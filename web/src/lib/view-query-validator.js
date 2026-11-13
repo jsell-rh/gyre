@@ -27,6 +27,8 @@ const KNOWN_HEAT_METRICS = [
 
 const VALID_DIRECTIONS = ['incoming', 'outgoing', 'both'];
 
+const VALID_SEED_MATCH_MODES = ['exact', 'substring'];
+
 const VALID_ZOOM_NAMES = ['fit', 'current'];
 
 /**
@@ -153,6 +155,11 @@ function validateScope(scope, errors) {
       if (typeof scope.expand_direction === 'string' && !VALID_DIRECTIONS.includes(scope.expand_direction)) {
         errors.push(
           `Invalid expand_direction '${scope.expand_direction}' in Concept scope — must be one of: ${VALID_DIRECTIONS.join(', ')}`
+        );
+      }
+      if (typeof scope.seed_match === 'string' && !VALID_SEED_MATCH_MODES.includes(scope.seed_match)) {
+        errors.push(
+          `Invalid seed_match '${scope.seed_match}' in Concept scope — must be one of: ${VALID_SEED_MATCH_MODES.join(', ')}`
         );
       }
       validateEdgeList(scope.expand_edges, 'Concept scope expand_edges', errors);

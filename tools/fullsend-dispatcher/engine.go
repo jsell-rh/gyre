@@ -20,6 +20,7 @@ type Snapshot struct {
 	RecoveryError                string
 	Rows                         []Row
 	Gateway, Connection, Message string
+	Admission                    string
 	Errors                       []string
 	Busy, Monitoring, Recovering bool
 	Active, Ready                int
@@ -28,9 +29,10 @@ type Snapshot struct {
 	Exit                         int
 }
 type discovery struct {
-	Jobs   []Job    `json:"jobs"`
-	Errors []string `json:"errors"`
-	Err    error
+	Jobs      []Job    `json:"jobs"`
+	Errors    []string `json:"errors"`
+	Err       error
+	Admission string `json:"admission"`
 }
 type authResult struct{ Err error }
 type recoveryRequest struct {
@@ -108,7 +110,7 @@ func rank(status string) int {
 	switch status {
 	case "running":
 		return 0
-	case "uncertain":
+	case "uncertain", "attention":
 		return 1
 	case "failed", "canceled":
 		return 2
@@ -344,6 +346,7 @@ func (e *Engine) run(ctx context.Context) (exit int) {
 				s.NextDiscovery = next
 				if result.Err == nil {
 					s.Errors = result.Errors
+					s.Admission = result.Admission
 				}
 			})
 			if e.c.DryRun {
@@ -492,7 +495,7 @@ func (e *Engine) run(ctx context.Context) (exit int) {
 				return 1
 			}
 			for _, row := range rows {
-				if row.Scope == e.c.Scope && (row.Status == "failed" || row.Status == "uncertain" || row.Status == "canceled") {
+				if row.Scope == e.c.Scope && (row.Status == "failed" || row.Status == "uncertain" || row.Status == "attention" || row.Status == "canceled") {
 					return 1
 				}
 			}

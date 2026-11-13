@@ -116,8 +116,8 @@ def main():
         if not store.reserve(name, execution.claim['id'], execution.claim['token'], 'sandbox', store.setting('slots', 8),
                              {'engine': 'fullsend', 'logical_token': execution.claim['token'], 'repo': '/sandbox/workspace/checkout'}):
             raise RuntimeError('global sandbox capacity is occupied')
-        from pipeline.compute import profile
-        budget = profile(store, execution.claim['task'], execution.claim['stage'])
+        from pipeline.compute import assigned_profile
+        budget = assigned_profile(store, execution.claim)
         # Never inherit the gateway's 1 GiB / half-CPU defaults for build work.
         for flag in ('--cpu','--memory'):
             while flag in args:
@@ -189,6 +189,12 @@ def main():
         import time
         if time.time()-gateway.auth_status(store.directory,bound_gateway).get('refreshed_at',0)>120:
             refresh()
+        from pipeline.bootstrap_transport import staging, run
+        if staging(args):
+            result = run([config['real_openshell'], '-g', bound_gateway, *args], env, execution,
+                         timeout=min(int(option(args,'--timeout') or 120),120))
+            store.close()
+            return result
         # Fullsend's deadline must kill the actual streaming CLI, not a
         # Python parent whose orphan keeps its stdout pipe open forever.
         store.close()

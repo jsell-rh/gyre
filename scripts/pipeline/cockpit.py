@@ -11,6 +11,8 @@ def snapshot(store):
     from .requirements import pending
     from .priority import task_priority, classes, PriorityError
     from .execution import gateway
+    from .capacity import summary
+    capacity=summary(store)
     records = store.tasks()
     work = [dict(row) for row in store.db.execute('SELECT * FROM work ORDER BY created DESC')]
     tasks, attempts, counts = [], [], {}
@@ -29,9 +31,10 @@ def snapshot(store):
         attention = next((item for item in related if item['state'] == 'attention'), None)
         if satisfied(data):
             attention, retry = None, None  # Historical failures remain in attempts, not the current condition.
+        triage_attention = bool(attention and json.loads(attention['result']).get('category') == 'requirements_triage')
         shared_wait = (data.get('repair') or {}).get('shared_environment')
         state = ('merged' if satisfied(data) and data.get('delivered') else
-                 'resolved' if satisfied(data) else 'failed' if attention else 'running' if active else
+                 'resolved' if satisfied(data) else 'needs-triage' if triage_attention else 'failed' if attention else 'running' if active else
                  'needs-triage' if (data.get('requirements') or {}).get('errors') else
                  'published' if retry and retry['stage'] == 'publish' and data.get('pr') else
                  'deferred' if retry else 'assessing' if pending(data) else
@@ -93,10 +96,13 @@ def snapshot(store):
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
             'resources': {'used': store.compute_used(), 'deletion_pending': dict(resources).get('deleting', 0),
                           'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
-            'health': {'condition': 'Paused' if store.setting('admission_paused', False) else store.setting('admission_condition', 'Reconciling'),
+            'health': {'condition': 'Paused' if store.setting('admission_paused', False) else capacity['condition'] if not capacity['allowed'] else store.setting('admission_condition', 'Reconciling'),
+                       'capacity':capacity,
+                       'stress_guard':store.setting('stress_watch_alert'),
                        'gateway_auth':gateway.auth_status(store.directory,store.setting('gateway','gyre-gyre')),
                        'inference':{key:value for key,value in store.setting('inference_health',{}).items() if key in ('condition','expires','failures')},
                        'effective_slots': 0 if store.setting('admission_paused', False) else store.setting('slots', 8)},
             'dispatch': {'only_task': store.setting('only_task'), 'integration':store.integration_lane(),
+                         'verification_active':sum(item['stage']=='verify' and item['state']=='claimed' for item in work),
                          'verification_reserved':store.verification_reserve(),'priority_classes':classes(store),
                          'integration_waiting':[task['name'] for task in records if not satisfied(task['data']) and store.integration_waiting(task['data'])]}}

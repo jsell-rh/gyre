@@ -49,34 +49,40 @@
     trust_suggestion: 'default',
     spec_assertion_failure: 'danger',
     suggested_link: 'default',
-    // PascalCase variants from the server
-    AgentCompleted: 'success',
-    AgentFailed: 'danger',
-    SpecApprovalRequested: 'warning',
-    SpecPendingApproval: 'warning', // legacy rows
-    SpecApproved: 'success',
-    SpecRejected: 'danger',
-    MrMerged: 'success',
-    MrCreated: 'info',
-    GateFailure: 'danger',
-    GatePassed: 'success',
-    SuggestedSpecLink: 'default',
-    TaskCreated: 'info',
-    AgentBudgetWarning: 'warning',
-    BudgetWarning: 'warning', // legacy rows
-    AgentBudgetExhausted: 'danger',
-    AgentEscalation: 'danger',
-    MergeQueuePaused: 'warning',
-    MergeQueueEscalation: 'danger',
-    MrReverted: 'danger',
-    BreakingChangeDetected: 'danger',
-    SpecDriftDetected: 'warning',
-    DependencyStale: 'info',
-    SecurityFinding: 'danger',
-    InvitationReceived: 'info',
-    MembershipChanged: 'info',
-    PersonaApprovalRequested: 'warning',
-    SystemAlert: 'warning',
+    // Newly normalized extended variants
+    abandoned_branch: 'info',
+    agent_escalation: 'danger',
+    constraint_violation: 'warning',
+    cascade_test_triggered: 'info',
+    cascade_test_failed: 'danger',
+    dependency_chain_too_deep: 'info',
+    atomic_group_failure: 'danger',
+    spec_conflict: 'warning',
+    mr_reverted: 'danger',
+    merge_queue_escalation: 'danger',
+    // Unified server taxonomy (notification types are normalized to
+    // snake_case via typeNormMap below before this lookup)
+    agent_completed: 'success',
+    agent_failed: 'danger',
+    spec_approved: 'success',
+    spec_rejected: 'danger',
+    mr_merged: 'success',
+    mr_created: 'info',
+    gate_passed: 'success',
+    budget_exhausted: 'danger',
+    merge_queue_paused: 'warning',
+    breaking_change_detected: 'danger',
+    spec_drift_detected: 'warning',
+    dependency_stale: 'info',
+    security_finding: 'danger',
+    invitation_received: 'info',
+    membership_changed: 'info',
+    persona_approval_requested: 'warning',
+    persona_change_pending_approval: 'warning',
+    system_alert: 'warning',
+    impersonation_request: 'warning',
+    impersonation_alert: 'danger',
+    secret_expiring: 'warning',
   };
 
   // Human-readable type labels — derived from i18n
@@ -112,29 +118,36 @@
       let raw = await api.myNotifications(params);
       if (gen !== loadGen) return; // scope changed while loading
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
-      // Normalize PascalCase notification types from the server to snake_case
+      // Normalize PascalCase notification types from the server to snake_case.
+      // The server persists NotificationType::as_str() (gyre-common/src/notification.rs),
+      // so every variant with a template branch MUST be mapped here — an
+      // unmapped type renders a card with no action buttons.
       const typeNormMap = {
-        TaskCreated: 'task_created',
-        AgentCompleted: 'agent_completed',
-        AgentFailed: 'agent_failed',
+        // HSI §8 priority table (10 item types) — canonical NotificationType values
+        AgentNeedsClarification: 'agent_clarification',
         SpecApprovalRequested: 'spec_approval',
         SpecPendingApproval: 'spec_approval', // legacy rows
-        SpecApproved: 'spec_approved',
-        SpecRejected: 'spec_rejected',
-        MrMerged: 'mr_merged',
-        MrCreated: 'mr_created',
-        MrNeedsReview: 'mr_needs_review',
         GateFailure: 'gate_failure',
-        GatePassed: 'gate_passed',
-        SuggestedSpecLink: 'suggested_link',
-        TaskCreated: 'task_created',
+        CrossWorkspaceSpecChange: 'cross_workspace_change',
+        ConflictingInterpretations: 'conflicting_interpretations',
+        MetaSpecDrift: 'meta_spec_drift',
         AgentBudgetWarning: 'budget_warning',
         BudgetWarning: 'budget_warning', // legacy rows
+        TrustSuggestion: 'trust_suggestion',
+        SpecAssertionFailure: 'spec_assertion_failure',
+        SuggestedSpecLink: 'suggested_link',
+        // Other NotificationType variants with template branches
+        AgentCompleted: 'agent_completed',
+        AgentFailed: 'agent_failed',
+        SpecApproved: 'spec_approved',
+        SpecRejected: 'spec_rejected',
+        GatePassed: 'gate_passed',
+        MrMerged: 'mr_merged',
+        MrCreated: 'mr_created',
+        TaskCreated: 'task_created',
+        SpecChanged: 'spec_changed',
         AgentBudgetExhausted: 'budget_exhausted',
-        AgentEscalation: 'agent_escalation',
         MergeQueuePaused: 'merge_queue_paused',
-        MergeQueueEscalation: 'merge_queue_escalation',
-        MrReverted: 'mr_reverted',
         BreakingChangeDetected: 'breaking_change_detected',
         SpecDriftDetected: 'spec_drift_detected',
         DependencyStale: 'dependency_stale',
@@ -142,14 +155,27 @@
         InvitationReceived: 'invitation_received',
         MembershipChanged: 'membership_changed',
         PersonaApprovalRequested: 'persona_approval_requested',
+        PersonaChangePendingApproval: 'persona_change_pending_approval',
         SystemAlert: 'system_alert',
-        SpecChanged: 'spec_changed',
-        MetaSpecDrift: 'meta_spec_drift',
-        PersonaApprovalRequested: 'persona_approval_requested',
-        MergeQueuePaused: 'merge_queue_paused',
+        ImpersonationRequest: 'impersonation_request',
+        ImpersonationAlert: 'impersonation_alert',
+        SecretExpiring: 'secret_expiring',
+        // Extended NotificationType variants (gyre-common/src/notification.rs) —
+        // each is emitted by a server path and previously rendered a card with
+        // no action buttons when unmapped.
+        AbandonedBranch: 'abandoned_branch',
+        AgentEscalation: 'agent_escalation',
+        ConstraintViolation: 'constraint_violation',
+        CascadeTestTriggered: 'cascade_test_triggered',
+        CascadeTestFailed: 'cascade_test_failed',
+        DependencyChainTooDeep: 'dependency_chain_too_deep',
+        AtomicGroupFailure: 'atomic_group_failure',
+        SpecConflict: 'spec_conflict',
+        MrReverted: 'mr_reverted',
+        MergeQueueEscalation: 'merge_queue_escalation',
+        // Legacy/defensive entries kept for older rows
+        MrNeedsReview: 'mr_needs_review',
         BudgetExhausted: 'budget_exhausted',
-        SecurityFinding: 'security_finding',
-        SpecAssertionFailure: 'spec_assertion_failure',
       };
       data = data.map(n => ({
         ...n,
@@ -194,6 +220,51 @@
 
   function toggleExpand(id) {
     expandedId = expandedId === id ? null : id;
+    // HSI §8 P2: expanding a spec_approval card loads the spec diff from the
+    // spec-edit/* MR branch so the human can review the change inline before
+    // approving.
+    if (expandedId === id) void loadSpecDiff(id);
+  }
+
+  // Diff rows per notification id — converted from the MR's structured hunks.
+  let specDiffs = $state({});
+
+  // Convert structured MR hunks into SpecDiffView rows ({op, text}).
+  function hunksToDiffRows(hunks) {
+    const rows = [];
+    for (const hunk of hunks ?? []) {
+      for (const line of hunk.lines ?? []) {
+        if (line.type === 'add') rows.push({ op: 'add', text: line.content ?? '' });
+        else if (line.type === 'delete') rows.push({ op: 'remove', text: line.content ?? '' });
+        else rows.push({ op: 'context', text: line.content ?? '' });
+      }
+    }
+    return rows;
+  }
+
+  async function loadSpecDiff(notifId) {
+    const n = notifications.find(x => x.id === notifId);
+    if (!n || n.notification_type !== 'spec_approval') return;
+    if (specDiffs[notifId] !== undefined) return; // already loaded
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    try {
+      const diff = await api.mrDiff(body.mr_id);
+      // Pick the spec file this notification is about; fall back to the only
+      // changed file when there is exactly one, else the first .md file.
+      const files = diff?.files ?? [];
+      const file =
+        files.find(f => f.path === body.spec_path) ??
+        (files.length === 1 ? files[0] : files.find(f => f.path?.endsWith('.md')));
+      if (!file || !file.hunks?.length) {
+        specDiffs = { ...specDiffs, [notifId]: [] };
+        return;
+      }
+      specDiffs = { ...specDiffs, [notifId]: hunksToDiffRows(file.hunks) };
+    } catch {
+      // Diff is best-effort context — approve/reject still work without it.
+      specDiffs = { ...specDiffs, [notifId]: [] };
+    }
   }
 
   function openDetail(entity) {
@@ -251,12 +322,48 @@
     return path ? path.replace(/^specs\//, '') : path;
   }
 
-  async function handleApproveSpec(n) {
+  // Resolve the spec path for a notification: from the structured body first,
+  // then from the "Spec pending approval: <path>" title format emitted by the
+  // server (legacy notifications created before the body was populated).
+  function resolveSpecPath(n) {
     const body = getBody(n);
-    if (!body.spec_path || !body.spec_sha) return;
+    return body.spec_path ?? (n.title?.match(/:\s*(.+\.md)\s*$/)?.[1] ?? null);
+  }
+
+  // Resolve the spec SHA to approve: from the body first, else from the spec
+  // ledger (GET /specs/:path returns current_sha). The SHA is the blob SHA of
+  // the spec content the human is approving.
+  //
+  // The ledger fallback is only safe once the spec-edit MR has MERGED — for
+  // a still-open MR the ledger's current_sha is the PRE-edit content, and
+  // approving that records an approval event for a version that is
+  // invalidated when the MR lands (auto_invalidate_on_change -> Pending), a
+  // no-op masked by the "Approved" success message. When the body lacks the
+  // branch blob SHA and the MR is still open, fail with missing_spec_sha
+  // instead of silently approving the wrong version.
+  async function resolveSpecSha(n, specPath) {
+    const body = getBody(n);
+    if (body.spec_sha) return body.spec_sha;
+    try {
+      if (body.mr_id) {
+        const mr = await api.mergeRequest(body.mr_id);
+        if (!mr || mr.status !== 'merged') return null;
+      }
+      const spec = await api.getSpec(normalizeSpecPath(specPath));
+      return spec?.current_sha ?? spec?.sha ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function handleApproveSpec(n) {
+    const specPath = resolveSpecPath(n);
+    if (!specPath) return;
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'approve' } };
     try {
-      await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
+      const sha = await resolveSpecSha(n, specPath);
+      if (!sha) throw new Error($t('decisions.missing_spec_sha'));
+      await api.approveSpec(normalizeSpecPath(specPath), sha);
       api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
@@ -274,11 +381,11 @@
   }
 
   async function handleRejectSpec(n) {
-    const body = getBody(n);
-    if (!body.spec_path) return;
+    const specPath = resolveSpecPath(n);
+    if (!specPath) return;
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reject' } };
     try {
-      await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected from inbox');
+      await api.revokeSpec(normalizeSpecPath(specPath), 'Rejected from inbox');
       api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
@@ -294,6 +401,7 @@
       };
     }
   }
+
 
   async function handleRetry(n) {
     const body = getBody(n);
@@ -323,17 +431,9 @@
   }
 
   function handleViewSpec(n) {
-    const body = getBody(n);
-    const specPath = body.spec_path || n.entity_ref;
+    const specPath = resolveSpecPath(n) ?? (getBody(n).spec_path ? null : n.entity_ref);
     if (specPath) {
-      openDetail({ type: 'spec', id: specPath, data: n });
-    }
-  }
-
-  function handleViewMr(n) {
-    const body = getBody(n);
-    if (body.mr_id) {
-      openDetail({ type: 'mr', id: body.mr_id, data: n });
+      openDetail({ type: 'spec', id: normalizeSpecPath(specPath), data: n });
     }
   }
 
@@ -364,6 +464,252 @@
 
   function handleAdjustMetaSpec(n) {
     goToAgentRules?.();
+  }
+
+  function handleViewMr(n, tab = undefined) {
+    const body = getBody(n);
+    if (body.mr_id) {
+      openDetail({
+        type: 'mr',
+        id: body.mr_id,
+        data: { ...n, ...(tab ? { _openTab: tab } : {}) },
+      });
+    }
+  }
+
+  // HSI §8 P3 "Override": the human judgment that a failed gate's failure is
+  // acceptable. Two effects, both required for the override to actually gate:
+  // 1. POST /merge-requests/:id/reviews — records the persisted approval
+  //    review (audit trail; consumed by the agent_review gate).
+  // 2. PUT /merge-requests/:id/status {approved} — the human-approval escape
+  //    the merge processor honors (it holds a merge on gate failure unless
+  //    mr.status == Approved). Recording only the review gates nothing for a
+  //    failed process gate: retry re-runs and re-fails, so the MR could never
+  //    merge despite the override.
+  async function handleOverrideGate(n) {
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'override' } };
+    try {
+      await api.submitReview(body.mr_id, {
+        decision: 'approved',
+        reviewer_agent_id: 'human',
+        body: `Gate override from Inbox: ${body.gate_name ?? 'gate'} failure accepted by human`,
+      });
+      await api.mrStatus(body.mr_id, 'approved');
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.override_submitted') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.override_failed') },
+      };
+    }
+  }
+
+  // HSI §8 P3 "Close MR": transition the failed-gate MR to closed.
+  async function handleCloseMr(n) {
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'close' } };
+    try {
+      await api.mrStatus(body.mr_id, 'closed');
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.mr_closed') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.mr_close_failed') },
+      };
+    }
+  }
+
+  // HSI §8 P7 "Pause Work": pause work in the affected scope —
+  // repo-scoped notifications pause that repo's merge queue; workspace-scoped
+  // notifications send a pause_requested StatusUpdate to every active agent
+  // (HSI §4 Hard Interrupt, via the existing message bus).
+  async function handlePauseWork(n) {
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'pause' } };
+    try {
+      if (n.repo_id) {
+        await api.pauseMergeQueue(n.repo_id, 'Paused from Inbox budget warning');
+        actionStates = {
+          ...actionStates,
+          [n.id]: { loading: false, success: true, message: $t('decisions.work_paused', { values: { count: 0 } }) },
+        };
+      } else if (workspaceId) {
+        const active = (await api.agents({ workspaceId })) ?? [];
+        const activeAgents = active.filter(a => a.status === 'active' || a.status === 'running');
+        await Promise.allSettled(
+          activeAgents.map(a =>
+            api.sendAgentMessage(workspaceId, a.id, {
+              kind: 'status_update',
+              tier: 'directed',
+              payload: { status: 'pause_requested', summary: 'Human requested pause from Inbox budget warning' },
+            })
+          )
+        );
+        actionStates = {
+          ...actionStates,
+          [n.id]: { loading: false, success: true, message: $t('decisions.work_paused', { values: { count: activeAgents.length } }) },
+        };
+      } else {
+        actionStates = {
+          ...actionStates,
+          [n.id]: { loading: false, success: false, message: $t('decisions.pause_failed') },
+        };
+        return;
+      }
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.pause_failed') },
+      };
+    }
+  }
+
+  // MergeQueueEscalation (platform-model.md §6): the repo's merge queue stays
+  // paused until a human intervenes. "Resume Queue" clears the pause via
+  // PUT /repos/:id/queue/resume; "View MR" shows the failing merge that
+  // tripped the circuit breaker.
+  async function handleResumeQueue(n) {
+    const body = getBody(n);
+    const repoId = n.repo_id ?? body.repo_id;
+    if (!repoId) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'resume' } };
+    try {
+      await api.resumeMergeQueue(repoId);
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.queue_resumed') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.resume_failed') },
+      };
+    }
+  }
+
+  // HSI §8 P5 "Pick A / Pick B / Reconcile": conflicting-interpretation
+  // arbitration. The divergence body carries both agents' commit SHAs and
+  // the repo; the divergence is post-merge. Per the spec, all three options
+  // create a task via the existing task domain model: picking a side creates
+  // a spec-implementation task to REVERT the non-selected side's changes
+  // (with the selected implementation as reference); Reconcile creates a
+  // reconciliation task.
+  //
+  // The task description identifies the losing side by agent + commit SHA.
+  // Deliberately NOT resolved to an MR: the divergence body's commit SHAs
+  // are default-branch push tips (the graph extraction records them from
+  // git-http push ref updates), while an MR's merge_commit_sha is a merge
+  // commit created by the merge processor (which never fast-forwards) — the
+  // two can never be equal in any emitter flow, so any MR lookup keyed on
+  // the losing SHA is dead code. The commit SHA alone is concretely
+  // actionable (`git show <sha>` / `git revert <sha>`).
+  async function handlePickSide(n, keepSide) {
+    const body = getBody(n);
+    const repoId = n.repo_id ?? body.repo_id;
+    const keepSha = keepSide === 'a' ? body.commit_sha_a : body.commit_sha_b;
+    const loseSha = keepSide === 'a' ? body.commit_sha_b : body.commit_sha_a;
+    const keepAgent = keepSide === 'a' ? body.agent_a : body.agent_b;
+    const loseAgent = keepSide === 'a' ? body.agent_b : body.agent_a;
+    if (!repoId || !loseSha) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: `pick_${keepSide}` } };
+    try {
+      const specRef = body.spec_ref || n.entity_ref;
+      const task = await api.createTask({
+        title: $t('decisions.revert_task_title', {
+          values: { spec: specRef?.split('/').pop() ?? specRef ?? '' },
+        }),
+        description: $t('decisions.revert_task_desc', {
+          values: {
+            spec: specRef ?? '',
+            keep_agent: keepAgent ?? '',
+            keep_sha: keepSha ?? '',
+            lose_agent: loseAgent ?? '',
+            lose_sha: loseSha,
+            count: body.conflict_count ?? (Array.isArray(body.conflicting_nodes) ? body.conflicting_nodes.length : 0),
+          },
+        }),
+        task_type: 'implementation',
+        spec_path: specRef,
+        workspace_id: n.workspace_id,
+        repo_id: repoId,
+        labels: ['spec-implementation', 'revert'],
+      });
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.revert_task_created', { values: { id: task?.id ?? '' } }) },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.pick_failed') },
+      };
+    }
+  }
+
+  async function handleReconcile(n) {
+    const body = getBody(n);
+    const specRef = body.spec_ref || n.entity_ref;
+    if (!specRef || !n.workspace_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reconcile' } };
+    try {
+      const task = await api.createTask({
+        title: $t('decisions.reconcile_task_title', { values: { spec: specRef.split('/').pop() ?? specRef } }),
+        description: $t('decisions.reconcile_task_desc', {
+          values: {
+            spec: specRef,
+            agent_a: body.agent_a ?? '',
+            agent_b: body.agent_b ?? '',
+            count: body.conflict_count ?? (Array.isArray(body.conflicting_nodes) ? body.conflicting_nodes.length : 0),
+          },
+        }),
+        task_type: 'implementation',
+        spec_path: specRef,
+        workspace_id: n.workspace_id,
+        repo_id: n.repo_id ?? undefined,
+        labels: ['reconciliation'],
+      });
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.reconcile_task_created', { values: { id: task?.id ?? '' } }) },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.reconcile_failed') },
+      };
+    }
   }
 
   // Reload when scope/workspaceId/repoId changes, and set up auto-refresh
@@ -545,6 +891,35 @@
                   <pre class="card-output">{body.output}</pre>
                 {/if}
 
+                {#if n.notification_type === 'spec_approval' && Array.isArray(specDiffs[n.id]) && specDiffs[n.id].length > 0}
+                  <!-- HSI §8 P2: review the spec-edit/* branch diff inline before approving -->
+                  <div class="spec-approval-diff">
+                    <SpecDiffView
+                      diff={specDiffs[n.id]}
+                      currentLabel={$t('decisions.spec_diff_current')}
+                      yoursLabel={$t('decisions.spec_diff_proposed')}
+                    />
+                  </div>
+                {/if}
+
+                {#if Array.isArray(body.conflicting_nodes) && body.conflicting_nodes.length > 0}
+                  <!-- HSI §8 P5: which agents conflicted and on which nodes -->
+                  <p class="card-detail">
+                    {$t('decisions.conflict_between', {
+                      values: {
+                        a: body.agent_name_a ?? resolveEntityName('agent', body.agent_a ?? ''),
+                        b: body.agent_name_b ?? resolveEntityName('agent', body.agent_b ?? ''),
+                        count: body.conflicting_nodes.length,
+                      },
+                    })}
+                  </p>
+                  <ul class="conflict-nodes">
+                    {#each body.conflicting_nodes as nodeName}
+                      <li class="conflict-node mono">{nodeName}</li>
+                    {/each}
+                  </ul>
+                {/if}
+
                 <!-- Entity reference links -->
                 <div class="card-refs">
                   {#if body.spec_path}
@@ -632,8 +1007,12 @@
                         {$t('decisions.open_spec')}
                       </Button>
                     {:else if n.notification_type === 'gate_failure'}
-                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
-                        {$t('decisions.view_mr')}
+                      <!-- HSI §8 P3: View Diff, View Output, Retry, Override, Close MR -->
+                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n, 'diff')}>
+                        {$t('decisions.view_diff')}
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n, 'gates')}>
+                        {$t('decisions.view_output')}
                       </Button>
                       <Button
                         variant="primary"
@@ -641,15 +1020,23 @@
                         disabled={state?.loading}
                         onclick={() => handleRetry(n)}
                       >
-                        {state?.loading ? $t('decisions.retrying') : $t('decisions.retry_gate')}
+                        {state?.loading && state?.action !== 'override' && state?.action !== 'close' ? $t('decisions.retrying') : $t('decisions.retry_gate')}
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
                         disabled={state?.loading}
-                        onclick={() => handleDismiss(n)}
+                        onclick={() => handleOverrideGate(n)}
                       >
-                        {$t('common.dismiss')}
+                        {state?.loading && state?.action === 'override' ? $t('decisions.overriding') : $t('decisions.override')}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleCloseMr(n)}
+                      >
+                        {state?.loading && state?.action === 'close' ? $t('decisions.closing_mr') : $t('decisions.close_mr')}
                       </Button>
                     {:else if n.notification_type === 'cross_workspace_change'}
                       <Button variant="primary" size="sm" onclick={() => handleViewSpec(n)}>
@@ -664,8 +1051,32 @@
                         {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'conflicting_interpretations'}
+                      <!-- HSI §8 P5: View Both, Pick A / Pick B, Reconcile -->
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>{$t('decisions.view_both_specs')}</Button>
-                      <span class="coming-soon-note">{$t('decisions.reconciliation_note')}</span>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handlePickSide(n, 'a')}
+                      >
+                        {state?.loading && state?.action === 'pick_a' ? $t('decisions.picking_a') : $t('decisions.pick_a')}
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handlePickSide(n, 'b')}
+                      >
+                        {state?.loading && state?.action === 'pick_b' ? $t('decisions.picking_b') : $t('decisions.pick_b')}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleReconcile(n)}
+                      >
+                        {state?.loading && state?.action === 'reconcile' ? $t('decisions.reconciling') : $t('decisions.reconcile')}
+                      </Button>
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'meta_spec_drift'}
                       <Button
@@ -689,7 +1100,16 @@
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'budget_warning'}
+                      <!-- HSI §8 P7: Increase Limit, Pause Work -->
                       <Button variant="primary" size="sm" onclick={() => goToWorkspaceSettings?.()}>{$t('decisions.increase_limit')}</Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handlePauseWork(n)}
+                      >
+                        {state?.loading && state?.action === 'pause' ? $t('decisions.pausing_work') : $t('decisions.pause_work')}
+                      </Button>
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button
@@ -761,7 +1181,51 @@
                         </Button>
                       {/if}
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
-                    {:else if n.notification_type === 'mr_merged' || n.notification_type === 'spec_approved' || n.notification_type === 'spec_rejected' || n.notification_type === 'task_created' || n.notification_type === 'spec_changed' || n.notification_type === 'agent_failed'}
+                    {:else if n.notification_type === 'agent_escalation'}
+                      <!-- AgentEscalation (priority 5): an agent failed/escalated and needs
+                           human attention. Emitted with mr_id/repo_id (post-merge circuit
+                           breaker) or bare (agent failure). -->
+                      {@const b = getBody(n)}
+                      {#if b.mr_id}
+                        <Button variant="primary" size="sm" onclick={() => handleViewMr(n)}>
+                          {$t('decisions.view_mr')}
+                        </Button>
+                      {/if}
+                      {#if b.agent_id || n.entity_ref}
+                        <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'agent', id: b.agent_id || n.entity_ref, data: n })}>
+                          {$t('decisions.view_agent')}
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
+                    {:else if n.notification_type === 'merge_queue_escalation'}
+                      <!-- MergeQueueEscalation (priority 1): the repo's merge queue stays
+                           paused until a human intervenes (platform-model.md §6). -->
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleResumeQueue(n)}
+                      >
+                        {state?.loading && state?.action === 'resume' ? $t('decisions.resuming_queue') : $t('decisions.resume_queue')}
+                      </Button>
+                      {@const b = getBody(n)}
+                      {#if b.mr_id}
+                        <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
+                          {$t('decisions.view_mr')}
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
+                    {:else if n.notification_type === 'atomic_group_failure'}
+                      <!-- AtomicGroupFailure (priority 3): group rolled back and requeued;
+                           the failing member MR is in body.failing_mr_id. -->
+                      {@const b = getBody(n)}
+                      {#if b.failing_mr_id}
+                        <Button variant="primary" size="sm" onclick={() => openDetail({ type: 'mr', id: b.failing_mr_id, data: n })}>
+                          {$t('decisions.view_mr')}
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
+                    {:else if n.notification_type === 'mr_merged' || n.notification_type === 'spec_approved' || n.notification_type === 'spec_rejected' || n.notification_type === 'task_created' || n.notification_type === 'spec_changed' || n.notification_type === 'agent_failed' || n.notification_type === 'mr_reverted' || n.notification_type === 'cascade_test_triggered' || n.notification_type === 'cascade_test_failed' || n.notification_type === 'abandoned_branch' || n.notification_type === 'spec_conflict' || n.notification_type === 'constraint_violation' || n.notification_type === 'dependency_chain_too_deep'}
                       {@const b = getBody(n)}
                       {#if b.mr_id}
                         <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'mr', id: b.mr_id, data: { repository_id: n.repo_id } })}>
@@ -1112,6 +1576,25 @@
     color: var(--color-text-muted);
   }
 
+  .conflict-nodes {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .conflict-node {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .conflict-node::before {
+    content: '· ';
+  }
+
   .card-output {
     margin: 0;
     padding: var(--space-3);
@@ -1218,11 +1701,6 @@
     color: var(--color-danger);
   }
 
-  .coming-soon-note {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-style: italic;
-  }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 

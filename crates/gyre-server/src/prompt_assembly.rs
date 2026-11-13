@@ -2,7 +2,9 @@
 //!
 //! Builds the ordered prompt set injected into every spawned agent:
 //!
-//! 1. All REQUIRED tenant (Global) meta-specs — ordered by kind
+//! 1. All REQUIRED tenant-level meta-specs — Global entries plus
+//!    Tenant-scoped entries for the workspace's own tenant (meta-spec-
+//!    reconciliation.md §8) — ordered by kind
 //!    (persona → principle → standard → process)
 //! 2. All REQUIRED workspace meta-specs (same kind ordering)
 //! 3. Spec-level bindings at their pinned versions
@@ -41,7 +43,7 @@ pub struct PromptSection {
     pub kind: String,
     /// The prompt text injected into agent context.
     pub prompt: String,
-    /// "global" (tenant scope) or "workspace".
+    /// "global", "tenant", or "workspace".
     pub scope: String,
     /// Which injection band the section came from: "required-tenant",
     /// "required-workspace", or "binding".
@@ -71,6 +73,7 @@ fn kind_rank(kind: &MetaSpecKind) -> u8 {
 fn scope_str(scope: &MetaSpecScope) -> &'static str {
     match scope {
         MetaSpecScope::Global => "global",
+        MetaSpecScope::Tenant => "tenant",
         MetaSpecScope::Workspace => "workspace",
     }
 }
@@ -144,16 +147,49 @@ fn filter_approved(specs: Vec<MetaSpec>) -> Vec<MetaSpec> {
 pub async fn assemble_prompt_set(state: &Arc<AppState>, task: &Task) -> PromptSet {
     let workspace_id = task.workspace_id.to_string();
 
-    // Band 1: required tenant (Global) meta-specs.
-    let tenant = state
-        .meta_specs
-        .list(&gyre_ports::MetaSpecFilter {
-            scope: Some(MetaSpecScope::Global),
-            required: Some(true),
-            ..Default::default()
-        })
-        .await
-        .unwrap_or_default();
+    // Band 1: required tenant-level meta-specs. Global entries apply to
+    // every tenant; Tenant-scoped entries (§8) apply to the workspaces of
+    // the tenant named by their scope_id — resolve the caller's tenant via
+    // the task's workspace and inject that tenant's required specs too.
+    let mut tenant = filter_approved(
+        state
+            .meta_specs
+            .list(&gyre_ports::MetaSpecFilter {
+                scope: Some(MetaSpecScope::Global),
+                required: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_default(),
+    );
+    match state.workspaces.find_by_id(&task.workspace_id).await {
+        Ok(Some(ws)) => {
+            let tenant_scoped = state
+                .meta_specs
+                .list(&gyre_ports::MetaSpecFilter {
+                    scope: Some(MetaSpecScope::Tenant),
+                    scope_id: Some(ws.tenant_id.to_string()),
+                    required: Some(true),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_default();
+            tenant.extend(filter_approved(tenant_scoped));
+        }
+        Ok(None) => {
+            tracing::warn!(
+                workspace_id = %task.workspace_id,
+                "prompt assembly: task workspace not found; skipping tenant-scoped required meta-specs"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %task.workspace_id,
+                error = %e,
+                "prompt assembly: failed to load task workspace; skipping tenant-scoped required meta-specs"
+            );
+        }
+    }
     // Band 2: required meta-specs scoped to this workspace.
     let workspace = state
         .meta_specs
@@ -166,7 +202,6 @@ pub async fn assemble_prompt_set(state: &Arc<AppState>, task: &Task) -> PromptSe
         .await
         .unwrap_or_default();
 
-    let mut tenant = filter_approved(tenant);
     let mut workspace = filter_approved(workspace);
     sort_by_kind(&mut tenant);
     sort_by_kind(&mut workspace);
@@ -305,6 +340,41 @@ pub fn render_system_prompt(sections: &[PromptSection]) -> String {
     out
 }
 
+/// Render the system-managed PROTOCOL section of the agent prompt
+/// (agent-runtime.md §5): Ralph loop rules, MCP tool usage, heartbeat,
+/// escalation, and completion signaling. Not user-editable and not part of
+/// the meta-spec registry — it defines how agents interact with Gyre
+/// infrastructure. Delivered at spawn (GYRE_PROTOCOL_PROMPT) and on demand
+/// via the MCP `system://protocol` prompt.
+pub fn render_protocol_prompt() -> String {
+    let mut out = String::new();
+    out.push_str("# Gyre Agent Protocol (system-managed)\n\n");
+    out.push_str("## Ralph loop rules\n");
+    out.push_str("- Read your task via the MCP tools, implement the change, run focused tests.\n");
+    out.push_str("- Commit with conventional commit messages; push your branch.\n");
+    out.push_str("- Signal completion with `agent.complete` — never leave work uncommitted.\n");
+    out.push_str(
+        "- On gate failure, read the failure messages, fix, commit, push, complete again.\n\n",
+    );
+    out.push_str("## MCP tools\n");
+    out.push_str("- `gyre_task_read` / task context: your task, spec ref, acceptance criteria.\n");
+    out.push_str("- `gyre_agent_complete`: create the completion MR and start review.\n");
+    out.push_str("- `gyre_agent_escalate`: ask a human when blocked on a decision.\n");
+    out.push_str("- See `tools/list` for the full set (resources, specs, graph, inbox).\n\n");
+    out.push_str("## Heartbeat\n");
+    out.push_str("- Send a heartbeat every 60 seconds; missing heartbeats mark you Dead.\n\n");
+    out.push_str("## Escalation\n");
+    out.push_str(
+        "- Escalate when: the spec is ambiguous after reading the referenced spec blob,\n",
+    );
+    out.push_str("  a decision requires human judgment, or infrastructure blocks progress.\n\n");
+    out.push_str("## Completion\n");
+    out.push_str(
+        "- `agent.complete` creates the MR, revokes your token, and hands off to gates.\n",
+    );
+    out
+}
+
 /// Stored prompt-set record (kv namespace "agent_meta_spec_sets"), keyed by
 /// agent id. The merge processor reads this at merge time to populate
 /// `MergeAttestation.meta_specs_used`.
@@ -316,6 +386,16 @@ pub struct AgentPromptSetRecord {
     pub set_sha: String,
     pub assembled_at: u64,
     pub meta_specs_used: Vec<MetaSpecUsed>,
+    /// The rendered meta-spec system prompt (the persona section of the
+    /// agent-runtime.md §5 prompt structure) as delivered to the agent at
+    /// spawn via `GYRE_META_SPEC_PROMPT`. Served verbatim by the MCP
+    /// `system://persona` prompt so on-demand reads return exactly what
+    /// the pinned assembly produced, not a re-render at current versions.
+    /// The system-managed protocol section is NOT part of this field — it
+    /// is served via `system://protocol`. `None` on records written before
+    /// task-119.
+    #[serde(default)]
+    pub rendered_prompt: Option<String>,
 }
 
 pub const PROMPT_SET_NAMESPACE: &str = "agent_meta_spec_sets";
@@ -502,7 +582,7 @@ async fn notify_stale_pin(
         );
         notif.source.entity_type = "spec".to_string();
         notif.source.entity_id = binding.spec_id.clone();
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(
                 user = %member.user_id,
                 "stale pin detection: failed to create notification: {e}"
@@ -624,7 +704,7 @@ mod tests {
 
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-chan"), None, None, None, None, 10, 0)
+            .list_for_user(&Id::new("user-chan"), None, None, None, None, None, 10, 0)
             .await
             .unwrap();
         assert!(
@@ -1056,6 +1136,7 @@ mod tests {
                 required: true,
                 scope: "global".to_string(),
             }],
+            rendered_prompt: None,
         };
         store_prompt_set_record(&state, &rec).await;
         let loaded = load_prompt_set_record(&state, "ag-1")
@@ -1064,5 +1145,44 @@ mod tests {
         assert_eq!(loaded.set_sha, "abc");
         assert_eq!(loaded.meta_specs_used.len(), 1);
         assert_eq!(loaded.meta_specs_used[0].version, 3);
+    }
+
+    /// agent-runtime.md §5: the record retains the rendered prompt so the
+    /// MCP `system://persona` prompt can serve the pinned assembly verbatim.
+    #[tokio::test]
+    async fn record_retains_rendered_prompt() {
+        let state = test_state();
+        let rendered = format!(
+            "{}\n{}",
+            render_system_prompt(&[]),
+            render_protocol_prompt()
+        );
+        let rec = AgentPromptSetRecord {
+            agent_id: Id::new("ag-2"),
+            task_id: Id::new("t2"),
+            spec_path: None,
+            set_sha: "def".to_string(),
+            assembled_at: 43,
+            meta_specs_used: vec![],
+            rendered_prompt: Some(rendered),
+        };
+        store_prompt_set_record(&state, &rec).await;
+        let loaded = load_prompt_set_record(&state, "ag-2")
+            .await
+            .expect("record must load");
+        assert_eq!(loaded.rendered_prompt, rec.rendered_prompt);
+    }
+
+    /// The protocol section is system-managed content (§5): it must cover
+    /// the Ralph loop, MCP tools, heartbeat, escalation, and completion.
+    #[test]
+    fn protocol_prompt_covers_the_five_protocol_areas() {
+        let p = render_protocol_prompt();
+        assert!(p.contains("Ralph loop rules"));
+        assert!(p.contains("MCP tools"));
+        assert!(p.contains("Heartbeat"));
+        assert!(p.contains("Escalation"));
+        assert!(p.contains("Completion"));
+        assert!(p.contains("60 seconds"));
     }
 }

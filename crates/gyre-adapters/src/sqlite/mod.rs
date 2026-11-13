@@ -12,6 +12,7 @@ pub mod agent_commit;
 pub mod analytics;
 pub mod attestation;
 pub mod audit;
+pub mod breaking_change;
 pub mod budget;
 pub mod budget_call;
 pub mod chain_attestation;
@@ -20,6 +21,7 @@ pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
+pub mod dependency_policy;
 pub mod graph;
 pub mod key_binding;
 pub mod kv_store;
@@ -35,6 +37,7 @@ pub mod policy;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rollout_policy;
@@ -47,6 +50,7 @@ pub mod spec_approval_event;
 pub mod spec_assertion_results;
 pub mod spec_ledger;
 pub mod spec_lifecycle;
+pub mod spec_links;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -243,6 +247,7 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "tenant_meta_spec_sets",
             "rollout_policies",
             "gate_traces",
             "trace_spans",
@@ -250,6 +255,8 @@ mod tests {
             "turn_commit_links",
             "budget_call_records",
             "user_workspace_state",
+            // Per-repo access overrides (task-121, user-management.md §Repo Access)
+            "repo_access_overrides",
             // Previously shadowed by duplicate version prefixes — regression guard
             // (these tables were silently skipped on fresh installs before the fix)
             "kv_store",
@@ -270,6 +277,12 @@ mod tests {
             "trust_anchors",
             "key_bindings",
             "chain_attestations",
+            // Spec-link graph (spec-links.md §Forge-Maintained Spec Graph,
+            // migration 000056, task-198)
+            "spec_links",
+            // Dependency breaking changes + policies (migration 000060, task-163)
+            "breaking_changes",
+            "dependency_policies",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
             "prompt_templates",
@@ -303,6 +316,34 @@ mod tests {
                 .is_ok();
             assert!(ok, "column '{table}.{column}' missing after migrations");
         }
+    }
+
+    #[test]
+    fn migrations_create_000060_repo_columns_and_overrides() {
+        // 000060 collision (task-121's repo_access_overrides vs task-118's
+        // repo_agent_limits, same-day merges): Diesel ran only the
+        // alphabetically-first repo_access_overrides, silently dropping the
+        // repositories.max_agents / max_agent_iterations columns. Guard
+        // asserts both sides of the collision exist after the renumbered
+        // 000061.
+        let (_tmp, storage) = tmp_storage();
+        let mut conn = storage.pool.get().unwrap();
+        for (table, column) in [
+            ("repositories", "max_agents"),
+            ("repositories", "max_agent_iterations"),
+        ] {
+            use diesel::RunQueryDsl;
+            let ok = diesel::sql_query(format!("SELECT {column} FROM {table} LIMIT 0"))
+                .execute(&mut *conn)
+                .is_ok();
+            assert!(ok, "column '{table}.{column}' missing after migrations");
+        }
+        // ...and the other side of the collision (the table the
+        // alphabetically-first migration owns) must still be applied.
+        use diesel::RunQueryDsl;
+        diesel::sql_query("SELECT 1 FROM repo_access_overrides LIMIT 0")
+            .execute(&mut *conn)
+            .unwrap_or_else(|e| panic!("table 'repo_access_overrides' missing: {e}"));
     }
 
     #[test]
@@ -674,6 +715,129 @@ mod tests {
         // Already-nested rows are left byte-identical; NULL stays NULL.
         assert_eq!(get("u-nested").as_deref(), Some(nested.as_str()));
         assert_eq!(get("u-null"), None);
+    }
+
+    /// Regression guard for migration 000062 (task-122): teams gain a
+    /// workspace-unique URL-safe `slug` and a `lead`, and membership moves
+    /// from the legacy `member_ids` JSON column to a `team_memberships`
+    /// table. This test builds a pre-000062 database (all migrations except
+    /// 000062 applied, legacy rows inserted), applies 000062 alone, and
+    /// asserts the backfill semantics: slug falls back to the team id
+    /// (stable, unique, URL-safe), lead falls back to the workspace Owner,
+    /// the (workspace_id, slug) unique index rejects duplicates, the
+    /// `member_ids` column is gone, and `team_memberships` enforces its
+    /// composite primary key.
+    #[test]
+    fn migration_000062_backfills_team_slug_and_lead() {
+        use diesel::migration::MigrationConnection;
+        use diesel::migration::MigrationSource;
+        use diesel::Connection;
+        use diesel::RunQueryDsl;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let mut conn = SqliteConnection::establish(path).unwrap();
+
+        let all = MIGRATIONS.migrations().unwrap();
+        let (pre, target): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|m| m.name().version().to_string() != "20261113000062");
+        assert_eq!(target.len(), 1, "000062 not found in embedded migrations");
+        conn.setup().unwrap();
+        conn.run_migrations(&pre).unwrap();
+
+        // Workspace with an Owner membership (created by 000007's tables).
+        diesel::sql_query(
+            "INSERT INTO workspaces (id, tenant_id, name, slug, description, trust_level, \
+             created_at) VALUES ('ws-1', 't-1', 'WS One', 'ws-one', NULL, 'Guided', 1)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO workspace_memberships (id, user_id, workspace_id, role, invited_by, \
+             accepted, created_at) \
+             VALUES ('m-1', 'u-owner', 'ws-1', 'Owner', 'system', 1, 1)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Legacy team rows exactly as a pre-000062 deployment would hold
+        // them (member_ids JSON, no slug/lead).
+        for (id, name, member_ids) in [
+            ("team-legacy-1", "Platform Team", "[]"),
+            ("team-legacy-2", "Weird Name!!", "[]"),
+        ] {
+            diesel::sql_query(format!(
+                "INSERT INTO teams (id, workspace_id, name, description, member_ids, created_at) \
+                 VALUES ('{id}', 'ws-1', '{name}', NULL, '{member_ids}', 100)"
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        }
+
+        conn.run_migrations(&target).unwrap();
+
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::Text;
+            use diesel::QueryableByName;
+
+            #[derive(QueryableByName)]
+            pub(super) struct TeamRow {
+                #[diesel(sql_type = Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = Text)]
+                pub(super) slug: String,
+                #[diesel(sql_type = Text)]
+                pub(super) lead: String,
+            }
+        }
+        use rows::TeamRow;
+
+        let rows: Vec<TeamRow> = diesel::sql_query("SELECT id, slug, lead FROM teams")
+            .load(&mut conn)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            // Slug backfills from the id: stable, unique, URL-safe.
+            assert_eq!(r.slug, r.id, "slug must backfill from the team id");
+            // Lead backfills from the workspace Owner.
+            assert_eq!(
+                r.lead, "u-owner",
+                "lead must backfill from the workspace owner"
+            );
+        }
+
+        // The (workspace_id, slug) unique index rejects a duplicate slug in
+        // the same workspace but allows the same slug in another workspace.
+        let dup = diesel::sql_query(
+            "INSERT INTO teams (id, workspace_id, name, slug, description, lead, created_at) \
+             VALUES ('team-dup', 'ws-1', 'Dup', 'team-legacy-1', NULL, 'u-owner', 100)",
+        )
+        .execute(&mut conn);
+        assert!(dup.is_err(), "duplicate (workspace, slug) must be rejected");
+
+        // The legacy member_ids column is gone.
+        let legacy_col =
+            diesel::sql_query("SELECT member_ids FROM teams LIMIT 0").execute(&mut conn);
+        assert!(legacy_col.is_err(), "member_ids column must be dropped");
+
+        // team_memberships enforces its composite primary key.
+        diesel::sql_query(
+            "INSERT INTO team_memberships (team_id, user_id, added_at) \
+             VALUES ('team-legacy-1', 'u-1', 1000)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let dup_member = diesel::sql_query(
+            "INSERT INTO team_memberships (team_id, user_id, added_at) \
+             VALUES ('team-legacy-1', 'u-1', 2000)",
+        )
+        .execute(&mut conn);
+        assert!(
+            dup_member.is_err(),
+            "duplicate team membership must be rejected"
+        );
     }
 
     /// Task-102 F1 regression: migration 000054 folds legacy path/pid

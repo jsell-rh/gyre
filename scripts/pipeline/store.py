@@ -194,6 +194,7 @@ class Store:
                         if (not compute or not self.db.execute(
                             "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
                         and not self.runtime_held(row)
+                        and (not compute or self.admission_available(stage,capacity,work=row))
                         and self.integration_available(dict(row))
                         and valid_priority(row)
                         and (eligible is None or eligible(dict(row)))), None)
@@ -203,19 +204,12 @@ class Store:
                             (owner, now + lease_seconds, now, row['id']))
             claimed = dict(self.db.execute('SELECT * FROM work WHERE id=?', (row['id'],)).fetchone())
             claimed['input'] = json.loads(claimed['input'])
-            if stage in ('verify','publish'):
-                candidate = self.task(claimed['task'])['data'].get('candidate')
-                if candidate:
-                    old = self.integration_lane()
-                    lane = {'task':claimed['task'], 'candidate':candidate, 'generation':claimed['generation'],
-                            'entered':old['entered'] if old else now}
-                    self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('integration_lane',json.dumps(lane)))
-                    if not old:
-                        self.event('integration_admitted',lane,claimed['task'],claimed['id'])
             if compute:
+                from .compute import profile
+                budget=profile(self,claimed['task'],claimed['stage'])
                 name = self.admission_name(claimed['id'], claimed['token'])
                 self.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
-                                (name, claimed['id'], claimed['token'], 'admission', 'intent', '{}', now))
+                                (name, claimed['id'], claimed['token'], 'admission', 'intent', json.dumps({'compute':budget}), now))
                 self.event('admitted', {'resource': name, 'stage': stage}, claimed['task'], claimed['id'])
             from .priority import info
             self.event('claimed', {'stage': stage, 'token': claimed['token'], 'owner': owner,
@@ -247,11 +241,16 @@ class Store:
         capacity=self.setting('slots',8) if capacity is None else capacity
         return min(self.setting('verification_slots',1),max(0,capacity-1))
 
-    def admission_available(self, stage, capacity=None):
+    def admission_available(self, stage, capacity=None, work=None):
         if stage not in ('triage','assess','implement','review','verify'):
             return True
+        if self.setting('admission_paused',False):
+            return False
         capacity=self.setting('slots',8) if capacity is None else capacity
         if self.compute_used() >= capacity:
+            return False
+        from .capacity import decision
+        if not decision(self,work)['allowed']:
             return False
         if stage == 'verify':
             return True
@@ -278,37 +277,24 @@ class Store:
                 and time.time()-ci['waiting_since'] >= self.setting('integration_wait_timeout',900))
 
     def integration_lane(self):
-        lane = self.setting('integration_lane')
-        if not lane:
-            return None
-        row = self.db.execute('SELECT generation,data FROM tasks WHERE name=?',(lane['task'],)).fetchone()
-        if not row:
-            return None
-        data = json.loads(row['data'])
-        ci = data.get('ci') or {}
-        if (row['generation'] != lane['generation'] or data.get('candidate') != lane['candidate']
-                or data.get('repair') or data.get('delivered') or data.get('resolved')
-                or self.integration_waiting(data)
-                or (ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'))
-                or self.setting('task_paused:'+lane['task'],False)):
-            return None
-        return lane
+        """Only an actual, unresolved upstream merge owns the global permit."""
+        row=self.db.execute("""SELECT r.data,r.updated,w.task,w.generation,w.input
+            FROM resources r JOIN work w ON w.id=r.work
+            WHERE r.kind='merge' AND r.state<>'absent' ORDER BY r.updated LIMIT 1""").fetchone()
+        if not row:return None
+        data=json.loads(row['data']);inputs=json.loads(row['input'])
+        return {'task':row['task'],'generation':row['generation'],
+                'candidate':inputs.get('candidate'),'entered':row['updated'],
+                'phase':'merge-confirmation','head':data.get('head'),'base':data.get('base')}
 
     def integration_available(self, work):
-        if work['stage'] not in ('verify','publish'):
-            return True
-        data = self.task(work['task'])['data']
-        ci = data.get('ci') or {}
-        if self.integration_waiting(data):
-            return False
-        # A new base must not silently bypass an unresolved source safety hold.
-        for row in self.db.execute("SELECT input FROM work WHERE task=? AND generation=? AND stage='verify' AND state='attention'", (work['task'],work['generation'])):
-            if json.loads(row['input']).get('candidate') == data.get('candidate'):
-                return False
-        if ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'):
-            return False
-        lane = self.integration_lane()
-        return lane is None or (lane['task'] == work['task'] and lane['generation'] == work['generation'])
+        # Per-task safety holds still apply; unrelated verification and PR
+        # preparation never wait for a global lane or another PR's CI.
+        if work['stage'] not in ('verify','publish'):return True
+        data=self.task(work['task'])['data'];ci=data.get('ci') or {}
+        for row in self.db.execute("SELECT input FROM work WHERE task=? AND generation=? AND stage='verify' AND state='attention'",(work['task'],work['generation'])):
+            if json.loads(row['input']).get('candidate')==data.get('candidate'):return False
+        return not (ci.get('status')=='closed' and ci.get('head')==data.get('published_head'))
 
     def _current(self, ident, token, now=None):
         row = self.db.execute('''SELECT w.* FROM work w JOIN tasks t
@@ -352,11 +338,6 @@ class Store:
                         continue
                     self.db.execute("UPDATE work SET state='obsolete',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?",(time.time(),victim['id']))
                     self.event('verification_superseded_by_ci',{'observation':ident},row['task'],victim['id'])
-            lane = self.setting('integration_lane')
-            refresh_idle=(result.get('status')=='environment_refresh' and not self.db.execute("SELECT 1 FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchone())
-            if lane and lane['task'] == row['task'] and (self.integration_lane() is None or refresh_idle):
-                self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
-                self.event('integration_released',{'reason':'candidate changed, repair, or delivery'},row['task'],ident)
             if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):
                 self.db.execute('UPDATE findings SET resolved_by=? WHERE task=? AND generation=? AND resolved_by IS NULL',
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
@@ -375,18 +356,13 @@ class Store:
             self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
             self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
-            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage'):
+            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage','requirements_triage','repair_stalled','ci_infrastructure'):
                 self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
                     (self.runtime_hold_key(row['task'],row['stage'],row['generation']),json.dumps(reason)))
-            if row['stage'] == 'verify' and (attention or reason.get('category') in ('infrastructure','gateway_transport','sandbox_oom','sandbox_stopped','sandbox_provisioning','sandbox_admission')):
-                lane=self.setting('integration_lane')
-                if lane and lane['task'] == row['task']:
-                    self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
-                    self.event('integration_released',{'reason':'verification safety failure needs attention'},row['task'],ident)
 
     def reserve(self, name, ident, token, kind, limit, data=None):
         with self.transaction():
-            self._current(ident, token)
+            claim=dict(self._current(ident, token))
             admission = self.admission_name(ident, token)
             admitted = kind == 'sandbox' and bool(self.db.execute(
                 "SELECT 1 FROM resources WHERE name=? AND kind='admission' AND state='intent'", (admission,)).fetchone())
@@ -397,6 +373,18 @@ class Store:
                 if admitted:
                     self.db.execute("UPDATE resources SET state='absent',updated=? WHERE name=?", (time.time(), admission))
             old = self.db.execute('SELECT * FROM resources WHERE name=?', (name,)).fetchone()
+            if old and (old['work'] != ident or old['token'] > token):
+                raise StaleClaim('resource belongs to another claim')
+            if kind=='sandbox':
+                from .compute import assigned_profile
+                from .capacity import decision
+                budget=assigned_profile(self,claim)
+                # Re-adoption retains an existing allocation's size. New
+                # reservations replace their admission rather than counting it twice.
+                if not old or old['state']=='absent':
+                    if not decision(self,claim,budget,replace=(admission,name),name=name)['allowed']:
+                        return False
+                data={**(data or {}),'compute':budget}
             if old:
                 if old['work'] != ident or old['token'] > token:
                     raise StaleClaim('resource belongs to another claim')

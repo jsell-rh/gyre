@@ -64,6 +64,51 @@ def job(store, row, tasks=None):
             'unmetered': row['stage'] not in COMPUTE}
 
 
+def code_readiness(store, row, data):
+    """Current delivery state, separate from the recorded stage outcome."""
+    from pipeline.repairs import satisfied
+    if satisfied(data):
+        return {'status':'merged' if data.get('delivered') else 'resolved'}
+    inputs = json.loads(row['input'])
+    candidate = data.get('candidate')
+    if not candidate or inputs.get('candidate') != candidate:
+        return None
+    ci = data.get('ci') or {}
+    bound = (inputs.get('published') or inputs.get('verified') or {}).get('head')
+    if row['stage'] == 'review':
+        published = data.get('published_verified') or {}
+        if published.get('candidate') == candidate:
+            bound = published.get('head')
+    if not ci.get('head') or bound != ci['head']:
+        return None
+    readiness = {key:ci.get(key) for key in ('status','merge_state')}
+    readiness['repair_queued'] = bool(data.get('repair'))
+    if data.get('repair'):
+        return readiness | {'status':'repair_pending'}
+    hold = store.setting(store.runtime_hold_key(row['task'],'verify',row['generation'])) or {}
+    if not hold:
+        blocked = store.db.execute("""SELECT result FROM work WHERE task=? AND generation=?
+            AND stage='verify' AND state='attention' AND json_extract(input,'$.candidate')=?
+            ORDER BY updated DESC LIMIT 1""", (row['task'],row['generation'],candidate)).fetchone()
+        if blocked:
+            hold = json.loads(blocked['result'] or '{}')
+    if hold:
+        return readiness | {'status':'verification_blocked','blocker':hold.get('category','verification')}
+    verified = data.get('verified') or {}
+    if (ci.get('checks') == 'green' or ci.get('status') in ('passed','policy_pending','artifact_refresh')) and (
+            not verified.get('passed') or verified.get('candidate') != candidate
+            or verified.get('head') != ci['head'] or verified.get('base') != store.setting('observed_main')):
+        refresh = store.db.execute("""SELECT state FROM work WHERE task=? AND generation=? AND stage='verify'
+            AND state IN ('claimed','ready','retry') AND json_extract(input,'$.candidate')=?
+            AND json_extract(input,'$.base')=? ORDER BY (state='claimed') DESC,updated DESC LIMIT 1""",
+            (row['task'],row['generation'],candidate,store.setting('observed_main'))).fetchone()
+        state = 'required' if not refresh else 'running' if refresh['state']=='claimed' else 'queued'
+        return readiness | {'status':'refresh_'+state}
+    if readiness['status'] == 'merged':
+        readiness['status'] = 'merge_confirmation'
+    return readiness
+
+
 def read_rows(store):
     tasks = {t['name']: t['data'] for t in store.tasks()}
     rows = store.db.execute('''SELECT * FROM (
@@ -73,33 +118,27 @@ def read_rows(store):
     result = []
     for raw in rows:
         r = dict(raw)
-        status = {'claimed': 'running', 'retry': 'failed', 'attention': 'uncertain',
+        status = {'claimed': 'running', 'retry': 'failed', 'attention': 'attention',
                   'ready': 'queued', 'succeeded': 'succeeded'}[r['state']]
         outcome = json.loads(r['result']) if r['result'] else {}
+        if r['state'] == 'attention' and outcome.get('category') == 'gateway_transport':
+            status = 'uncertain'
         if status == 'failed' and outcome.get('category') == 'observation':
             status = 'waiting'
         canceled = store.setting(f"cancel:{r['id']}:{r['token']}", False)
         if canceled and status != 'running':
             status = 'canceled'
         started = store.db.execute("SELECT at FROM events WHERE work=? AND kind='claimed' ORDER BY id DESC LIMIT 1", (r['id'],)).fetchone()
-        readiness = None
-        ci = tasks[r['task']].get('ci') or {}
-        inputs = json.loads(r['input'])
-        bound = (inputs.get('published') or inputs.get('verified') or {}).get('head')
-        if r['stage'] == 'review':
-            published = tasks[r['task']].get('published_verified') or {}
-            if published.get('candidate') == inputs.get('candidate'):
-                bound = published.get('head')
-        if ci.get('head') and bound == ci['head']:
-            readiness = {key:ci.get(key) for key in ('status','merge_state')}
-            readiness['repair_queued'] = bool(tasks[r['task']].get('repair'))
+        readiness = code_readiness(store, r, tasks[r['task']])
         result.append(job(store, r, tasks) | {'status': status, 'failures': r['failures'],
             'code_readiness':readiness,
             'next_at': r['retry_at'], 'started': started['at'] if started else r['created'],
             'finished': r['updated'] if status not in ('running','queued') else 0,
             'run_id': f"{r['id']}:{r['token']}",
             'log': str(store.directory/'attempts'/r['id']/str(r['token'])/'output.log'),
-            'error': outcome.get('message', ''), 'cancel_requested': canceled})
+            'error': outcome.get('message', ''),
+            'failure_category':outcome.get('category','') if r['state']=='attention' else '',
+            'cancel_requested': canceled})
     return result
 
 
@@ -115,7 +154,7 @@ def authorize(store, request):
     if row['stage'] in COMPUTE and (store.setting('admission_paused', False) or store.setting('slots', 8) == 0):
         return False
     return (request.get('fingerprint') == job(store,dict(row))['fingerprint']
-            and store.admission_available(row['stage']) and eligible(store, dict(row)))
+            and store.admission_available(row['stage'],work=dict(row)) and eligible(store, dict(row)))
 
 
 def launch(store, request):
@@ -172,6 +211,8 @@ def control(store, request, cancel=False):
                 raise ValueError('only a failed or canceled attempt can be retried')
             store.db.execute("UPDATE work SET state='ready',retry_at=0,ready_since=? WHERE id=? AND state IN ('attention','retry')", (time.time(),row['id']))
             store.db.execute('DELETE FROM settings WHERE key=?', (store.runtime_hold_key(row['task'],row['stage'],row['generation']),))
+            from pipeline.repair_budget import reset
+            reset(store,row['task'],row['stage'])
             store.db.execute('DELETE FROM settings WHERE key=?', ('task_paused:'+row['task'],))
             store.db.execute('DELETE FROM settings WHERE key=?', (f"cancel:{row['id']}:{row['token']}",))
         store.event('operator_cancel' if cancel else 'operator_retry', {'token':row['token']}, row['task'], row['id'])
@@ -207,6 +248,8 @@ def main():
         elif action == 'rows':
             from pipeline.runtime import observe
             observe(store)
+            from pipeline.stress import observe as observe_stress
+            observe_stress(store)
             result = {'rows':read_rows(store), 'capacity':store.setting('slots',8), 'settings':configuration(store)}
         elif action == 'recover':
             recover(store); result = {}
@@ -228,6 +271,8 @@ def main():
                         store.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('gateway',json.dumps(selected)))
                 ensure_github_provider(store)
                 store.set_setting('dispatcher_health_at',time.time())
+            from pipeline.capacity import observe as observe_quota
+            observe_quota(store)
             result = {}
         elif action == 'discover':
             with contextlib.redirect_stdout(sys.stderr):
@@ -237,8 +282,12 @@ def main():
             selected = allowed_tasks(store)
             tasks = {t['name']:t['data'] for t in store.tasks()}
             rows = store.ordered_ready()
+            from pipeline.capacity import summary
+            capacity=summary(store)
             result = {'jobs':[job(store,r,tasks) for r in rows if (selected is None or r['task'] in selected)
-                      and eligible(store,r) and store.admission_available(r['stage'])], 'errors':[]}
+                      and eligible(store,r) and store.admission_available(r['stage'],work=r)], 'errors':[],
+                      'admission':'New compute paused by operator' if store.setting('admission_paused',False)
+                        else capacity['message'] if not capacity['allowed'] else ''}
         elif action == 'retry':
             control(store,request); result = {}
         elif action == 'cancel':

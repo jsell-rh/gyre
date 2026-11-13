@@ -36,6 +36,10 @@ pub struct CompressionStats {
 pub trait AuditRepository: Send + Sync {
     async fn record(&self, event: &AuditEvent) -> Result<()>;
 
+    /// Query events matching the filter, ordered newest-first (descending
+    /// timestamp). All adapters (mem, SQLite, Postgres) must keep this
+    /// contract; callers that need a stable position across equal
+    /// second-granularity timestamps must identify events by content.
     async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>>;
 
     /// Total count of all audit events.

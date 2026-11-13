@@ -107,13 +107,23 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Mark a link's status and stale_since in the spec links store.
+/// Mark a link's status and stale_since in the spec links store and persist
+/// the mutation to the durable graph (spec-links.md §Forge-Maintained Spec
+/// Graph — the SQL table is authoritative).
 async fn mark_link_status(state: &AppState, link_id: &str, status: &str, now: u64) {
-    let mut store = state.spec_links_store.lock().await;
-    if let Some(link) = store.iter_mut().find(|l| l.id == link_id) {
-        link.status = status.to_string();
-        if status == "stale" {
-            link.stale_since = Some(now);
+    let updated: Option<crate::spec_registry::SpecLinkEntry> = {
+        let mut store = state.spec_links_store.lock().await;
+        store.iter_mut().find(|l| l.id == link_id).map(|link| {
+            link.status = status.to_string();
+            if status == "stale" {
+                link.stale_since = Some(now);
+            }
+            link.clone()
+        })
+    };
+    if let Some(entry) = updated {
+        if let Err(e) = state.spec_link_repo.save(&entry).await {
+            warn!(link_id = %link_id, "spec_link_staleness: failed to persist link status: {e}");
         }
     }
 }
@@ -174,14 +184,22 @@ async fn resolve_unresolved_cross_workspace_links(
         };
 
         if let Some(repo_id) = resolved_repo_id {
-            let mut store = state.spec_links_store.lock().await;
-            if let Some(entry) = store.iter_mut().find(|l| l.id == link.id) {
-                entry.target_repo_id = Some(repo_id);
-                entry.status = "active".to_string();
-                info!(
-                    link_id = %link.id,
-                    "spec_link_staleness: cross-workspace link resolved"
-                );
+            let updated: Option<crate::spec_registry::SpecLinkEntry> = {
+                let mut store = state.spec_links_store.lock().await;
+                store.iter_mut().find(|l| l.id == link.id).map(|entry| {
+                    entry.target_repo_id = Some(repo_id);
+                    entry.status = "active".to_string();
+                    entry.clone()
+                })
+            };
+            if let Some(entry) = updated {
+                if let Err(e) = state.spec_link_repo.save(&entry).await {
+                    warn!(
+                        link_id = %link.id,
+                        "spec_link_staleness: failed to persist resolved link: {e}"
+                    );
+                }
+                info!(link_id = %link.id, "spec_link_staleness: cross-workspace link resolved");
             }
         }
     }
@@ -257,7 +275,7 @@ async fn notify_workspace_members(
         notif.source.entity_type = "spec".to_string();
         notif.source.entity_id = source_path.to_string();
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
                 user = %member.user_id,
                 error = %e,
@@ -372,6 +390,7 @@ mod tests {
             id: id.to_string(),
             source_path: source.to_string(),
             source_repo_id: Some("repo1".to_string()),
+            source_sha: "src-sha".to_string(),
             link_type,
             target_path: target.to_string(),
             target_repo_id: None,
@@ -429,6 +448,9 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1_000_000,
             updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
         }
     }
 
@@ -565,6 +587,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -585,6 +608,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -602,6 +626,7 @@ mod tests {
             .list_for_user(
                 &Id::new("viewer1"),
                 Some(&Id::new("ws1")),
+                None,
                 None,
                 None,
                 None,
@@ -656,6 +681,7 @@ mod tests {
             .list_for_user(
                 &Id::new("spec-owner"),
                 Some(&Id::new("ws1")),
+                None,
                 None,
                 None,
                 None,

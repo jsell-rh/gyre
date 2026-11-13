@@ -312,11 +312,12 @@
   let wsAgents = $state([]);
 
   // Workspace orchestrator agent — recipient for the scoped priority chat (HSI §4).
-  // Agents carry no role field; the orchestrator is identified by naming
-  // convention (seed "orchestrator", persona "workspace-orchestrator"), preferring
-  // an active instance.
+  // Selected by orchestration role (`AgentResponse.orchestrator_type`,
+  // platform-model.md §3), never by name convention: a repo orchestrator or
+  // a worker whose name merely contains "orchestrator" must not receive
+  // workspace priority steering. Prefers a live (active) instance.
   let orchestratorAgent = $derived.by(() => {
-    const matches = wsAgents.filter((a) => (a.name ?? '').toLowerCase().includes('orchestrator'));
+    const matches = wsAgents.filter((a) => a.orchestrator_type === 'workspace_orchestrator');
     if (matches.length === 0) return null;
     return matches.find((a) => a.status === 'active') ?? matches[0];
   });
@@ -1575,6 +1576,7 @@
                   edges={depGraphEdges}
                   scope={depGraphScope}
                   onScopeChange={handleDepScopeChange}
+                  onRefresh={() => handleDepScopeChange(depGraphScope)}
                   onNodeClick={(node) => {
                     const repo = repos.find(r => r.id === node.repo_id);
                     if (repo) {

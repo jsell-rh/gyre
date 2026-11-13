@@ -231,15 +231,24 @@ fn ingest_request(req: &ExportTraceServiceRequest, guard: &mut Vec<TraceSpan>, m
 /// shutdown sender, and the server task handle. The socket is bound before
 /// this returns, so the receiver is guaranteed ready before the caller runs
 /// the test command (HSI §3a lifecycle step 1 precedes step 2).
+/// Lifecycle handle for the spawned OTLP gRPC receiver (HSI §3a): the
+/// bound address (the socket is bound before `spawn_receiver` returns, so
+/// the receiver is guaranteed ready), the shutdown signal sender, and the
+/// server task join handle.
+struct ReceiverHandle {
+    addr: SocketAddr,
+    shutdown_tx: oneshot::Sender<()>,
+    server: JoinHandle<std::result::Result<(), tonic::transport::Error>>,
+}
+
+/// Bind and start the OTLP gRPC receiver. The socket is bound before
+/// this returns, so the receiver is guaranteed ready before the caller runs
+/// the test command (HSI §3a lifecycle step 1 precedes step 2).
 async fn spawn_receiver(
     port: u16,
     accumulator: SpanAccumulator,
     max_spans: usize,
-) -> Result<(
-    SocketAddr,
-    oneshot::Sender<()>,
-    JoinHandle<std::result::Result<(), tonic::transport::Error>>,
-)> {
+) -> Result<ReceiverHandle> {
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)
         .await
@@ -262,7 +271,11 @@ async fn spawn_receiver(
             .await
     });
 
-    Ok((actual_addr, shutdown_tx, handle))
+    Ok(ReceiverHandle {
+        addr: actual_addr,
+        shutdown_tx,
+        server: handle,
+    })
 }
 
 /// Run the full TraceCapture gate lifecycle:
@@ -278,11 +291,10 @@ pub async fn run_trace_capture(
     commit_sha: String,
 ) -> Result<GateTrace> {
     let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
-    let (actual_addr, shutdown_tx, server) =
-        spawn_receiver(port, Arc::clone(&accumulator), config.max_spans).await?;
+    let receiver = spawn_receiver(port, Arc::clone(&accumulator), config.max_spans).await?;
 
     // Run the test command with OTel env vars pointing at our gRPC receiver.
-    let otlp_endpoint = format!("http://{actual_addr}");
+    let otlp_endpoint = format!("http://{}", receiver.addr);
     let parts: Vec<&str> = config.test_command.split_whitespace().collect();
     let command_output = if parts.is_empty() {
         Err(anyhow::anyhow!("empty test_command"))
@@ -309,8 +321,8 @@ pub async fn run_trace_capture(
     };
 
     // Stop the OTLP receiver.
-    let _ = shutdown_tx.send(());
-    let _ = server.await;
+    let _ = receiver.shutdown_tx.send(());
+    let _ = receiver.server.await;
 
     command_output?;
 
@@ -716,11 +728,11 @@ mod tests {
     #[tokio::test]
     async fn grpc_receiver_accepts_export() {
         let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
-        let (addr, shutdown_tx, server) = spawn_receiver(0, Arc::clone(&accumulator), 100)
+        let receiver = spawn_receiver(0, Arc::clone(&accumulator), 100)
             .await
             .unwrap();
 
-        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+        let mut client = TraceServiceClient::connect(format!("http://{}", receiver.addr))
             .await
             .expect("connect to gRPC receiver");
         let req = make_request(
@@ -738,8 +750,8 @@ mod tests {
         );
         client.export(req).await.expect("export spans");
 
-        let _ = shutdown_tx.send(());
-        let _ = server.await;
+        let _ = receiver.shutdown_tx.send(());
+        let _ = receiver.server.await;
 
         let spans = accumulator.lock();
         assert_eq!(spans.len(), 1, "receiver should have accumulated one span");

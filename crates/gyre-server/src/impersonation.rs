@@ -800,7 +800,7 @@ async fn deliver_approval_code(
     notif.source.entity_type = "impersonation".to_string();
     notif.source.entity_id = req.request_id.clone();
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation request notification");
     } else {
         // Channel fan-out per user-management.md §Delivery Channels.
@@ -852,7 +852,7 @@ async fn notify_impersonation_alert(
     notif.source.entity_type = "impersonation".to_string();
     notif.source.entity_id = session.session_id.clone();
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation alert notification");
     } else {
         // Channel fan-out per user-management.md §Delivery Channels.
@@ -1006,7 +1006,7 @@ mod tests {
         // In-app records exist for both events …
         let notifs = state
             .notifications
-            .list_for_user(&target.id, None, None, None, None, 10, 0)
+            .list_for_user(&target.id, None, None, None, None, None, 10, 0)
             .await
             .unwrap();
         assert_eq!(notifs.len(), 2, "approval code + start alert");

@@ -68,6 +68,9 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         &agent.workspace_id.to_string(),
                     )
                     .await;
+                    // agent-runtime.md §4: wall-clock compute time
+                    // (spawn → dead).
+                    crate::api::budget::record_compute_minutes_for_agent(state, &agent).await;
                 }
 
                 // Agent lifecycle audit event (observability.md §Audit Event Types):
@@ -236,6 +239,11 @@ async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, 
     }
 
     // Scoped JWT for the replacement (same tier and scope as the dead one).
+    let persona = match dead.orchestrator_type {
+        gyre_domain::OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        gyre_domain::OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+        gyre_domain::OrchestratorType::Worker => "worker",
+    };
     let token = state.agent_signing_key.mint_orchestrator(
         &replacement.id.to_string(),
         dead.spawned_by.as_deref().unwrap_or("system"),
@@ -244,6 +252,7 @@ async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, 
         &dead.workspace_id.to_string(),
         dead.repo_id.as_ref().map(|r| r.to_string()).as_deref(),
         &dead.orchestrator_type.to_string(),
+        persona,
     );
     match &token {
         Ok(t) => {

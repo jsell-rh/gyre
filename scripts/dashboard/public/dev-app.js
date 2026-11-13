@@ -123,14 +123,13 @@ function renderHealth() {
   const s = snapshot || {};
   const online = s.online;
   const value = s.slots ?? 0;
-  const gate = s.health || {};
   nodes.health.hidden = false;
   nodes.health.replaceChildren(
     e("span", {}, e("span", { class: `dot ${online ? "ok" : "down"}` }), online ? " controller online" : " controller offline"),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.running ?? 0} running / ${gate.effective_slots ?? value} admitted / ${value} desired` }),
+    e("span", { text: `${s.running ?? 0} running / ${value} desired` }),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} current · ${s.counts?.assessing ?? 0} assessing · ${s.counts?.['needs-triage'] ?? 0} need spec binding · ${s.confirmed_merges ?? 0} shipped by controller` }),
+    e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} current · ${s.counts?.assessing ?? 0} assessing · ${s.counts?.['needs-triage'] ?? 0} need triage · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
     e("form", { id: "sandbox-controls", class: "stepper", onsubmit: (event) => {
       event.preventDefault();
@@ -227,17 +226,19 @@ function renderOverview() {
   const control = e("section", { class: "dev-panel" },
     e("h2", { text: "Independent reconcilers" }),
     e("p", { text: s.online ? `${s.supervisor_online ? "Supervisor online" : "Independent stage workers active"} · ${gate.condition || "Reconciling"}` : "Run: python3 scripts/dev-pipeline.py serve. Stages can also run independently with tick." }),
+    gate.capacity && !gate.capacity.allowed ? e("p", { class: "muted", text: gate.capacity.message }) : null,
+    gate.stress_guard ? e("p", { class: "dev-health-error", text: `Stress guard paused new admissions: ${gate.stress_guard.reason}. Tasks: ${(gate.stress_guard.tasks || []).join(", ")}. Active work continues; inspect the fault before resuming.` }) : null,
     ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} ${stage === "observe" ? "waiting for CI" : "backing off"} · ${count.succeeded || 0} completed` })),
     e("p", { class: "muted", text: s.dispatch?.integration
-      ? `Final integration: ${s.dispatch.integration.task} owns verification, CI, and merge. Other candidates queue here; implementation and review remain parallel.`
-      : "Final integration admits one candidate at a time. Implementation and review remain parallel." }),
+      ? `Merge permit: ${s.dispatch.integration.task} is awaiting upstream confirmation. Verification and other PRs continue independently.`
+      : "Verification runs concurrently within the sandbox budget. Only actual merge requests share a global permit." }),
     e("p", { class: "muted", text: s.resources?.inventory_ready ? `Remote resource inventory current · ${s.resources.used} charged · ${s.resources.deletion_pending} awaiting deletion` : "Admission waits for a complete remote sandbox inventory." }),
-    (s.dispatch?.integration_waiting || []).length ? e("p", { class: "muted", text: `Integration lane yielded while waiting for external CI or policy: ${s.dispatch.integration_waiting.join(", ")}. Observation continues; merge checks remain required.` }) : null,
+    (s.dispatch?.integration_waiting || []).length ? e("p", { class: "muted", text: `External CI or policy waits: ${s.dispatch.integration_waiting.join(", ")}. Observation continues; merge checks remain required.` }) : null,
     gate.inference?.condition && gate.inference.condition !== "Ready" ? e("p", { class: "dev-health-error", text: `${gate.inference.condition} · ${gate.inference.expires > Date.now()/1000 ? `retry in ${until(gate.inference.expires)}` : "awaiting next probe"}` }) : null,
     gate.inventory_error ? e("p", { class: "muted", text: `Inventory: ${gate.inventory_error}` }) : null,
     gate.gateway_auth?.using_cached ? e("p", { class: "muted", text: `Gateway refresh is retrying with backoff; cached login is still working. Next refresh ${until(gate.gateway_auth.retry_at)}.` }) : null,
     s.dispatch?.only_task ? e("p", { text: `Dispatch restricted to ${s.dispatch.only_task}. Eligible counts include tasks excluded by this restriction.` }) : null,
-    e("p", { class: "muted", text: `Global sandbox budget: ${s.resources?.used || 0} charged / ${s.slots || 0} desired. Pending deletion continues to consume capacity.` }),
+    e("p", { class: "muted", text: `Global sandbox budget: ${s.resources?.used || 0} charged / ${s.slots || 0} desired. Pending deletion remains charged until physical absence is confirmed.` }),
     e("p", { class: "muted", text: `${s.dispatch?.verification_reserved || 0} slot reserved for verification. Priority classes age while queued; running workers are not preempted.` }),
     e("p", { class: "muted", text: "Set sandboxes to 0 to drain. Active attempts finish and keep their checkpoints." }),
     e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "implement").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && ["review", "verify"].includes(a.kind)).length} reviewing/verifying · ${s.slots ?? "—"} slots` }));

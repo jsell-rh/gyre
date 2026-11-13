@@ -33,6 +33,16 @@ def source(store):
         subprocess.run(['git', 'checkout', '--quiet', '--detach', 'origin/main'], cwd=path, check=True)
         revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=path, text=True).strip()
         sync_checkout(store, path, revision)
+        recovery = store.setting('requirements_recovery_revision')
+        if recovery:
+            from pipeline.requirement_migration import plan, apply
+            apply(store, plan(store, path, recovery))
+        from pipeline.fulfillment import reconcile
+        reconcile(store, path, revision)
+        from pipeline.repair_budget import reconcile_generated
+        reconcile_generated(store)
+        from pipeline.integration import resolve_upstream_assessments
+        resolve_upstream_assessments(store,path,revision)
         store.set_setting('observed_main', revision)
         return revision
 
@@ -248,6 +258,8 @@ def main():
                     params += (args.task,)
                 for row in store.db.execute("SELECT task,stage,generation FROM work WHERE state IN ('attention','retry')" + (' AND task=?' if args.command=='retry' else ''), (args.task,) if args.command=='retry' else ()).fetchall():
                     store.db.execute('DELETE FROM settings WHERE key=?',(store.runtime_hold_key(row['task'],row['stage'],row['generation']),))
+                    from pipeline.repair_budget import reset
+                    reset(store,row['task'],row['stage'])
                 count = store.db.execute(query, params).rowcount
                 store.event('operator_retry', {'count': count}, getattr(args, 'task', None))
             print(f'retried {count} work items')

@@ -155,6 +155,9 @@ pub async fn create_persona(
     // Recompute hash now that capabilities are set.
     persona.refresh_content_hash();
     state.personas.create(&persona).await?;
+    // search.md §Searchable Entities: personas indexed by prompt content with
+    // a scope facet.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
 
     // Persona is created Pending; notify its owner that approval is
     // requested (user-management.md §Who Gets Notified: "Persona approval
@@ -237,6 +240,9 @@ pub async fn update_persona(
     persona.updated_at = now_secs();
     persona.refresh_content_hash();
     state.personas.update(&persona).await?;
+    // search.md §Index Updates: write paths re-index so prompt-content searches
+    // never serve stale text.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok(Json(PersonaResponse::from(persona)))
 }
 
@@ -250,7 +256,9 @@ pub async fn delete_persona(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("persona {id} not found")))?;
-    state.personas.delete(&Id::new(id)).await?;
+    state.personas.delete(&Id::new(&id)).await?;
+    // De-index so persona searches never return deleted personas.
+    crate::search_indexer::deindex(&state, "persona", &id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -271,6 +279,8 @@ pub async fn approve_persona(
     persona.approved_at = Some(now);
     persona.updated_at = now;
     state.personas.update(&persona).await?;
+    // search.md §Index Updates: write paths re-index.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok(Json(PersonaResponse::from(persona)))
 }
 
@@ -755,6 +765,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -773,6 +784,7 @@ mod tests {
             state.notifications.as_ref(),
             &Id::new("user-viewer"),
             Some(&ws_id),
+            None,
             None,
             None,
             None,

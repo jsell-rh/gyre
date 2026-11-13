@@ -304,7 +304,11 @@ impl NotificationPriority {
             // Active impersonation of this user (identity-security.md
             // §Impersonation, merged from main's task-109): security alert
             // on the user's own account, priority 1.
-            | T::ImpersonationAlert => Self::Urgent,
+            | T::ImpersonationAlert
+            // Worker spawn failed on the compute target after all retries
+            // (agent-runtime.md §1 Phase 7, merged from main's task-125
+            // base): the task is Blocked — work blocked, immediate action.
+            | T::ComputeTargetUnavailable => Self::Urgent,
             // High - needs attention soon: gate failure, budget warning
             // (spec examples), plus decisions/blocks that stall work soon:
             // approvals, rejections, conflicts, paused queue, failed groups.
@@ -338,7 +342,11 @@ impl NotificationPriority {
             | T::BreakingChangeDetected
             // Platform-level system alert (merged from main): default High
             // per the taxonomy's numeric rank 3.
-            | T::SystemAlert => Self::High,
+            | T::SystemAlert
+            // Workspace has no active Owner; tenant admins must reassign
+            // ownership (user-management.md §Ownership Transfer & Reclamation,
+            // merged from main's task-125 base): needs attention soon.
+            | T::WorkspaceOwnerless => Self::High,
             // Medium - needs attention eventually: spec drift (spec example),
             // stale-dependency-adjacent and review-arbitration items.
             T::MetaSpecDrift

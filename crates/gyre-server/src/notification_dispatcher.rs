@@ -540,32 +540,53 @@ pub struct BudgetNotificationContext {
 }
 
 /// Recipients for a budget-level notification: the usage's spawning user
-/// (when it is agent-attributed) plus the workspace members holding
-/// `roles`. Deduplicated.
+/// (when it is agent-attributed), the spawning users of the workspace's
+/// *active* agents (the population enforcement acts on — a spawner whose
+/// agent is warned or stopped by budget enforcement is notified even when
+/// the crossing report is unattributed or was filed by a different agent),
+/// plus the workspace members holding `roles`. Deduplicated.
 async fn budget_recipients(
     state: &AppState,
     workspace_id: &Id,
     spawned_by: Option<&Id>,
     roles: &[WorkspaceRole],
 ) -> Vec<Id> {
+    // caller-scope:ok — recipients are resolved FROM this workspace
+    // (list_by_workspace / members_with_roles), so the parameter is each
+    // member's own scope by construction; there is no per-entity lookup to
+    // make. This function only returns a recipient list — it creates
+    // nothing.
     let mut recipients: Vec<Id> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let push = |id: &Id, recipients: &mut Vec<Id>, seen: &mut HashSet<String>| {
+        if seen.insert(id.as_str().to_string()) {
+            recipients.push(id.clone());
+        }
+    };
     if let Some(sb) = spawned_by {
-        if seen.insert(sb.as_str().to_string()) {
-            recipients.push(sb.clone());
+        push(sb, &mut recipients, &mut seen);
+    }
+    if let Ok(agents) = state.agents.list_by_workspace(workspace_id).await {
+        for agent in agents
+            .into_iter()
+            .filter(|a| a.status == gyre_domain::AgentStatus::Active)
+        {
+            if let Some(sb) = agent.spawned_by {
+                push(&gyre_common::Id::new(sb), &mut recipients, &mut seen);
+            }
         }
     }
     for member in members_with_roles(state, workspace_id, roles).await {
-        if seen.insert(member.as_str().to_string()) {
-            recipients.push(member);
-        }
+        push(&member, &mut recipients, &mut seen);
     }
     recipients
 }
 
 /// Shared delivery core for the budget rows: resolve recipients, skip
 /// users already notified this period for this level/entity, deliver via
-/// `notify_rich` (in-app record + channel fan-out).
+/// `notify_rich` (in-app record + channel fan-out). Returns the number of
+/// notifications newly created — the level-crossing signal the
+/// BudgetWarning bus event rides on.
 async fn notify_budget_level(
     state: &AppState,
     workspace_id: &Id,
@@ -574,7 +595,8 @@ async fn notify_budget_level(
     roles: &[WorkspaceRole],
     tenant_id: &str,
     ctx: &BudgetNotificationContext,
-) {
+) -> usize {
+    let mut created = 0usize;
     for user_id in budget_recipients(state, workspace_id, spawned_by, roles).await {
         let already_notified = state
             .notifications
@@ -604,20 +626,25 @@ async fn notify_budget_level(
             None,
         )
         .await;
+        created += 1;
     }
+    created
 }
 
 /// Deliver an "agent budget warning" notification to the usage's spawning
-/// user plus the workspace Admins (user-management.md §Who Gets Notified:
-/// budget warning row). Called by the production threshold check in
-/// api/budget.rs when workspace utilization crosses 80% of a daily limit.
+/// user, the workspace's active agents' spawning users, and the workspace
+/// Admins (user-management.md §Who Gets Notified: budget warning row).
+/// Called by the production threshold check in api/budget.rs when
+/// workspace utilization crosses 80% of a daily limit. Returns the number
+/// of notifications newly created (0 when every recipient was already
+/// notified this period).
 pub async fn notify_agent_budget_warning(
     state: &AppState,
     workspace_id: &Id,
     spawned_by: Option<&Id>,
     tenant_id: &str,
     ctx: &BudgetNotificationContext,
-) {
+) -> usize {
     notify_budget_level(
         state,
         workspace_id,
@@ -627,20 +654,23 @@ pub async fn notify_agent_budget_warning(
         tenant_id,
         ctx,
     )
-    .await;
+    .await
 }
 
 /// Deliver an "agent budget exhausted" notification to the usage's spawning
-/// user plus the workspace Owner (user-management.md §Who Gets Notified:
-/// budget exhausted row). Called by the production threshold check in
-/// api/budget.rs when workspace utilization crosses 100% of a daily limit.
+/// user, the workspace's active agents' spawning users, and the workspace
+/// Owner (user-management.md §Who Gets Notified: budget exhausted row).
+/// Called by the production threshold check in api/budget.rs when
+/// workspace utilization crosses 100% of a daily limit. Returns the number
+/// of notifications newly created (0 when every recipient was already
+/// notified this period).
 pub async fn notify_agent_budget_exhausted(
     state: &AppState,
     workspace_id: &Id,
     spawned_by: Option<&Id>,
     tenant_id: &str,
     ctx: &BudgetNotificationContext,
-) {
+) -> usize {
     notify_budget_level(
         state,
         workspace_id,
@@ -650,7 +680,7 @@ pub async fn notify_agent_budget_exhausted(
         tenant_id,
         ctx,
     )
-    .await;
+    .await
 }
 
 /// Deliver a "security finding" notification to the workspace Owners plus
@@ -782,6 +812,22 @@ mod tests {
         // SpecPendingApproval / PersonaApprovalRequested.
         assert_eq!(
             band(NotificationType::PersonaChangePendingApproval),
+            NotificationPriority::High
+        );
+        // Urgent: worker spawn failed on the compute target after all
+        // retries — the task is Blocked (agent-runtime.md §1 Phase 7,
+        // arrived with the task-125 base): work blocked, immediate action,
+        // same class as agent escalation.
+        assert_eq!(
+            band(NotificationType::ComputeTargetUnavailable),
+            NotificationPriority::Urgent
+        );
+        // High: workspace has no active Owner and tenant admins must
+        // reassign ownership (user-management.md §Ownership Transfer &
+        // Reclamation, arrived with the task-125 base): needs attention
+        // soon.
+        assert_eq!(
+            band(NotificationType::WorkspaceOwnerless),
             NotificationPriority::High
         );
         // Medium: stale dependency, spec drift.
@@ -1190,17 +1236,17 @@ mod tests {
 
         let owner_notifs = state
             .notifications
-            .list_for_user(&Id::new("owner-1"), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new("owner-1"), None, None, None, None, None, 50, 0)
             .await
             .unwrap();
         let spawner_notifs = state
             .notifications
-            .list_for_user(&Id::new("spawner-1"), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new("spawner-1"), None, None, None, None, None, 50, 0)
             .await
             .unwrap();
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-1"), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new("admin-1"), None, None, None, None, None, 50, 0)
             .await
             .unwrap();
         assert_eq!(
@@ -1239,12 +1285,12 @@ mod tests {
 
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-1"), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new("admin-1"), None, None, None, None, None, 50, 0)
             .await
             .unwrap();
         let spawner_notifs = state
             .notifications
-            .list_for_user(&Id::new("spawner-1"), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new("spawner-1"), None, None, None, None, None, 50, 0)
             .await
             .unwrap();
         assert_eq!(admin_notifs.len(), 1);
@@ -1290,6 +1336,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 50,
                 0,
             )
@@ -1309,7 +1356,16 @@ mod tests {
         // Nobody else was notified (routing table: owner only).
         let owner_member_notifs = state
             .notifications
-            .list_for_user(&Id::new("owner-1"), Some(&ws), None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("owner-1"),
+                Some(&ws),
+                None,
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -1335,7 +1391,7 @@ mod tests {
         notify_persona_approval_requested(&state, &persona).await;
         let all = state
             .notifications
-            .list_for_user(&Id::new("reviewer"), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new("reviewer"), None, None, None, None, None, 50, 0)
             .await
             .unwrap();
         assert!(
@@ -1369,7 +1425,7 @@ mod tests {
         for user in ["admin-1", "admin-2", "owner-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1389,7 +1445,7 @@ mod tests {
         for user in ["dev-1", "viewer-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
                 .await
                 .unwrap();
             assert!(
@@ -1429,7 +1485,7 @@ mod tests {
         for user in ["spawner-1", "admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1444,13 +1500,110 @@ mod tests {
         }
         let owner_notifs = state
             .notifications
-            .list_for_user(&Id::new("owner-1"), Some(&ws), None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("owner-1"),
+                Some(&ws),
+                None,
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
             owner_notifs.is_empty(),
             "budget warning must not notify Owners (that is the exhausted row)"
         );
+    }
+
+    /// The recipient set is the population budget enforcement acts on
+    /// (semantics merged from the task-125 base's api/budget.rs): the
+    /// spawners of the workspace's ACTIVE agents are notified even when
+    /// the crossing report is unattributed (no explicit spawned_by), while
+    /// an Idle agent's spawner is not — enforcement only stops active
+    /// work, so only its owners need the warning.
+    #[tokio::test]
+    async fn budget_warning_notifies_active_agents_spawners() {
+        let state = test_state();
+        let ws = Id::new("ws-1");
+        seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
+
+        let mut active = agent_spawned_by(&ws, Some("active-spawner"));
+        active.id = Id::new("agent-active");
+        active.name = "worker-active".to_string();
+        active.status = gyre_domain::AgentStatus::Active;
+        state.agents.create(&active).await.unwrap();
+        let mut idle = agent_spawned_by(&ws, Some("idle-spawner"));
+        idle.id = Id::new("agent-idle");
+        idle.name = "worker-idle".to_string();
+        idle.status = gyre_domain::AgentStatus::Idle;
+        state.agents.create(&idle).await.unwrap();
+
+        notify_agent_budget_warning(
+            &state,
+            &ws,
+            None,
+            "tenant-1",
+            &budget_ctx("Workspace budget at 85% of the daily limit"),
+        )
+        .await;
+
+        let active_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("active-spawner"),
+                Some(&ws),
+                None,
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            active_notifs.len(),
+            1,
+            "active agent's spawner must be notified (enforcement acts on active agents)"
+        );
+        let idle_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("idle-spawner"),
+                Some(&ws),
+                None,
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            idle_notifs.is_empty(),
+            "idle agent's spawner must not be notified (no work is stopped)"
+        );
+        // The explicit spawned_by recipient is still notified alongside
+        // the active agents' spawners (deduplicated when they coincide).
+        let admin_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("admin-1"),
+                Some(&ws),
+                None,
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(admin_notifs.len(), 1, "Admins stay on the warning row");
     }
 
     #[tokio::test]
@@ -1477,7 +1630,7 @@ mod tests {
         for user in ["spawner-1", "admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1508,7 +1661,7 @@ mod tests {
         for user in ["spawner-1", "owner-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1523,7 +1676,16 @@ mod tests {
         }
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-1"), Some(&ws), None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("admin-1"),
+                Some(&ws),
+                None,
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -1565,7 +1727,7 @@ mod tests {
         for user in ["owner-1", "tenant-admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1588,7 +1750,7 @@ mod tests {
         for user in ["admin-1", "dev-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
                 .await
                 .unwrap();
             assert!(

@@ -7,11 +7,10 @@ use gyre_common::{Id, Notification};
 /// Per-handler auth — callers MUST verify that the notification's `user_id` and
 /// `tenant_id` match the authenticated user before invoking mutating methods.
 #[async_trait]
-// async_trait generates a must_use future per method; `list_for_user`'s
-// 7 filter parameters (workspace scoping, priority band, type, pagination)
-// are the pre-existing HSI §2 inbox filter surface.
+// async_trait generates a must_use future per method; the pre-existing HSI §2
+// inbox filter surface (`list_for_user`'s 7 filter/pagination parameters) is
+// allowed at the method site below.
 #[allow(clippy::double_must_use)]
-#[allow(clippy::too_many_arguments)]
 pub trait NotificationRepository: Send + Sync {
     async fn create(&self, notification: &Notification) -> Result<()>;
 
@@ -19,8 +18,10 @@ pub trait NotificationRepository: Send + Sync {
     /// or if user_id does not match, preventing cross-user UUID guessing).
     async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>>;
 
-    /// List notifications for a user. Optionally filtered by workspace and priority range.
-    /// When `workspace_id` is None, returns notifications across all workspaces (tenant Inbox).
+    /// List notifications for a user. Optionally filtered by workspace, repo,
+    /// and priority range. When `workspace_id` is None, returns notifications
+    /// across all workspaces (tenant Inbox).
+    #[allow(clippy::too_many_arguments)] // filter + pagination parameters; pre-existing signature
     async fn list_for_user(
         &self,
         user_id: &Id,
@@ -28,9 +29,24 @@ pub trait NotificationRepository: Send + Sync {
         min_priority: Option<u8>,
         max_priority: Option<u8>,
         notification_type: Option<&str>,
+        repo_id: Option<&Id>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>>;
+
+    /// Replace the body of unresolved notifications of the given type whose
+    /// `entity_ref` matches. Returns the number of rows updated. Used by
+    /// save_spec's append-to-existing-MR path to keep the SpecPendingApproval
+    /// card's `spec_sha` in sync with iterative saves — a stale SHA would make
+    /// every later Approve record an approval for content that never becomes
+    /// the ledger's current_sha. Resolved/dismissed cards are left untouched
+    /// (their historical body is an audit record of what was acted on).
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64>;
 
     /// Set `dismissed_at` to now. Used by trust suggestions (30-day suppression).
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()>;
@@ -46,6 +62,19 @@ pub trait NotificationRepository: Send + Sync {
     /// Count active (not resolved, not dismissed) notifications.
     /// When `workspace_id` is None, counts across all workspaces (badge count).
     async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
+
+    /// Count active (not resolved, not dismissed) notifications that the user
+    /// has not read (user-management.md §API > Notifications: unread count for
+    /// the bell badge). When `workspace_id` is None, counts across all
+    /// workspaces.
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
+
+    /// Mark every unread notification owned by `user_id` as read, stamping
+    /// `read_at` (user-management.md §API > Notifications: mark-all-read).
+    /// Dismissed cards are included so the unread count deterministically
+    /// reaches zero. When `workspace_id` is Some, only that workspace's
+    /// notifications are marked. Returns the number of rows updated.
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
 
     /// List most recent notifications across all users (for activity feed).
     /// Ordered by created_at descending.

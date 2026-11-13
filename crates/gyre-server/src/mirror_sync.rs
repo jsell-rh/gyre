@@ -57,6 +57,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         crate::spec_registry::sync_spec_ledger(
                             &state.spec_ledger,
                             &state.spec_links_store,
+                            &state.spec_link_repo,
                             &repo.path,
                             &new_sha,
                             now,
@@ -78,10 +79,14 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                                 tenant_id: tenant_id.to_string(),
                             }
                         });
-                        // Channel fan-out after in-app create (user-management.md
+                        // §API > Notifications: broadcasting wrapper so
+                        // mirror-push notifications reach live SSE stream
+                        // subscribers (task-125 review repair), plus channel
+                        // fan-out after in-app create (user-management.md
                         // §Delivery Channels) — mirror-sync notifications
                         // (spec assertion failures) deliver to configured
                         // channels too.
+                        let divergence_notifications = state.broadcasting_notifications();
                         let fanout_state = std::sync::Arc::clone(state);
                         let on_created = move |notif: &gyre_common::Notification| {
                             let state = std::sync::Arc::clone(&fanout_state);
@@ -94,7 +99,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                             })
                         };
                         let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                            notification_repo: state.notifications.as_ref(),
+                            notification_repo: &divergence_notifications,
                             membership_repo: state.workspace_memberships.as_ref(),
                             on_created: Some(Box::new(on_created)),
                         });
