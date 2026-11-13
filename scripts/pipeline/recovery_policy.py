@@ -37,7 +37,7 @@ def reconcile(store,now=None):
             elif category=='repair_stalled' and stage=='implement':
                 repair=data.get('repair') or {}
                 if repair.get('category')=='contract' and checkbox_delta(repair.get('log_tail')):
-                    policy='restore-assigned-checkboxes-v1'
+                    policy='restore-assigned-checkboxes-v2'
                 elif task_document_repair(name,repair):policy='review-task-document-progress-v1'
             if not policy:continue
             receipt=f'hold_recovery:{name}:{stage}:{gen}:{policy}'
@@ -50,6 +50,12 @@ def reconcile(store,now=None):
                 # normal discover/claim predicates select current input/base.
                 store.db.execute("UPDATE work SET state='obsolete',token=token+1,retry_at=0,updated=? WHERE task=? AND generation=? AND stage=? AND state='attention' AND json_extract(result,'$.category')=?",
                                  (now,name,gen,stage,category))
+                if policy=='restore-assigned-checkboxes-v2':
+                    # Adoption would replay the already-rejected checkbox-only
+                    # receipt before the corrected finalizer ever gets to run.
+                    # The retained candidate stays the seed for a fresh model.
+                    store.db.execute("UPDATE work SET result=json_set(result,'$.fresh_model',json('true')) WHERE task=? AND generation=? AND stage=? AND state='obsolete' AND json_extract(result,'$.category')=?",
+                                     (name,gen,stage,category))
                 store.db.execute('DELETE FROM settings WHERE key=?',(key,))
                 record={'at':now,'policy':policy,'previous':hold}
                 store.db.execute('INSERT INTO settings VALUES(?,?)',(receipt,json.dumps(record)))

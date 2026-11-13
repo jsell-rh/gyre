@@ -7,6 +7,8 @@ import unittest
 from pipeline.store import Store
 from pipeline.compute import record_oom, profile
 from pipeline.catalog import helper
+from pipeline.execution import Execution
+from pipeline.fullsend import adopt
 from pipeline.recovery_policy import reconcile, checkbox_delta
 
 contract=helper('dev-contract')
@@ -80,9 +82,16 @@ class RecoveryPolicyTests(unittest.TestCase):
         self.assertTrue(checkbox_delta(delta))
         self.assertFalse(checkbox_delta(delta.replace('+- [x] Enforce authorization.','+- [x] Skip authorization.')))
         self.s.put_task('task-001','g','body',{'repair':{'category':'contract','log_tail':delta}})
-        self.hold({'category':'repair_stalled'},stage='implement')
+        work=self.hold({'category':'repair_stalled'},stage='implement')
+        prior=self.s.directory/'attempts'/work/'1';(prior/'bundle').mkdir(parents=True)
+        (prior/'bundle/job.json').write_text(json.dumps({'stage':'implement','task':'task-001','branch':'old'}))
+        (prior/'outcome.json').write_text(json.dumps({'published':True,'head':'already-rejected'}))
         self.assertEqual(len(reconcile(self.s)),1)
         self.assertEqual(reconcile(self.s),[])
+        self.s.enqueue('implement','task-001','g',{'base':'new'})
+        claim=self.s.claim('implement','fresh',ident=work)
+        self.assertTrue(json.loads(claim['result'])['fresh_model'])
+        self.assertIsNone(adopt(Execution(self.s,claim),self.s.task('task-001')))
 
     def test_stale_generations_do_not_release_current_hold(self):
         self.oom_hold(4)
