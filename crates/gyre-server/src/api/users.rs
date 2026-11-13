@@ -2152,7 +2152,7 @@ mod tests {
     async fn spec_path_unread_count_and_mark_all_read() {
         let state = test_state();
         let seed = |id: &str, user: &str, ty: NotificationType| {
-            let n = Notification::new(
+            Notification::new(
                 Id::new(id),
                 Id::new("ws-default"),
                 Id::new(user),
@@ -2160,8 +2160,7 @@ mod tests {
                 id,
                 "default",
                 1_700_000_000,
-            );
-            n
+            )
         };
         // Caller ("system"): one unread, one already read, one dismissed-but-unread.
         let unread = seed("notif-unread", "system", NotificationType::GatePassed);
