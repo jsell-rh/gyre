@@ -258,6 +258,24 @@ fn eval_condition(cond: &Condition, ctx: &AttributeContext) -> bool {
                 (ConditionOp::NotEquals, AttrValue::Bool(b), ConditionValue::Bool(expected)) => {
                     b != expected
                 }
+                // Set semantics for list-valued attributes (review round 6,
+                // task-129): a multi-role subject carries
+                // `subject.global_role` as a LIST, and Equals/NotEquals on
+                // a list test membership — "global_role Equals Agent" is
+                // true when Agent is among the caller's roles — instead of
+                // failing on a type mismatch. The previous `first()` pick
+                // at the extraction site made the single-value arms above
+                // hide every role but one.
+                (
+                    ConditionOp::Equals,
+                    AttrValue::List(list),
+                    ConditionValue::String(expected),
+                ) => list.contains(expected),
+                (
+                    ConditionOp::NotEquals,
+                    AttrValue::List(list),
+                    ConditionValue::String(expected),
+                ) => !list.contains(expected),
                 // In: value must be in list
                 (ConditionOp::In, AttrValue::Single(s), ConditionValue::StringList(list)) => {
                     list.contains(s)
@@ -501,6 +519,29 @@ pub fn build_decision(
     }
 }
 
+/// Persist a `PolicyDecision` to the queryable audit store, WARNing when
+/// the write fails (§Audit Integration, review round 6 task-129).
+/// 
+/// The previous call sites discarded the result
+/// (`let _ = state.policies.record_decision(...)`), so a failing store
+/// silently blanked the audit trail: an operator querying
+/// GET /api/v1/policies/decisions could not distinguish "no decisions"
+/// from "decisions dropped". Every evaluation path that records a
+/// decision goes through this helper so a dropped audit write is at
+/// least visible in the server log.
+pub async fn record_decision_audit(state: &crate::AppState, decision: &PolicyDecision) {
+    if let Err(e) = state.policies.record_decision(decision).await {
+        tracing::warn!(
+            error = %e,
+            request_id = %decision.request_id,
+            subject_id = %decision.subject_id,
+            action = %decision.action,
+            resource_type = %decision.resource_type,
+            "policy decision audit write failed — decision not recorded"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -574,6 +615,81 @@ mod tests {
         };
         let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "push", "repo");
         assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    /// Review round 6 (task-129): a multi-role subject carries
+    /// `subject.global_role` as a LIST; Equals/NotEquals on list-valued
+    /// attributes use set (membership) semantics instead of failing on a
+    /// type mismatch. Killing direction: without the list arms in
+    /// `eval_condition`, both evaluations below return Deny (the Allow's
+    /// Equals cannot match a List).
+    #[test]
+    fn condition_equals_on_list_attribute_uses_set_semantics() {
+        let mut ctx = AttributeContext::default();
+        ctx.set_list(
+            "subject.global_role",
+            vec!["Admin".to_string(), "Agent".to_string()],
+        );
+
+        let cond = |op, expected: &str| Condition {
+            attribute: "subject.global_role".to_string(),
+            operator: op,
+            value: ConditionValue::String(expected.to_string()),
+        };
+
+        // Equals: membership — Agent is among the caller's roles.
+        let result = evaluate(
+            vec![allow_policy(10, vec![cond(ConditionOp::Equals, "Agent")])],
+            &ctx,
+            "read",
+            "repo",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "Equals on a list attribute must match when the value is among the elements"
+        );
+
+        // NotEquals: non-membership — ReadOnly is NOT among the roles, so
+        // the condition holds.
+        let result = evaluate(
+            vec![allow_policy(10, vec![cond(ConditionOp::NotEquals, "ReadOnly")])],
+            &ctx,
+            "read",
+            "repo",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "NotEquals on a list attribute must hold when the value is not among the elements"
+        );
+
+        // And the negative halves: Equals for an absent role fails, and
+        // NotEquals for a present role fails (a Deny keyed on it must not
+        // fire for a subject that DOES carry the role — the lower-priority
+        // blanket Allow is what grants when the Deny correctly misses).
+        let result = evaluate(
+            vec![allow_policy(10, vec![cond(ConditionOp::Equals, "ReadOnly")])],
+            &ctx,
+            "read",
+            "repo",
+        );
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        let result = evaluate(
+            vec![
+                deny_policy(20, vec![cond(ConditionOp::NotEquals, "Agent")]),
+                allow_policy(10, vec![]),
+            ],
+            &ctx,
+            "read",
+            "repo",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "a Deny keyed on global_role NotEquals Agent must not fire for a subject \
+             that carries the Agent role"
+        );
     }
 
     #[test]

@@ -2405,10 +2405,39 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     .load_chain(&chain_att.id)
                     .await
                     .unwrap_or_default();
-                let decision = evaluate_attestation_abac(
+                // Review round 6 (task-129): a store-read failure inside the
+                // attestation gate FAILS CLOSED (requeue) — the evaluation
+                // result cannot be determined, and proceeding would let a
+                // merge through that a tenant-scoped Deny would have
+                // blocked. Same hold-then-retry semantics as
+                // supervised_trust_hold's fail-closed path.
+                let decision = match evaluate_attestation_abac(
                     state, &chain, &chain_att, &mr, &entry, &repo, "merge",
                 )
-                .await;
+                .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!(
+                            entry_id = %entry.id,
+                            mr_id = %mr.id,
+                            error = %e,
+                            "attestation ABAC gate unavailable, failing closed (requeue)"
+                        );
+                        state
+                            .merge_queue
+                            .update_status(
+                                &entry.id,
+                                MergeQueueEntryStatus::Queued,
+                                Some(format!(
+                                    "attestation ABAC evaluation unavailable for MR {}, failing closed",
+                                    mr.id
+                                )),
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                };
                 chain_found = true;
                 if decision.effect == gyre_domain::policy::PolicyEffect::Deny {
                     let reason = format!(
@@ -2446,10 +2475,35 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                     .load_chain(&leaf.id)
                                     .await
                                     .unwrap_or_default();
-                                let decision = evaluate_attestation_abac(
+                                // Same fail-closed (requeue) treatment as the
+                                // branch-head path above (review round 6).
+                                let decision = match evaluate_attestation_abac(
                                     state, &chain, leaf, &mr, &entry, &repo, "merge",
                                 )
-                                .await;
+                                .await
+                                {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        warn!(
+                                            entry_id = %entry.id,
+                                            mr_id = %mr.id,
+                                            error = %e,
+                                            "attestation ABAC gate unavailable, failing closed (requeue)"
+                                        );
+                                        state
+                                            .merge_queue
+                                            .update_status(
+                                                &entry.id,
+                                                MergeQueueEntryStatus::Queued,
+                                                Some(format!(
+                                                    "attestation ABAC evaluation unavailable for MR {}, failing closed",
+                                                    mr.id
+                                                )),
+                                            )
+                                            .await?;
+                                        return Ok(());
+                                    }
+                                };
                                 if decision.effect == gyre_domain::policy::PolicyEffect::Deny {
                                     let reason = format!(
                                         "attestation ABAC policy denied merge (matched policy: {:?})",
@@ -3876,7 +3930,7 @@ async fn evaluate_merge_abac(
         "mr",
         mr.id.as_str(),
     );
-    let _ = state.policies.record_decision(&decision).await;
+    crate::policy_engine::record_decision_audit(state, &decision).await;
     if result.effect == gyre_domain::policy::PolicyEffect::Deny && result.matched_policy.is_some() {
         warn!(
             mr_id = %mr.id,
@@ -4038,8 +4092,18 @@ async fn selection_meta_spec_drift_hold(
 ///
 /// Builds an `AttributeContext` from the attestation chain (chain_depth,
 /// root_signer, constraint_count, tenant_id) and evaluates policies with the
-/// given action and resource_type=attestation. Audit-only — result is logged
-/// but not enforced. Returns the evaluation result for testability.
+/// given action and resource_type=attestation. The result GATES the merge
+/// (callers fail the queue entry on Deny). Returns the evaluation result
+/// for testability.
+///
+/// Returns `Err` when the workspace or policy store cannot be READ (review
+/// round 6, task-129): the caller FAILS CLOSED (requeues the merge entry).
+/// The previous `_ => None` swallow degraded a workspace-store failure to
+/// "no tenant scope", leaving `resource.tenant_id` unset so tenant-scoped
+/// Deny policies silently did not apply while `builtin:attested-authorization`
+/// still granted — a store error could let a merge through that a
+/// tenant-scoped Deny would have blocked. This is the same fail-closed
+/// treatment the sibling `evaluate_merge_abac` already gives store errors.
 async fn evaluate_attestation_abac(
     state: &AppState,
     chain: &[gyre_common::Attestation],
@@ -4048,16 +4112,22 @@ async fn evaluate_attestation_abac(
     entry: &MergeQueueEntry,
     repo: &gyre_domain::Repository,
     action: &str,
-) -> crate::policy_engine::EvalResult {
+) -> anyhow::Result<crate::policy_engine::EvalResult> {
+    use anyhow::Context as _;
+
     let chain_depth = leaf.metadata.chain_depth;
     let signer = gyre_domain::root_signer(chain);
     let cc = gyre_domain::constraint_count(chain) as i64;
 
-    // Resolve tenant_id from repo → workspace (checklist item 125: ABAC context parity).
-    let tenant_id = match state.workspaces.find_by_id(&repo.workspace_id).await {
-        Ok(Some(ws)) => Some(ws.tenant_id.to_string()),
-        _ => None,
-    };
+    // Resolve tenant_id from repo → workspace (checklist item 125: ABAC
+    // context parity). A workspace-store read failure PROPAGATES (see doc
+    // comment) — never degraded to "no tenant scope".
+    let workspace = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .context("attestation ABAC gate: workspace store read failed")?;
+    let tenant_id = workspace.map(|w| w.tenant_id.to_string());
 
     let mut ctx = crate::policy_engine::AttributeContext::default();
     ctx.set("subject.type", "agent");
@@ -4086,7 +4156,15 @@ async fn evaluate_attestation_abac(
         ctx.set("resource.tenant_id", tid);
     }
 
-    let policies = state.policies.list().await.unwrap_or_default();
+    // Policy-list read errors propagate too (same fail-closed class as the
+    // workspace read above and `evaluate_merge_abac`'s policy read): an
+    // empty-set degradation would drop every tenant-scoped Deny while the
+    // attestation Allow still matched.
+    let policies = state
+        .policies
+        .list()
+        .await
+        .context("attestation ABAC gate: policy store read failed")?;
     let eval_result = crate::policy_engine::evaluate(policies, &ctx, action, "attestation");
 
     // Record the decision in the policy-decision audit trail, exactly as the
@@ -4103,20 +4181,50 @@ async fn evaluate_attestation_abac(
         "attestation",
         repo.id.as_str(),
     );
-    let _ = state.policies.record_decision(&decision).await;
+    crate::policy_engine::record_decision_audit(state, &decision).await;
 
-    tracing::info!(
-        entry_id = %entry.id,
-        mr_id = %mr.id,
-        chain_depth = chain_depth,
-        root_signer = ?signer,
-        constraint_count = cc,
-        decision = ?eval_result.effect,
-        matched_policy = ?eval_result.matched_policy,
-        "attestation ABAC evaluation for {action}"
-    );
+    // §Audit Integration log-level contract (review round 6, task-129):
+    // denials at warn, allowances at debug — the same contract as the
+    // middleware path and evaluate_merge_abac. A Deny additionally emits
+    // an AbacDenied audit event (observability.md §Audit Event Types); on
+    // this ENFORCED path the caller fails the merge queue entry on it.
+    if eval_result.effect == gyre_domain::policy::PolicyEffect::Deny {
+        tracing::warn!(
+            entry_id = %entry.id,
+            mr_id = %mr.id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation denied {action}"
+        );
+        crate::abac_middleware::record_abac_denied_service(
+            state,
+            mr.author_agent_id
+                .as_ref()
+                .map(|a| a.as_str())
+                .unwrap_or("unknown-agent"),
+            "attestation",
+            action,
+            eval_result.matched_policy.as_deref(),
+            "merge-queue",
+            true,
+        )
+        .await;
+    } else {
+        tracing::debug!(
+            entry_id = %entry.id,
+            mr_id = %mr.id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            decision = ?eval_result.effect,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation for {action}"
+        );
+    }
 
-    eval_result
+    Ok(eval_result)
 }
 
 #[cfg(test)]
@@ -6646,7 +6754,9 @@ mod tests {
 
             // Call the production function with the real chain data.
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // chain_depth=2 > 1 → deny policy should match.
             assert_eq!(result.effect, PolicyEffect::Deny);
@@ -6741,7 +6851,9 @@ mod tests {
             state.policies.create(&allow_policy).await.unwrap();
 
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // chain_depth=0 ≤ 5 → deny doesn't fire, allow matches.
             assert_eq!(result.effect, PolicyEffect::Allow);
@@ -6817,7 +6929,9 @@ mod tests {
             state.policies.create(&allow_trusted).await.unwrap();
 
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // root_signer "user:trusted-principal" matches the policy condition.
             assert_eq!(result.effect, PolicyEffect::Allow);
@@ -6889,7 +7003,9 @@ mod tests {
             state.policies.create(&allow_low_cc).await.unwrap();
 
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // constraint_count=4 < 10 → allow.
             assert_eq!(result.effect, PolicyEffect::Allow);
@@ -6962,7 +7078,9 @@ mod tests {
             state.policies.create(&allow_tenant).await.unwrap();
 
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // tenant_id resolved from workspace → "tenant-specific-id" → matches.
             assert_eq!(result.effect, PolicyEffect::Allow);
@@ -7064,6 +7182,207 @@ mod tests {
             assert_eq!(
                 d.matched_policy.as_ref().map(|p| p.as_str()),
                 Some("allow-merge-processor")
+            );
+        }
+
+        /// Review round 6 (task-129, §Audit Integration): an ENFORCED
+        /// attestation-gate Deny must land in the audit trail as an
+        /// `AbacDenied` event — previously this path logged at info and
+        /// emitted no audit event at all, so a policy-held merge was
+        /// invisible to the compliance query surface. Killing direction:
+        /// removing the record_abac_denied_service call (or keying it on
+        /// the wrong outcome) leaves the query empty and this fails.
+        #[tokio::test]
+        async fn attestation_deny_records_abac_denied_audit_event() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-att-audit"),
+                Id::new("tenant-att-audit"),
+                "ws-att-audit",
+                "ws-att-audit",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-att-audit"),
+                Id::new("ws-att-audit"),
+                "att-audit-repo",
+                "/tmp/att-audit-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            let chain = vec![root_attestation("user:att-signer"), derived_attestation(1)];
+            let leaf = &chain[1];
+
+            let mut mr = MergeRequest::new(
+                Id::new("mr-att-audit"),
+                repo.id.clone(),
+                "att audit MR",
+                "feat/att-audit",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:att-worker"));
+            mr.workspace_id = Id::new("ws-att-audit");
+            let entry = MergeQueueEntry::new(Id::new("entry-att-audit"), mr.id.clone(), 50, 1000);
+
+            // Deny: chain_depth > 0 → deny merge on attestation resources.
+            let deny = Policy {
+                id: Id::new("deny-att-audit"),
+                name: "deny-att-audit".to_string(),
+                description: "Deny deep chains".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 100,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.chain_depth".to_string(),
+                    operator: ConditionOp::GreaterThan,
+                    value: ConditionValue::Number(0),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("test"),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&deny).await.unwrap();
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
+            assert_eq!(result.effect, PolicyEffect::Deny);
+            assert_eq!(result.matched_policy, Some("deny-att-audit".to_string()));
+
+            // The Deny is in the AbacDenied audit trail, attributed to the
+            // MR's author agent, naming the matched policy and the
+            // enforced merge-queue endpoint.
+            let events = state
+                .audit
+                .query(&gyre_ports::AuditQueryFilter {
+                    agent_id: Some("agent:att-worker".to_string()),
+                    event_type: Some("abac_denied".to_string()),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(
+                events.iter().any(|e| {
+                    e.event_type == gyre_domain::AuditEventType::AbacDenied
+                        && e.detail["policy_id"] == "deny-att-audit"
+                        && e.detail["resource"] == "attestation"
+                        && e.detail["action"] == "merge"
+                        && e.detail["enforced"] == true
+                }),
+                "the enforced attestation Deny must be recorded as an AbacDenied \
+                 audit event: {:?}",
+                events
+            );
+        }
+
+        /// Review round 6 (task-129): a workspace-store read failure inside
+        /// the ENFORCED attestation gate must FAIL CLOSED (Err), not degrade
+        /// to "no tenant scope" — the previous `_ => None` swallow left
+        /// `resource.tenant_id` unset so tenant-scoped Deny policies
+        /// silently did not apply while the attestation Allow still
+        /// granted. Killing direction: with the swallow restored, this
+        /// returns Ok and the assertion on Err fails.
+        #[tokio::test]
+        async fn attestation_abac_fails_closed_on_workspace_store_error() {
+            use gyre_ports::WorkspaceRepository;
+
+            /// Delegates every method to the real store except `find_by_id`,
+            /// which fails — the exact store-read failure the review
+            /// finding describes.
+            struct FailingWorkspaceReads {
+                inner: std::sync::Arc<dyn WorkspaceRepository>,
+            }
+
+            #[async_trait::async_trait]
+            impl WorkspaceRepository for FailingWorkspaceReads {
+                async fn create(&self, workspace: &Workspace) -> anyhow::Result<()> {
+                    self.inner.create(workspace).await
+                }
+                async fn find_by_id(&self, _id: &Id) -> anyhow::Result<Option<Workspace>> {
+                    Err(anyhow::anyhow!("injected workspace store read failure"))
+                }
+                async fn find_by_slug(
+                    &self,
+                    tenant_id: &Id,
+                    slug: &str,
+                ) -> anyhow::Result<Option<Workspace>> {
+                    self.inner.find_by_slug(tenant_id, slug).await
+                }
+                async fn list(&self) -> anyhow::Result<Vec<Workspace>> {
+                    self.inner.list().await
+                }
+                async fn list_by_tenant(&self, tenant_id: &Id) -> anyhow::Result<Vec<Workspace>> {
+                    self.inner.list_by_tenant(tenant_id).await
+                }
+                async fn update(&self, workspace: &Workspace) -> anyhow::Result<()> {
+                    self.inner.update(workspace).await
+                }
+                async fn delete(&self, id: &Id) -> anyhow::Result<()> {
+                    self.inner.delete(id).await
+                }
+                async fn apply_trust_transition(
+                    &self,
+                    workspace: &Workspace,
+                    delete_trust_policies: bool,
+                    new_policies: &[Policy],
+                ) -> anyhow::Result<()> {
+                    self.inner
+                        .apply_trust_transition(workspace, delete_trust_policies, new_policies)
+                        .await
+                }
+            }
+
+            let mut state = test_state();
+            let real = state.workspaces.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state)
+                    .expect("test state is uniquely owned");
+                s.workspaces = std::sync::Arc::new(FailingWorkspaceReads { inner: real });
+            }
+
+            // Minimal fixtures: the gate reads the workspace BEFORE any
+            // other store, so the repo/MR/chain need not resolve further.
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-fail-closed"),
+                Id::new("ws-fail-closed"),
+                "fail-closed-repo",
+                "/tmp/fail-closed-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            let chain = vec![root_attestation("user:fail-signer")];
+            let leaf = &chain[0];
+            let mut mr = MergeRequest::new(
+                Id::new("mr-fail-closed"),
+                repo.id.clone(),
+                "fail closed MR",
+                "feat/fail",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:fail-worker"));
+            mr.workspace_id = Id::new("ws-fail-closed");
+            let entry = MergeQueueEntry::new(Id::new("entry-fail-closed"), mr.id.clone(), 50, 1000);
+
+            let result = evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+            assert!(
+                result.is_err(),
+                "a workspace-store read failure must propagate (fail closed), not \
+                 degrade to a tenant-scope-less evaluation — got {:?}",
+                result.map(|r| r.effect)
             );
         }
     }

@@ -1096,14 +1096,19 @@ pub async fn git_receive_pack(
                     // attributes and evaluate policies with action=push,
                     // resource_type=attestation. Audit-only — logged and
                     // recorded to the decision audit trail (see
-                    // evaluate_push_attestation_abac), never enforced.
+                    // evaluate_push_attestation_abac), never enforced. A
+                    // store-read failure inside the evaluation is logged
+                    // and the evaluation skipped (review round 6): the
+                    // push itself is unaffected either way, but a store
+                    // error must be visible, never silently reshaped into
+                    // a tenant-scope-less evaluation.
                     if let Some(leaf) = attestations.iter().max_by_key(|a| a.metadata.chain_depth) {
                         let chain = state_clone
                             .chain_attestations
                             .load_chain(&leaf.id)
                             .await
                             .unwrap_or_default();
-                        evaluate_push_attestation_abac( // enforcement:ok — TASK-006 Phase 1: push-time attestation evaluation is audit-only by spec; the decision is logged and persisted, never enforced
+                        if let Err(e) = evaluate_push_attestation_abac(
                             &state_clone,
                             tid,
                             &repo_id_clone,
@@ -1113,7 +1118,15 @@ pub async fn git_receive_pack(
                             leaf,
                             &chain,
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::warn!(
+                                task_id = %tid,
+                                repo_id = %repo_id_clone,
+                                error = %e,
+                                "push attestation ABAC evaluation unavailable (audit-only, push proceeds)"
+                            );
+                        }
                     }
                 }
                 Ok(_) => {
@@ -4255,6 +4268,14 @@ pub(crate) async fn detect_breaking_changes_on_push(
 /// push-time evaluations are queryable via GET /api/v1/policies/decisions.
 /// The gate itself remains audit-only (Phase 1): the result is logged and
 /// recorded, never enforced.
+///
+/// Returns `Err` when the workspace or policy store cannot be READ (review
+/// round 6, task-129): the previous `if let Ok(Some(ws))` swallow degraded
+/// a workspace-store failure to "no resource tenant scope", silently
+/// un-applying tenant-scoped Deny policies on this evaluation. The caller
+/// logs the failure and skips the audit evaluation (the gate is
+/// audit-only; the push itself is unaffected) — the point is that a store
+/// error is VISIBLE, never silently reshaped into a different decision.
 #[allow(clippy::too_many_arguments)]
 async fn evaluate_push_attestation_abac(
     state: &AppState,
@@ -4265,7 +4286,9 @@ async fn evaluate_push_attestation_abac(
     subject_tenant_id: &str,
     leaf: &gyre_common::Attestation,
     chain: &[gyre_common::Attestation],
-) -> crate::policy_engine::EvalResult {
+) -> anyhow::Result<crate::policy_engine::EvalResult> {
+    use anyhow::Context as _;
+
     let chain_depth = leaf.metadata.chain_depth;
     let signer = gyre_domain::root_signer(chain);
     let cc = gyre_domain::constraint_count(chain) as i64;
@@ -4288,17 +4311,23 @@ async fn evaluate_push_attestation_abac(
     // filter (policy_engine::scope_applies) scopes policies on this
     // audit path exactly like the HTTP middleware path. The resource
     // tenant comes from the repo's workspace (entity lookup), never from
-    // the caller's tenant claim.
+    // the caller's tenant claim — and a store-read failure PROPAGATES
+    // (see doc comment) instead of silently dropping the tenant scope.
     ctx.set("resource.workspace_id", repo_workspace_id);
-    if let Ok(Some(ws)) = state
+    let workspace = state
         .workspaces
         .find_by_id(&gyre_common::Id::new(repo_workspace_id))
         .await
-    {
+        .context("push attestation ABAC: workspace store read failed")?;
+    if let Some(ws) = workspace {
         ctx.set("resource.tenant_id", ws.tenant_id.to_string());
     }
 
-    let policies = state.policies.list().await.unwrap_or_default();
+    let policies = state
+        .policies
+        .list()
+        .await
+        .context("push attestation ABAC: policy store read failed")?;
     let eval_result = crate::policy_engine::evaluate(policies, &ctx, "push", "attestation");
 
     // Record the decision in the policy-decision audit trail, exactly as
@@ -4313,20 +4342,47 @@ async fn evaluate_push_attestation_abac(
         "attestation",
         repo_id,
     );
-    let _ = state.policies.record_decision(&decision).await;
+    crate::policy_engine::record_decision_audit(state, &decision).await;
 
-    tracing::info!(
-        task_id = %task_id,
-        repo_id = %repo_id,
-        chain_depth = chain_depth,
-        root_signer = ?signer,
-        constraint_count = cc,
-        decision = ?eval_result.effect,
-        matched_policy = ?eval_result.matched_policy,
-        "attestation ABAC evaluation for push (audit-only)" // enforcement-mode:ok
-    );
+    // §Audit Integration log-level contract (review round 6, task-129):
+    // denials at warn, allowances at debug. A Deny additionally emits an
+    // AbacDenied audit event marked enforced=false — this gate is
+    // audit-only by spec (TASK-006 Phase 1), so the push is NOT rejected;
+    // the event records that the policy evaluation returned Deny.
+    if eval_result.effect == gyre_domain::policy::PolicyEffect::Deny {
+        tracing::warn!(
+            task_id = %task_id,
+            repo_id = %repo_id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation for push denied (audit-only)" // enforcement-mode:ok
+        );
+        crate::abac_middleware::record_abac_denied_service(
+            state,
+            agent_id,
+            "attestation",
+            "push",
+            eval_result.matched_policy.as_deref(),
+            "git-push",
+            false,
+        )
+        .await;
+    } else {
+        tracing::debug!(
+            task_id = %task_id,
+            repo_id = %repo_id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            decision = ?eval_result.effect,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation for push (audit-only)" // enforcement-mode:ok
+        );
+    }
 
-    eval_result
+    Ok(eval_result)
 }
 
 // ---------------------------------------------------------------------------
@@ -5079,7 +5135,8 @@ mod tests {
             &leaf,
             &chain,
         )
-        .await;
+        .await
+        .unwrap();
 
         assert_eq!(result.effect, PolicyEffect::Allow);
         assert_eq!(

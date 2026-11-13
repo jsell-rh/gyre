@@ -1908,6 +1908,34 @@ fn budget_tokens_remaining(
     Some(max.saturating_sub(used) as i64)
 }
 
+/// The concrete addressed entity id for the decision audit trail (§Audit
+/// Integration, review round 6 task-129).
+///
+/// The PolicyDecision's `resource_id` must name the ADDRESSED ENTITY
+/// ("which concrete resource was allowed/denied"), not the route pattern:
+/// a trail full of `/api/v1/tasks/:id` cannot answer the compliance
+/// query "every time someone was denied access to X". The evaluation
+/// context carries `resource.id` (extracted from the request path);
+/// collection routes and unresolvable paths fall back to the pattern so
+/// the trail still identifies the route.
+fn addressed_resource_id(ctx: &AttributeContext, pattern: &str) -> String {
+    match ctx.get("resource.id") {
+        Some(AttrValue::Single(s)) if !s.is_empty() => s.clone(),
+        _ => pattern.to_string(),
+    }
+}
+
+/// Extract just the addressed resource id from the request path for the
+/// pre-evaluation denial paths (reserved identity, scoped gate tokens),
+/// which reject before the full attribute context is built. Same
+/// extraction rules as the evaluation context (`extract_path_attributes`),
+/// on a scratch context.
+fn path_resource_id(pattern: &str, path: &str, resource_type: &str) -> String {
+    let mut scratch = AttributeContext::default();
+    extract_path_attributes(&mut scratch, pattern, path, resource_type);
+    addressed_resource_id(&scratch, pattern)
+}
+
 /// ABAC middleware — evaluates access policy for every authenticated API request.
 ///
 /// Must be applied AFTER `require_auth_middleware` and BEFORE route handlers.
@@ -2007,9 +2035,9 @@ pub async fn abac_middleware(
             subject_type,
             action,
             resource_type,
-            &pattern,
+            &path_resource_id(&pattern, req.uri().path(), resource_type),
         );
-        let _ = state.policies.record_decision(&decision).await;
+        policy_engine::record_decision_audit(&state, &decision).await;
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "reserved system identity"})),
@@ -2063,9 +2091,9 @@ pub async fn abac_middleware(
                     "agent",
                     action,
                     resource_type,
-                    &pattern,
+                    &path_resource_id(&pattern, req.uri().path(), resource_type),
                 );
-                let _ = state.policies.record_decision(&decision).await;
+                policy_engine::record_decision_audit(&state, &decision).await;
                 let error = if is_reviewer {
                     "review-scoped token is limited to review routes"
                 } else {
@@ -2108,8 +2136,25 @@ pub async fn abac_middleware(
         ctx.set("subject.id", gyre_domain::SYSTEM_ABAC_IDENTITY);
     }
 
-    let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
-    ctx.set("subject.global_role", global_role);
+    // §Attributes: subject.global_role — the caller's role SET, not an
+    // arbitrary single element (review round 6, task-129). The previous
+    // `roles.first().unwrap_or("ReadOnly")` had two flaws: a role-less
+    // caller got a FABRICATED ReadOnly attribute (matching the
+    // builtin-readonly-get-only Allow at 600 and granting read access no
+    // store ever assigned), and a multi-role caller got an arbitrary
+    // `first()` pick. Empty roles now leave the attribute UNSET — a
+    // missing attribute never matches, so a role-less caller falls
+    // through to default-deny (fail closed). Multi-role callers get a
+    // list-valued attribute; `eval_condition` evaluates Equals/NotEquals
+    // on list values with set (membership) semantics.
+    match auth.roles.as_slice() {
+        [] => {}
+        [only] => ctx.set("subject.global_role", only.as_str()),
+        many => ctx.set_list(
+            "subject.global_role",
+            many.iter().map(|r| r.as_str().to_string()).collect(),
+        ),
+    }
     // Tenant identity from the auth context (§Attributes: subject.tenant_id,
     // source "Auth context / OIDC"). Set for every auth path — agent and
     // API-key callers do not carry JWT claims, so they get tenant_id only
@@ -2316,16 +2361,21 @@ pub async fn abac_middleware(
         );
     }
 
-    // Record decision to audit log.
+    // Record decision to audit log. `resource_id` is the CONCRETE
+    // addressed entity (from the evaluation context's `resource.id`, set
+    // by path extraction / entity lookup), falling back to the route
+    // pattern on collection routes — review round 6: a trail of route
+    // patterns cannot answer “which entity was denied access to X”.
+    let resource_id = addressed_resource_id(&ctx, &pattern);
     let decision = policy_engine::build_decision(
         &result,
         &auth.agent_id,
         subject_type,
         action,
         resource_type,
-        &pattern,
+        &resource_id,
     );
-    let _ = state.policies.record_decision(&decision).await;
+    policy_engine::record_decision_audit(&state, &decision).await;
 
     match result.effect {
         PolicyEffect::Allow => {
@@ -2408,6 +2458,53 @@ pub async fn record_abac_denied(
             "action": action,
             "claims": auth.jwt_claims,
             "endpoint": endpoint,
+        }),
+        None,
+        None,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
+}
+
+/// Record an `AbacDenied` audit event for a service-internal evaluation
+/// path that has no `AuthenticatedAgent` (review round 6, task-129): the
+/// merge processor's attestation gate and the git push-time attestation
+/// evaluation deny in the name of an agent/service subject, outside the
+/// HTTP request pipeline. Same event shape as [`record_abac_denied`]
+/// minus the caller claims; `enforced` records whether the Deny actually
+/// rejected the operation (the merge gate) or was audit-only (the
+/// push-time evaluation, TASK-006 Phase 1).
+pub async fn record_abac_denied_service(
+    state: &AppState,
+    subject_id: &str,
+    resource: &str,
+    action: &str,
+    policy_id: Option<&str>,
+    endpoint: &str,
+    enforced: bool,
+) {
+    let event = gyre_domain::AuditEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        gyre_domain::AuditEventType::AbacDenied,
+        if subject_id.is_empty() {
+            None
+        } else {
+            Some(gyre_common::Id::new(subject_id.to_string()))
+        },
+        None,
+        None,
+        None,
+        None,
+        "policy".to_string(),
+        None,
+        gyre_domain::AuditOutcome::Blocked,
+        serde_json::json!({
+            "agent_id": subject_id,
+            "policy_id": policy_id,
+            "resource": resource,
+            "action": action,
+            "endpoint": endpoint,
+            "enforced": enforced,
         }),
         None,
         None,
@@ -7278,6 +7375,122 @@ pub mod tests {
             resp.status(),
             StatusCode::OK,
             "Admin role must pass through to the policy create handler"
+        );
+    }
+
+    /// Review round 6 (task-129, §Attributes subject.global_role): a
+    /// role-less caller must NOT get a fabricated ReadOnly attribute.
+    /// The previous `roles.first().unwrap_or("ReadOnly")` matched the
+    /// builtin-readonly-get-only Allow (600) and granted read access no
+    /// store ever assigned. Killing direction: with the fabrication
+    /// restored, this request returns 200 and the recorded decision names
+    /// builtin-readonly-get-only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roleless_caller_gets_no_fabricated_readonly_role() {
+        let state = setup_state_with_policies();
+
+        // API-key auth backed by a user row with NO roles — the extractor
+        // resolves `roles: user.roles` (empty), and subject.id resolves to
+        // the user's display_name.
+        let mut user = gyre_domain::User::new(Id::new("u-roleless"), "local:roleless", "roleless-user", 0);
+        user.roles = vec![];
+        user.tenant_id = Some(Id::new("default"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre-roleless-user-key";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "roleless")
+            .await
+            .unwrap();
+
+        let app = build_test_app(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a role-less caller has no role Allow to match — default deny, \
+             never a fabricated ReadOnly read grant"
+        );
+
+        // The denial is NOT the readonly builtin — the fabricated
+        // attribute is what would have matched it. The only policy that
+        // may match a role-less subject is the default-deny catchall
+        // (priority 1, no conditions) — or the engine's no-match default.
+        let decisions = state
+            .policies
+            .list_decisions(Some("roleless-user"), Some("task"), 10)
+            .await
+            .unwrap();
+        let decision = decisions
+            .iter()
+            .find(|d| d.decision == gyre_domain::PolicyEffect::Deny)
+            .expect("the denial is recorded in the decision audit trail");
+        let matched = decision.matched_policy.as_ref().map(|p| p.as_str());
+        assert_ne!(
+            matched, Some("builtin-readonly-get-only"),
+            "no role Allow may match a role-less subject — the fabricated ReadOnly \
+             attribute is what matched this builtin before the fix"
+        );
+        assert!(
+            matched.is_none_or(|m| m == "builtin-default-deny"),
+            "the only match for a role-less subject is the default-deny catchall, \
+             got {matched:?}"
+        );
+    }
+
+    /// Review round 6 (task-129, §Audit Integration): the PolicyDecision's
+    /// `resource_id` must be the CONCRETE addressed entity id, not the
+    /// route pattern — a trail of `/api/v1/repos/:id` cannot answer
+    /// "which repo was denied access to X". Killing direction: with the
+    /// pattern recorded, resource_id is "/api/v1/repos/:id".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn decision_records_concrete_resource_id() {
+        let state = setup_state_with_policies();
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(REPOS_ID_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-audit-42")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let decisions = state
+            .policies
+            .list_decisions(Some("system"), Some("repo"), 10)
+            .await
+            .unwrap();
+        let decision = decisions
+            .iter()
+            .find(|d| d.decision == gyre_domain::PolicyEffect::Allow)
+            .expect("the allowed decision is recorded");
+        assert_eq!(
+            decision.resource_id, "repo-audit-42",
+            "resource_id must name the addressed entity, not the route pattern"
         );
     }
 }

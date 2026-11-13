@@ -162,6 +162,22 @@ pub async fn update_policy(
             "policy '{id}' is immutable and cannot be modified"
         )));
     }
+    // Review round 6 (task-129): the reserved-prefix invariant is enforced
+    // on the STORED name, not just a newly supplied one. Trust-preset
+    // policies (`trust:...`) are built_in: false and immutable: false, so
+    // without this check a caller could disable or rewrite one BY ID —
+    // e.g. PUT {"enabled": false} on `trust:require-human-mr-review` —
+    // silently desyncing workspace.trust_level from the enforced policy
+    // set and bypassing the atomic, transition-validated
+    // apply_trust_transition path that owns these policies.
+    if policy.name.starts_with("trust:") || policy.name.starts_with("builtin:") {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{}' has a reserved prefix ('trust:' or 'builtin:') and is \
+             server-managed; it cannot be modified via the API — use trust-level \
+             transitions instead",
+            policy.name
+        )));
+    }
 
     if let Some(name) = req.name {
         if name.starts_with("trust:") || name.starts_with("builtin:") {
@@ -217,6 +233,18 @@ pub async fn delete_policy(
     if policy.built_in {
         return Err(ApiError::InvalidInput(format!(
             "policy '{id}' is a built-in policy and cannot be deleted"
+        )));
+    }
+    // Review round 6 (task-129): same stored-name guard as update_policy —
+    // trust-preset policies are not built_in, so the flag alone let a
+    // caller delete `trust:require-human-mr-review` by id and silently
+    // desync workspace.trust_level from the enforced policy set.
+    if policy.name.starts_with("trust:") || policy.name.starts_with("builtin:") {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{}' has a reserved prefix ('trust:' or 'builtin:') and is \
+             server-managed; it cannot be deleted via the API — use trust-level \
+             transitions instead",
+            policy.name
         )));
     }
     state
@@ -450,8 +478,19 @@ pub async fn effective_permissions(
         };
         if let Some(user) = user {
             ctx.set("subject.type", "user");
-            if let Some(role) = user.roles.first() {
-                ctx.set("subject.global_role", role.as_str());
+            // Role SET semantics — same as the middleware's extraction
+            // (review round 6, task-129): empty roles leave the attribute
+            // unset (fail closed), multi-role callers get a list the
+            // engine evaluates with membership semantics. An arbitrary
+            // `first()` pick would answer this query differently than the
+            // middleware answers the real request.
+            match user.roles.as_slice() {
+                [] => {}
+                [only] => ctx.set("subject.global_role", only.as_str()),
+                many => ctx.set_list(
+                    "subject.global_role",
+                    many.iter().map(|r| r.as_str().to_string()).collect(),
+                ),
             }
             if let Some(tid) = &user.tenant_id {
                 ctx.set("subject.tenant_id", tid.as_str());
@@ -909,6 +948,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// Review round 6 (task-129): trust-preset policies are
+    /// `built_in: false` and `immutable: false`, so those flags alone let a
+    /// caller disable, rewrite, or delete one BY ID — silently desyncing
+    /// `workspace.trust_level` from the enforced policy set and bypassing
+    /// the atomic, transition-validated `apply_trust_transition` path.
+    /// The STORED name's reserved prefix must reject update and delete.
+    /// Killing direction: without the stored-name guard, the PUT returns
+    /// 200 and the policy comes back disabled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trust_preset_policy_cannot_be_updated_or_deleted_by_id() {
+        let state = test_state();
+        // Seed exactly what apply_trust_transition persists for a
+        // Supervised workspace (gyre-domain trust_policies_for_level):
+        // a trust:-prefixed Deny that is NOT built_in and NOT immutable —
+        // the flags must not be what protects it.
+        let trust = gyre_domain::policy::trust_policies_for_level(
+            &gyre_domain::TrustLevel::Supervised,
+            "ws-trust",
+            "test",
+        );
+        assert_eq!(trust.len(), 1);
+        let trust = trust.into_iter().next().unwrap();
+        assert!(
+            !trust.built_in && !trust.immutable,
+            "fixture shape: neither flag may protect the policy"
+        );
+        let id = trust.id.as_str().to_string();
+        state.policies.create(&trust).await.unwrap();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // PUT {"enabled": false} — the desync vector from the review
+        // finding: disabling the Supervised merge-hold Deny by id.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/policies/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"enabled": false})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "updating a trust: policy by id must be rejected"
+        );
+
+        // DELETE likewise.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/policies/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "deleting a trust: policy by id must be rejected"
+        );
+
+        // The policy is still there, still enabled — the enforced set
+        // still matches workspace.trust_level.
+        let still = state
+            .policies
+            .find_by_id(&id)
+            .await
+            .unwrap()
+            .expect("trust policy must survive the rejected mutations");
+        assert!(still.enabled, "the trust Deny must still be enforced");
+        assert_eq!(still.name, "trust:require-human-mr-review");
     }
 
     #[tokio::test(flavor = "multi_thread")]
