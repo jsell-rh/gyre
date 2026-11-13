@@ -3,7 +3,7 @@ title: "Enhance team management with lead, slug, and integration points"
 spec_ref: "user-management.md §Team Management"
 depends_on:
   - task-121
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §Team Management"
 commits: ["9d520866bc8ea06c74f113c41b82c6a8e4010233", "3056a7edd757b9d36b4e7c0e485951bc715755fd", "a2b86d834da6710c12e34301c96434d2bd4a414f", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "bbd72bc37ffd0bd4b286171ad73d236fca06c64b"]
