@@ -2,10 +2,10 @@
 title: "Architectural Timeline — time scrubber for historical architecture views"
 spec_ref: "system-explorer.md §6"
 depends_on: [task-178]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
-commits: ["f793571c271a16432ba5dda02865ce2258a39996", "c8e33c3c33c38a3f4aaabf8998d02c98fa8d946f", "f5a45295b4d7bbee06549f64427dcbc291843050", "8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -79,75 +79,3 @@ Click a key moment → the delta panel shows what changed and why (narrative fro
 ## Agent Instructions
 
 Read `system-explorer.md` §6 "Architectural Timeline" for the full specification. The canvas is built in task-178 — check `ExplorerView.svelte` for how to add the scrubber below the canvas. For historical graph queries, check `graph.rs` for existing query parameters on `GET /repos/:id/graph`. The ghost node visual language should match the ghost overlay styles defined in `system-explorer.md` §3 (dotted outlines, color coding). Key moments data may need a new endpoint or could be derived from existing spec approval and milestone data — check `specs.rs` for approval history and the spec lifecycle events. The `timeline` layout type is already in the view spec grammar (task-170) — the timeline scrubber is a different feature (it controls the temporal state of any layout, not a layout type itself).
-
-## Shipped
-
-The Architectural Timeline (system-explorer.md §6) is implemented on a
-real point-in-time graph API. Implementation commits: 6b9fb4e2b
-(point-in-time graph API, scrubber, ghosts, delta panel, key moments),
-cf8069ea8 (review repair: fetcher race, reconciliation narrative from
-real payload), 8405c8e47 (rustfmt repair), f5a45295b (clippy gate
-repair), 8f7b7a7b1 (verify reconcile with main), c8e33c3c3 + f793571c2
-(verified asset builds). This round (2044643a5, rebase repair) merged
-current main a8bd7d09 (task-179 Moldable Views) into the branch.
-
-### Behavior
-
-- **Point-in-time graph API:** `GraphPort` gains
-  `list_nodes_at`/`list_edges_at` with an explicit existed-at contract
-  (`first_seen_at <= at` AND not soft-deleted at or before `at`),
-  enforced in BOTH adapters (SQL filters in SQLite, the same guard in
-  code in `MemGraphStore`). `GET /repos/{id}/graph?at=<epoch-seconds|
-  RFC3339>` reconstructs the graph at that instant, including nodes
-  soft-deleted since; invalid `at` returns 400. Documented in
-  `docs/api-reference.md`.
-- **Scrubber, ghosts, delta panel, key moments:**
-  `TimelineScrubber.svelte` at the bottom of the canvas (time axis,
-  date label, key-moment markers with click-through narrative popover,
-  per-type delta stats). Scrubbing fetches the server `?at=` graph
-  through `createTimelineHistoryFetcher` (200 ms debounce; superseded
-  positions resolve null; late out-of-order responses are refused by
-  ExplorerView). Ghost overlays: forward ghosts (added since, green
-  dotted), backward ghosts (removed since, red dotted, recovered from
-  ArchitecturalDelta records), modified highlights (yellow). Key
-  moments derive from real payloads: spec approvals, milestone
-  completions, structural changes, and reconciliation events (the
-  `reconciliation_completed` payload carries `specs: [{name, version}]`
-  provenance labels for the narrative).
-
-### Rebase repair (2044643a5)
-
-The published PR conflicted with current main (merge-conflict repair
-category). Resolved by merging main a8bd7d09 into the branch:
-conflicts were confined to generated `web/dist` assets (resolved to
-main's build; final integration rebuilds and publishes those
-remotely). All source changes auto-merged; verified both sides' work
-coexists on the merged tree — task-183's `?at=` point-in-time handling
-in `api/graph.rs` + `api.js` timeline fetchers alongside task-179's
-moldable view routing in `NodeDetailPanel.svelte` +
-`web/src/lib/moldable/` (ExplorerView.svelte carries both the timeline
-scrubber wiring and the moldable agent-reference detail-panel wiring).
-All other task-183 implementation files are byte-identical to the
-retained approved candidate.
-
-### Test evidence
-
-Focused probes on the merged tree (this round; logs in
-/tmp/stage/review-evidence/):
-
-- `cargo check -p gyre-server -p gyre-ports -p gyre-adapters` — clean
-  (cargo-check-merged.txt).
-- `cargo test -p gyre-adapters sqlite::graph::tests::list_` — 3/3
-  passed, including both point-in-time reconstruction tests
-  (sqlite-graph-tests.txt).
-- `npx vitest run timeline-utils.test.js TimelineScrubber.test.js` —
-  60/60 passed (vitest-timeline.txt).
-- `npx vitest run MoldableViews.test.js` — 23/23 passed, confirming
-  main's merged-in views are intact on this tree
-  (vitest-moldable.txt).
-
-Server-side tests the independent verifier should execute:
-`cargo test -p gyre-adapters sqlite::graph::tests` and the
-`graph::` handler tests in gyre-server covering the `?at=` parameter
-(including the 400 on invalid `at`), plus the full workspace suite
-and web vitest suite.
