@@ -920,14 +920,15 @@ mod tests {
             .unwrap();
     }
 
-    /// Task-110 review F2 safety net: migration 000061 must apply to a
-    /// database that ALREADY contains raced duplicate Pending rows (the
-    /// exact state the check-then-insert gap allowed) without failing at
-    /// CREATE UNIQUE INDEX — the superseded duplicates are marked Expired
-    /// (audit-preserving terminal state) and only the newest per scope
-    /// survives as Pending.
+    /// Task-110 review F2 safety net: migration 000064 (renumbered from
+    /// 000061 at the 2026-11-13 rebase onto main head f764bc00) must apply
+    /// to a database that ALREADY contains raced duplicate Pending rows
+    /// (the exact state the check-then-insert gap allowed) without failing
+    /// at CREATE UNIQUE INDEX — the superseded duplicates are marked
+    /// Expired (audit-preserving terminal state) and only the newest per
+    /// scope survives as Pending.
     #[test]
-    fn migration_000061_dedupes_raced_pending_invitations_before_index() {
+    fn migration_000064_dedupes_raced_pending_invitations_before_index() {
         use crate::sqlite::MIGRATIONS;
         use diesel::migration::{MigrationConnection, MigrationSource};
         use diesel::sql_types::{Integer, Text};
@@ -938,15 +939,15 @@ mod tests {
         let path = dir.path().join("test.db");
         let mut conn = diesel::SqliteConnection::establish(path.to_str().unwrap()).unwrap();
 
-        // Pre-000061 state: every earlier migration applied.
+        // Pre-000064 state: every earlier migration applied.
         let all = MIGRATIONS.migrations().unwrap();
         let (pre, target): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
-            m.name().version().to_string() != "20261108000061"
+            m.name().version().to_string() != "20261113000064"
         });
         assert_eq!(
             target.len(),
             1,
-            "000061 not found in embedded migrations"
+            "000064 not found in embedded migrations"
         );
         conn.setup().unwrap();
         conn.run_migrations(&pre).unwrap();

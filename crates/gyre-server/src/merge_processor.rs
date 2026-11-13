@@ -1460,10 +1460,17 @@ async fn merge_atomic_group(
                 "mr_id": updated_mr.id.to_string(),
                 "result": "merged",
                 "atomic_group": group_name,
+                // Scope facets (search.md §Searchable Entities: Activity
+                // Event is filterable by workspace/repo).
+                "workspace_id": updated_mr.workspace_id.to_string(),
+                "repo_id": updated_mr.repository_id.to_string(),
             }),
             now,
         );
         let _ = state.analytics.record(&ev).await;
+        // search.md §Searchable Entities: activity events are indexed on write.
+        crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev))
+            .await;
 
         if let Some(ref author_id) = updated_mr.author_agent_id {
             crate::notifications::notify_mr_merged(
@@ -1924,7 +1931,8 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     // Note: Atomic group readiness (step 4c) is already verified in the
     // selection loop above — no need to re-check here.
 
-    // Check spec enforcement policy before merging.
+    // Check spec enforcement policy before merging (agent-gates.md
+    // §Forge Enforcement Policies — five per-repo policies).
     {
         let policy = state
             .spec_policies
@@ -1932,32 +1940,47 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             .await
             .unwrap_or_default();
 
-        if policy.require_spec_ref || policy.require_approved_spec {
-            if mr.spec_ref.is_none() {
-                let reason = "spec policy requires a spec_ref but MR has none".to_string();
-                warn!(entry_id = %entry.id, %reason, "spec policy blocked merge");
-                state
-                    .merge_queue
-                    .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
-                    .await?;
-                return Ok(());
-            }
+        // Blocking policies. `require_signed_approval` also implies a
+        // spec_ref is present: an MR with no spec_ref has no referenced
+        // approval, signed or otherwise.
+        let needs_spec_ref = policy.require_spec_ref
+            || policy.require_approved_spec
+            || policy.require_signed_approval;
+        let mut violation: Option<String> = if needs_spec_ref && mr.spec_ref.is_none() {
+            Some("spec policy requires a spec_ref but MR has none".to_string())
+        } else {
+            None
+        };
 
-            if policy.require_approved_spec {
-                let spec_ref = mr.spec_ref.as_deref().unwrap();
-                if let Err(reason) = crate::api::gates::verify_spec_ref(state, spec_ref).await {
-                    warn!(entry_id = %entry.id, %reason, "spec approval check blocked merge");
-                    state
-                        .merge_queue
-                        .update_status(
-                            &entry.id,
-                            MergeQueueEntryStatus::Failed,
-                            Some(format!("spec approval required: {reason}")),
-                        )
-                        .await?;
-                    return Ok(());
+        if violation.is_none() {
+            if let Some(spec_ref) = mr.spec_ref.as_deref() {
+                if policy.require_approved_spec {
+                    if let Err(reason) = crate::api::gates::verify_spec_ref(state, spec_ref).await {
+                        violation = Some(format!("spec approval required: {reason}"));
+                    }
+                }
+                if violation.is_none() && policy.require_signed_approval {
+                    if let Err(reason) =
+                        crate::api::gates::verify_signed_spec_ref(state, spec_ref).await
+                    {
+                        violation = Some(format!("signed spec approval required: {reason}"));
+                    }
                 }
             }
+        }
+
+        if let Some(reason) = violation {
+            warn!(entry_id = %entry.id, %reason, "spec policy blocked merge");
+            state
+                .merge_queue
+                .update_status(
+                    &entry.id,
+                    MergeQueueEntryStatus::Failed,
+                    Some(reason.clone()),
+                )
+                .await?;
+            report_spec_policy_violation(state, &mr, &repo.id, &reason).await;
+            return Ok(());
         }
 
         // Check if the spec_ref SHA is current (warn_stale_spec / require_current_spec).
@@ -1983,12 +2006,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                 .update_status(
                                     &entry.id,
                                     MergeQueueEntryStatus::Failed,
-                                    Some(reason),
+                                    Some(reason.clone()),
                                 )
                                 .await?;
+                            report_spec_policy_violation(state, &mr, &repo.id, &reason).await;
                             return Ok(());
                         } else {
-                            // warn_stale_spec only — emit domain event, don't block.
+                            // warn_stale_spec only — advisory comment and domain
+                            // event, don't block.
                             warn!(
                                 entry_id = %entry.id,
                                 mr_id = %mr.id,
@@ -1997,6 +2022,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                 %current_sha,
                                 "stale spec_ref detected (warn only)"
                             );
+                            record_stale_spec_advisory(state, &mr, path, sha, &current_sha).await;
                             state
                                 .emit_event(
                                     Some(mr.workspace_id.clone()),
@@ -2392,10 +2418,20 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     "entry_id": entry.id.to_string(),
                     "mr_id": updated_mr.id.to_string(),
                     "result": "merged",
+                    // Scope facets (search.md §Searchable Entities: Activity
+                    // Event is filterable by workspace/repo).
+                    "workspace_id": updated_mr.workspace_id.to_string(),
+                    "repo_id": updated_mr.repository_id.to_string(),
                 }),
                 now,
             );
             let _ = state.analytics.record(&ev).await;
+            // search.md §Searchable Entities: activity events are indexed on write.
+            crate::search_indexer::index(
+                state,
+                crate::search_indexer::activity_event_document(&ev),
+            )
+            .await;
 
             // Build and store a signed merge attestation bundle (G5).
             let gate_results_snapshot = state
@@ -2678,6 +2714,115 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Author identity for forge-generated advisory MR comments.
+const SPEC_POLICY_COMMENT_AUTHOR: &str = "forge:spec-policy";
+
+/// Report a spec-policy merge violation to the MR author (agent-gates.md
+/// §Forge Enforcement Policies): the queue entry already carries the failure
+/// reason, but the author must hear it directly — a GateFailure workspace
+/// event plus an inbox notification to the author's spawning user (same
+/// delivery rule as `notify_gate_failure`).
+async fn report_spec_policy_violation(
+    state: &AppState,
+    mr: &gyre_domain::MergeRequest,
+    repo_id: &Id,
+    reason: &str,
+) {
+    state
+        .emit_event(
+            Some(mr.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(mr.workspace_id.clone()),
+            gyre_common::message::MessageKind::GateFailure,
+            Some(serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": repo_id.to_string(),
+                "gate_type": "spec_enforcement",
+                "status": "Failed",
+                "output": reason,
+                "spec_ref": mr.spec_ref,
+            })),
+        )
+        .await;
+
+    if let Some(ref author_id) = mr.author_agent_id {
+        // The tenant scope comes from the workspace lookup — when it cannot
+        // be resolved there is no scoperable tenant, so skip the inbox
+        // notification rather than fabricate one
+        // (check-fabricated-scope-defaults.sh). The workspace event above
+        // already reported the violation.
+        match state.workspaces.find_by_id(&mr.workspace_id).await {
+            Ok(Some(ws)) => {
+                crate::notifications::notify_spec_policy_violation(
+                    state,
+                    author_id,
+                    &mr.workspace_id,
+                    mr.id.as_str(),
+                    reason,
+                    ws.tenant_id.as_str(),
+                )
+                .await;
+            }
+            Ok(None) => warn!(
+                mr_id = %mr.id,
+                "spec-policy violation: workspace not found; skipping author notification"
+            ),
+            Err(e) => warn!(
+                mr_id = %mr.id,
+                error = %e,
+                "spec-policy violation: workspace lookup failed; skipping author notification"
+            ),
+        }
+    }
+}
+
+/// `warn_stale_spec` advisory (agent-gates.md): a stale spec_ref warns but
+/// does not block. Record an advisory MR comment so the author sees the
+/// warning on the MR itself, not only in the event stream. Deduplicated per
+/// (path, referenced SHA, current SHA) so queue retries don't spam the
+/// timeline.
+async fn record_stale_spec_advisory(
+    state: &AppState,
+    mr: &gyre_domain::MergeRequest,
+    spec_path: &str,
+    spec_sha: &str,
+    current_sha: &str,
+) {
+    let body = format!(
+        "⚠️ Stale spec reference: '{spec_path}' HEAD has moved to {current_sha} but this MR \
+         references {spec_sha}. The code may implement an older version of the spec \
+         (warn_stale_spec policy — advisory, merge not blocked)."
+    );
+
+    // Dedupe: an identical advisory (same author + body) already on the MR
+    // means a previous queue pass already warned about exactly this drift.
+    if let Ok(existing) = state.reviews.list_comments(&mr.id).await {
+        if existing
+            .iter()
+            .any(|c| c.author_agent_id == SPEC_POLICY_COMMENT_AUTHOR && c.body == body)
+        {
+            return;
+        }
+    }
+
+    let comment = gyre_domain::ReviewComment::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        mr.id.clone(),
+        SPEC_POLICY_COMMENT_AUTHOR,
+        body,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    );
+    if let Err(e) = state.reviews.add_comment(&comment).await {
+        warn!(
+            mr_id = %mr.id,
+            error = format!("{e:#}"),
+            "failed to record stale-spec advisory comment"
+        );
+    }
+}
+
 /// KV namespace for merge queue pause state. Key = repo id, value = JSON
 /// `{"paused": bool, "reason": string}`.
 const MERGE_QUEUE_PAUSE_NS: &str = "merge_queue_pause";
@@ -2694,6 +2839,18 @@ async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
             .and_then(|j| j.get("paused").and_then(|p| p.as_bool()))
             .unwrap_or(false),
         _ => false,
+    }
+}
+
+/// Merge-queue ("forge") health for a repo, as consumed by the ABAC
+/// environment attribute `env.main_health` (abac-policy-engine.md §Attributes).
+/// `"red"` when the queue is paused (merge pipeline halted), `"green"` when
+/// merges may proceed.
+pub(crate) async fn queue_health(state: &AppState, repo_id: &str) -> &'static str {
+    if merge_queue_paused(state, &gyre_common::Id::new(repo_id)).await {
+        "red"
+    } else {
+        "green"
     }
 }
 
@@ -3576,7 +3733,7 @@ async fn evaluate_merge_abac(
             // statement about system merge authority (see doc comment above).
             p.id.as_str() != crate::abac_middleware::DEFAULT_DENY_POLICY_ID
                 && (p.scope != gyre_domain::policy::PolicyScope::Workspace
-                    || p.scope_id.as_deref() == Some(mr.workspace_id.as_str()))
+                    || p.scope_id.as_ref() == Some(&mr.workspace_id))
         })
         .collect();
     Ok(crate::policy_engine::evaluate(
@@ -5005,10 +5162,12 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
             created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -5129,10 +5288,12 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
             created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -5243,10 +5404,12 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
             created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -6244,7 +6407,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -6265,7 +6428,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -6341,7 +6504,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -6361,7 +6524,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -6437,7 +6600,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -6509,7 +6672,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -6582,7 +6745,7 @@ mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "test".to_string(),
+                created_by: Id::new("test"),
                 created_at: 0,
                 updated_at: 0,
             };
@@ -6613,10 +6776,12 @@ mod tests {
             command: Some(command.to_string()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required,
             gate_phase: GatePhase::PostMerge,
             timeout_secs: Some(30),
             created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
     }
@@ -7762,7 +7927,7 @@ mod tests {
             enabled: true,
             built_in: false,
             immutable: false,
-            created_by: "test".to_string(),
+            created_by: Id::new("test"),
             created_at: 0,
             updated_at: 0,
         };
@@ -7894,6 +8059,7 @@ mod tests {
                     scope: "workspace".to_string(),
                 },
             ],
+            rendered_prompt: None,
         };
         crate::prompt_assembly::store_prompt_set_record(&state, &record).await;
 
@@ -9130,6 +9296,282 @@ mod tests {
             "current spec_ref must not be blocked by require_current_spec (error: {:?})",
             entry2_after.error_message
         );
+    }
+
+    /// agent-gates.md §Forge Enforcement Policies, `require_signed_approval`:
+    /// "Spec approvals must include Sigstore signature." An MR whose
+    /// referenced spec SHA has only an unsigned active approval must be
+    /// blocked at merge, the failure must reach the queue entry with a clear
+    /// reason, and the author must be notified. A signed approval merges.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn require_signed_approval_blocks_unsigned_spec_approval() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "signed-spec-repo", "ws-1").await;
+
+        // Enable the policy.
+        state
+            .spec_policies
+            .set_for_repo(
+                repo.id.as_str(),
+                gyre_domain::SpecPolicy {
+                    require_signed_approval: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let sha = "a1".repeat(20);
+
+        // Ledger entry for the referenced version: approved but UNSIGNED.
+        let unsigned_id = Id::new("apr-unsigned");
+        state
+            .spec_approvals
+            .create(&gyre_domain::SpecApproval::new(
+                unsigned_id.clone(),
+                "system/signed.md",
+                &sha,
+                "user:test",
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_approvals
+            .approve(&unsigned_id, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-unsigned-spec"),
+            repo.id.clone(),
+            "Unsigned spec approval MR",
+            "feat/unsigned",
+            "main",
+            2000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.author_agent_id = Some(Id::new("author-agent-1"));
+        mr.spec_ref = Some(format!("system/signed.md@{sha}"));
+        state.merge_requests.create(&mr).await.unwrap();
+        let entry = MergeQueueEntry::new(Id::new("entry-unsigned-spec"), mr.id.clone(), 50, 2000);
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let entry_after = state
+            .merge_queue
+            .find_by_id(&entry.id)
+            .await
+            .unwrap()
+            .expect("unsigned entry persists after processing");
+        assert_eq!(
+            entry_after.status,
+            MergeQueueEntryStatus::Failed,
+            "unsigned approval must block the merge with a Failed entry"
+        );
+        let err = entry_after
+            .error_message
+            .as_deref()
+            .expect("unsigned-approval failure carries a reason");
+        assert!(
+            err.contains("no Sigstore signature"),
+            "failure reason must name the missing signature, got: {err}"
+        );
+
+        // The author was notified directly (agent-gates.md: enforcement
+        // errors are reported clearly to the author, not just the queue).
+        let author_notifications = state
+            .notifications
+            .list_for_user(&Id::new("author-agent-1"), None, None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert!(
+            author_notifications
+                .iter()
+                .any(|n| n.title.contains("Spec policy blocked merge")
+                    && n.title.contains("no Sigstore signature")),
+            "author must receive a notification naming the violation, got: {:?}",
+            author_notifications
+                .iter()
+                .map(|n| &n.title)
+                .collect::<Vec<_>>()
+        );
+
+        // Control: the same MR with a SIGNED active approval merges.
+        let sha2 = "b2".repeat(20);
+        let signed_id = Id::new("apr-signed");
+        let mut signed_entry = gyre_domain::SpecApproval::new(
+            signed_id.clone(),
+            "system/signed.md",
+            &sha2,
+            "user:test",
+        );
+        signed_entry.signature = Some("sigstore:test-signature".to_string());
+        state.spec_approvals.create(&signed_entry).await.unwrap();
+        state
+            .spec_approvals
+            .approve(&signed_id, 1700000200)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        let mut mr2 = gyre_domain::MergeRequest::new(
+            Id::new("mr-signed-spec"),
+            repo.id.clone(),
+            "Signed spec approval MR",
+            "feat/signed",
+            "main",
+            2001,
+        );
+        mr2.workspace_id = Id::new("ws-1");
+        mr2.spec_ref = Some(format!("system/signed.md@{sha2}"));
+        state.merge_requests.create(&mr2).await.unwrap();
+        let entry2 = MergeQueueEntry::new(Id::new("entry-signed-spec"), mr2.id.clone(), 50, 2001);
+        state.merge_queue.enqueue(&entry2).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let entry2_after = state
+            .merge_queue
+            .find_by_id(&entry2.id)
+            .await
+            .unwrap()
+            .expect("entry survives processing");
+        assert_eq!(
+            entry2_after.status,
+            MergeQueueEntryStatus::Merged,
+            "signed approval must not be blocked by require_signed_approval (error: {:?})",
+            entry2_after.error_message
+        );
+    }
+
+    /// `warn_stale_spec` (agent-gates.md §Forge Enforcement Policies): a
+    /// stale spec_ref warns but does not block — the warning must land as an
+    /// advisory MR comment the author can see, and the merge must proceed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warn_stale_spec_adds_advisory_comment_without_blocking() {
+        let state = test_state();
+
+        // Real repo whose HEAD contains the spec file, then moves past it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("warn-stale-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v1\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v1"]);
+        let v1_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
+
+        // Move HEAD past the referenced version.
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v2\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v2"]);
+
+        // Seed workspace + repo with the real path.
+        if state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .is_none()
+        {
+            let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "ws-1", "ws-1", 0);
+            state.workspaces.create(&ws).await.unwrap();
+        }
+        let repo = Repository::new(
+            Id::new("repo-warn-stale"),
+            Id::new("ws-1"),
+            "warn-stale-repo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Warn-only policy.
+        state
+            .spec_policies
+            .set_for_repo(
+                repo.id.as_str(),
+                gyre_domain::SpecPolicy {
+                    warn_stale_spec: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-warn-stale"),
+            repo.id.clone(),
+            "Stale spec (warn) MR",
+            "feat/warn",
+            "main",
+            3000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
+        state.merge_requests.create(&mr).await.unwrap();
+        let entry = MergeQueueEntry::new(Id::new("entry-warn-stale"), mr.id.clone(), 50, 3000);
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        // The merge proceeded despite the stale reference.
+        let entry_after = state
+            .merge_queue
+            .find_by_id(&entry.id)
+            .await
+            .unwrap()
+            .expect("warn entry persists after processing");
+        assert_eq!(
+            entry_after.status,
+            MergeQueueEntryStatus::Merged,
+            "warn_stale_spec must not block the merge (error: {:?})",
+            entry_after.error_message
+        );
+
+        // The advisory comment is on the MR.
+        let comments = state.reviews.list_comments(&mr.id).await.unwrap();
+        let advisory = comments
+            .iter()
+            .find(|c| c.author_agent_id == "forge:spec-policy")
+            .unwrap_or_else(|| {
+                panic!(
+                    "warn_stale_spec must add an advisory MR comment, got: {:?}",
+                    comments.iter().map(|c| &c.body).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            advisory.body.contains("Stale spec reference"),
+            "advisory must describe the drift, got: {}",
+            advisory.body
+        );
+        assert!(advisory.body.contains(&v1_blob));
     }
 
     // ── TASK-077 / HSI §2 (F5): merge-time ABAC enforcement tests ─────────

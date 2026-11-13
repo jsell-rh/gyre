@@ -192,6 +192,33 @@ impl NotificationRepository for PgStorage {
         .await?
     }
 
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let entity_ref = entity_ref.to_string();
+        let ntype = notification_type.to_string();
+        let body = body.to_string();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let updated = diesel::update(
+                notifications::table
+                    .filter(notifications::entity_ref.eq(entity_ref.as_str()))
+                    .filter(notifications::notification_type.eq(ntype.as_str()))
+                    .filter(notifications::resolved_at.is_null())
+                    .filter(notifications::dismissed_at.is_null()),
+            )
+            .set(notifications::body.eq(body))
+            .execute(&mut *conn)
+            .context("update notification body by entity_ref")?;
+            Ok(updated as u64)
+        })
+        .await?
+    }
+
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();

@@ -1,3 +1,4 @@
+use crate::budget::BudgetConfig;
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +45,21 @@ pub struct Repository {
     pub description: Option<String>,
     pub status: RepoStatus,
     pub updated_at: u64,
+    /// Max concurrent worker agents in this repo (repo-lifecycle.md §3).
+    /// `None` → fall back to `Workspace.max_agents_per_repo`; both `None` →
+    /// no limit. Cannot exceed the workspace limit (validated on update).
+    #[serde(default)]
+    pub max_agents: Option<u32>,
+    /// Ralph-loop iteration ceiling for agents working this repo
+    /// (agent-runtime.md §1 Phase 7: `max_iterations`, default 10).
+    /// `None` → server default (10).
+    #[serde(default)]
+    pub max_agent_iterations: Option<u32>,
+    /// Repo-level budget override (agent-runtime.md §4 Cascade,
+    /// repo-lifecycle.md §3). `None` → inherit the workspace limit.
+    /// Cannot exceed the workspace budget (validated on update).
+    #[serde(default)]
+    pub budget: Option<BudgetConfig>,
 }
 
 impl Repository {
@@ -68,6 +84,9 @@ impl Repository {
             description: None,
             status: RepoStatus::Active,
             updated_at: created_at,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
         }
     }
 

@@ -79,6 +79,14 @@ When spawning an agent into a container compute target, the server pre-mints the
 | `GYRE_AGENT_ID` | Agent UUID | Identity for API calls |
 | `GYRE_TASK_ID` | Task UUID | Assigned task reference |
 | `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
+| `GYRE_META_SPEC_PROMPT` | _(when meta-specs apply)_ | Rendered meta-spec system prompt (agent-runtime.md §5): required tenant + workspace meta-specs and spec-level bindings at pinned versions |
+| `GYRE_META_SPEC_SET_SHA` | _(when meta-specs apply)_ | SHA-256 of the assembled prompt set (provenance; matches the spawn response's `meta_spec_set_sha`) |
+| `GYRE_PROTOCOL_PROMPT` | Protocol section text | System-managed protocol (agent-runtime.md §5): Ralph loop rules, MCP tools, heartbeat, escalation, completion — also served on demand via the MCP `system://protocol` prompt |
+| `GYRE_ITERATION` | `0`, `1`, ... | Ralph-loop iteration for this session (agent-runtime.md §1 Phase 7) |
+| `GYRE_PROMPT_PERSONA` | _(optional)_ | Persona system prompt | Persona prompt (Platform Model §4.3): the resolved persona's prompt, injected only when a persona is bound to the agent (spawn request `persona_slug`, resolved repo → workspace → tenant, must be approved). Note: the MCP `system://persona` prompt serves the assembled meta-spec set per agent-runtime.md §5 |
+| `GYRE_PROMPT_PROTOCOL` | Protocol norms text | `system://protocol` (Platform Model §4.3): interaction norms, Ralph loop definition, escalation rules |
+| `GYRE_PROMPT_CONTEXT` | Task/worktree context text | `system://context` (Platform Model §4.3): current task (title, spec ref, description), worktree branch/path, repo info |
+| `GYRE_PROMPT_CONSTRAINTS` | Constraints text | `system://constraints` (Platform Model §4.3): budget limits + remaining budget, agent lifetime cap, scope boundaries |
 | `GYRE_AGENT_COMMAND` | _(optional)_ | Command for the entrypoint to exec after setup (e.g. a CI script) |
 | `GYRE_CRED_{NAME}` | _(per secret)_ | Resolved secrets from the secrets repository (Platform Model §7): tenant/workspace/repo/task scoped, nearest scope wins on name collision, expired secrets excluded. Held in memory by the `cred-proxy` sidecar and scrubbed before the agent process starts -- raw values never appear in the agent process env |
 | `GYRE_CRED_PROXY` | `http://127.0.0.1:8765` | Address of the `cred-proxy` sidecar (M27); injected so entrypoint and agent-runner can reference the proxy address |
@@ -131,13 +139,15 @@ When the merge queue executes an `AgentReview` or `AgentValidation` gate, it spa
 | `GYRE_GATE_AGENT_ID` | Identity to use when submitting reviews via API |
 | `GYRE_DIFF_URL` | URL to fetch the MR diff |
 | `GYRE_SPEC_REF` | Spec reference bound to the MR (if any) |
+| `GYRE_SPEC_URL` | URL to fetch the spec content at the MR's **pinned** spec_ref SHA (not HEAD) — `GET /api/v1/merge-requests/{id}/spec`. Empty when the MR has no spec_ref. Spec-alignment review (agent-gates.md §Integration with Agent Gates) must compare the diff against this pinned version |
 | `GYRE_PERSONA` | Persona file path for the gate |
+| `GYRE_VALIDATION_TYPE` | AgentValidation only: domain-specific check identifier from the gate config (empty string when unset) |
 
 **`AgentReview` protocol:** exit with any code; server checks for an Approved/ChangesRequested review submitted by `GYRE_GATE_AGENT_ID` after the process exits.
 
 **`AgentValidation` protocol:** exit 0 = pass, non-zero = fail.
 
-**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents.
+**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents. Review tokens carry OIDC scope `review:submit` (read MR context, submit verdict, read-only -- push denied); validation tokens carry `validation:report` (read MR context only -- no review submission, push denied). Scope checks are exact-match on the capability string.
 
 **Merge processor dep failure handling (P5):** before processing each queued entry, the merge processor checks dependency health: if a dependency MR is `Closed`, the queue entry is marked `Failed` and a High-priority task `"Dependency MR-{id} was closed, reassess MR-{dependent}"` is auto-created; if a dependency has 3+ gate failures, an escalation warning is logged.
 

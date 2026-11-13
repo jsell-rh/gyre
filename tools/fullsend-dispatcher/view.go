@@ -151,6 +151,8 @@ func rowStatus(r Row) string {
 
 	if r.Activity == "history" {
 		switch r.Status {
+		case "attention":
+			return "Needs attention"
 		case "failed":
 			return "Failed"
 		case "succeeded":
@@ -174,7 +176,31 @@ func rowStatus(r Row) string {
 		}
 		return "Ready to retry"
 	case "uncertain":
+		if r.FailureCategory == "gateway_transport" {
+			return "Worker health unknown"
+		}
 		return "Outcome unknown"
+	case "attention":
+		switch r.FailureCategory {
+		case "sandbox_oom":
+			return "Out of memory · needs retry"
+		case "repair_stalled":
+			return "Repair stalled · needs attention"
+		case "requirements_triage":
+			return "Spec/task conflict · needs triage"
+		case "assessment":
+			return "Assessment needs evidence"
+		case "sandbox_stopped":
+			return "Sandbox stopped · needs attention"
+		case "verification_timeout":
+			return "Verification deadline exceeded"
+		case "verification_source_integrity":
+			return "Verification changed source"
+		case "sandbox_storage":
+			return "Build storage exhausted"
+		default:
+			return "Needs attention"
+		}
 	case "succeeded":
 		return completionStatus(r.Finished)
 	default:
@@ -253,6 +279,29 @@ func readinessStatus(r Row) string {
 		return ""
 	}
 	switch r.CodeReadiness.Status {
+	case "merged":
+		return "Merged"
+	case "resolved":
+		return "Requirements satisfied upstream"
+	case "verification_blocked":
+		if r.CodeReadiness.Blocker == "sandbox_oom" {
+			return "Verification blocked · out of memory"
+		}
+		return "Verification blocked · needs attention"
+	case "refresh_required":
+		return "Integration refresh required"
+	case "refresh_queued":
+		return "Integration refresh queued"
+	case "refresh_running":
+		return "Integration refresh running"
+	case "repair_pending":
+		return "Implementation repair pending"
+	case "merge_conflict":
+		return "Merge conflict · needs repair"
+	case "artifact_refresh":
+		return "Generated artifacts need refresh"
+	case "merge_confirmation":
+		return "Confirming upstream merge"
 	case "pending", "infrastructure":
 		return "Waiting for CI"
 	case "candidate_failed", "baseline_failed":
@@ -271,6 +320,11 @@ func readinessStatus(r Row) string {
 	return ""
 }
 
+func completedDelivery(r Row) bool {
+	return r.Activity != "history" && r.CodeReadiness != nil &&
+		(r.CodeReadiness.Status == "merged" || r.CodeReadiness.Status == "resolved")
+}
+
 func (m Model) visibleRows() []Row {
 	if m.historyIssue != nil {
 		return m.orderRows(m.filterRows(append([]Row(nil), m.historyRows...)))
@@ -278,7 +332,7 @@ func (m Model) visibleRows() []Row {
 	rows := []Row{}
 	seen := map[string]bool{}
 	for _, r := range m.filterRows(m.scopedRows()) {
-		if r.Status == "succeeded" && readinessStatus(r) == "" && !m.showCompleted && !(m.screen != "" && r.Key == m.selected) {
+		if r.Status == "succeeded" && (readinessStatus(r) == "" || completedDelivery(r)) && !m.showCompleted && !(m.screen != "" && r.Key == m.selected) {
 			continue
 		}
 		group := r.Scope + "\x00" + r.Repo + "\x00" + r.Item
@@ -670,7 +724,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.confirmScroll = 0
 						m.setNotice("")
 					}
-				} else if row.Status != "failed" && row.Status != "canceled" {
+				} else if row.Status != "failed" && row.Status != "canceled" && row.Status != "attention" {
 					m.setNotice("Only failed or canceled jobs can be retried here.")
 				} else {
 					return m, func() tea.Msg { return retryDone{row.Key, m.engine.requestRetry(m.ctx, row.Key)} }
@@ -718,7 +772,7 @@ func (m Model) style(text, color string, bold bool) string {
 }
 func statusColor(status string) string {
 	switch status {
-	case "failed":
+	case "failed", "attention":
 		return "1"
 	case "uncertain", "canceled":
 		return "3"
@@ -731,6 +785,12 @@ func statusColor(status string) string {
 
 func rowColor(row Row) string {
 	if readiness := readinessStatus(row); readiness != "" {
+		if completedDelivery(row) {
+			return "2"
+		}
+		if row.CodeReadiness.Status == "verification_blocked" {
+			return "1"
+		}
 		if strings.HasPrefix(readiness, "CI failed") {
 			return "1"
 		}
@@ -815,7 +875,7 @@ func (m Model) agentGroups(rows []Row, w, budget int) []string {
 					switch item.Status {
 					case "running":
 						running++
-					case "failed", "uncertain", "canceled":
+					case "failed", "uncertain", "attention", "canceled":
 						failed++
 					case "succeeded":
 						done++
@@ -873,6 +933,11 @@ func (m Model) detailContent(rows []Row, w int) ([]string, []string) {
 	if len(rows) > 0 {
 		r := rows[m.index]
 		header = append(header, m.workHeader(r, w, "Details")...)
+		if r.Status == "attention" {
+			body = append(body, m.style("NEEDS ATTENTION", "1", true))
+			body = append(body, m.wrapped("The failure is recorded below. Resolve its blocker before retrying; running work and cleanup remain fenced.", w, "7")...)
+			body = append(body, "")
+		}
 		if r.Status == "uncertain" {
 			body = append(body, m.style("OUTCOME NOT RECORDED", "3", true))
 			body = append(body, m.wrapped("The local worker stopped without saving its result. Check this log and confirm the remote sandbox has stopped before retrying.", w, "7")...)
@@ -1097,6 +1162,10 @@ func (m Model) View() string {
 		lines = append(lines, m.scrollIndicator(start, min(len(body), start+count), len(body)))
 		lines = append(lines, "", m.style("j/k scroll   enter logs   r retry  C cancel   h back   ? help   q detach", "8", false))
 	} else {
+		if m.state.Admission != "" {
+			lines = append(lines, m.wrapped(m.state.Admission, w, "3")...)
+			lines = append(lines, "")
+		}
 		if m.state.Monitoring {
 			lines = append(lines, "Existing workers are finishing. Scheduling resumes automatically.", "")
 		} else if connection == "Connection lost" {

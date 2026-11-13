@@ -164,6 +164,7 @@ struct BudgetUsageRow {
     period_start: i64,
     #[allow(dead_code)]
     updated_at: i64,
+    compute_minutes: i64,
 }
 
 impl BudgetUsageRow {
@@ -175,6 +176,7 @@ impl BudgetUsageRow {
             cost_today: self.cost_today,
             active_agents: self.active_agents as u32,
             period_start: self.period_start as u64,
+            compute_minutes: self.compute_minutes as u64,
         }
     }
 }
@@ -189,6 +191,7 @@ struct NewBudgetUsageRow<'a> {
     cost_today: f64,
     active_agents: i32,
     period_start: i64,
+    compute_minutes: i64,
     updated_at: i64,
 }
 
@@ -210,6 +213,7 @@ impl BudgetUsageRepository for PgStorage {
                 cost_today: u.cost_today,
                 active_agents: u.active_agents as i32,
                 period_start: u.period_start as i64,
+                compute_minutes: u.compute_minutes as i64,
                 updated_at: now,
             };
             diesel::insert_into(budget_usages::table)
@@ -223,6 +227,7 @@ impl BudgetUsageRepository for PgStorage {
                     budget_usages::cost_today.eq(u.cost_today),
                     budget_usages::active_agents.eq(u.active_agents as i32),
                     budget_usages::period_start.eq(u.period_start as i64),
+                    budget_usages::compute_minutes.eq(u.compute_minutes as i64),
                     budget_usages::updated_at.eq(now),
                 ))
                 .execute(&mut *conn)
@@ -301,6 +306,7 @@ impl BudgetUsageRepository for PgStorage {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now as i64,
+                compute_minutes: 0,
                 updated_at: ts,
             };
             diesel::insert_into(budget_usages::table)
@@ -368,6 +374,7 @@ impl BudgetUsageRepository for PgStorage {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now as i64,
+                compute_minutes: 0,
                 updated_at: ts,
             };
             diesel::insert_into(budget_usages::table)
@@ -390,20 +397,46 @@ impl BudgetUsageRepository for PgStorage {
         .await?
     }
 
-    async fn reset_daily_counters(&self, now: u64) -> Result<()> {
+    async fn add_compute_minutes(
+        &self,
+        entity_key: &str,
+        entity_type: &str,
+        entity_id: &str,
+        now: u64,
+        minutes: u64,
+    ) -> Result<()> {
         let pool = Arc::clone(&self.pool);
+        let key = entity_key.to_string();
+        let etype = entity_type.to_string();
+        let eid = entity_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let ts = now_secs();
-            diesel::update(budget_usages::table)
+            let row = NewBudgetUsageRow {
+                entity_key: &key,
+                entity_type: &etype,
+                entity_id: &eid,
+                tokens_used_today: 0,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: now as i64,
+                compute_minutes: 0,
+                updated_at: ts,
+            };
+            diesel::insert_into(budget_usages::table)
+                .values(&row)
+                .on_conflict(budget_usages::entity_key)
+                .do_nothing()
+                .execute(&mut *conn)
+                .context("ensure budget_usage row")?;
+            diesel::update(budget_usages::table.find(&key))
                 .set((
-                    budget_usages::tokens_used_today.eq(0i64),
-                    budget_usages::cost_today.eq(0.0f64),
-                    budget_usages::period_start.eq(now as i64),
+                    budget_usages::compute_minutes
+                        .eq(budget_usages::compute_minutes + minutes as i64),
                     budget_usages::updated_at.eq(ts),
                 ))
                 .execute(&mut *conn)
-                .context("reset daily counters")?;
+                .context("add compute_minutes")?;
             Ok(())
         })
         .await?

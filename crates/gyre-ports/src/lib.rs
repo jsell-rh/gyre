@@ -41,6 +41,7 @@ pub mod pre_accept;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rollout_policy;
@@ -53,6 +54,7 @@ pub mod spec_approval_event_repo;
 pub mod spec_assertion_result_repo;
 pub mod spec_ledger_repo;
 pub mod spec_lifecycle_repo;
+pub mod spec_link_repo;
 pub mod spec_policy_repo;
 pub mod storage;
 pub mod task;
@@ -99,7 +101,7 @@ pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;
 pub use message::{MessageConsumer, MessageRepository};
 pub use meta_spec_repository::{MetaSpecBindingRepository, MetaSpecFilter, MetaSpecRepository};
-pub use meta_spec_set::MetaSpecSetRepository;
+pub use meta_spec_set::{MetaSpecSetRepository, TenantMetaSpecSetRepository};
 pub use network::NetworkPeerRepository;
 pub use notification::NotificationRepository;
 pub use policy::PolicyRepository;
@@ -107,12 +109,14 @@ pub use pre_accept::{GateOutcome, PreAcceptGate, PushContext};
 pub use prompt_template::PromptRepository;
 pub use push_gate::PushGateRepository;
 pub use quality_gate::{GateResultRepository, QualityGateRepository};
+pub use repo_access::RepoAccessOverrideRepository;
 pub use repository::RepoRepository;
 pub use review::ReviewRepository;
 pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
 pub use search::{
-    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+    parse_query, FacetCounts, FacetFilter, ParsedQuery, SearchDocument, SearchPort, SearchQuery,
+    SearchResult, SearchSuggestion, TimeBounds, UPDATED_AT_KEY,
 };
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
@@ -121,6 +125,7 @@ pub use spec_approval_event_repo::SpecApprovalEventRepository;
 pub use spec_assertion_result_repo::SpecAssertionResultRepository;
 pub use spec_ledger_repo::SpecLedgerRepository;
 pub use spec_lifecycle_repo::SpecLifecycleRepository;
+pub use spec_link_repo::SpecLinkRepository;
 pub use spec_policy_repo::SpecPolicyRepository;
 pub use storage::StoragePort;
 pub use task::TaskRepository;

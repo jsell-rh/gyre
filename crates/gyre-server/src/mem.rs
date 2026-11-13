@@ -4,6 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::spec_approval::ApprovalTransitionError;
+use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
@@ -12,14 +13,13 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
-use gyre_domain::{BudgetCallRecord, BudgetUsage};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
-    BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
-    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
+    AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
+    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
+    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, TenantMetaSpecSetRepository, TenantRepository, UserRepository,
     UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
@@ -161,6 +161,15 @@ impl GitOpsPort for NoopGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn read_file_at_commit(
+        &self,
+        _repo_path: &str,
+        _sha: &str,
         _file_path: &str,
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)
@@ -353,6 +362,15 @@ impl GitOpsPort for ConfigurableGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn read_file_at_commit(
+        &self,
+        _repo_path: &str,
+        _sha: &str,
         _file_path: &str,
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)
@@ -2119,7 +2137,7 @@ impl WorkspaceRepository for MemWorkspaceRepository {
         if delete_trust_policies {
             policies.retain(|_, p| {
                 !(p.name.starts_with("trust:")
-                    && p.scope_id.as_deref() == Some(workspace.id.as_str()))
+                    && p.scope_id.as_ref().map(|i| i.as_str()) == Some(workspace.id.as_str()))
             });
         }
         for p in new_policies {
@@ -2271,7 +2289,7 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
             .lock()
             .await
             .values()
-            .filter(|p| &p.scope == scope && p.scope_id.as_deref() == scope_id)
+            .filter(|p| &p.scope == scope && p.scope_id.as_ref().map(|i| i.as_str()) == scope_id)
             .cloned()
             .collect())
     }
@@ -2317,7 +2335,10 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
         let mut store = self.policies.lock().await;
         let to_delete: Vec<String> = store
             .values()
-            .filter(|p| p.name.starts_with(prefix) && p.scope_id.as_deref() == Some(scope_id))
+            .filter(|p| {
+                p.name.starts_with(prefix)
+                    && p.scope_id.as_ref().map(|i| i.as_str()) == Some(scope_id)
+            })
             .map(|p| p.id.to_string())
             .collect();
         let count = to_delete.len() as u64;
@@ -2436,24 +2457,104 @@ impl WorkspaceMembershipRepository for MemWorkspaceMembershipRepository {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Repo access overrides (user-management.md §Repo Access)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::RepoAccessOverride;
+use gyre_ports::RepoAccessOverrideRepository;
+
+#[derive(Default)]
+pub struct MemRepoAccessOverrideRepository {
+    store: Arc<Mutex<HashMap<String, RepoAccessOverride>>>,
+}
+
+#[async_trait]
+impl RepoAccessOverrideRepository for MemRepoAccessOverrideRepository {
+    async fn create(&self, o: &RepoAccessOverride) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: create fails when an override for the same
+        // (repo_id, user_id) pair already exists. The mem adapter has no
+        // schema, so the guard lives in code (check-mem-port-contracts).
+        if store
+            .values()
+            .any(|e| e.repo_id == o.repo_id && e.user_id == o.user_id)
+        {
+            return Err(anyhow::anyhow!(
+                "repo access override for user {} on repo {} already exists",
+                o.user_id,
+                o.repo_id
+            ));
+        }
+        store.insert(o.id.to_string(), o.clone());
+        Ok(())
+    }
+
+    async fn find_by_repo_and_user(
+        &self,
+        repo_id: &Id,
+        user_id: &Id,
+    ) -> Result<Option<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|e| e.repo_id == *repo_id && e.user_id == *user_id)
+            .cloned())
+    }
+
+    async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<RepoAccessOverride>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.repo_id == *repo_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn delete(&self, repo_id: &Id, user_id: &Id) -> Result<bool> {
+        let mut store = self.store.lock().await;
+        let key = store
+            .values()
+            .find(|e| e.repo_id == *repo_id && e.user_id == *user_id)
+            .map(|e| e.id.to_string());
+        match key {
+            Some(k) => {
+                store.remove(&k);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Team
 // ──────────────────────────────────────────────────────────────────────────────
 
-use gyre_domain::Team;
+use gyre_domain::{Team, TeamMembership};
 use gyre_ports::TeamRepository;
 
 #[derive(Default)]
 pub struct MemTeamRepository {
     store: Arc<Mutex<HashMap<String, Team>>>,
+    members: Arc<Mutex<HashMap<(String, String), TeamMembership>>>,
 }
 
 #[async_trait]
 impl TeamRepository for MemTeamRepository {
     async fn create(&self, team: &Team) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(team.id.to_string(), team.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: the slug is unique within the workspace.
+        if store
+            .values()
+            .any(|t| t.workspace_id == team.workspace_id && t.slug == team.slug)
+        {
+            anyhow::bail!("team slug already exists in workspace");
+        }
+        store.insert(team.id.to_string(), team.clone());
         Ok(())
     }
 
@@ -2461,28 +2562,100 @@ impl TeamRepository for MemTeamRepository {
         Ok(self.store.lock().await.get(id.as_str()).cloned())
     }
 
-    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Team>> {
+    async fn find_by_slug(&self, workspace_id: &Id, slug: &str) -> Result<Option<Team>> {
         Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|t| t.workspace_id == *workspace_id && t.slug == slug)
+            .cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<Team>> {
+        let mut teams: Vec<Team> = self
             .store
             .lock()
             .await
             .values()
             .filter(|t| t.workspace_id == *workspace_id)
             .cloned()
-            .collect())
+            .collect();
+        teams.sort_by_key(|t| t.created_at);
+        Ok(teams)
     }
 
     async fn update(&self, team: &Team) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(team.id.to_string(), team.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: the new slug must not collide with another team's
+        // slug in the same workspace.
+        if store
+            .values()
+            .any(|t| t.id != team.id && t.workspace_id == team.workspace_id && t.slug == team.slug)
+        {
+            anyhow::bail!("team slug already exists in workspace");
+        }
+        store.insert(team.id.to_string(), team.clone());
         Ok(())
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
+        // Memberships go with the team.
+        self.members
+            .lock()
+            .await
+            .retain(|(team_id, _), _| team_id != id.as_str());
         Ok(())
+    }
+
+    async fn add_member(&self, membership: &TeamMembership) -> Result<()> {
+        let mut members = self.members.lock().await;
+        let key = (
+            membership.team_id.to_string(),
+            membership.user_id.to_string(),
+        );
+        // Port contract: duplicate membership fails.
+        if members.contains_key(&key) {
+            anyhow::bail!("user is already a member of the team");
+        }
+        members.insert(key, membership.clone());
+        Ok(())
+    }
+
+    async fn remove_member(&self, team_id: &Id, user_id: &Id) -> Result<()> {
+        self.members
+            .lock()
+            .await
+            .remove(&(team_id.to_string(), user_id.to_string()));
+        Ok(())
+    }
+
+    async fn list_members(&self, team_id: &Id) -> Result<Vec<TeamMembership>> {
+        let mut memberships: Vec<TeamMembership> = self
+            .members
+            .lock()
+            .await
+            .values()
+            .filter(|m| m.team_id == *team_id)
+            .cloned()
+            .collect();
+        memberships.sort_by_key(|m| m.added_at);
+        Ok(memberships)
+    }
+
+    async fn list_for_user(&self, workspace_id: &Id, user_id: &Id) -> Result<Vec<Team>> {
+        let store = self.store.lock().await;
+        let members = self.members.lock().await;
+        let mut teams: Vec<Team> = members
+            .values()
+            .filter(|m| m.user_id == *user_id)
+            .filter_map(|m| store.get(m.team_id.as_str()))
+            .filter(|t| t.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        teams.sort_by_key(|t| t.created_at);
+        Ok(teams)
     }
 }
 
@@ -2547,6 +2720,29 @@ impl NotificationRepository for MemNotificationRepository {
             .skip(offset as usize)
             .take(limit as usize)
             .collect())
+    }
+
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64> {
+        let mut updated = 0u64;
+        for n in self.store.lock().await.iter_mut() {
+            // Same match + unresolved guard as the SQL adapters: resolved or
+            // dismissed cards keep their historical body (audit record of what
+            // was acted on), so the guard is enforced in code here too.
+            if n.source.entity_id == entity_ref
+                && n.notification_type.as_str() == notification_type
+                && n.resolved_at.is_none()
+                && n.dismissed_at.is_none()
+            {
+                n.body = Some(body.to_string());
+                updated += 1;
+            }
+        }
+        Ok(updated)
     }
 
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()> {
@@ -2784,14 +2980,21 @@ impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
         Ok(self.gates.lock().await.get(id).cloned())
     }
     async fn list_by_repo_id(&self, repo_id: &str) -> Result<Vec<gyre_domain::QualityGate>> {
-        Ok(self
+        let mut gates: Vec<gyre_domain::QualityGate> = self
             .gates
             .lock()
             .await
             .values()
             .filter(|g| g.repo_id.to_string() == repo_id)
             .cloned()
-            .collect())
+            .collect();
+        // Same ordering contract as the SQL adapters: (position, created_at).
+        gates.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then(a.created_at.cmp(&b.created_at))
+        });
+        Ok(gates)
     }
     async fn delete(&self, id: &str) -> Result<()> {
         self.gates.lock().await.remove(id);
@@ -2861,6 +3064,7 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now,
+                compute_minutes: 0,
             });
         usage.active_agents = usage.active_agents.saturating_add(1);
         Ok(usage.clone())
@@ -2893,19 +3097,34 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now,
+                compute_minutes: 0,
             });
         usage.tokens_used_today = usage.tokens_used_today.saturating_add(tokens);
         usage.cost_today += cost_usd;
         Ok(())
     }
 
-    async fn reset_daily_counters(&self, now: u64) -> Result<()> {
+    async fn add_compute_minutes(
+        &self,
+        entity_key: &str,
+        entity_type: &str,
+        entity_id: &str,
+        now: u64,
+        minutes: u64,
+    ) -> Result<()> {
         let mut guard = self.store.lock().await;
-        for usage in guard.values_mut() {
-            usage.tokens_used_today = 0;
-            usage.cost_today = 0.0;
-            usage.period_start = now;
-        }
+        let usage = guard
+            .entry(entity_key.to_string())
+            .or_insert_with(|| BudgetUsage {
+                entity_type: entity_type.to_string(),
+                entity_id: gyre_common::Id::new(entity_id.to_string()),
+                tokens_used_today: 0,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: now,
+                compute_minutes: 0,
+            });
+        usage.compute_minutes = usage.compute_minutes.saturating_add(minutes);
         Ok(())
     }
 }
@@ -2913,19 +3132,21 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
 // ── MemBudgetCallRepository ───────────────────────────────────────────────────
 
 /// In-memory BudgetCallRepository for tests and development.
-/// Mirrors the SQLite/Postgres adapters: insert-only with duplicate-id
-/// rejection, workspace-scoped reads newest-first.
 #[derive(Default)]
 pub struct MemBudgetCallRepository {
-    store: Arc<Mutex<Vec<BudgetCallRecord>>>,
+    store: Mutex<Vec<gyre_domain::BudgetCallRecord>>,
 }
 
 #[async_trait]
-impl BudgetCallRepository for MemBudgetCallRepository {
-    async fn save(&self, record: &BudgetCallRecord) -> Result<()> {
+impl gyre_ports::BudgetCallRepository for MemBudgetCallRepository {
+    async fn save(&self, record: &gyre_domain::BudgetCallRecord) -> Result<()> {
         let mut store = self.store.lock().await;
-        if store.iter().any(|r| r.id.as_str() == record.id.as_str()) {
-            anyhow::bail!("budget call record {} already exists", record.id.as_str());
+        // Port contract: "Insert-only; the record id is unique." The SQL
+        // adapters enforce this via the PRIMARY KEY; the mem adapter guards
+        // in code (check-mem-port-contracts.sh) so both backends reject a
+        // duplicate id identically.
+        if store.iter().any(|r| r.id == record.id) {
+            anyhow::bail!("budget call record {} already exists", record.id);
         }
         store.push(record.clone());
         Ok(())
@@ -2936,11 +3157,33 @@ impl BudgetCallRepository for MemBudgetCallRepository {
         workspace_id: &str,
         since: u64,
         limit: i64,
-    ) -> Result<Vec<BudgetCallRecord>> {
-        let store = self.store.lock().await;
-        let mut records: Vec<BudgetCallRecord> = store
+    ) -> Result<Vec<gyre_domain::BudgetCallRecord>> {
+        let mut records: Vec<gyre_domain::BudgetCallRecord> = self
+            .store
+            .lock()
+            .await
             .iter()
             .filter(|r| r.workspace_id.as_str() == workspace_id && r.timestamp >= since)
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then(b.id.as_str().cmp(a.id.as_str()))
+        });
+        records.truncate(limit.max(0) as usize);
+        Ok(records)
+    }
+
+    async fn list_since(
+        &self,
+        since: u64,
+        limit: i64,
+    ) -> Result<Vec<gyre_domain::BudgetCallRecord>> {
+        let store = self.store.lock().await;
+        let mut records: Vec<gyre_domain::BudgetCallRecord> = store
+            .iter()
+            .filter(|r| r.timestamp >= since)
             .cloned()
             .collect();
         records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
@@ -3319,6 +3562,157 @@ impl gyre_ports::SpecLedgerRepository for MemSpecLedgerRepository {
 }
 
 #[derive(Default)]
+pub struct MemSpecLinkRepository {
+    store: Arc<Mutex<Vec<gyre_domain::spec_links::SpecLinkEntry>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecLinkRepository for MemSpecLinkRepository {
+    async fn list_all(&self) -> Result<Vec<gyre_domain::spec_links::SpecLinkEntry>> {
+        Ok(self.store.lock().await.clone())
+    }
+    async fn replace_for_source(
+        &self,
+        source_repo_id: &str,
+        source_path: &str,
+        links: &[gyre_domain::spec_links::SpecLinkEntry],
+    ) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Match the SQL adapters' (source_repo_id, source_path) scoping:
+        // `source_repo_id` None in the entry means the unscoped/legacy bucket.
+        let source_repo_key = |e: &gyre_domain::spec_links::SpecLinkEntry| {
+            e.source_repo_id.clone().unwrap_or_default()
+        };
+        store.retain(|l| !(source_repo_key(l) == source_repo_id && l.source_path == source_path));
+        store.extend(links.iter().cloned());
+        Ok(())
+    }
+    async fn save(&self, entry: &gyre_domain::spec_links::SpecLinkEntry) -> Result<()> {
+        let mut store = self.store.lock().await;
+        match store.iter().position(|l| l.id == entry.id) {
+            Some(i) => store[i] = entry.clone(),
+            None => store.push(entry.clone()),
+        }
+        Ok(())
+    }
+    async fn delete_by_source_repo(&self, source_repo_id: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .retain(|l| l.source_repo_id.as_deref().unwrap_or_default() != source_repo_id);
+        Ok(())
+    }
+}
+
+/// Task-198 AC: `SpecLinkEntry` must round-trip losslessly through the mem
+/// adapter (used by the in-memory test constructor and mem-mode server) —
+/// every `SpecLinkType` variant and every `Option` column, with the same
+/// `(source_repo_id, source_path)` scoping contract the SQL adapters enforce.
+#[cfg(test)]
+mod spec_link_contract_tests {
+    use super::*;
+    use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
+    use gyre_ports::SpecLinkRepository;
+
+    fn entry(id: &str, link_type: SpecLinkType) -> SpecLinkEntry {
+        SpecLinkEntry {
+            id: id.to_string(),
+            source_path: format!("system/source-{id}.md"),
+            source_repo_id: Some("repo-1".to_string()),
+            source_sha: format!("sha-{id}"),
+            link_type,
+            target_path: "system/target.md".to_string(),
+            target_repo_id: Some("repo-2".to_string()),
+            target_display: Some("@ws/repo-2/system/target.md".to_string()),
+            target_sha: Some("target-sha".to_string()),
+            reason: Some("why".to_string()),
+            status: "active".to_string(),
+            created_at: 1_700_000_000,
+            stale_since: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn round_trips_every_link_type_and_option_columns() {
+        let repo = MemSpecLinkRepository::default();
+        let variants = [
+            SpecLinkType::Implements,
+            SpecLinkType::Supersedes,
+            SpecLinkType::DependsOn,
+            SpecLinkType::ConflictsWith,
+            SpecLinkType::Extends,
+            SpecLinkType::References,
+        ];
+        let mut expected: Vec<SpecLinkEntry> = Vec::new();
+        for (i, lt) in variants.iter().enumerate() {
+            let e = entry(&format!("link-{i}"), lt.clone());
+            repo.save(&e).await.unwrap();
+            expected.push(e);
+        }
+        // Option columns exercised in their None forms too.
+        let mut none_opts = entry("link-none", SpecLinkType::DependsOn);
+        none_opts.source_repo_id = None;
+        none_opts.target_repo_id = None;
+        none_opts.target_display = None;
+        none_opts.target_sha = None;
+        none_opts.reason = None;
+        none_opts.stale_since = Some(1_700_000_500);
+        repo.save(&none_opts).await.unwrap();
+        expected.push(none_opts);
+
+        let all = repo.list_all().await.unwrap();
+        assert_eq!(all.len(), expected.len());
+        for exp in &expected {
+            let got = all.iter().find(|l| l.id == exp.id).expect("link present");
+            assert_eq!(
+                got,
+                exp,
+                "entry {id} must round-trip losslessly",
+                id = exp.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_for_source_scopes_to_repo_and_path() {
+        let repo = MemSpecLinkRepository::default();
+        let old = entry("old-1", SpecLinkType::Implements);
+        repo.save(&old).await.unwrap();
+        // Unrelated link — must survive the replace.
+        let other = entry("other-1", SpecLinkType::Extends);
+        repo.save(&other).await.unwrap();
+
+        let replacement = entry("new-1", SpecLinkType::DependsOn);
+        repo.replace_for_source(
+            "repo-1",
+            &old.source_path,
+            std::slice::from_ref(&replacement),
+        )
+        .await
+        .unwrap();
+
+        let all = repo.list_all().await.unwrap();
+        assert_eq!(all.len(), 2, "old row replaced, unrelated row kept");
+        assert!(all.iter().any(|l| l.id == "new-1"));
+        assert!(all.iter().any(|l| l.id == "other-1"));
+        assert!(!all.iter().any(|l| l.id == "old-1"));
+    }
+
+    #[tokio::test]
+    async fn replace_for_source_empty_set_clears_rows() {
+        let repo = MemSpecLinkRepository::default();
+        let e = entry("gone-1", SpecLinkType::Implements);
+        repo.save(&e).await.unwrap();
+        // A manifest edit that removes all links must clear the rows, not
+        // skip them (an empty set is a delete, matching sync_spec_ledger).
+        repo.replace_for_source("repo-1", &e.source_path, &[])
+            .await
+            .unwrap();
+        assert!(repo.list_all().await.unwrap().is_empty());
+    }
+}
+
+#[derive(Default)]
 pub struct MemSpecAssertionResultRepository {
     store: Arc<Mutex<Vec<gyre_domain::SpecAssertionResult>>>,
 }
@@ -3448,6 +3842,35 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
 
     async fn delete(&self, workspace_id: &Id) -> Result<()> {
         self.store.lock().await.remove(workspace_id.as_str());
+        Ok(())
+    }
+}
+
+/// In-memory `TenantMetaSpecSetRepository` — same contract as
+/// `MemMetaSpecSetRepository`, keyed by tenant id. Kept in a separate store
+/// so a tenant and a workspace that happen to share an id string never
+/// shadow each other's set (mirrors the two DB tables).
+#[derive(Default)]
+pub struct MemTenantMetaSpecSetRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl TenantMetaSpecSetRepository for MemTenantMetaSpecSetRepository {
+    async fn get(&self, tenant_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(tenant_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, tenant_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, tenant_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(tenant_id.as_str());
         Ok(())
     }
 }
@@ -3588,8 +4011,18 @@ impl LlmConfigRepository for MemLlmConfigRepository {
     }
 }
 
-/// sha -> (agent_id, workspace_id, tenant_id, blob)
-type ConvMap = Arc<Mutex<HashMap<String, (String, String, String, Vec<u8>)>>>;
+/// Stored conversation blob with its scope identity. Named carrier
+/// (TASK-048 F1): the previous positional 4-tuple
+/// `(agent_id, workspace_id, tenant_id, blob)` was a field-swap hazard.
+struct ConversationBlob {
+    agent_id: String,
+    workspace_id: String,
+    tenant_id: String,
+    data: Vec<u8>,
+}
+
+/// sha -> stored conversation blob
+type ConvMap = Arc<Mutex<HashMap<String, ConversationBlob>>>;
 
 /// In-memory ConversationRepository for development and tests.
 pub struct MemConversationRepository {
@@ -3622,27 +4055,25 @@ impl gyre_ports::ConversationRepository for MemConversationRepository {
             .lock()
             .await
             .entry(sha.clone())
-            .or_insert_with(|| {
-                (
-                    agent_id.as_str().to_string(),
-                    workspace_id.as_str().to_string(),
-                    tenant_id.as_str().to_string(),
-                    conversation.to_vec(),
-                )
+            .or_insert_with(|| ConversationBlob {
+                agent_id: agent_id.as_str().to_string(),
+                workspace_id: workspace_id.as_str().to_string(),
+                tenant_id: tenant_id.as_str().to_string(),
+                data: conversation.to_vec(),
             });
         Ok(sha)
     }
 
     async fn get(&self, conversation_sha: &str, tenant_id: &Id) -> Result<Option<Vec<u8>>> {
         let guard = self.convs.lock().await;
-        let Some((_, _, tid, blob)) = guard.get(conversation_sha) else {
+        let Some(record) = guard.get(conversation_sha) else {
             return Ok(None);
         };
-        if tid != tenant_id.as_str() {
+        if record.tenant_id != tenant_id.as_str() {
             return Ok(None);
         }
         // Decompress.
-        let decompressed = zstd::decode_all(blob.as_slice())
+        let decompressed = zstd::decode_all(record.data.as_slice())
             .map_err(|e| anyhow::anyhow!("zstd decompress: {e}"))?;
         Ok(Some(decompressed))
     }
@@ -3674,20 +4105,25 @@ impl gyre_ports::ConversationRepository for MemConversationRepository {
         tenant_id: &Id,
     ) -> Result<Option<(Id, Id)>> {
         let guard = self.convs.lock().await;
-        let Some((aid, wid, tid, _)) = guard.get(conversation_sha) else {
+        let Some(record) = guard.get(conversation_sha) else {
             return Ok(None);
         };
-        if tid != tenant_id.as_str() {
+        if record.tenant_id != tenant_id.as_str() {
             return Ok(None);
         }
-        Ok(Some((Id::new(aid), Id::new(wid))))
+        Ok(Some((
+            Id::new(&record.agent_id),
+            Id::new(&record.workspace_id),
+        )))
     }
 
     async fn list_by_agent(&self, agent_id: &Id, tenant_id: &Id) -> Result<Vec<String>> {
         let guard = self.convs.lock().await;
         Ok(guard
             .iter()
-            .filter(|(_, (aid, _, tid, _))| aid == agent_id.as_str() && tid == tenant_id.as_str())
+            .filter(|(_, rec)| {
+                rec.agent_id == agent_id.as_str() && rec.tenant_id == tenant_id.as_str()
+            })
             .map(|(sha, _)| sha.clone())
             .collect())
     }
@@ -3905,9 +4341,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -3921,9 +4355,7 @@ pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<cra
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     );
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
@@ -3942,9 +4374,27 @@ pub fn test_state_with_storage(
         workspaces,
         policies,
         ws_store,
-        Some(storage),
-        None,
-        None,
+        TestStateOverrides {
+            storage: Some(storage),
+            ..Default::default()
+        },
+    )
+}
+
+/// Build a test AppState whose search port is the given adapter — used to
+/// exercise the reindex coordinator against a real SQLite FTS5 backend.
+#[cfg(test)]
+pub fn test_state_with_search(search: Arc<dyn gyre_ports::SearchPort>) -> Arc<crate::AppState> {
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides {
+            search: Some(search),
+            ..Default::default()
+        },
     )
 }
 
@@ -3957,7 +4407,13 @@ pub fn test_state_with_jj_and_git_ops(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
-    let mut state = test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None);
+    let mut state = test_state_inner(
+        git_ops,
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    );
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
     state
@@ -3976,9 +4432,10 @@ pub fn test_state_with_secrets(
         workspaces,
         policies,
         ws_store,
-        None,
-        Some(secrets),
-        None,
+        TestStateOverrides {
+            secrets: Some(secrets),
+            ..Default::default()
+        },
     )
 }
 
@@ -3993,9 +4450,10 @@ pub fn test_state_with_kv_store(kv: Arc<dyn gyre_ports::KvJsonStore>) -> Arc<cra
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        Some(kv),
+        TestStateOverrides {
+            kv: Some(kv),
+            ..Default::default()
+        },
     )
 }
 
@@ -4009,9 +4467,7 @@ pub fn test_state_failing_trust() -> Arc<crate::AppState> {
         workspaces,
         policies,
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4030,9 +4486,7 @@ pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
         Arc::new(workspaces),
         Arc::new(policies),
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4052,9 +4506,7 @@ pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
         Arc::new(workspaces),
         Arc::new(policies),
         ws_store,
-        None,
-        None,
-        None,
+        TestStateOverrides::default(),
     )
 }
 
@@ -4093,34 +4545,100 @@ fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, ws_store, None, None, None)
+    test_state_inner(
+        git_ops,
+        workspaces,
+        policies,
+        ws_store,
+        TestStateOverrides::default(),
+    )
 }
+/// Optional port overrides for `test_state_inner`: each field replaces the
+/// default in-memory implementation when `Some`. Bundling them in one struct
+/// keeps the shared builder under clippy's `too_many_arguments` threshold.
+#[cfg(test)]
+#[derive(Default)]
+struct TestStateOverrides {
+    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
+    search: Option<Arc<dyn gyre_ports::SearchPort>>,
+    secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
+    kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
+}
+
 /// Shared builder for all in-memory test states. Callers supply the git ops
-/// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
-/// `secrets` overrides the default in-memory SecretRepository when given.
+/// adapter plus a paired workspace/policy repo (see
+/// `shared_workspace_policy_pair`); `overrides` replaces individual default
+/// in-memory ports (storage/search/secrets/kv) when set.
 #[cfg(test)]
 fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     ws_store: Arc<Mutex<HashMap<String, Workspace>>>,
-    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
-    secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
-    kv: Option<Arc<dyn gyre_ports::KvJsonStore>>,
+    overrides: TestStateOverrides,
 ) -> Arc<crate::AppState> {
+    let spec_link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+        Arc::new(MemSpecLinkRepository::default());
+    let spec_links_store = crate::spec_registry::SpecLinksStore::default();
+    crate::load_spec_links_into_store(&spec_link_repo, &spec_links_store);
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+
+    let TestStateOverrides {
+        storage,
+        search,
+        secrets,
+        kv,
+    } = overrides;
+
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
     let meta_spec_binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+    // Mirror production wiring (lib.rs): entity repositories are wrapped in
+    // search-sync decorators so tests exercise the same index-on-write
+    // behavior as every real write path. The search port is wrapped in the
+    // tenant-resolution decorator (search_scope) exactly like production.
+    let search = crate::search_scope::with_tenant_resolution(
+        search.unwrap_or_else(|| {
+            Arc::new(gyre_adapters::MemSearchAdapter::new()) as Arc<dyn gyre_ports::SearchPort>
+        }),
+        Arc::clone(&workspaces),
+    );
+    let agents = crate::search_sync::wrap_agents(
+        Arc::new(MemAgentRepository::default()),
+        Arc::clone(&search),
+    );
+    let tasks =
+        crate::search_sync::wrap_tasks(Arc::new(MemTaskRepository::default()), Arc::clone(&search));
+    let merge_requests =
+        crate::search_sync::wrap_mrs(Arc::new(MemMrRepository::default()), Arc::clone(&search));
+    let reviews = crate::search_sync::wrap_reviews(
+        Arc::new(MemReviewRepository::default()),
+        Arc::clone(&merge_requests),
+        Arc::clone(&search),
+    );
+    let personas = crate::search_sync::wrap_personas(
+        Arc::new(MemPersonaRepository::default()),
+        Arc::clone(&search),
+    );
+    let analytics = crate::search_sync::wrap_analytics(
+        Arc::new(MemAnalyticsRepository::default()),
+        Arc::clone(&search),
+    );
+    let audit = crate::search_sync::wrap_audit(
+        Arc::new(MemAuditRepository::default()),
+        Arc::clone(&search),
+    );
+
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
         repos: Arc::new(MemRepoRepository::default()),
-        agents: Arc::new(MemAgentRepository::default()),
-        tasks: Arc::new(MemTaskRepository::default()),
-        merge_requests: Arc::new(MemMrRepository::default()),
-        reviews: Arc::new(MemReviewRepository::default()),
+        agents,
+        tasks,
+        merge_requests,
+        reviews,
         merge_queue: Arc::new(MemMergeQueueRepository::default()),
         git_ops,
         jj_ops: Arc::new(NoopJjOps),
@@ -4144,9 +4662,12 @@ fn test_state_inner(
         explorer_sessions: Arc::new(crate::explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: crate::retention::RetentionStore::new(),
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
-        analytics: Arc::new(MemAnalyticsRepository::default()),
+        budget_grace_in_progress: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
+        analytics,
         costs: Arc::new(MemCostRepository::default()),
-        audit: Arc::new(MemAuditRepository::default()),
+        audit,
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
@@ -4181,18 +4702,20 @@ fn test_state_inner(
         container_audits: Arc::new(MemContainerAuditRepository::default()),
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
         spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
+        spec_link_repo: spec_link_repo.clone(),
         spec_assertion_results: Arc::new(MemSpecAssertionResultRepository::default()),
         trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
-        spec_links_store: Arc::new(Mutex::new(Vec::new())),
+        spec_links_store,
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
         budget_calls: Arc::new(MemBudgetCallRepository::default()),
-        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        search,
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
-        personas: Arc::new(MemPersonaRepository::default()),
+        personas,
         policies,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
+        repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
         tenant_invitations: Arc::new(MemTenantInvitationRepository::default()),
@@ -4219,6 +4742,7 @@ fn test_state_inner(
             &meta_spec_binding_store,
         ))),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        tenant_meta_spec_sets: Arc::new(MemTenantMetaSpecSetRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         llm_configs: Arc::new(MemLlmConfigRepository::default()),
@@ -5804,6 +6328,45 @@ impl gyre_ports::commit_signature_repo::CommitSignatureRepository for MemCommitS
 }
 
 #[cfg(test)]
+mod budget_call_tests {
+    use super::*;
+    use gyre_ports::BudgetCallRepository;
+
+    fn record(id: &str) -> gyre_domain::BudgetCallRecord {
+        gyre_domain::BudgetCallRecord {
+            id: Id::new(id),
+            tenant_id: Id::new("tenant-1"),
+            workspace_id: Id::new("ws-1"),
+            repo_id: None,
+            agent_id: None,
+            task_id: None,
+            usage_type: "llm_query".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+            cost_usd: 0.001,
+            model: "test-model".to_string(),
+            prompt_template_sha: None,
+            timestamp: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn save_rejects_duplicate_id() {
+        // Port contract: "Insert-only; the record id is unique." The SQL
+        // adapters enforce this via the PRIMARY KEY; the mem adapter must
+        // reject a duplicate identically or SQLite-only suites would pass
+        // while the in-memory backend silently accepts rewrites.
+        let repo = MemBudgetCallRepository::default();
+        repo.save(&record("dup-1")).await.unwrap();
+        let err = repo.save(&record("dup-1")).await.unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        // Distinct ids still append.
+        repo.save(&record("dup-2")).await.unwrap();
+        let listed = repo.list_by_workspace("ws-1", 0, 10).await.unwrap();
+        assert_eq!(listed.len(), 2);
+    }
+}
+#[cfg(test)]
 mod secret_contract_tests {
     //! F1 (task-097): the mem adapter must enforce the SecretRepository port's
     //! duplicate-rejection contract in code — SQLite enforces it via UNIQUE
@@ -6092,5 +6655,76 @@ mod trace_payload_tests {
             .expect("promoted trace's payloads must survive delete_by_mr");
         let input = payload.input.map(|b| String::from_utf8(b).unwrap());
         assert_eq!(input.as_deref(), Some("i"));
+    }
+}
+
+#[cfg(test)]
+mod team_contract_tests {
+    use super::*;
+    use gyre_ports::TeamRepository;
+
+    fn team(id: &str, ws: &str, slug: &str) -> Team {
+        Team::new(
+            Id::new(id),
+            Id::new(ws),
+            "Platform",
+            slug,
+            Id::new("u-lead"),
+            1000,
+        )
+    }
+
+    /// Mirrors sqlite's team contract tests: the mem adapter must enforce
+    /// the port's duplicate constraints in code (it has no schema to lean
+    /// on) — duplicate slug within a workspace on create and update, and
+    /// duplicate team membership.
+    #[tokio::test]
+    async fn mem_team_enforces_duplicate_contracts() {
+        let repo = MemTeamRepository::default();
+
+        repo.create(&team("t-1", "ws-1", "platform")).await.unwrap();
+        let err = repo
+            .create(&team("t-2", "ws-1", "platform"))
+            .await
+            .expect_err("duplicate slug in workspace must fail");
+        assert!(format!("{err:#}").contains("team slug already exists"));
+        // Same slug in another workspace is fine.
+        repo.create(&team("t-3", "ws-2", "platform")).await.unwrap();
+
+        repo.create(&team("t-4", "ws-1", "sre")).await.unwrap();
+        let mut t4 = repo.find_by_id(&Id::new("t-4")).await.unwrap().unwrap();
+        t4.slug = "platform".to_string();
+        let err = repo
+            .update(&t4)
+            .await
+            .expect_err("renaming onto another team's slug must fail");
+        assert!(format!("{err:#}").contains("team slug already exists"));
+
+        repo.add_member(&TeamMembership::new(Id::new("t-1"), Id::new("u-1"), 2000))
+            .await
+            .unwrap();
+        let err = repo
+            .add_member(&TeamMembership::new(Id::new("t-1"), Id::new("u-1"), 3000))
+            .await
+            .expect_err("duplicate membership must fail");
+        assert!(format!("{err:#}").contains("already a member"));
+
+        // find_by_slug / list_for_user / delete-with-memberships.
+        assert_eq!(
+            repo.find_by_slug(&Id::new("ws-1"), "platform")
+                .await
+                .unwrap()
+                .unwrap()
+                .id
+                .as_str(),
+            "t-1"
+        );
+        let teams = repo
+            .list_for_user(&Id::new("ws-1"), &Id::new("u-1"))
+            .await
+            .unwrap();
+        assert_eq!(teams.len(), 1);
+        repo.delete(&Id::new("t-1")).await.unwrap();
+        assert_eq!(repo.list_members(&Id::new("t-1")).await.unwrap().len(), 0);
     }
 }
