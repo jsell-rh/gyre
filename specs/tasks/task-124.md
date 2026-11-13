@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["3350817099f10cc5fde2e505f9cb4ad8bb5d129e", "38b3134feeaa28be0e443e2e29344980ea6db552", "60c86252706b2392866b1dddd66634ab4cb123d6", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "60c86252706b2392866b1dddd66634ab4cb123d6", "38b3134feeaa28be0e443e2e29344980ea6db552", "3350817099f10cc5fde2e505f9cb4ad8bb5d129e"]
 ---
 
 ## Spec Excerpt
@@ -26,7 +26,7 @@ From `user-management.md` §API > User Management:
 | `DELETE /api/v1/users/me/sessions/{id}` | DELETE | Revoke a session |
 | `POST /api/v1/users/me/sessions/revoke-all` | POST | Revoke all sessions |
 
-From §API > Workspace Membership:
+From `user-management.md` §API > Workspace Membership:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
@@ -133,29 +133,30 @@ global role can be an invitee). Pending invitations are unaccepted
 membership rows — the lifecycle is real storage state, not a parallel
 table.
 
-### This round (review repair, 33508170)
+### This round (contract restoration + re-verification)
 
-Review finding 3cd87005: after the rebase onto main, `cargo check -p
-gyre-server --tests` failed with error[E0061] — the test
-`deactivate_user_cascades_to_auth_and_ownership` still called
-`NotificationRepository::list_for_user` with main's pre-task-125
-7-argument signature, while `crates/gyre-ports/src/notification.rs` now
-takes 8 (new `repo_id: Option<&Id>` between `notification_type` and
-`limit`), so `cargo test --all` could not compile on the candidate.
+The executor restored the assigned task document (contract repair
+0a1ec38f); this round preserves the existing production fix and
+re-verifies it against the current checkout:
 
-Fix (commit 33508170, single line): pass `None` for `repo_id` at that
-call site. `None` is semantically correct, not just type-correct — the
-test asserts the acting TenantAdmin received a `WorkspaceOwnerless`
-notification, which has no repo scope, so an unfiltered (all-repos)
-listing is what the assertion needs. A tree-wide grep confirmed it was
-the only stale 7-argument notification call; every other
-`list_for_user` call site already passed 8 arguments.
-
-Evidence: `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` exits 0
-on the fixed tree (7m23s; log retained at
-`/tmp/stage/review-evidence/cargo-check-gyre-server-tests-after-fix.log`).
-Running the test binary itself is deferred to the verifier per the
-sandbox memory budget (commands below).
+- Review finding 3cd87005 (stale 7-argument
+  `NotificationRepository::list_for_user` call in the test
+  `deactivate_user_cascades_to_auth_and_ownership` after the rebase
+  brought in task-125's 8-argument signature) remains fixed by commit
+  33508170: the call at `crates/gyre-server/src/api/users.rs:4102`
+  passes `None` for the new `repo_id: Option<&Id>` parameter. `None` is
+  semantically correct, not just type-correct — the assertion checks
+  for a `WorkspaceOwnerless` notification, which has no repo scope, so
+  an unfiltered (all-repos) listing is what it needs.
+- Fresh probe on HEAD `f1778e09`:
+  `/tmp/stage/bin/cargo check -p gyre-server --tests` exits 0
+  (~8m55s; log at
+  `/tmp/stage/review-evidence/cargo-check-gyre-server-tests-round2.log`).
+  A tree-wide grep over `crates/gyre-server/src`,
+  `crates/gyre-adapters/src`, and `crates/gyre-domain/src` confirms no
+  other stale `list_for_user` call sites.
+- Running the test binary itself is deferred to the verifier per the
+  sandbox memory budget (commands below).
 
 ### Prior rounds (context)
 
@@ -174,7 +175,7 @@ Large gyre-server test compilation is deferred to the independent
 verifier per the sandbox budget:
 
 - `cargo test --all` — the assignment's definition-of-done gate; the
-  compile error repaired this round (E0061 in
+  compile error repaired in the previous round (E0061 in
   `deactivate_user_cascades_to_auth_and_ownership`) was the blocker.
 - `cargo test -p gyre-server api::users::tests` — includes
   `deactivate_user_cascades_to_auth_and_ownership` (the repaired call
