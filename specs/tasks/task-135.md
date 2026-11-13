@@ -3,7 +3,7 @@ title: "Implement gate chain configuration and gate agent lifecycle"
 spec_ref: "agent-gates.md §Gate Chains"
 depends_on:
   - task-134
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
@@ -102,13 +102,9 @@ Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Exi
 
 ## Shipped
 
-Both coverage sections (§Gate Chains (Composable Policies), §Gate Agent
-Lifecycle) are implemented in production code and independently approved in
-prior rounds. This round repaired the protected-contract drift: the assigned
-task document was restored by the executor with its contract text (spec
-excerpt, acceptance criteria, agent instructions) intact; this round
-re-recorded the commit attribution and these shipped notes without touching
-that protected text, preserving the existing production fix unchanged.
+Both coverage sections are implemented in production code and were
+independently approved in prior rounds; this round resolved the fresh
+rebase conflict against main (task-128's ABAC policy engine).
 
 ### Behavior
 
@@ -124,23 +120,29 @@ that protected text, preserving the existing production fix unchanged.
   run with a scoped OIDC token (`review:submit` only — no push, no task
   creation), attributed to their persona and gate config, torn down
   (token revoked) after the verdict, and their full context window
-  (persona prompt, spec content pinned at the MR's `spec_ref` SHA, diff,
-  task description) is captured to the audit trail before the process
-  runs.
+  captured to the audit trail.
 
-### Merge state
+### This round: rebase resolution
 
-The DIRTY merge state against main was resolved in `a312f2a7` (only
-conflicted file: `crates/gyre-server/src/gate_executor.rs`; task-135's
-context-window capture and main's pinned-SHA spec delivery are
-complementary and both kept). Remote main is currently at `4dc0eb9b`,
-the branch base, so the resolution is current and clean.
+Main gained task-128's ABAC policy engine, which refactored the route
+literals in `abac_middleware.rs` into constants. The only conflicted file
+was `crates/gyre-server/src/abac_middleware.rs`; the resolution keeps
+task-128's `REPOS_WORKTREES_ID_ROUTE`/`REPOS_GATES_ROUTE`/
+`REPOS_GATES_ID_ROUTE` constants and preserves task-135's
+`/api/v1/repos/:id/gate-chain` resolver mapping (required: the route is
+registered in `api/mod.rs` and an unregistered route gets no policy
+evaluation). All other task-128 files auto-merged.
 
 ### Test evidence
 
-- `cargo check -p gyre-server` — clean on this head
-  (log: `/tmp/stage/review-evidence/cargo-check-gyre-server.txt`).
-- gyre-server test builds exceed the in-sandbox 4 GiB budget; the
-  verifier must run: `cargo test -p gyre-server --lib update_gate`,
-  `cargo test -p gyre-server --test task134_review_probe`, then the full
-  `cargo test --all`.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean on the merged
+  tree (no semantic conflict between task-128's policy engine and
+  task-135's gate/merge-processor code).
+- `scripts/check-abac-route-registry.sh` — OK: all registered
+  `/api/v1/` routes resolve in the ABAC registry, no duplicate entries,
+  no exemption growth.
+- `scripts/check-arch.sh` — passed.
+- Behavior tests for gate chains and agent lifecycle live in
+  `crates/gyre-server/src/api/gates.rs` and
+  `crates/gyre-server/src/merge_processor.rs` (unchanged this round;
+  full `cargo test --all` runs in the independent verifier).
