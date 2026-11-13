@@ -23,7 +23,7 @@ use axum::{
     response::sse::{Event, Sse},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::GateStatus;
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
@@ -1699,12 +1699,13 @@ pub async fn briefing_ask(
         ));
     }
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2 /
+    // HSI §6): 10 req/60 s, keyed on the auth-context user_id.
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -1781,18 +1782,10 @@ pub async fn briefing_ask(
 
     let workspace_id_obj = Id::new(&id);
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&workspace_id_obj, "briefing-ask")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_BRIEFING_ASK.to_string());
-
-    // Grounding context: JSON-serialized briefing + conversation history.
-    // The server is stateless (HSI §1325); the client owns the conversation
-    // state, so we replay exactly what was sent as prompt context.
+    // Grounding context: JSON-serialized briefing + conversation history
+    // (HSI §1327). The server is stateless (HSI §1325); the client owns
+    // the conversation state, so we replay exactly what was sent as prompt
+    // context.
     let briefing_json =
         serde_json::to_string(&briefing).map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
     let mut context = format!("Briefing data:\n{briefing_json}");
@@ -1814,24 +1807,89 @@ pub async fn briefing_ask(
         ));
     }
 
-    let system_prompt = template_content
-        .replace("{{workspace_id}}", &id)
-        .replace("{{context}}", &context)
-        .replace("{{question}}", &req.question);
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &workspace_id_obj,
+        None,
+        "briefing-ask",
+        crate::llm_defaults::PROMPT_BRIEFING_ASK,
+    )
+    .await;
+
+    // Prompt template (ui-layout.md §2): DB override → git tree
+    // (specs/prompts/briefing-ask.md) → hardcoded fallback. `sha` carries
+    // git provenance for the cost entry. Variables match the committed
+    // template (`{{briefing_json}}`, `{{graph_summary}}`, `{{history}}`);
+    // the hardcoded default uses `{{context}}` (briefing JSON + history
+    // transcript) — each variable gets its own faithful value.
+    // The user's question travels as the user prompt only (injection
+    // containment), so the template's `{{question}}` placeholder is
+    // explicitly blanked — the same rule the other two LLM endpoints
+    // apply — rather than leaking literal placeholder text.
+    let graph_summary =
+        crate::llm_helpers::workspace_graph_summary(&state, &workspace_id_obj, None).await;
+    let history_transcript: String = req
+        .history
+        .as_deref()
+        .map(|h| {
+            h.iter()
+                .map(|e| format!("{}: {}", e.role, e.content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("workspace_id", id.as_str()),
+            ("context", context.as_str()),
+            ("briefing_json", briefing_json.as_str()),
+            ("graph_summary", graph_summary.as_str()),
+            ("history", history_transcript.as_str()),
+            ("question", ""),
+        ],
+    );
     let user_prompt = req.question.clone();
 
-    // Resolve model and call streaming LLM.
-    let (model, _) =
-        crate::llm_helpers::resolve_llm_model(&state, &Id::new(&id), "briefing-ask").await;
-    let stream = factory
+    // Model + per-endpoint max output tokens (ui-layout.md §2).
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(&state, &workspace_id_obj, "briefing-ask").await;
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let stream = match factory
         .for_model(&model)
-        .stream_complete(&system_prompt, &user_prompt, None)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(model = %model, workspace_id = %id, error = ?e, "LLM stream_complete failed in briefing_ask");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
-
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
     // Budget tracking (ui-layout.md §3, platform-model.md §Budget Tracking):
     // the LlmPort does not return actual usage, so estimate — ~4 chars per
     // token for prompts (input) and the produced text (output).
@@ -1852,8 +1910,10 @@ pub async fn briefing_ask(
     }
 
     // Per-call budget record + workspace/tenant counter increment
-    // (platform-model.md §Budget Tracking). User-initiated query:
-    // agent_id/task_id/repo_id are None.
+    // (platform-model.md §Budget Tracking), with the prompt-template git
+    // SHA for audit (ui-layout.md §2). User-initiated query:
+    // agent_id/task_id/repo_id are None. Skip and log if the workspace
+    // cannot be resolved rather than fabricating a tenant scope.
     let ws_for_budget = state
         .workspaces
         .find_by_id(&workspace_id_obj)
@@ -1874,6 +1934,7 @@ pub async fn briefing_ask(
                 output_tokens: estimated_output as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
+                prompt_template_sha: template.sha.clone(),
             },
         )
         .await;
@@ -1897,7 +1958,8 @@ pub async fn briefing_ask(
     .unwrap_or_default();
     events.push(Ok(Event::default().event("complete").data(complete_data)));
 
-    Ok(Sse::new(stream::iter(events)).keep_alive(
+    let s = stream::iter(events);
+    Ok(Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
@@ -1953,6 +2015,22 @@ pub async fn link_node_to_spec(
             confidence: confidence_str.to_string(),
         }),
     ))
+}
+
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+fn sse_error_stream(
+    message: String,
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 /// GET /workspaces/{id}/graph/concept/{name}
@@ -2038,12 +2116,13 @@ pub async fn predict_graph(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
-    // Per-user/repo sliding-window rate limit: 10 req/60 s.
+    // Per-user/repo sliding-window rate limit: 10 req/60 s, keyed on the
+    // auth-context user_id (same principal rule as the LLM endpoints).
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -2135,7 +2214,7 @@ pub async fn predict_graph(
         crate::llm_helpers::resolve_llm_model(&state, &workspace_id, "graph-predict").await;
     let result = factory
         .for_model(&model)
-        .predict_json(&system_prompt, &user_prompt)
+        .predict_json(&system_prompt, &user_prompt, None)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -2737,6 +2816,172 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn briefing_ask_llm_connection_failure_sends_error_event() {
+        // ui-layout.md §2: an LLM connection failure is an SSE `error` event,
+        // not an HTTP 500 — and never a `complete` event.
+        let mut s = (*test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::failing(
+                "connection refused by mock",
+            )),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let app = crate::api::api_router().with_state(Arc::new(s));
+
+        let ws_body = serde_json::json!({"name": "llm-connfail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "Tell me more"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "error" {
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if kind == "complete" {
+                    complete_count += 1;
+                }
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a connection failure must never masquerade as a complete event"
+        );
+        assert!(
+            error_msgs[0].contains("connection refused by mock"),
+            "error event must carry the failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_llm_mid_stream_failure_sends_error_event() {
+        // A connection that drops mid-generation: partial chunks arrive, then
+        // the stream errors. The truncated response must surface as
+        // `event: error` — never a `complete` event built from the partial
+        // text. Regression for the old `filter_map(|r| r.ok())` that silently
+        // dropped the stream error and completed on the truncated text.
+        let mut s = (*test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::stream_error_after(
+                vec!["The workspace ".into(), "has three ".into()],
+                "dropped mid-generation by mock",
+            )),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let app = crate::api::api_router().with_state(Arc::new(s));
+
+        let ws_body = serde_json::json!({"name": "llm-midfail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "Tell me more"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "error" {
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if kind == "complete" {
+                    complete_count += 1;
+                }
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a truncated (mid-stream failed) response must never be completed"
+        );
+        assert!(
+            error_msgs[0].contains("dropped mid-generation by mock"),
+            "error event must carry the mid-stream failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
     /// Prompt-capturing LLM factory for the grounding test: records the
     /// system prompt of each stream_complete call and streams it back so the
     /// caller can assert on the exact prompt text the production code built.
@@ -2763,6 +3008,7 @@ mod tests {
             &self,
             _system_prompt: &str,
             _user_prompt: &str,
+            _max_tokens: Option<u32>,
         ) -> anyhow::Result<serde_json::Value> {
             Ok(serde_json::json!([]))
         }
@@ -3219,6 +3465,7 @@ mod tests {
                 id: "link-1".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3265,6 +3512,7 @@ mod tests {
                 id: "link-same".to_string(),
                 source_path: "system/auth.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/users.md".to_string(),
                 target_repo_id: Some("repo-1".to_string()),
@@ -3300,6 +3548,7 @@ mod tests {
                 id: "link-stale".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3341,6 +3590,7 @@ mod tests {
                 id: "link-old-stale".to_string(),
                 source_path: "system/billing.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/old-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3555,6 +3805,7 @@ mod tests {
                 id: "link-old".to_string(),
                 source_path: "system/old-dep.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "old-spec.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -4307,6 +4558,7 @@ concepts:
                 id: "link-r1".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "sha-link-r1".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -4321,6 +4573,7 @@ concepts:
                 id: "link-r2".to_string(),
                 source_path: "system/auth.md".to_string(),
                 source_repo_id: Some("repo-2".to_string()),
+                source_sha: "sha-link-r2".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/sso.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),

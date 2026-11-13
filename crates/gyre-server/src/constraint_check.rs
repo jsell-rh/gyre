@@ -414,13 +414,12 @@ pub async fn enforce_push_constraints(
     );
 
     // Collect all constraints from the full chain (§4.3 additive accumulation).
-    let (_root, explicit_from_chain, gate_from_chain) =
-        crate::git_http::accumulate_chain_constraints(&attestations);
+    let chain_constraints = crate::git_http::accumulate_chain_constraints(&attestations);
 
     let all_constraints = constraint_evaluator::collect_all_constraints(
-        &explicit_from_chain,
+        &chain_constraints.explicit_constraints,
         &strategy_constraints,
-        &gate_from_chain,
+        &chain_constraints.gate_constraints,
     );
 
     if all_constraints.is_empty() {
@@ -671,13 +670,12 @@ pub async fn enforce_merge_constraints(
     );
 
     // Collect all constraints from the full chain (§4.3 additive accumulation).
-    let (_root, explicit_from_chain, gate_from_chain) =
-        crate::git_http::accumulate_chain_constraints(&attestations);
+    let chain_constraints = crate::git_http::accumulate_chain_constraints(&attestations);
 
     let all_constraints = constraint_evaluator::collect_all_constraints(
-        &explicit_from_chain,
+        &chain_constraints.explicit_constraints,
         &strategy_constraints,
-        &gate_from_chain,
+        &chain_constraints.gate_constraints,
     );
 
     if all_constraints.is_empty() {
