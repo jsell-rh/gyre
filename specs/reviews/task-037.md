@@ -66,3 +66,31 @@ The implementation is well-executed overall. TypeScript interfaces accurately mi
 - No fix-introduced regressions: guard removal is covered by existing validator tests; streaming text finalization on error path is correct by code inspection (state symmetry with success path confirmed).
 
 **Verdict:** `complete` — all acceptance criteria met, both R1 findings resolved.
+
+---
+
+## R3 — `complete`
+
+**Round:** R3
+**Commit reviewed:** `8321e71a` (candidate `55f7054520802049f9e6d4508497c08d2dde7d8f`, base `b9487b1b7a1486d808df5fc20dc23a8c903f150e`)
+
+### Durable finding 87facbcf verification
+
+- [x] **Type gap — ScopeConcept missing `seed_match`**: Fixed. `web/src/lib/types/view-query.ts:61-62` now declares `seed_match?: string` with documentation of `'exact'` (default) | `'substring'`, matching `crates/gyre-common/src/view_query.rs:65-66` (`#[serde(default = "default_seed_match")] seed_match: String`) and the amended `specs/system/view-query-grammar.md` concept-scope entry. Typed consumers can now express the field the server serializes on every concept scope.
+
+- [x] **Validator gap — no `seed_match` enum check**: Fixed. `web/src/lib/view-query-validator.js:160-165` rejects `seed_match` values outside `{exact, substring}`, mirroring `ViewQuery::validate()` (`view_query.rs:346-351`). The client no longer accepts concept queries the Rust validator would reject.
+
+- [x] **Test gap — zero seed_match cases**: Fixed. Five new cases in `web/src/__tests__/view-query-validator.test.js`: valid `'exact'`, valid `'substring'`, omitted-default, invalid `'regex'`, case-variant `'Exact'`.
+
+### R3 verification
+
+- Diff from base is exactly the seed_match repair (types + validator + tests) plus task-doc updates; no unrelated changes.
+- Focused test run: `cd web && npx vitest run src/__tests__/view-query-validator.test.js` — 58 passed, exit 0 (log: `/tmp/stage/review-evidence/task-037-validator-tests.txt`).
+- Mutation check: disabling the seed_match validation line makes exactly the 2 invalid-value tests fail, exit 1 (log: `/tmp/stage/review-evidence/task-037-mutation-check.txt`); source restored byte-identical afterward (git tree clean).
+- Adjacent regression probe: `ExplorerConceptViews`, `ExplorerCanvas`, `ExplorerChat`, `view-query-scope` suites — 294 passed, exit 0 (log: `/tmp/stage/review-evidence/task-037-adjacent-tests.txt`).
+- Integration re-confirmed on the candidate: `ExplorerChat.svelte:359-376` validates every incoming `view_query` and renders an `isError` chat message on failure; `ExplorerCanvas.svelte:63-68` types `activeQuery` as `ViewQuery | null` and reads `scope.seed_match ?? 'exact'` at the concept-scope expansion site.
+- All acceptance criteria remain satisfied (types, matching, validator coverage, chat integration, error-not-crash, typed prop, unit tests).
+
+Non-blocking observation: the `seed_match` check fires only for string-typed values, so a non-string `seed_match` (e.g., a number) passes client validation silently — consistent with the validator's pre-existing type-guarded pattern for `direction`/`expand_direction`/heat metric, and such a value cannot cause a rendering error (the renderer coerces via `String(scope.seed_match ?? 'exact') === 'substring'`, falling back to exact). Rust rejects non-strings at deserialization, so the server never emits them.
+
+**Verdict:** `complete` — durable finding 87facbcf fully repaired with mutation-verified tests; no new defects.
