@@ -122,7 +122,7 @@ pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
-pub use team::Team;
+pub use team::{Team, TeamMembership};
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
 pub use user::{

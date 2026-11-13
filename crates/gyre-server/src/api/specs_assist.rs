@@ -1141,6 +1141,46 @@ pub async fn save_spec(
         })
         .map(|m| m.user_id.clone())
         .collect();
+
+    // Team routing (user-management.md §Team Management — "notify the
+    // platform team"): when the spec's registry manifest names a team in
+    // `human_approvers` (spec ownership, `team:slug`), that team's members
+    // are approval recipients too, resolved from the real team membership.
+    // Best-effort: an unreadable manifest adds no recipients (the
+    // role-based fan-out above already covers the approver-capable roles).
+    if let Some(manifest) = crate::spec_registry::read_manifest(&repo.path, "HEAD").await {
+        // Manifest paths are relative to `specs/` (e.g. "system/owned.md"),
+        // while `spec_path` arrives in the client-facing `specs/...` form —
+        // match both, the same normalization the conflict check above uses.
+        let stripped = req
+            .spec_path
+            .strip_prefix("specs/")
+            .unwrap_or(&req.spec_path)
+            .to_string();
+        let path_matches = |p: &str| p == req.spec_path || p == stripped;
+        if let Some(spec_entry) = manifest.specs.iter().find(|e| path_matches(&e.path)) {
+            if let Some(approval) = spec_entry.approval.as_ref() {
+                for approver in &approval.human_approvers {
+                    if crate::notifications::parse_team_ref(approver).is_some() {
+                        if let Some(team_members) = crate::notifications::resolve_team_members(
+                            state.as_ref(),
+                            &repo.workspace_id,
+                            approver,
+                        )
+                        .await
+                        {
+                            for uid in team_members {
+                                if !recipients.contains(&uid) {
+                                    recipients.push(uid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if recipients.is_empty() {
         // No eligible members — deliver to the system account so the
         // global-admin Inbox still surfaces the pending approval.
@@ -2667,6 +2707,310 @@ mod tests {
                 "submitted lines should appear as add ops in the persisted diff"
             );
         }
+    }
+
+    /// user-management.md §Team Management — notification routing ("notify
+    /// the platform team"): a manifest's `team:{slug}` human approvers are
+    /// SpecApprovalRequested recipients, resolved from real team
+    /// membership. The distinguishing recipient is a Viewer team member —
+    /// outside the role-based Admin/Developer/Owner fan-out — so this test
+    /// fails if team routing is dropped, reverted, or stubbed.
+    #[tokio::test]
+    async fn save_spec_notifies_team_members_from_manifest_approvers() {
+        use gyre_domain::{User, Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace + members: an Owner (role-based recipient) and a Viewer
+        // who is on the platform team (team-routed recipient only).
+        let now = 1_700_000_000u64;
+        let ws = Workspace {
+            id: Id::new("ws-team-route"),
+            tenant_id: Id::new("tenant-1"),
+            name: "Team Route WS".to_string(),
+            slug: "team-route-ws".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: now,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut owner = User::new(Id::new("user-tr-owner"), "ext-tr-owner", "tr-owner", now);
+        owner.tenant_id = Some(Id::new("tenant-1"));
+        state.users.create(&owner).await.unwrap();
+        let mut viewer = User::new(Id::new("user-tr-viewer"), "ext-tr-viewer", "tr-viewer", now);
+        viewer.tenant_id = Some(Id::new("tenant-1"));
+        state.users.create(&viewer).await.unwrap();
+
+        for (uid, role) in [
+            ("user-tr-owner", WorkspaceRole::Owner),
+            ("user-tr-viewer", WorkspaceRole::Viewer),
+        ] {
+            let m = WorkspaceMembership::new(
+                Id::new(format!("mem-{uid}")),
+                Id::new(uid),
+                ws.id.clone(),
+                role,
+                Id::new("system"),
+                now,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        // Team + membership through the real team API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-team-route/teams")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "Platform", "lead": "user-tr-owner"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team = body_json(resp).await;
+        assert_eq!(team["slug"], "platform");
+        let team_id = team["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/ws-team-route/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": "user-tr-viewer"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Repo with a manifest at HEAD naming team:platform as approver.
+        let repo_id = create_repo(&app, "team-route-repo", "ws-team-route").await;
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(repo_id.clone()))
+            .await
+            .unwrap()
+            .expect("repo record");
+
+        let manifest = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/owned.md
+    title: Owned
+    owner: team:platform
+    approval:
+      mode: human_only
+      human_approvers:
+        - team:platform
+"#;
+        commit_to_bare_repo_head(&repo.path, "main", manifest, "owned.md", "# Owned\n");
+
+        state
+            .spec_ledger
+            .save(&ledger_entry("system/owned.md", "sha-x", "ws-team-route"))
+            .await
+            .unwrap();
+
+        let save_body = serde_json::json!({
+            "spec_path": "specs/system/owned.md",
+            "content": "# Owned\n\nEdited.\n",
+            "message": "edit",
+            "base_sha": "sha-x",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The Viewer team member received the approval card — only team
+        // routing can address a Viewer here.
+        let viewer_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-tr-viewer"),
+                Some(&Id::new("ws-team-route")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            viewer_notifs.iter().any(
+                |n| n.notification_type == gyre_common::NotificationType::SpecApprovalRequested
+            ),
+            "the platform team's Viewer member must receive the SpecApprovalRequested card"
+        );
+
+        // The Owner still receives it through the role-based fan-out (guards
+        // against the notification block silently not running at all).
+        let owner_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-tr-owner"),
+                Some(&Id::new("ws-team-route")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            owner_notifs.iter().any(
+                |n| n.notification_type == gyre_common::NotificationType::SpecApprovalRequested
+            ),
+            "the workspace Owner must still receive the SpecApprovalRequested card"
+        );
+    }
+
+    /// Commit `specs/manifest.yaml` and `specs/system/<spec_file>` to the
+    /// HEAD branch of a bare git repo (plumbing only — no worktree), so
+    /// `read_manifest(repo_path, "HEAD")` resolves in tests.
+    ///
+    /// The API-created repo record points at a path that `NoopGitOps`
+    /// (test_state's git ops) never initialized on disk, so the bare repo
+    /// is created here — without it both this plumbing and the save flow's
+    /// `read_manifest` would fail against a nonexistent directory.
+    fn commit_to_bare_repo_head(
+        repo_path: &str,
+        branch: &str,
+        manifest: &str,
+        spec_file: &str,
+        spec_content: &str,
+    ) {
+        use std::io::Write;
+
+        if !std::path::Path::new(repo_path).exists() {
+            let out = std::process::Command::new("git")
+                .args(["init", "--bare", "-b", branch])
+                .arg(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git init --bare {repo_path} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let hash_object_stdin = |content: &str| -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["hash-object", "-w", "--stdin"])
+                .current_dir(repo_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(content.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let mktree = |entries: &str| -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["mktree"])
+                .current_dir(repo_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(entries.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "git mktree failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        let manifest_blob = hash_object_stdin(manifest);
+        let spec_blob = hash_object_stdin(spec_content);
+        let system_tree = mktree(&format!("100644 blob {spec_blob}\t{spec_file}"));
+        let specs_tree = mktree(&format!(
+            "100644 blob {manifest_blob}\tmanifest.yaml\n040000 tree {system_tree}\tsystem"
+        ));
+        let root_tree = mktree(&format!("040000 tree {specs_tree}\tspecs"));
+        // `git commit-tree` needs an author identity; the test environment
+        // has no global git config, so pass one explicitly (same identity
+        // `make_manifest_repo`-style tests set via local repo config).
+        let commit = {
+            let out = std::process::Command::new("git")
+                .args(["commit-tree", &root_tree, "-m", "manifest"])
+                .env("GIT_AUTHOR_NAME", "Gyre Test")
+                .env("GIT_AUTHOR_EMAIL", "test@gyre.dev")
+                .env("GIT_COMMITTER_NAME", "Gyre Test")
+                .env("GIT_COMMITTER_EMAIL", "test@gyre.dev")
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git commit-tree failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["update-ref", &format!("refs/heads/{branch}"), &commit]);
     }
 
     // ── POST /workspaces/:id/meta-specs/assist (§9 State 1 chat) ──────────
