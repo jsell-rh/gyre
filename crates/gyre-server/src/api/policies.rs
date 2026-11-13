@@ -265,6 +265,10 @@ pub struct ResourceAttrs {
     pub id: Option<String>,
     pub workspace_id: Option<String>,
     pub repo_id: Option<String>,
+    /// The resource's tenant — the third leg of the scope chain the
+    /// engine's canonical scope filter (`policy_engine::scope_applies`)
+    /// evaluates tenant-scoped policies against (review round 4).
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -328,6 +332,9 @@ pub async fn evaluate_policy(
     if let Some(repo) = &req.resource.repo_id {
         ctx.set("resource.repo_id", repo);
     }
+    if let Some(tid) = &req.resource.tenant_id {
+        ctx.set("resource.tenant_id", tid);
+    }
 
     let policies = state.policies.list().await?;
     let result = policy_engine::evaluate(policies, &ctx, &req.action, &req.resource.r#type);
@@ -385,6 +392,15 @@ pub struct EffectiveQuery {
     #[serde(alias = "subject_id")]
     pub subject: Option<String>,
     pub resource_type: Option<String>,
+    /// Optional resource scope the caller wants the answer scoped to
+    /// (review round 4): the engine's canonical scope filter
+    /// (`policy_engine::scope_applies`) evaluates Workspace/Repo/Tenant-
+    /// scoped policies against the resource scope chain, so without these
+    /// the endpoint can only answer for an unscoped resource — scoped
+    /// policies conservatively do not apply.
+    pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -476,6 +492,20 @@ pub async fn effective_permissions(
         } else if let Ok(Some(_agent)) = state.agents.find_by_id(&Id::new(sid.clone())).await {
             ctx.set("subject.type", "agent");
         }
+    }
+
+    // Resource scope chain for the engine's canonical scope filter
+    // (review round 4): scoped policies apply only when the queried scope
+    // matches; without a scope the answer is for an unscoped resource and
+    // scoped policies conservatively do not apply.
+    if let Some(ws) = &q.workspace_id {
+        ctx.set("resource.workspace_id", ws);
+    }
+    if let Some(repo) = &q.repo_id {
+        ctx.set("resource.repo_id", repo);
+    }
+    if let Some(tid) = &q.tenant_id {
+        ctx.set("resource.tenant_id", tid);
     }
 
     // Sample action/resource_type pairs to test.
@@ -717,6 +747,126 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["decision"], "deny");
+    }
+
+    /// Review round 4 (scope applicability): the dry-run endpoint must honor
+    /// the engine's canonical scope filter — a workspace-scoped policy does
+    /// not apply to a dry-run resource in a different workspace, and a
+    /// tenant-scoped policy does not apply across tenants (via the
+    /// resource.tenant_id scope-chain leg this round added to the request).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluate_respects_policy_scope() {
+        let app = app();
+
+        async fn create(app: &Router, body: serde_json::Value) -> String {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/policies")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let created = body_json(resp).await;
+            created["id"].as_str().unwrap().to_string()
+        }
+
+        async fn evaluate(app: &Router, resource: serde_json::Value) -> serde_json::Value {
+            let eval_body = serde_json::json!({
+                "subject": { "type": "user", "id": "user-1" },
+                "action": "write",
+                "resource": resource
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/policies/evaluate")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&eval_body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_json(resp).await
+        }
+
+        // Workspace-scoped Allow for ws-A only (the reviewer's repro shape).
+        let ws_id = create(
+            &app,
+            serde_json::json!({
+                "name": "ws-a-allow",
+                "scope": "workspace",
+                "scope_id": "ws-A",
+                "priority": 900,
+                "effect": "allow",
+                "conditions": [],
+                "actions": ["*"],
+                "resource_types": ["*"]
+            }),
+        )
+        .await;
+
+        // Out of scope (ws-B): default deny, no matched policy.
+        let json = evaluate(
+            &app,
+            serde_json::json!({ "type": "task", "workspace_id": "ws-B" }),
+        )
+        .await;
+        assert_eq!(json["decision"], "deny", "ws-A policy must not apply to ws-B");
+        assert!(
+            json["matched_policy"].is_null(),
+            "out-of-scope policy must not be the matched policy"
+        );
+
+        // In scope (ws-A): allowed by the scoped policy.
+        let json = evaluate(
+            &app,
+            serde_json::json!({ "type": "task", "workspace_id": "ws-A" }),
+        )
+        .await;
+        assert_eq!(json["decision"], "allow");
+        assert_eq!(json["matched_policy"], ws_id);
+
+        // Tenant-scoped Allow for t-1: applies via resource.tenant_id.
+        let t_id = create(
+            &app,
+            serde_json::json!({
+                "name": "t1-allow",
+                "scope": "tenant",
+                "scope_id": "t-1",
+                "priority": 890,
+                "effect": "allow",
+                "conditions": [],
+                "actions": ["*"],
+                "resource_types": ["*"]
+            }),
+        )
+        .await;
+
+        let json = evaluate(
+            &app,
+            serde_json::json!({ "type": "task", "tenant_id": "t-2" }),
+        )
+        .await;
+        assert_eq!(json["decision"], "deny", "t-1 policy must not apply to t-2");
+
+        let json = evaluate(
+            &app,
+            serde_json::json!({ "type": "task", "tenant_id": "t-1" }),
+        )
+        .await;
+        assert_eq!(json["decision"], "allow");
+        assert_eq!(json["matched_policy"], t_id);
     }
 
     #[tokio::test(flavor = "multi_thread")]

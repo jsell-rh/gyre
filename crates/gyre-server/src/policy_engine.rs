@@ -292,6 +292,58 @@ fn eval_policy_conditions(policy: &Policy, ctx: &AttributeContext) -> bool {
     policy.conditions.iter().all(|c| eval_condition(c, ctx))
 }
 
+/// Read a `Single` string attribute from the context.
+fn ctx_str<'a>(ctx: &'a AttributeContext, key: &str) -> Option<&'a str> {
+    match ctx.get(key) {
+        Some(AttrValue::Single(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Returns `true` if `policy`'s scope applies to the resource scope chain
+/// carried by `ctx` (§Evaluation Flow step 5: "collect applicable policies:
+/// repo → workspace → tenant scope"; §Policy Language scope column: "Tenant —
+/// applies to all tenants", "Workspace — applies to all repos in workspace",
+/// "Repo — applies to one repo").
+///
+/// Semantics (review round 4 — scope applicability on the evaluation path):
+///
+/// - `scope_id: None` means "all entities at this scope level": a Tenant
+///   policy with `None` is global (every seeded builtin), and a
+///   Workspace/Repo policy with `None` applies whenever a workspace/repo
+///   is addressed.
+/// - `scope_id: Some(id)` requires the addressed resource's scope-chain
+///   attribute (`resource.repo_id` / `resource.workspace_id` /
+///   `resource.tenant_id`) to be present AND equal. A ws-A policy never
+///   grants or restricts requests addressing ws-B (or another tenant's
+///   resources); a t-1 policy never governs t-2 resources.
+/// - When the scope level is not addressed at all (attribute absent), a
+///   policy scoped to that level does not apply — no scope is fabricated.
+///
+/// `Policy::applies_to` covers only actions/resource_types; scope
+/// applicability lives HERE, next to the other evaluation-ordering rules,
+/// as the single canonical filter every evaluation path (HTTP middleware,
+/// dry-run, effective-permissions, merge-time) shares.
+fn scope_applies(policy: &Policy, ctx: &AttributeContext) -> bool {
+    match policy.scope {
+        PolicyScope::Repo => match (&policy.scope_id, ctx_str(ctx, "resource.repo_id")) {
+            (None, Some(_)) => true,
+            (Some(sid), Some(rid)) => sid.as_str() == rid,
+            _ => false,
+        },
+        PolicyScope::Workspace => match (&policy.scope_id, ctx_str(ctx, "resource.workspace_id")) {
+            (None, Some(_)) => true,
+            (Some(sid), Some(wid)) => sid.as_str() == wid,
+            _ => false,
+        },
+        PolicyScope::Tenant => match (&policy.scope_id, ctx_str(ctx, "resource.tenant_id")) {
+            (None, _) => true,
+            (Some(sid), Some(tid)) => sid.as_str() == tid,
+            (Some(_), None) => false,
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Evaluation result
 // ---------------------------------------------------------------------------
@@ -360,8 +412,14 @@ pub fn evaluate(
         ctx.set_number("env.time", now as i64);
     }
 
-    // Filter to enabled policies that apply to this action/resource_type.
-    policies.retain(|p| p.enabled && p.applies_to(action, resource_type));
+    // Filter to enabled policies that apply to this action/resource_type
+    // AND whose scope applies to the addressed resource's scope chain
+    // (§Evaluation Flow step 5 — see `scope_applies`). The context's
+    // resource scope attributes are caller-resolved: the middleware and
+    // merge path look them up from the addressed entity before calling.
+    policies.retain(|p| {
+        p.enabled && p.applies_to(action, resource_type) && scope_applies(p, &ctx)
+    });
 
     let total = policies.len() as u32;
 
@@ -636,6 +694,142 @@ mod tests {
         // Policy only applies to "approve", not "read".
         let result = evaluate(vec![p], &ctx, "read", "spec");
         assert_eq!(result.effect, PolicyEffect::Deny); // default deny
+    }
+
+    // --- Scope applicability (review round 4: §Evaluation Flow step 5, -----
+    // §Policy Language scope column, §Policy Composition)
+
+    fn scoped_allow_policy(scope: PolicyScope, scope_id: Option<&str>, priority: u32) -> Policy {
+        Policy {
+            id: Id::new(format!(
+                "p-scoped-{priority}-{}",
+                scope_id.unwrap_or("none")
+            )),
+            name: "scoped-allow".to_string(),
+            description: String::new(),
+            scope,
+            scope_id: scope_id.map(Id::new),
+            priority,
+            effect: PolicyEffect::Allow,
+            conditions: vec![],
+            actions: vec!["*".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: Id::new("system"),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn workspace_scoped_policy_does_not_apply_out_of_scope() {
+        // A ws-A Allow must not grant a request addressing ws-B — the exact
+        // escalation the round-4 finding describes (scoped policy evaluated
+        // against every workspace's resources).
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-B");
+        let p = scoped_allow_policy(PolicyScope::Workspace, Some("ws-A"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "a ws-A policy must not apply to a ws-B request"
+        );
+        assert!(
+            result.matched_policy.is_none(),
+            "out-of-scope policy must not be recorded as the match"
+        );
+
+        // In scope: the same policy addressing ws-A grants the request.
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-A");
+        let p = scoped_allow_policy(PolicyScope::Workspace, Some("ws-A"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "an in-scope ws-A policy must apply to a ws-A request"
+        );
+    }
+
+    #[test]
+    fn repo_scoped_policy_requires_matching_addressed_repo() {
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.repo_id", "repo-1");
+        ctx.set("resource.workspace_id", "ws-1");
+        let p = scoped_allow_policy(PolicyScope::Repo, Some("repo-2"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect, PolicyEffect::Deny,
+            "a repo-2 policy must not apply to a repo-1 request"
+        );
+
+        // A repo-scoped policy does not apply when no repo is addressed,
+        // even inside the same workspace.
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-1");
+        let p = scoped_allow_policy(PolicyScope::Repo, Some("repo-1"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect, PolicyEffect::Deny,
+            "a repo-scoped policy must not apply when no repo is addressed"
+        );
+    }
+
+    #[test]
+    fn tenant_scoped_policy_does_not_apply_across_tenants() {
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.tenant_id", "t-2");
+        let p = scoped_allow_policy(PolicyScope::Tenant, Some("t-1"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect, PolicyEffect::Deny,
+            "a t-1 tenant policy must not apply to a t-2 request"
+        );
+
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.tenant_id", "t-1");
+        let p = scoped_allow_policy(PolicyScope::Tenant, Some("t-1"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    #[test]
+    fn scope_id_none_means_all_at_that_level_and_keeps_builtins_global() {
+        // Tenant/None is global: applies with no scope attributes at all —
+        // this is what keeps every seeded builtin (all Tenant/None)
+        // applicable on unscoped routes.
+        let ctx = AttributeContext::default();
+        let p = scoped_allow_policy(PolicyScope::Tenant, None, 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Workspace/None applies to any ADDRESSED workspace…
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-any");
+        let p = scoped_allow_policy(PolicyScope::Workspace, None, 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // …but not when no workspace is addressed (no scope fabricated).
+        let ctx = AttributeContext::default();
+        let p = scoped_allow_policy(PolicyScope::Workspace, None, 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn scoped_policy_still_overridden_by_immutable_deny_in_scope() {
+        // Scope filtering composes with the immutable-Deny-first rule: an
+        // in-scope high-priority Allow cannot bypass an immutable Deny.
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-A");
+        let allow = scoped_allow_policy(PolicyScope::Workspace, Some("ws-A"), 2000);
+        let deny = immutable_deny_policy(vec![]);
+        let result = evaluate(vec![allow, deny], &ctx, "approve", "spec");
+        assert_eq!(result.effect, PolicyEffect::Deny);
     }
 
     #[test]

@@ -3675,9 +3675,15 @@ pub(crate) async fn report_cascade_test_result(
 /// the merge processor is an internal service whose merge authority is
 /// governed by trust-preset and user Denies, not the pipeline catch-all.
 ///
-/// Workspace-scoped policies from OTHER workspaces are filtered out: the
-/// engine's `evaluate` does not check scope_id, and one workspace's trust Deny
-/// must not hold another workspace's merges.
+/// Scope applicability is enforced canonically inside the engine's
+/// `evaluate` (`policy_engine::scope_applies`, review round 4): policies
+/// scoped (scope_id set) to another workspace, repo, or tenant are filtered
+/// out, so one workspace's trust Deny cannot hold another workspace's
+/// merges. `scope_id: None` means "all entities at that scope level"
+/// (every seeded builtin), so a Workspace/None policy applies to merges in
+/// any workspace — the documented domain semantics
+/// (gyre-domain/src/policy.rs: "None means the policy applies to ALL
+/// entities at this scope level").
 ///
 /// Returns `Err` when the policy or workspace store cannot be READ (review
 /// F9): a read failure means the trust state cannot be determined, and the
@@ -3713,6 +3719,11 @@ async fn evaluate_merge_abac(
     ctx.set("resource.type", "mr");
     ctx.set("resource.repo_id", repo.id.as_str());
     ctx.set("resource.workspace_id", mr.workspace_id.as_str());
+    // Complete the resource scope chain so the engine's canonical scope
+    // filter (scope_applies) can tenant-scope policies on this path too.
+    if let Some(tid) = &tenant_id {
+        ctx.set("resource.tenant_id", tid);
+    }
 
     // Review F9: the policy-list read error PROPAGATES. The previous
     // `.unwrap_or_default()` degraded a store failure to an empty policy
@@ -3726,14 +3737,17 @@ async fn evaluate_merge_abac(
         .list()
         .await
         .context("supervised trust gate: policy store read failed")?;
+    // Scope applicability is NOT filtered here: the engine's `evaluate`
+    // applies the canonical `scope_applies` filter against the resource
+    // scope chain set above (review round 4 — previously this call site
+    // carried its own workspace-only filter while the HTTP path had none).
+    // Only the pipeline catch-all is excluded here, for the reason above.
     let policies: Vec<_> = policies
         .into_iter()
         .filter(|p| {
             // Pipeline catch-all: unconditional deny for HTTP subjects — not a
             // statement about system merge authority (see doc comment above).
             p.id.as_str() != crate::abac_middleware::DEFAULT_DENY_POLICY_ID
-                && (p.scope != gyre_domain::policy::PolicyScope::Workspace
-                    || p.scope_id.as_ref() == Some(&mr.workspace_id))
         })
         .collect();
     Ok(crate::policy_engine::evaluate(
@@ -3875,6 +3889,13 @@ async fn evaluate_attestation_abac(
     ctx.set_bool("subject.attestation_chain_present", true);
     ctx.set("resource.type", "attestation");
     ctx.set("resource.repo_id", repo.id.as_str());
+    // Complete the resource scope chain so the engine's canonical scope
+    // filter (policy_engine::scope_applies) scopes policies on this path
+    // exactly like the HTTP middleware path (review round 4).
+    ctx.set("resource.workspace_id", repo.workspace_id.as_str());
+    if let Some(ref tid) = tenant_id {
+        ctx.set("resource.tenant_id", tid);
+    }
 
     let policies = state.policies.list().await.unwrap_or_default();
     let eval_result = crate::policy_engine::evaluate(policies, &ctx, action, "attestation");

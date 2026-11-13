@@ -2281,6 +2281,10 @@ pub async fn abac_middleware(
     // change loads from the store; every subsequent request is served from
     // the cached set until a policy mutation (or an out-of-band
     // apply_trust_transition, invalidated by its handlers) clears it.
+    // §Evaluation Flow step 5 (review round 4): the engine's `evaluate`
+    // applies the canonical scope filter (`policy_engine::scope_applies`)
+    // against the resource scope chain extracted above — a policy scoped
+    // to another workspace/repo/tenant is not part of the applicable set.
     let policies = state.policies.list().await.unwrap_or_default();
     let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
 
@@ -3826,6 +3830,266 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "workspace Viewer membership must override global Developer allow"
+        );
+    }
+
+    /// Review round 4 (scope applicability, live): a Workspace-scoped
+    /// policy with `scope_id` = ANOTHER workspace must not apply to a
+    /// request addressing ws-1. Before the canonical `scope_applies`
+    /// filter the middleware fed the entire policy store to the engine, so
+    /// a ws-other Deny restricted (or a ws-other Allow granted) requests in
+    /// EVERY workspace. Both directions are asserted live:
+    ///
+    /// - out-of-scope Deny must NOT fire (the member's write stays allowed);
+    /// - the SAME policy re-scoped to ws-1 MUST fire (403, and the decision
+    ///   audit records it as the matched policy).
+    ///
+    /// Killing direction: reverting the scope filter makes leg 1 return 403.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scoped_workspace_deny_does_not_apply_out_of_scope_live() {
+        use axum::routing::post;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Unconditional high-priority Deny scoped to ws-other (a workspace
+        // the request does not address; the caller is not even a member).
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("test-ws-scoped-deny"),
+                name: "ws-other-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Workspace,
+                scope_id: Some(Id::new("ws-other")),
+                priority: 960,
+                effect: PolicyEffect::Deny,
+                conditions: vec![],
+                actions: vec!["*".to_string()],
+                resource_types: vec!["*".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // Leg 1: the member (global Developer, ws-1 member) writes in ws-1.
+        // The ws-other Deny is OUT OF SCOPE and must not fire — the request
+        // stays allowed by the seeded developer allow.
+        let token = member_jwt();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a ws-other-scoped Deny must not restrict a ws-1 request"
+        );
+
+        // Leg 2: re-scope the SAME policy to ws-1 — now it is in scope and
+        // must fire.
+        let mut p = state
+            .policies
+            .find_by_id("test-ws-scoped-deny")
+            .await
+            .unwrap()
+            .unwrap();
+        p.scope_id = Some(Id::new("ws-1"));
+        state.policies.update(&p).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the same Deny re-scoped to ws-1 must restrict the ws-1 request"
+        );
+
+        // The 403 must be a match of the scoped policy recorded in the
+        // decision audit trail (not a default deny).
+        let decisions = state
+            .policies
+            .list_decisions(Some("member-user"), None, 50)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().any(|d| {
+                d.decision == PolicyEffect::Deny
+                    && d.matched_policy
+                        .as_ref()
+                        .map(|p| p.as_str() == "test-ws-scoped-deny")
+                        .unwrap_or(false)
+            }),
+            "the in-scope Deny's 403 must be recorded as a test-ws-scoped-deny \
+             match in the decision audit trail"
+        );
+    }
+
+    /// Review round 4 (scope applicability, live, Allow direction — the
+    /// reviewer's exact repro): a Workspace-scoped Allow for ws-other must
+    /// NOT grant a write in ws-1. The caller's global role is downgraded to
+    /// Viewer so no seeded role-band allow covers the write — only the
+    /// scoped policy could. Out of scope → 403 (default deny); the SAME
+    /// policy re-scoped to ws-1 → 200 via a recorded policy match.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scoped_workspace_allow_does_not_escalate_across_workspaces_live() {
+        use axum::routing::post;
+
+        let (state, user_id) = setup_membership_state().await;
+
+        // Downgrade the global role so nothing else allows the write
+        // (UserRole has no Viewer; ReadOnly is the read-only global role).
+        let mut user = state.users.find_by_id(&user_id).await.unwrap().unwrap();
+        user.roles = vec![gyre_domain::UserRole::ReadOnly];
+        state.users.update(&user).await.unwrap();
+
+        // Unconditional high-priority Allow scoped to ws-other.
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("test-ws-scoped-allow"),
+                name: "ws-other-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Workspace,
+                scope_id: Some(Id::new("ws-other")),
+                priority: 900,
+                effect: PolicyEffect::Allow,
+                conditions: vec![],
+                actions: vec!["*".to_string()],
+                resource_types: vec!["*".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // Leg 1: out-of-scope Allow must not grant — default deny stands.
+        let token = member_jwt();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a ws-other-scoped Allow must not grant a ws-1 write"
+        );
+
+        // The denial must NOT be attributed to the out-of-scope policy.
+        let decisions = state
+            .policies
+            .list_decisions(Some("member-user"), None, 50)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().all(|d| d
+                .matched_policy
+                .as_ref()
+                .map(|p| p.as_str() != "test-ws-scoped-allow")
+                .unwrap_or(true)),
+            "the out-of-scope Allow must never be recorded as the matched policy"
+        );
+
+        // Leg 2: re-scope the SAME policy to ws-1 — now it grants.
+        let mut p = state
+            .policies
+            .find_by_id("test-ws-scoped-allow")
+            .await
+            .unwrap()
+            .unwrap();
+        p.scope_id = Some(Id::new("ws-1"));
+        state.policies.update(&p).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the same Allow re-scoped to ws-1 must grant the ws-1 write"
+        );
+
+        // The 200 must be a recorded match of the scoped policy.
+        let decisions = state
+            .policies
+            .list_decisions(Some("member-user"), None, 50)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().any(|d| {
+                d.decision == PolicyEffect::Allow
+                    && d.matched_policy
+                        .as_ref()
+                        .map(|p| p.as_str() == "test-ws-scoped-allow")
+                        .unwrap_or(false)
+            }),
+            "the in-scope Allow's 200 must be recorded as a test-ws-scoped-allow \
+             match in the decision audit trail"
         );
     }
 

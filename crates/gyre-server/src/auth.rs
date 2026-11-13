@@ -665,7 +665,12 @@ pub struct AuthenticatedAgent {
     ///   default tenant (`system_principal_tenant`).
     pub tenant_id: String,
     /// Raw JWT claims for ABAC evaluation (G6).
-    /// - Global token or API key: `None` — ABAC checks are bypassed for these.
+    /// - Global token or API key: `None` — these auth methods carry no JWT
+    ///   claims object. They are NOT exempt from ABAC: both flow through
+    ///   the normal policy evaluation (API-key principals evaluate with
+    ///   `subject.id` = the user's display_name; the global token is
+    ///   allowed by the seeded `system-full-access` policy, not by a
+    ///   middleware bypass).
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     pub jwt_claims: Option<serde_json::Value>,
     /// The raw bearer token presented by the caller, when auth came from the

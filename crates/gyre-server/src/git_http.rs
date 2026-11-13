@@ -81,7 +81,9 @@ fn service_header(service: &str) -> Vec<u8> {
 ///      workspace (gyre bootstrap --dev creates tenant "dev" while the
 ///      system principal's tenant_id stays "default"), so a strict filter
 ///      would 404 the bootstrap flow's own push. The fallback grants
-///      nothing the token lacks elsewhere (it bypasses ABAC on REST), and
+///      nothing the token lacks elsewhere (on REST it is allowed by the
+///      seeded `system-full-access` policy through normal ABAC evaluation,
+///      not by a bypass), and
 ///      the repo is still resolved inside the workspace the slug names.
 ///   2. Look up the repo by name within that workspace.
 async fn resolve_repo_by_slug(
@@ -1118,6 +1120,21 @@ pub async fn git_receive_pack(
                         ctx.set_bool("subject.attestation_chain_present", true);
                         ctx.set("resource.type", "attestation");
                         ctx.set("resource.repo_id", &repo_id_clone);
+                        // Complete the resource scope chain so the engine's
+                        // canonical scope filter
+                        // (policy_engine::scope_applies, review round 4)
+                        // scopes policies on this audit path exactly like
+                        // the HTTP middleware path. The resource tenant
+                        // comes from the repo's workspace (entity lookup),
+                        // never from the caller's tenant claim.
+                        ctx.set("resource.workspace_id", &repo_workspace_id_str);
+                        if let Ok(Some(ws)) = state_clone
+                            .workspaces
+                            .find_by_id(&gyre_common::Id::new(&repo_workspace_id_str))
+                            .await
+                        {
+                            ctx.set("resource.tenant_id", ws.tenant_id.to_string());
+                        }
 
                         let policies = state_clone.policies.list().await.unwrap_or_default();
                         let eval_result =
