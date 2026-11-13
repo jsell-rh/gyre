@@ -2,10 +2,10 @@
 title: "Wire meta-spec drift warnings into merge gates"
 spec_ref: "meta-spec-reconciliation.md §9"
 depends_on: [task-156]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["1066686c900276a5d94673ed23577c9700dc62a8", "ef9680cd63c187c1b0912590e12dec3fa8b1a6fd", "733f1bd6aa2cd179c662c5a057764acb1f972065", "04df217adba0528df3e0a54538c793bb9b0ec0e6", "e0a97a8a6f011f8e60817782d75431763c7419e6", "51528a6c51b11f2714bf026c34bc9886d4a93d1d", "2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "0ade5b2f8f3afd66337a14957a67abeb64d9809c"]
+commits: ["1066686c900276a5d94673ed23577c9700dc62a8", "ef9680cd63c187c1b0912590e12dec3fa8b1a6fd", "733f1bd6aa2cd179c662c5a057764acb1f972065", "04df217adba0528df3e0a54538c793bb9b0ec0e6", "e0a97a8a6f011f8e60817782d75431763c7419e6", "51528a6c51b11f2714bf026c34bc9886d4a93d1d", "2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "0ade5b2f8f3afd66337a14957a67abeb64d9809c", "752bf632fae065c692ed3b4a39a2af1f886dec36"]
 ---
 
 ## Spec Excerpt
@@ -114,26 +114,24 @@ tooltip "Meta-spec drift: produced under v{old}, current is v{new}".
 ### Repair history
 
 The published PR repeatedly conflicted with advancing main; each round
-merged current main into the branch (latest: 2688cfc2 ← 349a32ac
-task-037) preserving the task-159 implementation — all six task-159
-source files (`reconciliation.rs`, `merge_processor.rs`,
-`merge_policy.rs`, `api/workspaces.rs`, `api/merge_deps.rs`,
-`MergeQueueGraph.svelte`) byte-identical to the approved head, main's
-task-037 view-query sources taken whole, and the generated
-`web/dist/index.html` resolved to the assignment base (dist assets are
-restored/republished by the executor and final integration). The
-`commits:` frontmatter records the attributed product commits plus the
-repair merge commits for review scoping. This round (contract repair
-427d0fc7) restored the assigned task document without touching any
-source file; head b38aebd5 is unchanged.
+merged current main into the branch. This round: merged assignment base
+f764bc00 (task-187 conversational exploration) as 752bf632, preserving the
+task-159 implementation — all six task-159 source files
+(`reconciliation.rs`, `merge_processor.rs`, `merge_policy.rs`,
+`api/workspaces.rs`, `api/merge_deps.rs`, `MergeQueueGraph.svelte`)
+verified present post-merge, and `web/dist` resolved byte-identical to
+the assignment base (dist assets are restored/republished by the executor
+and final integration). The durable CI finding for previous head ceca6de2
+(`Development controller` check failed, logs unavailable) is addressed by
+this reconciliation merge with the current base.
 
 ### Test evidence
 
-On head b38aebd5 this round (evidence under /tmp/stage/review-evidence/:
+On merge head 752bf632 (evidence under /tmp/stage/review-evidence/:
 task-159-cargo-check.txt, task-159-cargo-check-tests.txt,
 task-159-mergequeuegraph-vitest.txt, task-159-arch.txt,
 task-159-abac-registry.txt): `cargo check -p gyre-server` passes
-(7m 59s) and `cargo check -p gyre-server --tests` passes (3m 29s),
+(7m 06s) and `cargo check -p gyre-server --tests` passes (3m 05s),
 both via the build wrapper; `npx vitest run
 src/__tests__/MergeQueueGraph.test.js` — 29/29 pass (drift badge +
 tooltip); `scripts/check-arch.sh` — pass;
@@ -142,7 +140,5 @@ gyre-server` is owned by the independent verifier (server test
 compilation exceeds the sandbox budget): the verifier should run
 `cargo test -p gyre-server` (drift merge-gate tests in
 `merge_processor.rs`: match, mismatch, strict-policy hard block,
-no-attestation skip, cross-workspace starvation; drift evaluation tests
-in `reconciliation.rs`: matching SHA, mismatched SHA, no-attestation
-skip, no-workspace-set skip, empty-SHA skip, warning parse round-trip)
-plus `cd web && npx vitest run`.
+no-attestation, idempotent-warning; drift evaluation and
+format/parse round-trip tests in `reconciliation.rs`).
