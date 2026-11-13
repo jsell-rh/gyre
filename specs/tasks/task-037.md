@@ -5,7 +5,10 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-037.md
 coverage_sections: []
-commits: ["8321e71a32c10bba653336d07628e347f4977751"]
+commits: 
+  - e9b13077
+  - 35d45dac
+  - 8321e71a
 ---
 
 ## Spec Excerpt
@@ -91,7 +94,8 @@ When working on this task:
 ## Shipped
 
 ViewQuery TypeScript types and client-side validation for the explorer, plus the
-requirements-gap repair from review round 87facbcf.
+requirements-gap repair from review round 87facbcf (seed_match mirroring),
+preserved through the contract restoration of round 25ca67b7.
 
 ### Types (`web/src/lib/types/view-query.ts`)
 
@@ -101,7 +105,8 @@ All ViewQuery sub-types mirror the Rust definitions in
 `Highlight`, `HeatConfig`, `BadgeConfig`, `EdgeFilter`, `Zoom`,
 `ViewAnnotation`, `ViewGroup`, `ViewCallout`, `NarrativeStep`. `ScopeConcept`
 declares `seed_match?: string` (`'exact'` default | `'substring'`), matching
-the Rust field and the amended spec.
+the Rust field (`view_query.rs:65-66`) and the amended
+`specs/system/view-query-grammar.md` concept-scope spec.
 
 ### Validator (`web/src/lib/view-query-validator.js`)
 
@@ -112,8 +117,9 @@ expand_direction/seed_match/expand_edges, diff commits), edge types against
 `KNOWN_EDGE_TYPES`, emphasis (dim_unmatched range, tiered_colors, heat metric,
 highlight color, badge template length), zoom (names, number-as-string trap,
 level range), callout/group colors, and narrative order uniqueness. The
-concept case rejects `seed_match` values outside `{exact, substring}`, so the
-client no longer accepts queries the Rust validator rejects.
+concept case rejects `seed_match` values outside `{exact, substring}` (mirrors
+`view_query.rs:346-351`), so the client no longer accepts queries the Rust
+validator would reject.
 
 ### Integration
 
@@ -121,14 +127,14 @@ client no longer accepts queries the Rust validator rejects.
 applying it; invalid queries render an error message in the chat instead of
 crashing, with errors logged for debugging. `ExplorerCanvas.svelte` types
 `activeQuery` as `ViewQuery | null` and reads `scope.seed_match ?? 'exact'`
-for concept expansion (real behavior already shipped in task-182's concept
-views; this round closed the stale type and missing validation).
+for concept expansion (runtime behavior shipped with task-182's concept
+views; rounds e9b13077/8321e71a closed the types and validation gaps).
 
 ### Test evidence
 
 `cd web && npx vitest run src/__tests__/view-query-validator.test.js` —
-58 passed (53 prior + 5 new seed_match cases: valid `'exact'`, valid
-`'substring'`, default-absent, invalid `'regex'`, case-variant `'Exact'`).
-Mutation-verified: removing the seed_match check fails the 2 invalid-value
-tests. Log retained at /tmp/stage/review-evidence/task-037-validator-tests.txt
-(exit 0).
+58 passed (53 prior + 5 seed_match cases: valid `'exact'`, valid
+`'substring'`, default-absent, invalid `'regex'`, case-variant `'Exact'`),
+exit 0. Mutation-verified this round: removing the seed_match check from the
+validator fails the 2 invalid-value tests. Log retained at
+/tmp/stage/review-evidence/task-037-validator-tests.txt (exit 0).
