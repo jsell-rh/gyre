@@ -42,7 +42,9 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod search_indexer;
 pub mod search_scope;
+pub mod search_sync;
 pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
@@ -1197,6 +1199,63 @@ pub fn build_state(
         };
     }
 
+    // search.md §Index Updates: entity repositories are wrapped in
+    // search-sync decorators so every write path (REST, MCP, background
+    // jobs) keeps the search index in sync. The search port must be resolved
+    // first because the decorators hold a clone of it. It is wrapped in the
+    // tenant-resolution decorator (search_scope) so every indexed document
+    // carries its tenant scope — the mem fallback has no workspace table to
+    // derive it from, so resolution happens server-side, uniformly for every
+    // index path (§Access Scoping step 1).
+    let workspaces: Arc<dyn WorkspaceRepository> = store!(
+        dyn WorkspaceRepository,
+        mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
+            .with_workspace_store(Arc::clone(&mem_workspace_store))
+    );
+    let search: Arc<dyn gyre_ports::SearchPort> = search_scope::with_tenant_resolution(
+        store!(
+            dyn gyre_ports::SearchPort,
+            gyre_adapters::MemSearchAdapter::new()
+        ),
+        Arc::clone(&workspaces),
+    );
+    let agents: Arc<dyn AgentRepository> = search_sync::wrap_agents(
+        store!(dyn AgentRepository, mem::MemAgentRepository::default()),
+        Arc::clone(&search),
+    );
+    let tasks: Arc<dyn TaskRepository> = search_sync::wrap_tasks(
+        store!(dyn TaskRepository, mem::MemTaskRepository::default()),
+        Arc::clone(&search),
+    );
+    let merge_requests: Arc<dyn MergeRequestRepository> = search_sync::wrap_mrs(
+        store!(dyn MergeRequestRepository, mem::MemMrRepository::default()),
+        Arc::clone(&search),
+    );
+    let reviews: Arc<dyn ReviewRepository> = search_sync::wrap_reviews(
+        store!(dyn ReviewRepository, mem::MemReviewRepository::default()),
+        Arc::clone(&merge_requests),
+        Arc::clone(&search),
+    );
+    let personas: Arc<dyn PersonaRepository> = search_sync::wrap_personas(
+        store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
+        Arc::clone(&search),
+    );
+    let analytics: Arc<dyn AnalyticsRepository> = search_sync::wrap_analytics(
+        store!(
+            dyn AnalyticsRepository,
+            mem::MemAnalyticsRepository::default()
+        ),
+        Arc::clone(&search),
+    );
+    // The audit repo keeps both concerns: search-sync indexing on every
+    // recorded event (task-202) AND store sharing with the judgment ledger
+    // in pure-mem mode (task-209, HSI §12) — the decorator wraps the shared
+    // store instead of constructing its own.
+    let audit: Arc<dyn AuditRepository> = search_sync::wrap_audit(
+        store_shared!(dyn AuditRepository, mem_audit),
+        Arc::clone(&search),
+    );
+
     // Spec-link graph persistence (spec-links.md §Forge-Maintained Spec Graph).
     // The SQL table is authoritative; the in-memory store is a hot cache,
     // loaded here at boot so the graph survives restarts without re-push.
@@ -1211,10 +1270,10 @@ pub fn build_state(
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
         repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
-        agents: store!(dyn AgentRepository, mem::MemAgentRepository::default()),
-        tasks: store!(dyn TaskRepository, mem::MemTaskRepository::default()),
-        merge_requests: store!(dyn MergeRequestRepository, mem::MemMrRepository::default()),
-        reviews: store!(dyn ReviewRepository, mem::MemReviewRepository::default()),
+        agents,
+        tasks,
+        merge_requests,
+        reviews,
         merge_queue: store!(
             dyn MergeQueueRepository,
             mem::MemMergeQueueRepository::default()
@@ -1254,12 +1313,9 @@ pub fn build_state(
         budget_grace_in_progress: Arc::new(tokio::sync::Mutex::new(
             std::collections::HashSet::new(),
         )),
-        analytics: store!(
-            dyn AnalyticsRepository,
-            mem::MemAnalyticsRepository::default()
-        ),
+        analytics,
         costs: store!(dyn CostRepository, mem::MemCostRepository::default()),
-        audit: store_shared!(dyn AuditRepository, mem_audit),
+        audit,
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
         network_peers: store!(
@@ -1372,20 +1428,13 @@ pub fn build_state(
             dyn BudgetCallRepository,
             mem::MemBudgetCallRepository::default()
         ),
-        search: store!(
-            dyn gyre_ports::SearchPort,
-            gyre_adapters::MemSearchAdapter::new()
-        ),
+        search,
         tenants: store!(
             dyn gyre_ports::TenantRepository,
             mem::MemTenantRepository::default()
         ),
-        workspaces: store!(
-            dyn WorkspaceRepository,
-            mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
-                .with_workspace_store(Arc::clone(&mem_workspace_store))
-        ),
-        personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
+        workspaces,
+        personas,
         policies: store!(
             dyn PolicyRepository,
             mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
