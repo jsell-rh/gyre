@@ -2460,6 +2460,7 @@ mod tests {
             updated_at: 1_000_000,
             max_agents: None,
             max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo).await.unwrap();
 

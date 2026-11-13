@@ -2941,6 +2941,7 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now,
+                compute_minutes: 0,
             });
         usage.active_agents = usage.active_agents.saturating_add(1);
         Ok(usage.clone())
@@ -2973,19 +2974,34 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now,
+                compute_minutes: 0,
             });
         usage.tokens_used_today = usage.tokens_used_today.saturating_add(tokens);
         usage.cost_today += cost_usd;
         Ok(())
     }
 
-    async fn reset_daily_counters(&self, now: u64) -> Result<()> {
+    async fn add_compute_minutes(
+        &self,
+        entity_key: &str,
+        entity_type: &str,
+        entity_id: &str,
+        now: u64,
+        minutes: u64,
+    ) -> Result<()> {
         let mut guard = self.store.lock().await;
-        for usage in guard.values_mut() {
-            usage.tokens_used_today = 0;
-            usage.cost_today = 0.0;
-            usage.period_start = now;
-        }
+        let usage = guard
+            .entry(entity_key.to_string())
+            .or_insert_with(|| BudgetUsage {
+                entity_type: entity_type.to_string(),
+                entity_id: gyre_common::Id::new(entity_id.to_string()),
+                tokens_used_today: 0,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: now,
+                compute_minutes: 0,
+            });
+        usage.compute_minutes = usage.compute_minutes.saturating_add(minutes);
         Ok(())
     }
 }
@@ -3033,6 +3049,24 @@ impl gyre_ports::BudgetCallRepository for MemBudgetCallRepository {
                 .then(b.id.as_str().cmp(a.id.as_str()))
         });
         records.truncate(limit.max(0) as usize);
+        Ok(records)
+    }
+
+    async fn list_since(
+        &self,
+        since: u64,
+        limit: i64,
+    ) -> Result<Vec<gyre_domain::BudgetCallRecord>> {
+        let store = self.store.lock().await;
+        let mut records: Vec<gyre_domain::BudgetCallRecord> = store
+            .iter()
+            .filter(|r| r.timestamp >= since)
+            .cloned()
+            .collect();
+        records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+        if limit >= 0 {
+            records.truncate(limit as usize);
+        }
         Ok(records)
     }
 }
@@ -4505,6 +4539,9 @@ fn test_state_inner(
         explorer_sessions: Arc::new(crate::explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: crate::retention::RetentionStore::new(),
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
+        budget_grace_in_progress: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
         analytics,
         costs: Arc::new(MemCostRepository::default()),
         audit,

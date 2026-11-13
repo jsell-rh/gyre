@@ -119,6 +119,13 @@ pub trait GitOpsPort: Send + Sync {
     /// the spec content at the exact SHA pinned in the MR's `spec_ref`
     /// (`path@sha`), so the reviewer judges the change against the spec the
     /// MR was authored under, not whatever the branch tip holds now.
+    ///
+    /// The SHA may also name a **blob** directly — the production spec_ref
+    /// shape: MR spec_refs carry the spec ledger's blob SHA
+    /// (`spec_ledger.current_sha`), whose ledger path (`system/foo.md`) is
+    /// not a repo tree path. A blob pin resolves to the blob's own content;
+    /// the path is informational for that shape. A SHA that is neither a
+    /// commit nor a blob is an error (fail-closed pin resolution).
     async fn read_file_at_commit(
         &self,
         repo_path: &str,
