@@ -111,41 +111,38 @@ result into a `meta_spec_drift` node field;
 `web/src/components/MergeQueueGraph.svelte` renders the ⚠ badge with
 tooltip "Meta-spec drift: produced under v{old}, current is v{new}".
 
-### Rebase repair rounds
+### Repair history
 
-The published PR repeatedly conflicted with advancing main. Each round
-merged current main into the branch (f8076591 ← b9487b1b task-182;
-2688cfc2 ← 349a32ac task-037) preserving the task-159 implementation:
-in the latest merge, all six task-159 source files (`reconciliation.rs`,
-`merge_processor.rs`, `merge_policy.rs`, `api/workspaces.rs`,
-`api/merge_deps.rs`, `MergeQueueGraph.svelte`) are byte-identical to the
-approved head, main's task-037 view-query sources are taken whole
-(main's delta since the merge base is frontend-only: view-query types,
-validator, tests, dist, and task specs), and the only
-both-sides-modified file was
-`web/dist/index.html` (generated, resolved to the assignment base;
-dist assets are restored/republished by the executor and final
-integration). The `commits:` frontmatter records the attributed product
-commits plus the repair merge commits for review scoping.
+The published PR repeatedly conflicted with advancing main; each round
+merged current main into the branch (latest: 2688cfc2 ← 349a32ac
+task-037) preserving the task-159 implementation — all six task-159
+source files (`reconciliation.rs`, `merge_processor.rs`,
+`merge_policy.rs`, `api/workspaces.rs`, `api/merge_deps.rs`,
+`MergeQueueGraph.svelte`) byte-identical to the approved head, main's
+task-037 view-query sources taken whole, and the generated
+`web/dist/index.html` resolved to the assignment base (dist assets are
+restored/republished by the executor and final integration). The
+`commits:` frontmatter records the attributed product commits plus the
+repair merge commits for review scoping. This round (contract repair
+427d0fc7) restored the assigned task document without touching any
+source file; head b38aebd5 is unchanged.
 
 ### Test evidence
 
-This round on the merged tree 2688cfc2 (evidence:
-/tmp/stage/review-evidence/task-159-merge-349a32ac-cargo-check.txt,
-task-159-merge-349a32ac-cargo-check-tests.txt,
-task-159-merge-349a32ac-vitest.txt,
-task-159-merge-349a32ac-attribution.txt): `cargo check -p gyre-server`
-passes (8m 18s) and `cargo check -p gyre-server --tests` passes
-(4m 27s), both via the build wrapper; `npx vitest run
-src/__tests__/MergeQueueGraph.test.js
-src/__tests__/view-query-validator.test.js` — 87/87 pass (29 drift badge
-+ tooltip, 58 main-side view-query validator, confirming the merged
-frontend is coherent); `scripts/check-arch.sh` — pass;
-`scripts/check-abac-route-registry.sh` — pass;
-`scripts/check-task-commit-attribution.sh` — pass with the re-recorded
-frontmatter. `cargo test -p gyre-server` is owned by the
-independent verifier (server test compilation exceeds the sandbox
-budget): the verifier should run `cargo test -p gyre-server` (drift
-merge-gate tests: match, mismatch, strict-policy hard block,
-no-attestation skip, and cross-workspace starvation cases in
-`merge_processor.rs`) plus `cd web && npx vitest run`.
+On head b38aebd5 this round (evidence under /tmp/stage/review-evidence/:
+task-159-cargo-check.txt, task-159-cargo-check-tests.txt,
+task-159-mergequeuegraph-vitest.txt, task-159-arch.txt,
+task-159-abac-registry.txt): `cargo check -p gyre-server` passes
+(7m 59s) and `cargo check -p gyre-server --tests` passes (3m 29s),
+both via the build wrapper; `npx vitest run
+src/__tests__/MergeQueueGraph.test.js` — 29/29 pass (drift badge +
+tooltip); `scripts/check-arch.sh` — pass;
+`scripts/check-abac-route-registry.sh` — pass. `cargo test -p
+gyre-server` is owned by the independent verifier (server test
+compilation exceeds the sandbox budget): the verifier should run
+`cargo test -p gyre-server` (drift merge-gate tests in
+`merge_processor.rs`: match, mismatch, strict-policy hard block,
+no-attestation skip, cross-workspace starvation; drift evaluation tests
+in `reconciliation.rs`: matching SHA, mismatched SHA, no-attestation
+skip, no-workspace-set skip, empty-SHA skip, warning parse round-trip)
+plus `cd web && npx vitest run`.
