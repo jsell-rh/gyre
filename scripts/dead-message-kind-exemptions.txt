@@ -12,11 +12,11 @@
 # post-merge recovery path (handle_post_merge_failure).
 MrReverted
 
-# Spec'd (agent-runtime.md budget warnings; platform-model hot-file
-# warnings; message-bus QueueUpdated) but never emitted — pre-existing
-# gaps, tracked here so the check is green for NEW kinds.
+# Spec'd (platform-model hot-file warnings; message-bus QueueUpdated)
+# but never emitted — pre-existing gaps, tracked here so the check is
+# green for NEW kinds. BudgetWarning/BudgetExhausted gained real emitters
+# in task-119 (agent-runtime.md §4 enforcement levels) and were removed
+# from this list.
 QueueUpdated
 HotFilesChanged
-BudgetWarning
-BudgetExhausted
 AgentError
