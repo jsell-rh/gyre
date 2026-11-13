@@ -178,11 +178,16 @@ impl SearchPort for MemSearchAdapter {
             doc.updated_at = Some(now_secs());
         }
         let mut docs = self.docs.lock().unwrap();
-        // Replace existing entry for the same entity, or insert.
-        if let Some(existing) = docs
-            .iter_mut()
-            .find(|d| d.entity_type == doc.entity_type && d.entity_id == doc.entity_id)
-        {
+        // Replace existing entry for the same entity + scope, or insert.
+        // Scope is part of the identity: a spec/file path is only unique
+        // within its repo, so same-path documents in different repos must
+        // coexist rather than clobber each other.
+        if let Some(existing) = docs.iter_mut().find(|d| {
+            d.entity_type == doc.entity_type
+                && d.entity_id == doc.entity_id
+                && d.workspace_id == doc.workspace_id
+                && d.repo_id == doc.repo_id
+        }) {
             *existing = doc;
         } else {
             docs.push(doc);
@@ -251,8 +256,13 @@ impl SearchPort for MemSearchAdapter {
     }
 
     async fn reindex_all(&self) -> Result<u64> {
-        // In-memory adapter has nothing to rebuild — index is always current.
-        let count = self.docs.lock().unwrap().len() as u64;
+        // Adapter-level contract (same as the SQLite/Postgres adapters): clear
+        // the index and return how many documents were dropped. The
+        // rebuild-from-domain-entities half of reindex is the server
+        // coordinator's job (search_indexer::reindex_all).
+        let mut docs = self.docs.lock().unwrap();
+        let count = docs.len() as u64;
+        docs.clear();
         Ok(count)
     }
 
