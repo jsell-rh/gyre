@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Token Scoping"
-commits: ["f3beafe789e921436efa8603d7c6412ebaf84502", "318f1fd0322c68304ae134434f74e57514449d82", "33468526f46ca5eb4dcf4afbd473d9960495ee0e", "25fc7ab37182951b5f63a09498e00f03f966ba35", "d500a34a88be3b0e0a1c967fc82b98d58b34f12b", "371bed863d11d347ac239d99921ea2ef7bed1b37", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0"]
+commits: ["f3beafe789e921436efa8603d7c6412ebaf84502", "318f1fd0322c68304ae134434f74e57514449d82", "33468526f46ca5eb4dcf4afbd473d9960495ee0e", "25fc7ab37182951b5f63a09498e00f03f966ba35", "d500a34a88be3b0e0a1c967fc82b98d58b34f12b", "371bed863d11d347ac239d99921ea2ef7bed1b37", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0", "c709b94ea17612d30a4437e1e8e407256293b2ef"]
 ---
 
 ## Spec Excerpt
@@ -83,22 +83,18 @@ Read `specs/system/platform-model.md` §1 Token Scoping for the full spec. Curre
 
 ## Shipped
 
-`platform-model.md` §1 Token Scoping is implemented end-to-end in production code on this branch. This round repairs the three test failures from the verification run (`cargo test --all`, round `4199d965`: 3 failed / 2001 passed).
+`platform-model.md` §1 Token Scoping is implemented end-to-end in production code on this branch. This round repairs the single review finding against candidate `248f6c86`.
 
-### §1 Token Scoping implementation (unchanged this round)
+### §1 Token Scoping implementation
 
-`AgentJwtClaims` (`gyre-server/src/auth.rs`) carries `tenant_id`, `workspace_id`, `repo_id` (None on workspace orchestrators), `persona`, `attestation_level`, `jti`, `scope: Vec<String>`, and workload claims (`wl_image_hash`), minted with full hierarchy context via `mint_with_workload` from `spawn.rs` / `orchestrator.rs` / `stale_agents.rs` / `signal_chain.rs` / `ralph_loop.rs`: worker agents get `["repo:{repo_name}:write"]`, workspace orchestrators get `["workspace:{ws}:read", "workspace:{ws}:spawn"]`, repo orchestrators get `["repo:{name}:write", "repo:{name}:spawn"]`. `AuthenticatedAgent` mirrors all hierarchy fields from signature-verified claims. `validate_tool_scope` in `mcp.rs` runs before dispatch on every `tools/call` for scoped tokens and rejects every mismatch with a `PERMISSION_DENIED` JSON-RPC error naming the target (no silent allow; unresolvable targets fail closed). See prior shipped notes in git history for the full rebase-repair and scope-literal-cleanup ledger.
+`AgentJwtClaims` (`gyre-server/src/auth.rs`) carries `tenant_id`, `workspace_id`, `repo_id` (None on workspace orchestrators), `persona`, `attestation_level`, `scope: Vec<String>`, and workload claims (`wl_image_hash`), minted with full hierarchy context via `mint_with_workload` from `spawn.rs` / `orchestrator.rs` / `stale_agents.rs` / `signal_chain.rs` / `ralph_loop.rs`: worker agents get `["repo:{repo_name}:write"]`, workspace orchestrators get `["workspace:{ws}:read", "workspace:{ws}:spawn"]`, repo orchestrators get `["repo:{name}:write", "repo:{name}:spawn"]`. `AuthenticatedAgent` mirrors all hierarchy fields from signature-verified claims. `validate_tool_scope` in `mcp.rs` runs before dispatch on every `tools/call` for scoped tokens and rejects every mismatch with a `PERMISSION_DENIED` JSON-RPC error naming the target (no silent allow; unresolvable targets fail closed). Worker-tool targets are bound to the token's scope and the `list_mrs` fallback clamped to it.
 
-### This round: verification-failure repair (`f3beafe7`)
+### This round: review-finding repair (`c709b94e`)
 
-All three failures were test-fixture defects against the (correct) fail-closed §1 mint, not production bugs:
-
-- **`api::orchestrator::tests::workspace_orchestrator_spawn_and_scoped_jwt`**: asserted the `persona` claim equals `"workspace_orchestrator"` — a copy-paste from the `orchestrator_type` serde name asserted two lines above. The persona claim truthfully carries the persona slug `"workspace-orchestrator"` (the slug `resolve_orchestrator_persona` resolves and bootstrap step 5 registers); minting the underscore form would fabricate a slug matching no persona. Assertion corrected to the real slug.
-- **`gate_executor::tests::agent_review_context_resolves_blob_pinned_spec_ref`**: the fixture seeded the `ws-test` repo/MR/persona rows but never the workspace row, so the §1 gate-agent mint's fail-closed MR → workspace → tenant resolution correctly errored "workspace ws-test not found". Fixed by seeding the workspace via the existing `ensure_workspace_row` helper (the same pattern `seed_full_review_fixture` already uses).
-- **`gate_executor::tests::validation_token_ttl_covers_configured_gate_timeout`**: invoked `run_agent_validation_gate` with an unseeded `make_mr_id()`; the §1 mint now requires the MR to exist before spawning the validator ("merge request … not found"). Switched to `seed_mr_with_repo(&state)`, exactly like its passing sibling `agent_validation_token_carries_validation_scope_not_review`.
+The review of candidate `248f6c86` found one defect: a test-target compile error introduced by `f3beafe7` at `gate_executor.rs:1897` — `agent_review_context_resolves_blob_pinned_spec_ref` passed the owned `Arc<AppState>` returned by `test_state()` to `ensure_workspace_row(&Arc<AppState>, ...)`, error[E0308], so `cargo test -p gyre-server --lib` could not build. The implementer's recorded evidence (`cargo check -p gyre-server --lib`) does not type-check `#[cfg(test)]` code. Fixed by borrowing: `ensure_workspace_row(&state, ...)`. No production code changed this round.
 
 ### Test evidence
 
-This sandbox follows the 4 GiB budget rule (no gyre-server test binaries here). At head `f3beafe7`: `cargo check -p gyre-server --lib` exit 0; `cargo fmt --check -p gyre-server` clean; evidence saved under `/tmp/stage/review-evidence/` (repair diff, cargo-check exit, head SHAs).
+This sandbox follows the 4 GiB budget rule (no gyre-server test binaries here). At repair head `c709b94e`: `cargo check -p gyre-server --lib --tests` exit 0 (was exit 101 pre-repair, error[E0308] at gate_executor.rs:1897:30 — logs in `/tmp/stage/review-evidence/`); `cargo fmt --check -p gyre-server` clean.
 
-The independent verifier must run: `cargo test --all` (the prior failing round's command), in particular `cargo test -p gyre-server --lib` slices `api::orchestrator::tests::workspace_orchestrator_spawn_and_scoped_jwt`, `gate_executor::tests::agent_review_context_resolves_blob_pinned_spec_ref`, and `gate_executor::tests::validation_token_ttl_covers_configured_gate_timeout`, plus the §1 slices from prior rounds (mcp/auth/abac §1 tests, `--test search_wiring`, `--test task134_review_probe`), `cargo test -p gyre-adapters --lib`, and `cargo test -p gyre-domain`.
+The independent verifier must run: `cargo test --all` (the acceptance criterion), in particular `cargo test -p gyre-server --lib` slices `api::orchestrator::tests::workspace_orchestrator_spawn_and_scoped_jwt`, `gate_executor::tests::agent_review_context_resolves_blob_pinned_spec_ref`, and `gate_executor::tests::validation_token_ttl_covers_configured_gate_timeout`, plus the §1 slices from prior rounds (mcp/auth/abac token-scoping tests, `--test search_wiring`, `--test task134_review_probe`), `cargo test -p gyre-adapters --lib`, and `cargo test -p gyre-domain`.
