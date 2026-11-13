@@ -3899,6 +3899,7 @@ mod tests {
                 "ws-a",
                 Some("repo-1"),
                 "repo_orchestrator",
+                "repo-orchestrator",
             )
             .unwrap();
         state
@@ -3946,6 +3947,7 @@ mod tests {
                 "ws-a",
                 None,
                 "workspace_orchestrator",
+                "workspace-orchestrator",
             )
             .unwrap();
         state
@@ -8153,6 +8155,11 @@ concepts:
                 workspace_id,
                 repo_id,
                 orchestrator_type,
+                match orchestrator_type {
+                    "workspace_orchestrator" => "workspace-orchestrator",
+                    "repo_orchestrator" => "repo-orchestrator",
+                    _ => "worker",
+                },
             )
             .unwrap();
         state
