@@ -2,7 +2,7 @@
 title: "Frontend ViewQuery TypeScript Types & Validation"
 spec_ref: "view-query-grammar.md"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-037.md
 coverage_sections: []
 commits: ["8321e71a32c10bba653336d07628e347f4977751"]
