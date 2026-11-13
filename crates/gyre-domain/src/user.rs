@@ -37,6 +37,15 @@ pub enum GlobalRole {
     Member,
 }
 
+impl GlobalRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GlobalRole::TenantAdmin => "TenantAdmin",
+            GlobalRole::Member => "Member",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Theme {
     Light,

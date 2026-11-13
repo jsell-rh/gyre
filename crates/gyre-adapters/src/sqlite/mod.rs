@@ -23,6 +23,7 @@ pub mod conversation;
 pub mod dependency;
 pub mod dependency_policy;
 pub mod graph;
+pub mod invitation;
 pub mod key_binding;
 pub mod kv_store;
 pub mod llm_config;
@@ -393,11 +394,26 @@ mod tests {
         // (000056 here is task-180's spec_assertion_results and 000057 is
         // task-193's spec_approval_attestation — different migrations that
         // legitimately own those versions on main.)
+        // 2026-11-13-000065_user_tenant_scope (task-110) is excluded too:
+        // after the rebase onto c5deca801 it only creates the tenant-scope
+        // index and depends on 000058's tenant_id column, so it cannot run
+        // in the pre-000058 set. It rides along with the target batch (in
+        // version order, after 000058) — index creation only, so the
+        // backfill assertions below are unaffected. (Renumbered from
+        // 20261009000057 to 20261108000060 when upstream landed
+        // agent_persona_id under the same version, then to 20261113000065
+        // when the task-110 rebase onto main head f764bc00 collided with
+        // upstream's 2026-11-08 numbering; see its up.sql.)
         let all = MIGRATIONS.migrations().unwrap();
-        let (pre, target): (Vec<_>, Vec<_>) = all
-            .into_iter()
-            .partition(|m| m.name().version().to_string() != "20261008000058");
-        assert_eq!(target.len(), 1, "000058 not found in embedded migrations");
+        let (pre, target): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
+            let v = m.name().version().to_string();
+            v != "20261008000058" && v != "20261113000065"
+        });
+        assert_eq!(
+            target.len(),
+            2,
+            "000058 and the tenant-scope index migration not found in embedded migrations"
+        );
         use diesel::migration::MigrationConnection;
         // run_migrations is the raw harness method — unlike
         // run_pending_migrations (used by SqliteStorage::new) it does not
