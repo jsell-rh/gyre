@@ -1561,6 +1561,7 @@
                   edges={depGraphEdges}
                   scope={depGraphScope}
                   onScopeChange={handleDepScopeChange}
+                  onRefresh={() => handleDepScopeChange(depGraphScope)}
                   onNodeClick={(node) => {
                     const repo = repos.find(r => r.id === node.repo_id);
                     if (repo) {
