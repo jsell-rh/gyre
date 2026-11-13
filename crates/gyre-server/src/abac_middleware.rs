@@ -48,12 +48,15 @@ const MR_REVIEWS_ROUTE: &str = "/api/v1/merge-requests/:id/reviews";
 const MR_DIFF_ROUTE: &str = "/api/v1/merge-requests/:id/diff";
 const MR_GATES_ROUTE: &str = "/api/v1/merge-requests/:id/gates";
 const AGENT_MESSAGES_ROUTE: &str = "/api/v1/agents/:id/messages";
+const MR_SPEC_ROUTE: &str = "/api/v1/merge-requests/:id/spec";
 
 /// Routes a `review:submit` gate agent may touch: read MR context, submit
-/// its verdict, read comments and gate state. The inbox poll route lets a
-/// forge-spawned manifest-gate agent receive its ReviewRequest over REST
-/// (the handler restricts non-admin callers to their own inbox, and the
-/// /mcp `gyre_message_poll` tool is outside this allow-list's reach).
+/// its verdict, read comments and gate state, and fetch the pinned spec
+/// (GYRE_SPEC_URL — agent-gates.md §Integration with Agent Gates step 1:
+/// the gate agent receives the spec at the pinned SHA). The inbox poll
+/// route lets a forge-spawned manifest-gate agent receive its ReviewRequest
+/// over REST (the handler restricts non-admin callers to their own inbox,
+/// and the /mcp `gyre_message_poll` tool is outside this allow-list's reach).
 const REVIEWER_ALLOWED_ROUTES: &[&str] = &[
     MR_DETAIL_ROUTE,
     MR_REVIEWS_ROUTE,
@@ -61,12 +64,19 @@ const REVIEWER_ALLOWED_ROUTES: &[&str] = &[
     MR_COMMENTS_ROUTE,
     MR_GATES_ROUTE,
     AGENT_MESSAGES_ROUTE,
+    MR_SPEC_ROUTE,
     "/api/v1/version",
 ];
 
 /// Routes a `validation:report` gate agent may touch: read-only MR context
-/// for its check and nothing else (its contract is the process exit code).
-const VALIDATOR_ALLOWED_ROUTES: &[&str] = &[MR_DETAIL_ROUTE, MR_DIFF_ROUTE, "/api/v1/version"];
+/// and the pinned spec for its check and nothing else (its contract is the
+/// process exit code).
+const VALIDATOR_ALLOWED_ROUTES: &[&str] = &[
+    MR_DETAIL_ROUTE,
+    MR_DIFF_ROUTE,
+    MR_SPEC_ROUTE,
+    "/api/v1/version",
+];
 
 /// A single entry in the route registry: maps an axum route pattern to a
 /// resource type and optional path parameters for workspace resolution.
@@ -299,6 +309,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api(MR_COMMENTS_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(MR_REVIEWS_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(MR_DIFF_ROUTE, "merge_request", None),
+                RouteResourceMapping::api(MR_SPEC_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/attestation",
                     "merge_request",
