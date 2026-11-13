@@ -759,6 +759,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
         )
+        // Workspace merge policy (meta-spec-reconciliation.md §9)
+        .route(
+            "/api/v1/workspaces/:id/merge-policy",
+            get(workspaces::get_merge_policy).put(workspaces::set_merge_policy),
+        )
         // Rollout policy (meta-spec-reconciliation.md §7)
         .route(
             "/api/v1/workspaces/:id/meta-specs/rollout-policy",
@@ -1080,6 +1085,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/explorer-views/generate",
             post(explorer_views::generate_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/ask",
+            post(explorer_views::ask_explorer),
         )
         .route(
             "/api/v1/workspaces/:id/explorer-views/:view_id",

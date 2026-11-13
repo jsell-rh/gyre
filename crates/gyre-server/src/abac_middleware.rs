@@ -519,6 +519,7 @@ impl ResourceResolver {
                     "meta_spec",
                     None,
                 ),
+                RouteResourceMapping::api("/api/v1/workspaces/:id/merge-policy", "workspace", None),
                 RouteResourceMapping::api("/api/v1/tenants/:id/meta-specs/set", "meta_spec", None),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-specs/rollout-policy",
@@ -585,6 +586,17 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/explorer-views/generate",
+                    "explorer_view",
+                    Some("generate"),
+                ),
+                // Conversational exploration Q&A (system-explorer.md §8) —
+                // an LLM endpoint like /generate: same resource, same
+                // `generate` action (Developer+ workspace role via the
+                // builtin-developer-generate-access policy). Registered
+                // BEFORE /:view_id — the resolver is first-match and
+                // "/ask" would otherwise be captured as a view_id param.
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/explorer-views/ask",
                     "explorer_view",
                     Some("generate"),
                 ),
@@ -1445,8 +1457,9 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
         //
         // HSI §1444-1445 (spec-amendment table): `generate` is distinct from
         // `write` so policies can permit LLM generation while restricting
-        // CRUD. The four LLM endpoints (`explorer-views/generate`,
-        // `briefing/ask`, `specs/assist`, `prompts/save`) use
+        // CRUD. The five LLM endpoints (`explorer-views/generate`,
+        // `explorer-views/ask`, `briefing/ask`, `specs/assist`,
+        // `prompts/save`) use
         // `action_override: "generate"`, which no other builtin Allow
         // covers — without this policy, `default-deny` 403s every LLM call
         // for non-Admin users.
