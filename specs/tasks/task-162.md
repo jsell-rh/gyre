@@ -54,41 +54,34 @@ Read `specs/system/message-bus.md` §"Relationship to Notifications" and §"Impl
 
 ## Shipped
 
-### Rebase resolution
+### Merge state (this round)
 
-The published head (918e2f0b) conflicted with main @ 44a01390c (task-171).
-Resolved in merge commit f2476fdc5: the only textual conflict was the TOTAL
-row of `specs/coverage/SUMMARY.md` — the candidate had moved 5 sections
-assigned→implemented (message-bus ×2, meta-spec, platform-model,
-spec-lifecycle) while main had moved 5 ui-layout sections the same way. The
-merged row set sums to 802 / 220 / 0 / 245 / 174 / 163 → 58% coverage; the
-TOTAL row now reflects that union. All product-source files merged cleanly;
-`cargo check -p gyre-server` passes on the merged head and all task-162
-wiring is intact (main.rs spawns, jobs.rs registry entry, three `try_send`
-call sites in `lib.rs` / `api/messages.rs` / `mcp.rs`).
+The executor restored the assigned task contract (progress reset, shipped
+notes stripped) while preserving the production fix on the branch. This
+round re-verified the merged head 88ceb71d0 (candidate 0d2de17a3 merged
+with main @ a218b956, task-198 spec links): the merge is purely additive
+for task-198 code — no changes to `message_dispatcher.rs`, `main.rs`, the
+notification surface, or the three `try_send` call sites — and
+`cargo check -p gyre-server` passes on the merged head (8m41s, exit 0).
+All task-162 product commits are listed in `commits:` frontmatter.
 
 ### Dispatcher (§Relationship to Notifications)
 
-`spawn_message_consumer()` (crates/gyre-server/src/message_dispatcher.rs)
-takes ownership of the 256-capacity mpsc receiver via
-`AppState::take_message_dispatch_rx()` (single-owner — a second call is a
-logged no-op) and spawns the background drain task. `MessageDispatcher`
+`spawn_message_consumer()` (`crates/gyre-server/src/message_dispatcher.rs`,
+called from `main.rs`) takes single-owner possession of the 256-capacity
+mpsc receiver via `AppState::take_message_dispatch_rx()` (a second call is
+a logged no-op) and spawns the background drain task. `MessageDispatcher`
 holds `Vec<Arc<dyn MessageConsumer>>` and dispatches every drained message
 to all registered consumers. The first registered consumer is
 `NotificationBridge`, which derives Inbox notifications from Event-tier
-messages (ranks per the unified user-management taxonomy):
+messages:
 
 - `GateFailure` → rank-3 `GateFailure` for the MR author agent's spawning
-  user, resolved through the MR → author agent → spawner chain; tenant
-  resolved from the workspace record, never fabricated. The gate executor
-  emits the `GateFailure` event and no longer creates the Inbox item
-  synchronously — single creation path via the bridge (HSI §8 p3
-  amendment). The bridge consumes only Workspace/Broadcast-targeted
-  GateFailure events — two production emitters publish GateFailure for the
-  same failed gate (`gate_executor::run_gate`, Workspace-targeted;
-  `ralph_loop::on_gates_failed`, Agent-targeted copy for the agent's next
-  session), and the Agent-directed copy is the agent's inbox record, not a
-  human-notification trigger (review round-1 repair, commit dd716a986).
+  user (MR → author agent → spawner chain; tenant resolved from the
+  workspace record, never fabricated). Only Workspace/Broadcast-targeted
+  GateFailure events are consumed — the Agent-directed copy from
+  `ralph_loop::on_gates_failed` is the agent's inbox record, not a
+  human-notification trigger (round-1 dedupe repair, commit dd716a986).
 - `BudgetWarning` → rank-4 `AgentBudgetWarning` for workspace
   Admin/Developer/Owner members.
 - `AgentError` → rank-2 `AgentEscalation` for the failing agent's spawning
@@ -96,55 +89,46 @@ messages (ranks per the unified user-management taxonomy):
 - `ReconciliationCompleted` → rank-6 `MetaSpecDrift` for workspace
   Admin/Developer/Owner members (HSI §8 p6).
 
-Bridge creation delegates to `notifications::notify_rich`, so bridge-derived
-notifications carry the same structured `NotificationSource` and deep-link
-derivation as every other producer (one creation path end to end). All three
-send paths (`AppState::emit_event`, REST send handler, MCP `message.send`)
-clone into the channel via non-blocking `try_send`; a full channel drops with
-a warning log at all three call sites and never blocks the send path, per
-spec.
+Bridge creation delegates to `notifications::notify_rich`, so
+bridge-derived notifications carry the same structured
+`NotificationSource` and deep-link derivation as every other producer.
+All three send paths (`AppState::emit_event`, REST send handler,
+MCP `message.send`) clone into the channel via non-blocking `try_send`; a
+full channel drops with a warning log and never blocks the send path.
 
 ### Event TTL expiry job (§Implementation Notes)
 
-`spawn_message_expiry()` (message_dispatcher.rs) starts the hourly job
-(3600s interval, `MissedTickBehavior::Delay`). Each cycle runs
-`run_message_expiry`: `expire_events(now_ms − GYRE_EVENT_TTL_SECS·1000)` for
-Event-tier cleanup plus `expire_acked_inboxes(now_ms −
-GYRE_DEAD_INBOX_TTL_SECS·1000)` for completed/orphaned agent inbox cleanup.
-Both env vars default to 604800 (7 days); invalid values warn and fall back.
-Implemented by the SQLite, PostgreSQL, and mem `MessageRepository` adapters.
-Registered as `message_expiry` in the admin job registry
-(`POST /admin/jobs/message_expiry/run`) and wired in `main.rs` alongside the
-other background jobs.
+`spawn_message_expiry()` starts the hourly job (3600s interval,
+`MissedTickBehavior::Delay`), registered as `message_expiry` in the admin
+job registry (`POST /admin/jobs/message_expiry/run` triggers on demand).
+Each cycle runs `run_message_expiry`:
+`expire_events(now_ms − GYRE_EVENT_TTL_SECS·1000)` for Event-tier cleanup
+plus `expire_acked_inboxes(now_ms − GYRE_DEAD_INBOX_TTL_SECS·1000)` for
+completed/orphaned agent inbox cleanup. Both env vars default to 604800
+(7 days); invalid values warn and fall back. Implemented by the SQLite,
+PostgreSQL, and mem `MessageRepository` adapters.
 
-### Tests
+### Test evidence
 
-- `spawn_message_consumer_end_to_end` — emits a `ReconciliationCompleted`
-  event through the real send path and asserts the rank-6 notification
-  arrives via the background dispatcher; also asserts the single-owner
-  receiver (second spawn is a no-op).
-- `notification_bridge_creates_*` — GateFailure (rank-3, MR-author chain),
-  BudgetWarning (rank-4, role fan-out), AgentError (rank-2, spawner),
-  MetaSpecDrift (rank-6, role fan-out; Viewer excluded), plus
-  unknown-workspace skip.
-- `notification_bridge_ignores_agent_directed_gate_failure_copy` — regression
-  for the two-emitter GateFailure dedupe.
-- `dispatcher_dispatches_to_all_consumers` — channel drain fan-out.
-- `message_expiry_deletes_old_events_and_dead_inboxes` — retention
-  boundaries (unacked Directed and explicit-ack retained) and
-  `message_expiry_env_ttl_respected` (1s TTL deletes only >1s-old events).
-- Adapter-level expiry tests in `gyre-adapters` (sqlite message.rs).
+Focused tests in `crates/gyre-server/src/message_dispatcher.rs` (run in
+prior rounds on the pre-merge candidate; the merged head type-checks and
+the merge did not touch any file in this surface):
+`notification_bridge_creates_gate_failure_notification`,
+`notification_bridge_ignores_agent_directed_gate_failure_copy`,
+`notification_bridge_creates_meta_spec_drift_notification`,
+`notification_bridge_creates_budget_warning_notification`,
+`notification_bridge_creates_agent_error_notification`,
+`notification_bridge_skips_unknown_workspace`,
+`dispatcher_dispatches_to_all_consumers`,
+`message_expiry_deletes_old_events_and_dead_inboxes` (retention
+boundaries: unacked Directed and explicit-ack rows retained),
+`message_expiry_env_ttl_respected` (1s TTL deletes only >1s-old events),
+`spawn_message_consumer_end_to_end`.
 
-### Evidence on the merged head (f2476fdc5)
+Server test compilation exceeds this sandbox's budget and must run in the
+independent verifier:
 
-- `cargo check -p gyre-server` — passes (8m37s, exit 0; this sandbox cannot
-  compile the gyre-server test binary within the 4 GiB budget).
-- `cargo test -p gyre-adapters --lib sqlite::message` — 33 passed, 0 failed
-  (includes `expire_events_removes_old_non_agent_messages`,
-  `expire_acked_inboxes`, `expire_acked_inboxes_preserves_explicit_ack_reason`).
-- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-mcp-write-tools.sh`, `check-migration-versions.sh` — all exit 0 on
-  the merged head.
-
-The verifier must run: `cargo test -p gyre-server --lib message_dispatcher`
-and `cargo test --all`.
+```
+cargo test -p gyre-server message_dispatcher
+cargo test --all
+```
