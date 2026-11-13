@@ -1891,6 +1891,10 @@ mod tests {
         // Production shape (spawn.rs): ledger path + ledger blob sha.
         mr.spec_ref = Some(format!("system/widget.md@{blob_sha}"));
         mr.workspace_id = Id::new("ws-test");
+        // The §1 gate-agent mint resolves MR → workspace → tenant to scope
+        // the review token; an unseeded workspace row fails that lookup
+        // (fail-closed, never a fabricated tenant).
+        ensure_workspace_row(state, &Id::new("ws-test")).await;
         state.merge_requests.create(&mr).await.unwrap();
 
         let mut gate = make_gate(GateType::AgentReview, Some("true".to_string()));
@@ -2379,8 +2383,11 @@ mod tests {
             GateType::AgentValidation,
             Some("printenv GYRE_VALIDATION_TOKEN".to_string()),
         );
+        // The §1 mint resolves MR → workspace → tenant before spawning the
+        // validator, so the MR fixture (repo + workspace row) must exist —
+        // same seeding as the sibling scope test.
         gate.timeout_secs = Some(700); // > the old fixed 360s token TTL
-        let mr_id = make_mr_id();
+        let (mr_id, _repo_id) = seed_mr_with_repo(&state).await;
 
         let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
 

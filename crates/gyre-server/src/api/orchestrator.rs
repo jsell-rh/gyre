@@ -1082,7 +1082,10 @@ mod tests {
             ]
         );
         assert_eq!(claims.tenant_id, "t1");
-        assert_eq!(claims.persona.as_deref(), Some("workspace_orchestrator"));
+        // Persona claim carries the REAL persona slug (hyphenated — the
+        // slug `resolve_orchestrator_persona` resolved and bootstrap step 5
+        // registers), not the underscore orchestrator_type serde name.
+        assert_eq!(claims.persona.as_deref(), Some("workspace-orchestrator"));
 
         // Token registered so the auth middleware accepts it.
         let stored = state
