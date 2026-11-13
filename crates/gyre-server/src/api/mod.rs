@@ -193,6 +193,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/gates/:gate_id",
             put(gates::update_gate).delete(gates::delete_gate),
         )
+        // Gate chain configuration (agent-gates.md §Gate Chains)
+        .route(
+            "/api/v1/repos/:id/gate-chain",
+            get(gates::get_gate_chain).put(gates::set_gate_chain),
+        )
         // Pre-accept push gates
         .route(
             "/api/v1/repos/:id/push-gates",
