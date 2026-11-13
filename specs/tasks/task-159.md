@@ -2,7 +2,7 @@
 title: "Wire meta-spec drift warnings into merge gates"
 spec_ref: "meta-spec-reconciliation.md §9"
 depends_on: [task-156]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
 commits: ["51528a6c51b11f2714bf026c34bc9886d4a93d1d", "2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3"]
