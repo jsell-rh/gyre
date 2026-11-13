@@ -562,6 +562,22 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register code-search file indexing (search.md §Index Updates: file
+    // content is indexed asynchronously on push; also runs on a fixed interval
+    // so the index stays consistent after restarts without a manual reindex).
+    registry
+        .register(
+            JobDefinition {
+                name: "search_code_index".to_string(),
+                description: "Indexes repo file content for code search (search.md)".to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::search_indexer::run_code_index_job(&state).await },
+        )
+        .await;
+
     // Register meta_spec_stale_pin_check job (agent-runtime.md §2 Stale Pin
     // Detection): compares spec-level binding pins against current versions.
     registry
