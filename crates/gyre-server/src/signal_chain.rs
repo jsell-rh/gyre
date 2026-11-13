@@ -824,9 +824,14 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
         // Backlog with the BudgetExhausted flag (a label on the task —
         // the observable marker the spec calls for), cleared on the
         // successful spawn of a later cycle.
-        if let Err(reason) =
-            crate::api::budget::check_spawn_budget(state, &repo.workspace_id.to_string()).await
-        {
+        let budget_check =
+            match crate::api::budget::check_spawn_budget(state, &repo.workspace_id.to_string())
+                .await
+            {
+                Ok(()) => crate::api::budget::check_repo_spawn_budget(state, &repo).await,
+                Err(reason) => Err(reason),
+            };
+        if let Err(reason) = budget_check {
             // Flag the FRESHEST row (same stale-snapshot defense as the
             // claim below): persisting the snapshot taken at
             // list_by_status could revert a concurrent status change
