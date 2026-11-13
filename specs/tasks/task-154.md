@@ -2,7 +2,7 @@
 title: "Implement search query language (quoted phrases, faceted filtering)"
 spec_ref: "search.md §Query Language"
 depends_on: [task-153]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "search.md §Query Language"
   - "search.md §Simple Search"
