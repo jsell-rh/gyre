@@ -1303,8 +1303,12 @@ pub async fn git_receive_pack(
             } else {
                 None
             };
+            // §API > Notifications: pass the broadcasting wrapper, not the
+            // bare repo — push-scoped notifications must fan out to live
+            // /notifications/stream subscribers (task-125 review repair).
+            let divergence_notifications = state_clone.broadcasting_notifications();
             let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                notification_repo: state_clone.notifications.as_ref(),
+                notification_repo: &divergence_notifications,
                 membership_repo: state_clone.workspace_memberships.as_ref(),
             });
             // §9 spec-assertion notifications are scoped by the repo's
@@ -2444,7 +2448,7 @@ async fn process_persona_changes(
                             notif.source.entity_type = "persona".to_string();
                             notif.source.entity_id = slug.clone();
                             notif.source.repo_id = Some(repo.id.clone());
-                            if let Err(e) = state.notifications.create(&notif).await {
+                            if let Err(e) = state.create_notification(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
                             }
                         }
@@ -2882,7 +2886,7 @@ async fn notify_cross_workspace_dependents(
             notif.source.entity_type = "spec".to_string();
             notif.source.entity_id = changed_spec_path.to_string();
 
-            if let Err(e) = state.notifications.create(&notif).await {
+            if let Err(e) = state.create_notification(&notif).await {
                 tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
             }
         }
@@ -8454,7 +8458,17 @@ specs:
         // The owner was notified.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-1"), None, None, None, None, &[], 100, 0)
+            .list_for_user(
+                &Id::new("user-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         let notif = notifs

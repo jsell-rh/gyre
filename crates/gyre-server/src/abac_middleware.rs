@@ -519,6 +519,7 @@ impl ResourceResolver {
                     "meta_spec",
                     None,
                 ),
+                RouteResourceMapping::api("/api/v1/workspaces/:id/merge-policy", "workspace", None),
                 RouteResourceMapping::api("/api/v1/tenants/:id/meta-specs/set", "meta_spec", None),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-specs/rollout-policy",
@@ -654,6 +655,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
                 // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
+                RouteResourceMapping::exempt("/api/v1/notifications"),
+                RouteResourceMapping::exempt("/api/v1/notifications/unread-count"),
+                RouteResourceMapping::exempt("/api/v1/notifications/mark-all-read"),
+                RouteResourceMapping::exempt("/api/v1/notifications/preferences"),
+                RouteResourceMapping::exempt("/api/v1/notifications/stream"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/dismiss"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/resolve"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/read"),

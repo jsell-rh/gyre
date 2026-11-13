@@ -3,6 +3,9 @@
 
 use crate::AppState;
 use gyre_common::{Id, Notification, NotificationType};
+use gyre_ports::NotificationRepository;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// Resolve a deep-link URL for a notification source
 /// (user-management.md §Notification Entity: "Deep link to relevant page").
@@ -92,7 +95,7 @@ pub async fn notify(
         now,
     );
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
     }
 }
@@ -157,7 +160,7 @@ pub async fn notify_rich(
         }
     };
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
     }
 }
@@ -541,6 +544,180 @@ pub async fn resolve_team_members(
     }
 }
 
+// ─── SSE fan-out wrapper (user-management.md §API > Notifications) ───────────
+
+/// [`NotificationRepository`] decorator that fans every `create` out to the
+/// SSE broadcast channel behind `/notifications/stream`.
+///
+/// This is the single fan-out point: `AppState::create_notification` routes
+/// through it, and background paths that persist notifications without an
+/// `&AppState` at hand (the `DivergencePorts` feeders in git_http, mirror_sync,
+/// and repo import) must wrap their repository with
+/// [`AppState::broadcasting_notifications`] instead of passing the bare repo —
+/// a bare repo persists fine but a connected stream client never sees the
+/// notification (task-125 review finding).
+///
+/// Broadcast is fire-and-forget: no subscribers, or a lagged one, must never
+/// fail the persist. Every non-`create` method delegates to the inner
+/// repository unchanged.
+pub struct BroadcastingNotificationRepo {
+    inner: Arc<dyn NotificationRepository>,
+    tx: broadcast::Sender<String>,
+}
+
+impl BroadcastingNotificationRepo {
+    /// Build a broadcasting decorator over a repository and an SSE channel.
+    /// Production callers should prefer `AppState::broadcasting_notifications`,
+    /// which wires the state's own channel; this constructor exists for
+    /// callers (and tests) that own a separate channel.
+    pub fn new(inner: Arc<dyn NotificationRepository>, tx: broadcast::Sender<String>) -> Self {
+        Self { inner, tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationRepository for BroadcastingNotificationRepo {
+    async fn create(&self, notification: &Notification) -> anyhow::Result<()> {
+        self.inner.create(notification).await?;
+        if let Ok(json) = serde_json::to_string(notification) {
+            let _ = self.tx.send(json);
+        }
+        Ok(())
+    }
+
+    async fn get(&self, id: &Id, user_id: &Id) -> anyhow::Result<Option<Notification>> {
+        self.inner.get(id, user_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)] // filter + pagination; mirrors the port signature
+    async fn list_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_type: Option<&str>,
+        repo_id: Option<&Id>,
+        exclude_types: &[&str],
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<Notification>> {
+        self.inner
+            .list_for_user(
+                user_id,
+                workspace_id,
+                min_priority,
+                max_priority,
+                notification_type,
+                repo_id,
+                exclude_types,
+                limit,
+                offset,
+            )
+            .await
+    }
+
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> anyhow::Result<u64> {
+        self.inner
+            .update_body_by_entity_ref(entity_ref, notification_type, body)
+            .await
+    }
+
+    async fn dismiss(&self, id: &Id, user_id: &Id) -> anyhow::Result<()> {
+        self.inner.dismiss(id, user_id).await
+    }
+
+    async fn resolve(
+        &self,
+        id: &Id,
+        user_id: &Id,
+        action_taken: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.inner.resolve(id, user_id, action_taken).await
+    }
+
+    async fn mark_read(&self, id: &Id, user_id: &Id, read: bool) -> anyhow::Result<()> {
+        self.inner.mark_read(id, user_id, read).await
+    }
+
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> anyhow::Result<u64> {
+        self.inner
+            .count_unresolved(user_id, workspace_id, exclude_types)
+            .await
+    }
+
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> anyhow::Result<u64> {
+        self.inner.count_unread(user_id, workspace_id).await
+    }
+
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> anyhow::Result<u64> {
+        self.inner.mark_all_read(user_id, workspace_id).await
+    }
+
+    async fn list_recent(&self, limit: usize) -> anyhow::Result<Vec<Notification>> {
+        self.inner.list_recent(limit).await
+    }
+
+    async fn has_recent_dismissal(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        days: u32,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .has_recent_dismissal(workspace_id, user_id, notification_type, days)
+            .await
+    }
+
+    async fn has_active_notification(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        entity_ref: &str,
+        since: i64,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .has_active_notification(workspace_id, user_id, notification_type, entity_ref, since)
+            .await
+    }
+
+    async fn delete_older_than(
+        &self,
+        read_cutoff_secs: u64,
+        unread_cutoff_secs: u64,
+    ) -> anyhow::Result<u64> {
+        self.inner
+            .delete_older_than(read_cutoff_secs, unread_cutoff_secs)
+            .await
+    }
+}
+
+impl AppState {
+    /// A notification repository whose `create` both persists and broadcasts
+    /// to live `/notifications/stream` subscribers — the exact fan-out
+    /// `AppState::create_notification` routes through. Background paths
+    /// building `DivergencePorts` use this instead of the bare
+    /// `state.notifications` so their notifications reach the stream.
+    pub fn broadcasting_notifications(&self) -> BroadcastingNotificationRepo {
+        BroadcastingNotificationRepo {
+            inner: Arc::clone(&self.notifications),
+            tx: self.notification_broadcast_tx.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,7 +761,7 @@ mod tests {
     async fn notifs_for(state: &crate::AppState, user: &str) -> Vec<gyre_common::Notification> {
         state
             .notifications
-            .list_for_user(&Id::new(user), None, None, None, None, &[], 50, 0)
+            .list_for_user(&Id::new(user), None, None, None, None, None, &[], 50, 0)
             .await
             .unwrap()
     }

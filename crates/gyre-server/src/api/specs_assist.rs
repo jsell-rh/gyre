@@ -292,7 +292,7 @@ async fn spec_conflict_response(
         notif.source.entity_type = "spec".to_string();
         notif.source.entity_id = spec_path.to_string();
         notif.source.repo_id = Some(repo.id.clone());
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
         }
     }
@@ -1203,7 +1203,7 @@ pub async fn save_spec(
         notif.source.entity_id = mr_id.to_string();
         notif.source.repo_id = Some(repo.id.clone());
         // Non-fatal — MR is created even if notification fails.
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(mr_id = %mr_id, user_id = %uid, "Failed to create spec-pending-approval notification: {e}");
         }
     }
@@ -1594,7 +1594,17 @@ mod tests {
         for uid in ["user-admin", "user-dev"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, &[], 100, 0)
+                .list_for_user(
+                    &Id::new(uid),
+                    Some(&ws_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    100,
+                    0,
+                )
                 .await
                 .unwrap();
             let approvals: Vec<_> = notifs
@@ -1619,6 +1629,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -1634,6 +1645,7 @@ mod tests {
             .list_for_user(
                 &Id::new("system"),
                 Some(&ws_id),
+                None,
                 None,
                 None,
                 None,
@@ -2683,7 +2695,17 @@ mod tests {
         for uid in ["user-a", "user-b"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws), None, None, None, &[], 100, 0)
+                .list_for_user(
+                    &Id::new(uid),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    100,
+                    0,
+                )
                 .await
                 .unwrap();
             let conflict: Vec<_> = notifs
@@ -2874,6 +2896,7 @@ specs:
                 None,
                 None,
                 None,
+                None,
                 &[],
                 50,
                 0,
@@ -2894,6 +2917,7 @@ specs:
             .list_for_user(
                 &Id::new("user-tr-owner"),
                 Some(&Id::new("ws-team-route")),
+                None,
                 None,
                 None,
                 None,

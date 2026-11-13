@@ -131,6 +131,7 @@ async fn evaluate_workspace(
                 Some(8),
                 Some(8),
                 None,
+                None,
                 &[],
                 20,
                 0,
@@ -176,7 +177,7 @@ async fn evaluate_workspace(
         notif.source.entity_type = "workspace".to_string();
         notif.source.entity_id = ws.id.to_string();
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
                 workspace = %ws.slug,
                 user = %member.user_id,
@@ -350,6 +351,7 @@ mod tests {
                 None,
                 None,
                 Some(NotificationType::TrustSuggestion.as_str()),
+                None,
                 &[],
                 50,
                 0,

@@ -272,7 +272,7 @@ async fn notify_workspace_members(
         notif.source.entity_type = "spec".to_string();
         notif.source.entity_id = source_path.to_string();
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
                 user = %member.user_id,
                 error = %e,
@@ -516,6 +516,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 10,
                 0,
@@ -537,6 +538,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 10,
                 0,
@@ -555,6 +557,7 @@ mod tests {
             .list_for_user(
                 &Id::new("viewer1"),
                 Some(&Id::new("ws1")),
+                None,
                 None,
                 None,
                 None,

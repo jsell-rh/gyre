@@ -3884,7 +3884,7 @@ mod registry_tests {
         let user_id = gyre_common::Id::new("user-stale-pin");
         let notifs = state
             .notifications
-            .list_for_user(&user_id, Some(&ws_id), None, None, None, &[], 50, 0)
+            .list_for_user(&user_id, Some(&ws_id), None, None, None, None, &[], 50, 0)
             .await
             .unwrap();
         let drift: Vec<_> = notifs
@@ -3903,7 +3903,7 @@ mod registry_tests {
             .unwrap();
         let notifs2 = state
             .notifications
-            .list_for_user(&user_id, Some(&ws_id), None, None, None, &[], 50, 0)
+            .list_for_user(&user_id, Some(&ws_id), None, None, None, None, &[], 50, 0)
             .await
             .unwrap();
         let drift2: Vec<_> = notifs2

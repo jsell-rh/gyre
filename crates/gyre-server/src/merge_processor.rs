@@ -4,8 +4,8 @@ use tracing::{error, info, warn};
 
 use gyre_common::Id;
 use gyre_domain::{
-    AnalyticsEvent, GateStatus, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MergeResult,
-    MrStatus, TaskPriority,
+    AnalyticsEvent, GateResult, GateStatus, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest,
+    MergeResult, MrStatus, TaskPriority,
 };
 use uuid::Uuid;
 
@@ -750,6 +750,72 @@ pub(crate) async fn trip_circuit_breaker(
     Ok(())
 }
 
+/// Record the §9 meta-spec drift warning as a gate result on the MR
+/// (meta-spec-reconciliation.md §9).
+///
+/// The gate result carries `GateStatus::Passed` — the warning is
+/// informational and never blocks a merge by itself (§9: "warn, don't
+/// block"); blocking is decided by the workspace merge policy in the
+/// caller. Idempotent across merge-processor retry cycles: an existing
+/// drift gate result for the MR is updated in place instead of duplicated.
+async fn record_meta_spec_drift_warning(
+    state: &AppState,
+    mr: &MergeRequest,
+    drift: &crate::reconciliation::MetaSpecDrift,
+) {
+    let output = crate::reconciliation::format_meta_spec_drift_warning(drift);
+    let now = crate::api::now_secs();
+
+    let existing = state
+        .gate_results
+        .list_by_mr_id(mr.id.as_str())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID);
+
+    let saved = match existing {
+        Some(r) => {
+            state
+                .gate_results
+                .update_status(
+                    &r.id.to_string(),
+                    GateStatus::Passed,
+                    Some(now),
+                    Some(now),
+                    Some(output.clone()),
+                )
+                .await
+        }
+        None => {
+            let result = GateResult {
+                id: Id::new(Uuid::new_v4().to_string()),
+                gate_id: Id::new(crate::reconciliation::META_SPEC_DRIFT_GATE_ID.to_string()),
+                mr_id: mr.id.clone(),
+                status: GateStatus::Passed,
+                output: Some(output.clone()),
+                started_at: Some(now),
+                finished_at: Some(now),
+            };
+            state.gate_results.save(&result).await
+        }
+    };
+    if let Err(e) = saved {
+        warn!(
+            mr_id = %mr.id,
+            error = %e,
+            "failed to record meta-spec drift gate result"
+        );
+    }
+
+    warn!(
+        mr_id = %mr.id,
+        produced_set = %drift.produced_set_sha,
+        current_set = %drift.current_set_sha,
+        "meta-spec drift detected (warn only, merge proceeds)"
+    );
+}
+
 /// Check if all `depends_on` for the given MR have status `Merged`.
 /// Returns `Ok(true)` if all dependencies are satisfied, `Ok(false)` if any are pending.
 async fn dependencies_satisfied(state: &AppState, mr_id: &Id) -> anyhow::Result<bool> {
@@ -1211,6 +1277,15 @@ async fn merge_atomic_group(
         );
         return Ok(());
     }
+
+    // meta-spec-reconciliation.md §9 — the drift gate for every group
+    // member is evaluated during candidate selection (step 4c'' in
+    // `process_next`), which expands atomic-group candidates to all group
+    // members: a strictly-blocked drifted member holds the whole group
+    // (each member entry is requeued with the drift reason) while later
+    // entries in the queue still merge in the same cycle, and warn-only
+    // drift records each member's §9 warning gate result before the
+    // transactional merge starts. Nothing to re-check here.
 
     // Record the target branch HEAD before starting, for rollback.
     let target_branch = &first_mr.target_branch;
@@ -1863,6 +1938,34 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 continue;
             }
 
+            // Step 4c'': meta-spec-reconciliation.md §9 — strict-policy
+            // meta-spec drift hold, evaluated DURING selection for the
+            // same starvation reason as the trust hold above (task-159
+            // review repair): a strictly-blocked drifted entry is requeued
+            // with the drift reason and skipped, so the processor tries
+            // the next candidate in the SAME cycle. Evaluating the drift
+            // hold only after selection and returning early starves the
+            // shared queue — `update_status` does not rotate
+            // `enqueued_at`, so a drifted head-of-queue entry under
+            // `require_current_meta_spec_set` would be re-selected and
+            // re-blocked every cycle, denying merge service to later
+            // entries in the same workspace and to entries in other
+            // workspaces. Warn-only drift (the default) records the §9
+            // warning gate result in the same helper and never blocks.
+            if let Some(reason) = selection_meta_spec_drift_hold(state, &candidate_mr).await? {
+                info!(
+                    entry_id = %candidate.id,
+                    mr_id = %candidate.merge_request_id,
+                    %reason,
+                    "meta-spec drift: holding merge under strict workspace policy, trying next candidate"
+                );
+                state
+                    .merge_queue
+                    .update_status(&candidate.id, MergeQueueEntryStatus::Queued, Some(reason))
+                    .await?;
+                continue;
+            }
+
             found = Some((candidate.clone(), candidate_mr));
             break;
         }
@@ -1927,6 +2030,12 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             .await?;
         return Ok(());
     }
+
+    // meta-spec-reconciliation.md §9 — the drift gate was already
+    // evaluated during candidate selection (step 4c'' above): warn-only
+    // drift recorded its `[WARN] meta-spec-drift` gate result there, and
+    // strict-policy drift requeued the entry with the drift reason before
+    // it could be selected. Nothing to re-check on the claimed entry.
 
     // Note: Atomic group readiness (step 4c) is already verified in the
     // selection loop above — no need to re-check here.
@@ -3831,6 +3940,55 @@ async fn selection_trust_hold(
     Ok(None)
 }
 
+/// meta-spec-reconciliation.md §9 — strict-policy meta-spec drift hold,
+/// evaluated DURING candidate selection (task-159 review repair), exactly
+/// like `selection_trust_hold` above. Expands atomic-group candidates to
+/// all group members (the group merges — or is held — as a unit).
+/// Returns `Some(reason)` when any member is drifted under a workspace
+/// merge policy with `require_current_meta_spec_set: true`; the caller
+/// requeues the entry with the reason and tries the next candidate in the
+/// SAME cycle, so a strictly-blocked head-of-queue entry cannot starve the
+/// shared merge queue. Warn-only drift (the default, §9 "warn, don't
+/// block") records the `[WARN] meta-spec-drift` gate result here and
+/// never blocks. MRs without an attestation and workspaces without a
+/// bound set skip the check gracefully.
+async fn selection_meta_spec_drift_hold(
+    state: &AppState,
+    candidate_mr: &MergeRequest,
+) -> anyhow::Result<Option<String>> {
+    let members: Vec<MergeRequest> = if let Some(ref group) = candidate_mr.atomic_group {
+        let all_mrs = state.merge_requests.list().await?;
+        all_mrs
+            .into_iter()
+            .filter(|m| m.atomic_group.as_deref() == Some(group))
+            .collect()
+    } else {
+        vec![candidate_mr.clone()]
+    };
+
+    for mr in &members {
+        if let Some(drift) = crate::reconciliation::mr_meta_spec_drift(state, mr).await {
+            let policy =
+                crate::merge_policy::merge_policy_or_default(state, &mr.workspace_id).await;
+            if policy.require_current_meta_spec_set {
+                warn!(
+                    mr_id = %mr.id,
+                    produced_set = %drift.produced_set_sha,
+                    current_set = %drift.current_set_sha,
+                    "meta-spec drift blocked merge (strict workspace policy)"
+                );
+                return Ok(Some(format!(
+                    "meta-spec drift: code produced under meta-spec set {}, current is {} \
+                     (require_current_meta_spec_set)",
+                    drift.produced_set_sha, drift.current_set_sha
+                )));
+            }
+            record_meta_spec_drift_warning(state, mr, &drift).await;
+        }
+    }
+    Ok(None)
+}
+
 /// TASK-061 (§7.2): Evaluate ABAC policies with attestation chain subject attributes.
 ///
 /// Builds an `AttributeContext` from the attestation chain (chain_depth,
@@ -4384,6 +4542,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -4535,6 +4694,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-1"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,
@@ -4936,6 +5096,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-1"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,
@@ -5656,6 +5817,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -5676,6 +5838,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-human-2"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,
@@ -5938,6 +6101,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -5989,6 +6153,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -6011,6 +6176,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-1"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,
@@ -6853,6 +7019,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -6958,6 +7125,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -7051,6 +7219,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -7134,6 +7303,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -7185,6 +7355,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-recov"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,
@@ -7298,6 +7469,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-grp"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,
@@ -7423,6 +7595,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 100,
                 0,
@@ -7539,6 +7712,7 @@ mod tests {
                 .list_for_user(
                     &Id::new(user),
                     Some(&Id::new("ws-1")),
+                    None,
                     None,
                     None,
                     None,
@@ -7673,6 +7847,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-grpa"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,
@@ -8206,6 +8381,674 @@ mod tests {
             worktrees,
             vec![repo_path.to_str().unwrap().to_string()],
             "gate worktree should be removed"
+        );
+    }
+
+    // ── meta-spec-reconciliation.md §9: merge-gate drift behavior ───────────
+
+    /// Bind a meta-spec set to the workspace and return its current set SHA
+    /// (the SHA `compute_meta_spec_set_sha` derives for the binding).
+    async fn bind_drift_set(state: &AppState, ws_id: &str) -> String {
+        let set = crate::api::meta_specs::MetaSpecSet {
+            workspace_id: ws_id.to_string(),
+            personas: std::collections::BTreeMap::from([(
+                "backend-developer".to_string(),
+                crate::api::meta_specs::MetaSpecPinnedEntry {
+                    path: "specs/personas/backend.md".to_string(),
+                    sha: "a1b2c3".to_string(),
+                },
+            )]),
+            principles: vec![],
+            standards: vec![],
+            process: vec![],
+        };
+        let json = serde_json::to_string(&set).unwrap();
+        state
+            .meta_spec_sets
+            .upsert(&Id::new(ws_id), &json)
+            .await
+            .unwrap();
+        crate::compute_meta_spec_set_sha(state, &Id::new(ws_id)).await
+    }
+
+    /// A signed provenance attestation recording `meta_sha` as the set the
+    /// code was produced under (same shape as the authorization chain's
+    /// root `SignedInput`), attached to `task_id`.
+    fn drift_attestation(
+        task_id: &str,
+        repo_id: &Id,
+        ws_id: &str,
+        meta_sha: &str,
+    ) -> gyre_common::Attestation {
+        use gyre_common::attestation::*;
+        let content = InputContent {
+            spec_path: "specs/system/x.md".to_string(),
+            spec_sha: "a".repeat(40),
+            workspace_id: ws_id.to_string(),
+            repo_id: repo_id.to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: meta_sha.to_string(),
+            scope: ScopeConstraint::default(),
+        };
+        let si = SignedInput {
+            content,
+            output_constraints: vec![],
+            valid_until: 2000,
+            expected_generation: None,
+            signature: vec![1, 2, 3],
+            key_binding: gyre_common::KeyBinding {
+                public_key: vec![1],
+                user_identity: "user:admin".to_string(),
+                issuer: "https://gyre.local".to_string(),
+                trust_anchor_id: "ta".to_string(),
+                issued_at: 1000,
+                expires_at: 2000,
+                user_signature: vec![1],
+                platform_countersign: vec![1],
+            },
+        };
+        gyre_common::Attestation {
+            id: format!("att-{task_id}"),
+            input: AttestationInput::Signed(si),
+            output: AttestationOutput {
+                content_hash: vec![1],
+                commit_sha: format!("{task_id:040}"),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::attestation::AttestationMetadata {
+                created_at: 1000,
+                workspace_id: ws_id.to_string(),
+                repo_id: repo_id.to_string(),
+                task_id: task_id.to_string(),
+                agent_id: format!("agent-{task_id}"),
+                chain_depth: 0,
+            },
+        }
+    }
+
+    /// Seed the provenance chain for a drifted MR: an author agent whose
+    /// current task carries a signed attestation recording `meta_sha` as
+    /// the meta-spec set the code was produced under. Returns the agent id
+    /// (the task-based attestation lookup path — the repo path is not a
+    /// real git repo, so the commit-based path resolves nothing).
+    async fn seed_drift_provenance(
+        state: &AppState,
+        mr_id: &str,
+        ws_id: &str,
+        repo: &Repository,
+        meta_sha: &str,
+    ) -> Id {
+        let task_id = format!("task-{mr_id}");
+        let att = drift_attestation(&task_id, &repo.id, ws_id, meta_sha);
+        let mut agent = gyre_domain::Agent::new(Id::new(format!("agent-{mr_id}")), "author", 1000);
+        agent.workspace_id = Id::new(ws_id);
+        agent.current_task_id = Some(Id::new(task_id));
+        state.agents.create(&agent).await.unwrap();
+        state.chain_attestations.save(&att).await.unwrap();
+        agent.id.clone()
+    }
+
+    /// Create an MR whose author agent's current task carries a provenance
+    /// attestation recording `meta_sha`.
+    async fn create_drift_mr(
+        state: &AppState,
+        mr_id: &str,
+        ws_id: &str,
+        repo: &Repository,
+        meta_sha: &str,
+    ) -> gyre_domain::MergeRequest {
+        let agent_id = seed_drift_provenance(state, mr_id, ws_id, repo, meta_sha).await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new(mr_id),
+            repo.id.clone(),
+            format!("MR {mr_id}"),
+            "feat/drift",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new(ws_id);
+        mr.author_agent_id = Some(agent_id);
+        state.merge_requests.create(&mr).await.unwrap();
+        mr
+    }
+
+    /// §9: mismatched meta_spec_set_sha records a `[WARN] meta-spec-drift`
+    /// gate result on the MR and the merge proceeds (warn, don't block).
+    #[tokio::test]
+    async fn meta_spec_drift_records_warn_gate_result_and_merge_proceeds() {
+        let state = test_state();
+        // Production policy set (same as
+        // `guided_workspace_merge_proceeds_with_startup_seeded_builtins`):
+        // a deployed server seeds the builtin ABAC policies at startup, and
+        // the merge-time attestation-ABAC gate default-denies without them.
+        // The drift MR carries a chain attestation, so
+        // `builtin:attested-authorization` allows the merge — the §9 drift
+        // behavior is under test, not the empty policy store.
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
+        let ws_id = "ws-drift-warn";
+        let repo = create_repo_in_workspace(&state, "repo-drift-warn", ws_id).await;
+        let current = bind_drift_set(&state, ws_id).await;
+        assert!(
+            !current.is_empty(),
+            "set must be bound for the check to run"
+        );
+
+        // Provenance under an OLD set SHA → drift.
+        create_drift_mr(&state, "mr-drift-warn", ws_id, &repo, "deadbeef").await;
+        enqueue_mr(&state, "mr-drift-warn", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        // The drift warning is recorded as a gate result in the §9 format,
+        // carrying Passed — informational, never blocking by itself.
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-warn")
+            .await
+            .unwrap();
+        let drift = results
+            .iter()
+            .find(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID)
+            .expect("drift gate result must be recorded");
+        assert_eq!(drift.status, GateStatus::Passed);
+        let output = drift.output.as_deref().expect("warning output");
+        let expected = crate::reconciliation::format_meta_spec_drift_warning(
+            &crate::reconciliation::MetaSpecDrift {
+                produced_set_sha: "deadbeef".to_string(),
+                current_set_sha: current.clone(),
+            },
+        );
+        assert_eq!(output, expected);
+        assert!(output.starts_with("[WARN] meta-spec-drift: "));
+
+        // Warn only — the MR still merges.
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-warn"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "warn-only drift must not block the merge"
+        );
+    }
+
+    /// §9: with `require_current_meta_spec_set: true`, drift converts to a
+    /// hard block — the entry stays queued with the drift reason and the MR
+    /// does not merge.
+    #[tokio::test]
+    async fn meta_spec_drift_hard_blocks_under_strict_workspace_policy() {
+        let state = test_state();
+        // Production policy set — see the warn-only test above: the relaxed
+        // phase of this test must merge the attested drifted MR, which the
+        // builtin `attested-authorization` Allow covers exactly as in a
+        // deployed server.
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
+        let ws_id = "ws-drift-block";
+        let repo = create_repo_in_workspace(&state, "repo-drift-block", ws_id).await;
+        bind_drift_set(&state, ws_id).await;
+
+        create_drift_mr(&state, "mr-drift-block", ws_id, &repo, "deadbeef").await;
+        enqueue_mr(&state, "mr-drift-block", 50, 1000).await;
+
+        // Strict workspace policy: drift blocks.
+        crate::merge_policy::set_merge_policy(
+            &state,
+            &Id::new(ws_id),
+            &crate::merge_policy::WorkspaceMergePolicy {
+                require_current_meta_spec_set: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        process_next(&state).await.unwrap();
+
+        // Entry went back to Queued carrying the drift reason — it stays in
+        // the queue until reconciled or the policy is relaxed.
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-drift-block"))
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Queued);
+        let reason = entry
+            .error_message
+            .as_deref()
+            .expect("drift reason recorded");
+        assert!(reason.contains("meta-spec drift"), "reason: {reason}");
+        assert!(
+            reason.contains("require_current_meta_spec_set"),
+            "reason: {reason}"
+        );
+
+        // The MR did not merge.
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-block"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(updated.status, MrStatus::Open);
+
+        // The block path records no drift gate result (it returns before
+        // the warn-only recording).
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-block")
+            .await
+            .unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| r.gate_id.as_str() != crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
+            "blocked drift must not record a Passed warn gate result"
+        );
+
+        // Relaxing the policy lets the same entry merge on the next cycle
+        // (the drift then downgrades to the warn-only gate result).
+        crate::merge_policy::set_merge_policy(
+            &state,
+            &Id::new(ws_id),
+            &crate::merge_policy::WorkspaceMergePolicy::default(),
+        )
+        .await
+        .unwrap();
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-block"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "relaxed policy must let the drifted MR merge (warn only)"
+        );
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-block")
+            .await
+            .unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
+            "warn-only path must record the drift gate result"
+        );
+    }
+
+    /// §9: matching meta_spec_set_sha → pass, no warning gate result.
+    #[tokio::test]
+    async fn meta_spec_drift_matching_set_sha_merges_without_warning() {
+        let state = test_state();
+        // Production policy set — see the warn-only drift test above.
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
+        let ws_id = "ws-drift-match";
+        let repo = create_repo_in_workspace(&state, "repo-drift-match", ws_id).await;
+        let current = bind_drift_set(&state, ws_id).await;
+
+        // Provenance under the CURRENT set SHA → pass.
+        create_drift_mr(&state, "mr-drift-match", ws_id, &repo, &current).await;
+        enqueue_mr(&state, "mr-drift-match", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-match"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(updated.status, MrStatus::Merged);
+
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-match")
+            .await
+            .unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| r.gate_id.as_str() != crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
+            "matching set SHA must not record a drift warning"
+        );
+    }
+
+    /// §9: an MR without an attestation skips the check gracefully — no
+    /// crash, no drift gate result, merge proceeds.
+    #[tokio::test]
+    async fn meta_spec_drift_mr_without_attestation_skips_check() {
+        let state = test_state();
+        let ws_id = "ws-drift-noatt";
+        let repo = create_repo_in_workspace(&state, "repo-drift-noatt", ws_id).await;
+        bind_drift_set(&state, ws_id).await;
+
+        // No author agent, no attestation anywhere.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-drift-noatt"),
+            repo.id.clone(),
+            "MR no attestation",
+            "feat/noatt",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new(ws_id);
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-drift-noatt", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-noatt"))
+            .await
+            .unwrap()
+            .expect("mr exists");
+        assert_eq!(updated.status, MrStatus::Merged);
+
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-noatt")
+            .await
+            .unwrap();
+        assert!(
+            results
+                .iter()
+                .all(|r| r.gate_id.as_str() != crate::reconciliation::META_SPEC_DRIFT_GATE_ID),
+            "no attestation → no drift gate result"
+        );
+    }
+
+    /// The warn-only drift gate result is idempotent across retry cycles:
+    /// an existing result for the MR is updated in place, not duplicated.
+    #[tokio::test]
+    async fn meta_spec_drift_warning_gate_result_is_idempotent() {
+        let state = test_state();
+        let ws_id = "ws-drift-idem";
+        let repo = create_repo_in_workspace(&state, "repo-drift-idem", ws_id).await;
+        bind_drift_set(&state, ws_id).await;
+
+        let mr = create_drift_mr(&state, "mr-drift-idem", ws_id, &repo, "deadbeef").await;
+        let drift = crate::reconciliation::mr_meta_spec_drift(&state, &mr)
+            .await
+            .expect("drift expected");
+
+        record_meta_spec_drift_warning(&state, &mr, &drift).await;
+        record_meta_spec_drift_warning(&state, &mr, &drift).await;
+
+        let results = state
+            .gate_results
+            .list_by_mr_id("mr-drift-idem")
+            .await
+            .unwrap();
+        let drift_results: Vec<_> = results
+            .iter()
+            .filter(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID)
+            .collect();
+        assert_eq!(
+            drift_results.len(),
+            1,
+            "retry cycles must not duplicate the drift gate result"
+        );
+    }
+
+    /// Review regression (task-159 repair): the strict-policy drift hold is
+    /// evaluated DURING candidate selection, so a strictly-blocked drifted
+    /// entry at the head of the shared merge queue cannot starve later
+    /// entries — the processor requeues it with the drift reason and tries
+    /// the next candidate in the SAME cycle. Clean MRs behind the drifted
+    /// head — both in the same workspace and in other workspaces — must
+    /// merge while the drifted head stays held.
+    #[tokio::test]
+    async fn strict_drift_hold_does_not_starve_shared_merge_queue() {
+        let state = test_state();
+
+        // Workspace A: strict merge policy + bound meta-spec set. A drifted
+        // MR sits at the HEAD of the shared queue (highest priority,
+        // earliest enqueue); a clean MR (no attestation → drift check
+        // skips gracefully) sits behind it in the SAME workspace.
+        let ws_a = "ws-drift-starve";
+        let repo_a = create_repo_in_workspace(&state, "repo-drift-starve", ws_a).await;
+        bind_drift_set(&state, ws_a).await;
+        create_drift_mr(&state, "mr-drift-starve-head", ws_a, &repo_a, "deadbeef").await;
+        enqueue_mr(&state, "mr-drift-starve-head", 100, 1000).await;
+        let mut clean_same_ws = gyre_domain::MergeRequest::new(
+            Id::new("mr-drift-starve-clean"),
+            repo_a.id.clone(),
+            "MR clean same workspace",
+            "feat/starve-clean",
+            "main",
+            1000,
+        );
+        clean_same_ws.workspace_id = Id::new(ws_a);
+        state.merge_requests.create(&clean_same_ws).await.unwrap();
+        enqueue_mr(&state, "mr-drift-starve-clean", 50, 1001).await;
+        crate::merge_policy::set_merge_policy(
+            &state,
+            &Id::new(ws_a),
+            &crate::merge_policy::WorkspaceMergePolicy {
+                require_current_meta_spec_set: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Workspace B: clean MR, lowest priority, enqueued last.
+        let ws_b = "ws-drift-starve-other";
+        let repo_b = create_repo_in_workspace(&state, "repo-drift-starve-other", ws_b).await;
+        let mut clean_other_ws = gyre_domain::MergeRequest::new(
+            Id::new("mr-drift-starve-other"),
+            repo_b.id.clone(),
+            "MR clean other workspace",
+            "feat/starve-other",
+            "main",
+            1000,
+        );
+        clean_other_ws.workspace_id = Id::new(ws_b);
+        state.merge_requests.create(&clean_other_ws).await.unwrap();
+        enqueue_mr(&state, "mr-drift-starve-other", 10, 1002).await;
+
+        // One cycle: the drifted head is requeued with the drift reason and
+        // the clean same-workspace MR behind it merges in the SAME cycle.
+        process_next(&state).await.unwrap();
+
+        let head = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-starve-head"))
+            .await
+            .unwrap()
+            .expect("head mr exists");
+        assert_eq!(
+            head.status,
+            MrStatus::Open,
+            "strict drift holds the drifted MR"
+        );
+        let head_entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-drift-starve-head"))
+            .await
+            .unwrap()
+            .expect("head entry exists");
+        assert_eq!(head_entry.status, MergeQueueEntryStatus::Queued);
+        let reason = head_entry
+            .error_message
+            .as_deref()
+            .unwrap_or_else(|| panic!("held entry must carry the drift reason"));
+        assert!(reason.contains("meta-spec drift"), "reason: {reason}");
+
+        let clean = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-starve-clean"))
+            .await
+            .unwrap()
+            .expect("clean mr exists");
+        assert_eq!(
+            clean.status,
+            MrStatus::Merged,
+            "clean MR queued behind a strictly-blocked drifted MR in the same \
+             workspace must merge in the same cycle — the drift hold must not \
+             starve the shared merge queue"
+        );
+
+        // Second cycle: the cross-workspace clean MR also merges while the
+        // drifted head is still held.
+        process_next(&state).await.unwrap();
+
+        let other = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-starve-other"))
+            .await
+            .unwrap()
+            .expect("other-workspace mr exists");
+        assert_eq!(
+            other.status,
+            MrStatus::Merged,
+            "clean MR in ANOTHER workspace must merge while a strict-policy \
+             drifted MR is held — a workspace-scoped governance setting must \
+             not deny merge service to unrelated workspaces"
+        );
+        let head = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-starve-head"))
+            .await
+            .unwrap()
+            .expect("head mr exists");
+        assert_eq!(
+            head.status,
+            MrStatus::Open,
+            "the drifted MR stays held across cycles until reconciled or relaxed"
+        );
+    }
+
+    /// Review regression (task-159 repair): an atomic group containing a
+    /// strictly-blocked drifted member is held as a unit during candidate
+    /// selection — every member entry is requeued with the drift reason —
+    /// while a later independent entry in another workspace still merges
+    /// in the same cycle.
+    #[tokio::test]
+    async fn strict_drift_hold_atomic_group_does_not_starve_later_entry() {
+        let state = test_state();
+
+        // Workspace A: strict merge policy + bound set. Two-member atomic
+        // group; member A is drifted (attestation under an old set SHA),
+        // member B has no attestation of its own — the group is held as a
+        // unit because the drift check expands to all members.
+        let ws_a = "ws-drift-group-starve";
+        let group_repo = create_repo_in_workspace(&state, "repo-drift-group-starve", ws_a).await;
+        bind_drift_set(&state, ws_a).await;
+        let drifted_author =
+            seed_drift_provenance(&state, "mr-drift-group-a", ws_a, &group_repo, "deadbeef").await;
+        create_mr_in_group(
+            &state,
+            "mr-drift-group-a",
+            &group_repo.id,
+            ws_a,
+            "bundle-drift-starve",
+            "feat/drift-group-a",
+            Some(drifted_author.as_str()),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-drift-group-b",
+            &group_repo.id,
+            ws_a,
+            "bundle-drift-starve",
+            "feat/drift-group-b",
+            None,
+        )
+        .await;
+        enqueue_mr(&state, "mr-drift-group-a", 100, 1000).await;
+        enqueue_mr(&state, "mr-drift-group-b", 100, 1001).await;
+        crate::merge_policy::set_merge_policy(
+            &state,
+            &Id::new(ws_a),
+            &crate::merge_policy::WorkspaceMergePolicy {
+                require_current_meta_spec_set: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Later independent entry in another workspace (no bound set → no
+        // drift possible), lower priority, enqueued last.
+        let ws_b = "ws-drift-group-later";
+        let later_repo = create_repo_in_workspace(&state, "repo-drift-group-later", ws_b).await;
+        let mut later_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-drift-group-later"),
+            later_repo.id.clone(),
+            "MR behind a drift-held atomic group",
+            "feat/drift-group-later",
+            "main",
+            1002,
+        );
+        later_mr.workspace_id = Id::new(ws_b);
+        state.merge_requests.create(&later_mr).await.unwrap();
+        enqueue_mr(&state, "mr-drift-group-later", 50, 1002).await;
+
+        process_next(&state).await.unwrap();
+
+        // The group is held as a unit: both members stay Open with their
+        // entries requeued carrying the drift reason.
+        for mr_id in ["mr-drift-group-a", "mr-drift-group-b"] {
+            let updated = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .expect("group member should exist");
+            assert_eq!(
+                updated.status,
+                MrStatus::Open,
+                "drift-held group member {mr_id} must stay Open"
+            );
+            let entry = state
+                .merge_queue
+                .find_by_id(&Id::new(format!("entry-{mr_id}")))
+                .await
+                .unwrap()
+                .expect("group member entry should exist");
+            assert_eq!(
+                entry.status,
+                MergeQueueEntryStatus::Queued,
+                "drift-held group member {mr_id} must stay Queued"
+            );
+            let reason = entry
+                .error_message
+                .as_deref()
+                .unwrap_or_else(|| panic!("held group member {mr_id} must carry a reason"));
+            assert!(
+                reason.contains("meta-spec drift"),
+                "member {mr_id} reason: {reason}"
+            );
+        }
+
+        // The later independent entry merged in the SAME cycle.
+        let later = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-drift-group-later"))
+            .await
+            .unwrap()
+            .expect("later mr should exist");
+        assert_eq!(
+            later.status,
+            MrStatus::Merged,
+            "MR queued behind a drift-held atomic group must still merge — a \
+             held group must not monopolize the shared merge queue"
         );
     }
 
@@ -9406,6 +10249,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &[],
                 50,
                 0,
@@ -10461,7 +11305,17 @@ mod tests {
         for uid in ["user-admin", "user-owner"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, &[], 10, 0)
+                .list_for_user(
+                    &Id::new(uid),
+                    Some(&ws_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    10,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(notifs.len(), 1, "{uid} must be notified");
@@ -10486,7 +11340,17 @@ mod tests {
         for uid in ["user-dev", "user-viewer"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, &[], 10, 0)
+                .list_for_user(
+                    &Id::new(uid),
+                    Some(&ws_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    10,
+                    0,
+                )
                 .await
                 .unwrap();
             assert!(

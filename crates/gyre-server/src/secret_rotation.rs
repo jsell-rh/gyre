@@ -483,6 +483,7 @@ async fn notify_workspace_admins(
                 None,
                 None,
                 Some(NotificationType::SecretExpiring.as_str()),
+                None,
                 &[],
                 50,
                 0,
@@ -540,7 +541,7 @@ async fn notify_workspace_admins(
             notif.source.repo_id = Some(Id::new(secret.scope_id.clone()));
         }
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
                 workspace_id = %workspace_id,
                 user_id = %member.user_id,
@@ -696,7 +697,17 @@ mod tests {
 
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("user-admin"), None, None, None, None, &[], 50, 0)
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         let secret_notifs: Vec<&Notification> = admin_notifs
@@ -722,7 +733,17 @@ mod tests {
         // Developer member gets nothing.
         let dev_notifs = state
             .notifications
-            .list_for_user(&Id::new("user-dev"), None, None, None, None, &[], 50, 0)
+            .list_for_user(
+                &Id::new("user-dev"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(dev_notifs
@@ -745,6 +766,7 @@ mod tests {
                 None,
                 None,
                 Some("SecretExpiring"),
+                None,
                 &[],
                 50,
                 0,
@@ -804,6 +826,7 @@ mod tests {
                 None,
                 None,
                 Some("SecretExpiring"),
+                None,
                 &[],
                 50,
                 0,
@@ -969,6 +992,7 @@ mod tests {
                 None,
                 None,
                 Some("SecretExpiring"),
+                None,
                 &[],
                 50,
                 0,
@@ -1018,6 +1042,7 @@ mod tests {
                 None,
                 None,
                 Some("SecretExpiring"),
+                None,
                 &[],
                 50,
                 0,
@@ -1049,6 +1074,7 @@ mod tests {
                 None,
                 None,
                 Some("SecretExpiring"),
+                None,
                 &[],
                 50,
                 0,

@@ -1252,7 +1252,7 @@ async fn test_divergence_detection_creates_notifications() {
     let admin_notifs = ctx
         .state
         .notifications
-        .list_for_user(&admin_user, None, None, None, None, &[], 10, 0)
+        .list_for_user(&admin_user, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert_eq!(
@@ -1270,7 +1270,7 @@ async fn test_divergence_detection_creates_notifications() {
     let dev_notifs = ctx
         .state
         .notifications
-        .list_for_user(&dev_user, None, None, None, None, &[], 10, 0)
+        .list_for_user(&dev_user, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert_eq!(dev_notifs.len(), 1, "Developer should have 1 notification");
@@ -1278,7 +1278,7 @@ async fn test_divergence_detection_creates_notifications() {
     let viewer_notifs = ctx
         .state
         .notifications
-        .list_for_user(&viewer_user, None, None, None, None, &[], 10, 0)
+        .list_for_user(&viewer_user, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1393,7 +1393,7 @@ async fn test_divergence_below_threshold_no_notifications() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, None, &[], 10, 0)
+        .list_for_user(&user_id, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1505,7 +1505,7 @@ async fn test_divergence_skips_reconciliation_agents() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, None, &[], 10, 0)
+        .list_for_user(&user_id, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1618,7 +1618,7 @@ async fn test_divergence_skips_same_agent() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, None, &[], 10, 0)
+        .list_for_user(&user_id, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1732,7 +1732,7 @@ async fn test_divergence_skips_human_pushed_deltas() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, None, &[], 10, 0)
+        .list_for_user(&user_id, None, None, None, None, None, &[], 10, 0)
         .await
         .unwrap();
     assert!(

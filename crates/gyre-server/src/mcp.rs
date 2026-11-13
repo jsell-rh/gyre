@@ -1802,7 +1802,7 @@ async fn create_uncertainty_notifications(
         notif.source.entity_id = agent_id.to_string();
         notif.body = body.clone();
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(
                 "agent_complete: failed to create AgentNeedsClarification notification for user {}: {e}",
                 member.user_id
@@ -3583,6 +3583,7 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
                 Some(&ws_id),
                 min_pri,
                 max_pri,
+                None,
                 None,
                 &disabled,
                 50,
