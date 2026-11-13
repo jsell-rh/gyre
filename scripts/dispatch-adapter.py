@@ -154,7 +154,7 @@ def authorize(store, request):
     if row['stage'] in COMPUTE and (store.setting('admission_paused', False) or store.setting('slots', 8) == 0):
         return False
     return (request.get('fingerprint') == job(store,dict(row))['fingerprint']
-            and store.admission_available(row['stage']) and eligible(store, dict(row)))
+            and store.admission_available(row['stage'],work=dict(row)) and eligible(store, dict(row)))
 
 
 def launch(store, request):
@@ -248,6 +248,8 @@ def main():
         elif action == 'rows':
             from pipeline.runtime import observe
             observe(store)
+            from pipeline.stress import observe as observe_stress
+            observe_stress(store)
             result = {'rows':read_rows(store), 'capacity':store.setting('slots',8), 'settings':configuration(store)}
         elif action == 'recover':
             recover(store); result = {}
@@ -269,6 +271,8 @@ def main():
                         store.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('gateway',json.dumps(selected)))
                 ensure_github_provider(store)
                 store.set_setting('dispatcher_health_at',time.time())
+            from pipeline.capacity import observe as observe_quota
+            observe_quota(store)
             result = {}
         elif action == 'discover':
             with contextlib.redirect_stdout(sys.stderr):
@@ -278,8 +282,12 @@ def main():
             selected = allowed_tasks(store)
             tasks = {t['name']:t['data'] for t in store.tasks()}
             rows = store.ordered_ready()
+            from pipeline.capacity import summary
+            capacity=summary(store)
             result = {'jobs':[job(store,r,tasks) for r in rows if (selected is None or r['task'] in selected)
-                      and eligible(store,r) and store.admission_available(r['stage'])], 'errors':[]}
+                      and eligible(store,r) and store.admission_available(r['stage'],work=r)], 'errors':[],
+                      'admission':'New compute paused by operator' if store.setting('admission_paused',False)
+                        else capacity['message'] if not capacity['allowed'] else ''}
         elif action == 'retry':
             control(store,request); result = {}
         elif action == 'cancel':

@@ -67,6 +67,17 @@ func TestKnownFailureRetryDoesNotClaimItsOutcomeIsUnknown(t *testing.T) {
 	}
 }
 
+func TestQuotaAdmissionBannerIsNotAConnectionFailure(t *testing.T) {
+	m := sampleModel()
+	defer m.cancel()
+	m.state.Admission = "Namespace quota requests.memory: needs 6.50 GiB, available 2.00 GiB"
+	m.state.Connection = "Connected"
+	view := m.View()
+	if !strings.Contains(view, "Namespace quota requests.memory") || strings.Contains(view, "Connection lost") {
+		t.Fatal("quota waiting disappeared or became a gateway outage", view)
+	}
+}
+
 func TestDeliveredWorkLeavesPendingListButRemainsVisibleInCompletedAndDetails(t *testing.T) {
 	m := sampleModel()
 	defer m.cancel()
