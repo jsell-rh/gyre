@@ -282,24 +282,47 @@ pub async fn admin_audit(
 
 // ── Agent Kill ────────────────────────────────────────────────────────────────
 
-/// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
-pub async fn admin_kill_agent(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    auth: crate::auth::AuthenticatedAgent,
-) -> Result<StatusCode, ApiError> {
-    let mut agent = state
-        .agents
-        .find_by_id(&Id::new(&id))
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
-
+/// Kill an agent: transition to `Dead`, stop its process, handle worktrees,
+/// emit `AgentStatusChanged` telemetry, emit the container-crashed audit
+/// event, revoke the agent's auth token, emit the `AgentKilled` audit event,
+/// clean up interrogation state, and release the budget active-agent slot
+/// when the agent held one.
+///
+/// Kill path for the admin kill route. Budget enforcement uses its own
+/// `budget_stop_agent` (api/budget.rs) with materially different terminal
+/// semantics mandated by agent-runtime.md §4 / platform-model.md §5:
+/// status `Stopped` (not Dead — the run is recoverable), task left
+/// InProgress (not Blocked), worktree preserved, compute minutes charged.
+/// The two paths are deliberately distinct; do not funnel budget stops
+/// through this admin-terminal helper.
+///
+/// `preserve_worktree`: preserve the agent's in-progress work (worktree,
+/// branch, partial MR); admin kills clean up.
+///
+/// `killed_by`: identity attributed in the `AgentKilled` audit event (the
+/// admin's user/agent id on admin kills).
+///
+/// `revoke_reason`: short cause tag recorded on the `AgentTokenRevoked`
+/// audit event ("admin_kill").
+pub(crate) async fn kill_agent(
+    state: &AppState,
+    agent: &gyre_domain::Agent,
+    reason: &str,
+    preserve_worktree: bool,
+    killed_by: &str,
+    revoke_reason: &str,
+) -> Result<(), ApiError> {
+    let id = agent.id.to_string();
     if agent.status == AgentStatus::Dead {
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(());
     }
+    // Only an Active agent holds a budget active-agent slot (incremented at
+    // spawn, released on Idle/Failed/Stopped) — never double-release.
+    let was_active = agent.status == AgentStatus::Active;
 
     let now = now_secs();
 
+    let mut agent = agent.clone();
     let _ = agent.transition_status(AgentStatus::Dead);
     state.agents.update(&agent).await?;
 
@@ -330,28 +353,25 @@ pub async fn admin_kill_agent(
     }
     // Fall back to the attested PID when no live process handle exists.
     if killed_pid.is_none() {
-        killed_pid = crate::agent_audit::attested_pid(&state, &id).await;
+        killed_pid = crate::agent_audit::attested_pid(state, &id).await;
     }
 
-    // Clean up worktrees.
-    if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
-        for wt in worktrees {
-            if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
-                let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
+    // Worktrees: preserved on budget kills (in-progress work must survive
+    // for reassignment), cleaned up on admin kills.
+    if !preserve_worktree {
+        if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
+            for wt in worktrees {
+                if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+                    let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
+                }
+                let _ = state.worktrees.delete(&wt.id).await;
             }
-            let _ = state.worktrees.delete(&wt.id).await;
         }
     }
 
-    // Block the agent's current task.
-    if let Some(task_id) = &agent.current_task_id {
-        if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
-            if task.status == TaskStatus::InProgress {
-                let _ = task.transition_status(TaskStatus::Blocked);
-                task.updated_at = now;
-                let _ = state.tasks.update(&task).await;
-            }
-        }
+    // M22.2: release the budget active-agent slot this agent held.
+    if was_active {
+        crate::api::budget::decrement_active_agents(state, &agent.workspace_id.to_string()).await;
     }
 
     let ws_id = agent.workspace_id.clone();
@@ -363,7 +383,7 @@ pub async fn admin_kill_agent(
                 "event_id": uuid::Uuid::new_v4().to_string(),
                 "agent_id": agent.id.to_string(),
                 "status": "dead",
-                "description": format!("Agent {} force-killed by admin", agent.name),
+                "description": format!("Agent {}: {}", agent.name, reason),
                 "timestamp": now,
             })),
         )
@@ -375,44 +395,75 @@ pub async fn admin_kill_agent(
             audit: state.audit.as_ref(),
             broadcast_tx: &state.audit_broadcast_tx,
         };
-        crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, "force-killed by admin")
-            .await;
+        crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, reason).await;
     }
 
-    // HSI §4: Clean up interrogation ABAC policies on admin kill.
-    crate::api::spawn::cleanup_interrogation_policies(&state, &id).await;
+    // HSI §4: Clean up interrogation ABAC policies on kill.
+    crate::api::spawn::cleanup_interrogation_policies(state, &id).await;
     let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
 
     // Revoke the agent's token — killed agents must not continue to
     // authenticate. Revocation is audited as an AgentTokenRevoked event.
-    crate::agent_audit::revoke_agent_token(&state, &agent, "admin_kill").await;
+    crate::agent_audit::revoke_agent_token(state, &agent, revoke_reason).await;
 
     // Platform Model §7: revoke task-scoped ephemeral secrets on kill
     // ("Secrets access revoked" at teardown) — deletes Task-scoped secrets
     // for the agent's task and logs `secret.revoked` per secret.
-    crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+    crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
 
-    // Agent lifecycle audit event (observability.md §Audit Event Types).
+    // Agent lifecycle audit event (observability.md §Audit Event Types):
+    // attributes who ordered the kill and which PID was terminated.
+    crate::agent_audit::emit_killed(state, &agent, reason, killed_by, killed_pid).await;
+
+    Ok(())
+}
+
+/// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
+pub async fn admin_kill_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
+) -> Result<StatusCode, ApiError> {
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    if agent.status == AgentStatus::Dead {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    // Admin identity for the AgentKilled audit event.
     let killed_by = auth
         .user_id
         .map(|u| u.to_string())
         .unwrap_or_else(|| auth.agent_id.clone());
-    crate::agent_audit::emit_killed(
+    kill_agent(
         &state,
         &agent,
         "force-killed by admin",
+        false,
         &killed_by,
-        killed_pid,
+        "admin_kill",
     )
-    .await;
+    .await?;
 
-    // The kill ended the run — release the workspace's active-agent budget
-    // slot and charge the wall-clock compute minutes (spawn → kill,
-    // agent-runtime.md §4 What's Tracked). `agent.status` still holds the
-    // pre-transition status: only an Active agent held a slot.
-    if agent.status == AgentStatus::Active {
-        crate::api::budget::decrement_active_agents(&state, &agent.workspace_id.to_string()).await;
+    // Block the agent's current task.
+    if let Some(task_id) = &agent.current_task_id {
+        if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
+            if task.status == TaskStatus::InProgress {
+                let _ = task.transition_status(TaskStatus::Blocked);
+                task.updated_at = now_secs();
+                let _ = state.tasks.update(&task).await;
+            }
+        }
     }
+
+    // The kill ended the run — charge the wall-clock compute minutes
+    // (spawn → kill, agent-runtime.md §4 What's Tracked). The budget
+    // active-agent slot is already released inside `kill_agent` (exactly
+    // once — only an Active agent ever held one).
     crate::api::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     Ok(StatusCode::NO_CONTENT)
