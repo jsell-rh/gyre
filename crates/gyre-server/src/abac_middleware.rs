@@ -1943,7 +1943,9 @@ fn addressed_resource_id(ctx: &AttributeContext, pattern: &str) -> String {
 /// extraction rules as the evaluation context (`extract_path_attributes`),
 /// on a scratch context.
 fn path_resource_id(pattern: &str, path: &str, resource_type: &str) -> String {
-    let mut scratch = AttributeContext::default();
+    // Scratch context for resource-id extraction only; never evaluates
+    // policies, so no subject baseline attributes are set.
+    let mut scratch = AttributeContext::default(); // abac-context:ok
     extract_path_attributes(&mut scratch, pattern, path, resource_type);
     addressed_resource_id(&scratch, pattern)
 }
@@ -2128,6 +2130,11 @@ pub async fn abac_middleware(
     // Subject identity from the auth context: the authenticated identity
     // string (JWT display name, agent-token id, or API-key subject).
     ctx.set("subject.id", &auth.agent_id);
+    // Tenant identity from the auth context (§Attributes: subject.tenant_id,
+    // source "Auth context / OIDC"). Set for every auth path — agent and
+    // API-key callers do not carry JWT claims, so they get tenant_id only
+    // from here.
+    ctx.set("subject.tenant_id", &auth.tenant_id);
     // TASK-129 (§Built-In Policies): the genuine system principal (the
     // global GYRE_AUTH_TOKEN — `is_system_principal` requires
     // agent_id == "system" AND no user identity, so a user merely NAMED
@@ -2167,11 +2174,6 @@ pub async fn abac_middleware(
             many.iter().map(|r| r.as_str().to_string()).collect(),
         ),
     }
-    // Tenant identity from the auth context (§Attributes: subject.tenant_id,
-    // source "Auth context / OIDC"). Set for every auth path — agent and
-    // API-key callers do not carry JWT claims, so they get tenant_id only
-    // from here.
-    ctx.set("subject.tenant_id", &auth.tenant_id);
     // OIDC-claim-sourced subject attributes (§Attributes: persona, stack_hash,
     // attestation_level, repo_scope — source "Agent OIDC claim"), for AGENT
     // subjects only. Claim merging is allowlisted to those four names

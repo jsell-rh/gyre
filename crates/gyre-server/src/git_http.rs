@@ -4338,7 +4338,15 @@ async fn evaluate_push_attestation_abac(
     // the ABAC middleware does for HTTP requests and evaluate_merge_abac /
     // evaluate_attestation_abac do at merge time (task-129 §Audit
     // Integration: every evaluation path records).
-    let decision = crate::policy_engine::build_decision(
+    //
+    // `request_id`: this path has no HTTP request to key the decision on —
+    // the triggering push task IS the correlation key (the chain under
+    // evaluation was located via `find_by_task(task_id)`). Stamping the
+    // task id here, instead of the opaque random UUID `build_decision`
+    // generates, makes the persisted trail answer “which task's push
+    // produced this decision” when queried via
+    // GET /api/v1/policies/decisions.
+    let mut decision = crate::policy_engine::build_decision(
         &eval_result,
         agent_id,
         "agent",
@@ -4346,6 +4354,7 @@ async fn evaluate_push_attestation_abac(
         "attestation",
         repo_id,
     );
+    decision.request_id = task_id.to_string();
     crate::policy_engine::record_decision_audit(state, &decision).await;
 
     // §Audit Integration log-level contract (review round 6, task-129):
@@ -5165,6 +5174,10 @@ mod tests {
         assert_eq!(d.subject_type, "agent");
         assert_eq!(d.action, "push");
         assert_eq!(d.resource_id, "repo-push-audit");
+        // The decision's request_id is the triggering push TASK — the
+        // correlation key for this path (no HTTP request exists), so the
+        // trail answers “which task's push produced this decision”.
+        assert_eq!(d.request_id, "TASK-PUSH-AUDIT");
         assert_eq!(d.decision, PolicyEffect::Allow);
         assert_eq!(
             d.matched_policy.as_ref().map(|p| p.as_str()),
