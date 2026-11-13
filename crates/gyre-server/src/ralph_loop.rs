@@ -867,8 +867,8 @@ mod tests {
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
-            timeout_secs: None,
             position: 0,
+            timeout_secs: None,
             created_at: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();

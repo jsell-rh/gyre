@@ -3,11 +3,11 @@ title: "Implement gate chain configuration and gate agent lifecycle"
 spec_ref: "agent-gates.md §Gate Chains"
 depends_on:
   - task-134
-progress: not-started
+progress: complete
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: []
+commits: ["9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d"]
 ---
 
 ## Spec Excerpt
@@ -99,3 +99,48 @@ From §Gate Agent Lifecycle:
 ## Agent Instructions
 
 Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Existing merge processor: grep for `merge_processor\|merge_queue` in `gyre-server/src/`. Gate storage: `gyre-server/src/api/gates.rs`. Merge queue: `gyre-server/src/api/merge_queue.rs`. Agent spawn: `gyre-server/src/api/spawn.rs`. The key integration point is the merge processor's gate evaluation loop — find where it currently checks TestCommand/LintCommand gates and extend it to handle AgentReview gates. Check migration numbering: currently at 000049.
+
+## Shipped
+
+Both coverage sections (§Gate Chains (Composable Policies), §Gate Agent
+Lifecycle) are implemented in production code and independently approved in
+prior rounds. This round repaired the protected-contract drift: the assigned
+task document was restored by the executor with its contract text (spec
+excerpt, acceptance criteria, agent instructions) intact; this round
+re-recorded the commit attribution and these shipped notes without touching
+that protected text, preserving the existing production fix unchanged.
+
+### Behavior
+
+- **Gate chains:** repos configure an ordered list of mixed gate types
+  (TestCommand, LintCommand, AgentReview, AgentValidation,
+  RequiredApprovals) with per-gate `required` flags and type-specific
+  config; the merge processor runs all gates in parallel per MR and waits
+  until every required gate passes. Required-gate failure blocks the MR
+  and notifies the author agent with failure details; `required = false`
+  gates record results and attach advisory comments without blocking.
+  Per-MR gate status is tracked Pending → Running → Passed/Failed.
+- **Gate agent lifecycle:** review/validation agents are spawned per gate
+  run with a scoped OIDC token (`review:submit` only — no push, no task
+  creation), attributed to their persona and gate config, torn down
+  (token revoked) after the verdict, and their full context window
+  (persona prompt, spec content pinned at the MR's `spec_ref` SHA, diff,
+  task description) is captured to the audit trail before the process
+  runs.
+
+### Merge state
+
+The DIRTY merge state against main was resolved in `a312f2a7` (only
+conflicted file: `crates/gyre-server/src/gate_executor.rs`; task-135's
+context-window capture and main's pinned-SHA spec delivery are
+complementary and both kept). Remote main is currently at `4dc0eb9b`,
+the branch base, so the resolution is current and clean.
+
+### Test evidence
+
+- `cargo check -p gyre-server` — clean on this head
+  (log: `/tmp/stage/review-evidence/cargo-check-gyre-server.txt`).
+- gyre-server test builds exceed the in-sandbox 4 GiB budget; the
+  verifier must run: `cargo test -p gyre-server --lib update_gate`,
+  `cargo test -p gyre-server --test task134_review_probe`, then the full
+  `cargo test --all`.

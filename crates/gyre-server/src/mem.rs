@@ -2943,12 +2943,10 @@ impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
             .filter(|g| g.repo_id.to_string() == repo_id)
             .cloned()
             .collect();
-        // Same ordering contract as the SQL adapters: (position, created_at).
-        gates.sort_by(|a, b| {
-            a.position
-                .cmp(&b.position)
-                .then(a.created_at.cmp(&b.created_at))
-        });
+        // Chain order (agent-gates.md §Gate Chains): position first,
+        // creation order as the tiebreak — mirrors the SQL adapters'
+        // ORDER BY position, created_at.
+        gates.sort_by_key(|g| (g.position, g.created_at));
         Ok(gates)
     }
     async fn delete(&self, id: &str) -> Result<()> {
