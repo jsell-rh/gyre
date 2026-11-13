@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-056.md
 coverage_sections: []
-commits: ["d5b463e109599315f6329aab8d12c2fa5a74fe31"]
+commits: ["d5b463e109599315f6329aab8d12c2fa5a74fe31", "52101cd0a05798168095ea1247570d87e12259c4"]
 ---
 
 ## Spec Excerpt
@@ -76,15 +76,15 @@ Missing:
 
 ## Acceptance Criteria
 
-- [x] `abandoned_branch_check` job is no longer a stub
-- [x] Creates `AbandonedBranch` notifications (priority 9) for `spec-edit/*` MRs with no activity for >7 days
-- [x] Notifications sent to workspace Admin and Developer members
-- [x] Notifications include `entity_ref` (MR id) and `repo_id` for Inbox filtering
-- [x] Dismissed notifications are not re-created within 30 days
-- [x] Active notifications for the same MR are not duplicated
-- [x] Merged/closed MRs are not flagged
-- [x] Unit tests cover all cases
-- [ ] `cargo test --all` passes (deferred to independent verifier; see Shipped test evidence)
+- [ ] `abandoned_branch_check` job is no longer a stub
+- [ ] Creates `AbandonedBranch` notifications (priority 9) for `spec-edit/*` MRs with no activity for >7 days
+- [ ] Notifications sent to workspace Admin and Developer members
+- [ ] Notifications include `entity_ref` (MR id) and `repo_id` for Inbox filtering
+- [ ] Dismissed notifications are not re-created within 30 days
+- [ ] Active notifications for the same MR are not duplicated
+- [ ] Merged/closed MRs are not flagged
+- [ ] Unit tests cover all cases
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -101,6 +101,7 @@ When working on this task:
 ## Git Commits
 
 - `d5b463e1` — `fix(server): exact storage-level dedup for abandoned branch notifications (TASK-056)`
+- `52101cd0` — `fix(server): align abandoned-branch dedup test with merged list_for_user signature (TASK-056)` (base-6f5a631c merge-conflict resolution, round f10a9351)
 
 ## Shipped
 
@@ -128,6 +129,18 @@ the module is exported from `lib.rs` — no stub remains.
   replaced the earlier paginated `list_for_user` scan, which missed existing
   active notifications past the first page and stacked duplicates.
 
+### Round f10a9351 (contract repair, merged with base 6f5a631c)
+
+- Resolved the merge conflict in `abandoned_branch.rs` in favor of the exact
+  storage-level `has_active_notification` dedup (5-arg port signature now on
+  the merged tree); the base side carried the obsolete 9-arg paginated form.
+- Fixed one stale test call site still using the pre-merge 7-arg
+  `list_for_user` signature (missing `repo_id` param) —
+  commit `52101cd0`.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` exit 0 on the
+  merged head; evidence at
+  `/tmp/stage/review-evidence/cargo-check-gyre-server-r2.txt`.
+
 ### Test evidence
 
 9 unit tests in `abandoned_branch.rs` cover: happy path (entity_ref +
@@ -137,14 +150,8 @@ exclusion, dismissal suppression, active dedup, and
 `dedup_is_not_page_bounded` (mutation-distinguished: restoring the old
 paginated dedup makes it fail while the exact lookup passes).
 
-This round (repair continuation, merged with current base `7daca25d`):
-`SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` exit 0 — lib and
-test targets type-check cleanly after the base merge; evidence saved at
-`/tmp/stage/review-evidence/cargo-check-gyre-server.txt`. Full server test
-compilation is deferred to the independent verifier (4 GiB budget);
-commands to execute: `cargo test -p gyre-server --lib abandoned_branch` and
-`cargo test --all`.
-
-Prior-round evidence: R1 review (`specs/reviews/task-056.md`) verdict
-complete (0 findings); full `cargo test --all` passed against this
-implementation.
+Server test compilation is deferred to the independent verifier (4 GiB
+budget); commands to execute: `cargo test -p gyre-server --lib
+abandoned_branch` and `cargo test --all`. Prior-round evidence: R1 review
+(`specs/reviews/task-056.md`) verdict complete (0 findings); full
+`cargo test --all` passed against this implementation.
