@@ -386,6 +386,7 @@ pub async fn admin_kill_agent(
         let ctx = crate::container_audit::AuditCtx {
             audit: state.audit.as_ref(),
             broadcast_tx: &state.audit_broadcast_tx,
+            search: state.search.as_ref(),
         };
         crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, "force-killed by admin")
             .await;

@@ -1467,6 +1467,10 @@ async fn merge_atomic_group(
                 "outcome": "merged",
                 "wait_secs": now.saturating_sub(ge.enqueued_at),
                 "atomic_group": group_name,
+                // Scope facets (search.md §Searchable Entities: Activity
+                // Event is filterable by workspace/repo).
+                "workspace_id": updated_mr.workspace_id.to_string(),
+                "repo_id": updated_mr.repository_id.to_string(),
             }),
             now,
         )
@@ -1477,6 +1481,9 @@ async fn merge_atomic_group(
             Some(&updated_mr.repository_id),
         );
         let _ = state.analytics.record(&ev).await;
+        // search.md §Searchable Entities: activity events are indexed on write.
+        crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev))
+            .await;
         // mr.merged analytics event — deferred with the other side effects
         // so a group rollback (which reverts MR statuses to Open) never
         // leaves a phantom "merged" event behind.
@@ -2413,6 +2420,12 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 Some(&updated_mr.repository_id),
             );
             let _ = state.analytics.record(&ev).await;
+            // search.md §Searchable Entities: activity events are indexed on write.
+            crate::search_indexer::index(
+                state,
+                crate::search_indexer::activity_event_document(&ev),
+            )
+            .await;
 
             // mr.merged analytics event (analytics.md §Auto-Emitted Events)
             // — the queue is the primary merge path; the HTTP transition

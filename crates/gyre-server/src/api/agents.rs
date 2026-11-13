@@ -5,9 +5,8 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{Agent, AgentStatus};
-use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::AppState;
 
@@ -130,27 +129,9 @@ pub async fn create_agent(
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     state.agents.create(&agent).await?;
-    // Index for search. Scope fields come from the agent record (§Access
-    // Scoping): its workspace (mandatory per M34), its repo when bound, and
-    // the tenant resolved from the workspace's scope row.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "idle".to_string());
-    crate::search_scope::index_doc(
-        &state,
-        SearchDocument {
-            entity_type: "agent".to_string(),
-            entity_id: agent.id.to_string(),
-            title: agent.name.clone(),
-            body: String::new(),
-            workspace_id: Some(agent.workspace_id.to_string()),
-            repo_id: agent.repo_id.as_ref().map(|r| r.to_string()),
-            tenant_id: None,
-            facets,
-            // Entity's own update time — the since:/until: facets filter on it.
-            updated_at: Some(now as i64),
-        },
-    )
-    .await;
+    // Index for search (search.md §Searchable Entities: agent facets status,
+    // workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::agent_document(&agent)).await;
     state
         .emit_event(
             Some(agent.workspace_id.clone()),
@@ -291,6 +272,8 @@ pub async fn update_agent_status(
         .transition_status(new_status)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.update(&agent).await?;
+    // search.md §Index Updates: agent status changed -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::agent_document(&agent)).await;
     // Platform Model §7 (task-100 review round-3 F2): a terminal status
     // transition (Dead/Failed/Stopped — Stopped has no exit transitions)
     // ends the agent's run, so the task-scoped ephemeral secrets must be

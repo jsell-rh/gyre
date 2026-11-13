@@ -1139,6 +1139,8 @@ pub(crate) async fn spawn_agent_core(
     )
     .with_scope(None, None, Some(&repo.workspace_id), Some(&repo.id));
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
     super::budget::increment_active_agents(state, &repo.workspace_id.to_string()).await;
@@ -1594,6 +1596,7 @@ pub(crate) async fn launch_agent_process(
                             let ctx = crate::container_audit::AuditCtx {
                                 audit: state.audit.as_ref(),
                                 broadcast_tx: &state.audit_broadcast_tx,
+                                search: state.search.as_ref(),
                             };
                             crate::container_audit::emit_started(
                                 &ctx,
@@ -2068,6 +2071,7 @@ async fn monitor_spawned_agent_exit(state: Arc<AppState>, agent_id: String) {
                 let ctx = crate::container_audit::AuditCtx {
                     audit: state.audit.as_ref(),
                     broadcast_tx: &state.audit_broadcast_tx,
+                    search: state.search.as_ref(),
                 };
                 let container_id_for_evt = audit_rec.map(|r| r.container_id).unwrap_or_default();
                 crate::container_audit::emit_stopped(
@@ -2397,16 +2401,27 @@ pub async fn complete_agent(
     )
     .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // Auto-track MR creation
     let ev = AnalyticsEvent::new(
         new_id(),
         "mr.created",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string(), "source_branch": mr.source_branch }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "source_branch": mr.source_branch,
+            // Scope facets (search.md §Searchable Entities: Activity Event
+            // is filterable by workspace/repo).
+            "workspace_id": mr.workspace_id.to_string(),
+            "repo_id": mr.repository_id.to_string(),
+        }),
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
