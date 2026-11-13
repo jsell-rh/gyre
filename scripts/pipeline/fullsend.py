@@ -180,7 +180,7 @@ def prepare(execution, task, prompt):
                'providers': [forge_provider],
                'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage', 'assess':'review'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
-               'sandbox_timeout_seconds': 600,
+               'sandbox_timeout_seconds': execution.store.setting('model_timeout',DEFAULT_MODEL_TIMEOUT),
                'timeout_minutes': max(1, (execution.store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT) + 59) // 60),
                'host_files': [{'src': str(p), 'dest': '/tmp/stage/' + str(p.relative_to(bundle))}
                               for p in sorted(bundle.rglob('*')) if p.is_file()],

@@ -79,7 +79,7 @@ class FullsendContracts(FullsendFixture):
         self.assertTrue(all(not p['dest'].endswith('auth.json') for p in harness['host_files']))
         self.assertNotIn('ENMAAS_API_KEY', json.dumps(harness))
         self.assertNotIn('FULLSEND_INFERENCE_GATEWAY_API_KEY', json.dumps(harness))
-        self.assertEqual(harness['sandbox_timeout_seconds'], 600)
+        self.assertEqual(harness['sandbox_timeout_seconds'], 14400)
         self.assertEqual(harness['timeout_minutes'], 240)
         self.assertTrue((shim / 'openshell').is_file())
 
