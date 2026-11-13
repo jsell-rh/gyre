@@ -608,6 +608,10 @@ pub async fn update_invitation_policy(
 
 // ─── Tenant invitation acceptance (magic link) ───────────────────────────────
 
+/// Name recorded for the first API key minted at invitation acceptance
+/// (mirrors the "bootstrap" key name of POST /api/v1/users).
+const INVITE_KEY_NAME: &str = "invitation";
+
 #[derive(Deserialize, Default)]
 pub struct AcceptInviteRequest {
     /// Local mode: display name for the new account (defaults to the email
@@ -624,6 +628,14 @@ pub struct AcceptInviteRequest {
 }
 
 #[derive(Serialize)]
+pub struct AcceptInviteApiKey {
+    /// Plaintext API key - returned exactly once. Only the SHA-256 hash
+    /// is stored (same contract as the POST /api/v1/users bootstrap key).
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
 pub struct AcceptInviteResponse {
     pub user_id: String,
     pub username: String,
@@ -632,6 +644,20 @@ pub struct AcceptInviteResponse {
     pub tenant_id: String,
     /// Workspaces activated by this acceptance.
     pub workspaces: Vec<String>,
+    /// Local mode only: the account's first API key, minted at acceptance
+    /// (review d6b8a97). The magic-link token in the URL is the auth factor
+    /// — the acceptor proved control of the invited email — so acceptance
+    /// is the moment a credential is delivered, mirroring the
+    /// POST /api/v1/users bootstrap pattern. This is what makes local
+    /// accounts first-class in air-gapped/no-IdP tenants: without it the
+    /// accepted invitee could never authenticate (the platform has no
+    /// password-login path; API keys are the local credential).
+    ///
+    /// Absent (`null`) when a pre-existing account with an independent
+    /// identity binding was linked: SSO-provisioned accounts authenticate
+    /// via their IdP, and minting a key from token possession would let an
+    /// invitation holder bypass that IdP for someone else's account.
+    pub api_key: Option<AcceptInviteApiKey>,
 }
 
 /// POST /api/v1/invite/:token/accept
@@ -648,7 +674,10 @@ pub struct AcceptInviteResponse {
 /// Flow (spec §Tenant invitation flow):
 /// - token → invitation (hash lookup), must be Pending and unexpired
 /// - Local mode: create the user (external_id namespaced by tenant+email so
-///   the same email can exist in different tenants)
+///   the same email can exist in different tenants) and mint the account's
+///   first API key in the response — the magic-link credential delivery
+///   ("Invitee receives a magic link"; the acceptor holds the one-time
+///   256-bit token, so they are the account owner)
 /// - SSO mode: if a user with the invitation email already exists in the
 ///   tenant, link (activate pre-assigned memberships); otherwise create a
 ///   local-mode account now — on first SSO login, the verified email
@@ -779,8 +808,21 @@ async fn accept_tenant_invitation_claimed(
     //    subject) when the emails match within the same tenant.
     let email = invitation.email.clone();
     let tenant_ns = format!("tenant:{}:email:{}", invitation.tenant_id, email);
+    // Credential delivery (review d6b8a97): mint the account's first API
+    // key iff the account exists because of invitation acceptance to this
+    // email — a fresh create (case 3) or a local-mode account carrying the
+    // invitation namespace external_id (case 1: a retry/re-invite whose
+    // earlier key, if any, never reached the client). A pre-existing
+    // account with an independent identity binding (case 2: SSO subject,
+    // SCIM, or a bootstrap `local:{username}` account) gets NO minted key:
+    // those accounts authenticate through their existing factor, and a
+    // key minted from token possession would bypass it.
+    let mut mint_credential = false;
     let (user, mode) = match state.users.find_by_external_id(&tenant_ns).await? {
-        Some(existing) => (existing, "linked"),
+        Some(existing) => {
+            mint_credential = true;
+            (existing, "linked")
+        }
         None => match find_tenant_user_by_email(state, &invitation.tenant_id, &email).await? {
             Some(mut sso_user) => {
                 // The inviting TenantAdmin chose the role at invite time;
@@ -849,6 +891,7 @@ async fn accept_tenant_invitation_claimed(
                     GlobalRole::Member => vec![UserRole::Developer],
                 };
                 state.users.create(&user).await?;
+                mint_credential = true;
                 (user, "created")
             }
         },
@@ -911,12 +954,40 @@ async fn accept_tenant_invitation_claimed(
         }
     }
 
+    // Mint the first API key only after every side effect succeeded: if
+    // this errors, the invitation rolls back to Pending and a retry mints
+    // again (the user dedups via the namespace lookup above), so no
+    // credential is handed out for an acceptance that did not complete.
+    // Same generation and storage contract as the POST /api/v1/users
+    // bootstrap key: CSPRNG UUID v4 raw key, only the SHA-256 hash
+    // persisted, registered in `state.api_keys` — the store the auth
+    // extractor consults, so the key authenticates through the real
+    // routing chain immediately.
+    let api_key = if mint_credential {
+        let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key(&raw_key),
+                &user.id,
+                INVITE_KEY_NAME,
+            )
+            .await?;
+        Some(AcceptInviteApiKey {
+            key: raw_key,
+            name: INVITE_KEY_NAME.to_string(),
+        })
+    } else {
+        None
+    };
+
     Ok(AcceptInviteResponse {
         user_id: user.id.to_string(),
         username: user.username.clone(),
         mode: mode.to_string(),
         tenant_id: invitation.tenant_id.to_string(),
         workspaces: activated,
+        api_key,
     })
 }
 
@@ -3742,6 +3813,11 @@ mod tests {
             json["username"], "sso-alice",
             "the linked account keeps its immutable handle"
         );
+        assert!(
+            json["api_key"].is_null(),
+            "token possession must not mint a credential for a pre-existing \
+             SSO-provisioned account — the IdP remains its auth factor"
+        );
 
         // No parallel local-mode account was created.
         assert_eq!(
@@ -3782,6 +3858,171 @@ mod tests {
         );
         // The link must not have disturbed the SSO identity binding.
         assert_eq!(linked.external_id, "keycloak-subj-sso-alice");
+    }
+
+    /// Review d6b8a97: local-mode acceptance must deliver a credential —
+    /// the platform has no password-login path, so without a minted API
+    /// key the accepted invitee could never authenticate (the only other
+    /// unauthenticated mint, POST /api/v1/users, creates a NEW user and
+    /// cannot serve them). The minted key must authenticate as the new
+    /// user through the REAL auth extractor, not just resolve in the
+    /// store.
+    #[tokio::test]
+    async fn local_mode_accept_mints_authenticating_api_key() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .route("/api/v1/users/me", get(crate::api::users::get_me))
+            .with_state(state.clone());
+
+        let (status, json) = http_invite(&app, "nadia@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Unauthenticated accept (magic-link token is the auth factor).
+        let (status, json) =
+            http_accept(&app, &token, serde_json::json!({"display_name": "Nadia"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["mode"], "created");
+        let raw_key = json["api_key"]["key"]
+            .as_str()
+            .expect("local-mode accept must return a first API key")
+            .to_string();
+        assert!(raw_key.starts_with("gyre_"), "key: {raw_key}");
+        assert_eq!(json["api_key"]["name"], "invitation");
+        let user_id = json["user_id"].as_str().unwrap().to_string();
+        let tenant_id = json["tenant_id"].as_str().unwrap().to_string();
+
+        // The key authenticates as the new user through the full routing
+        // chain (auth extractor's state.api_keys hash lookup).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the minted key must authenticate the accepted invitee"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let me: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(me["id"], user_id.as_str());
+        assert_eq!(me["username"], "nadia");
+        assert_eq!(me["display_name"], "Nadia");
+        // First-class local user: scoped to the inviting tenant, not a
+        // fabricated "default".
+        assert_eq!(me["tenant_id"], tenant_id.as_str());
+
+        // Only the hash is persisted: the store cannot reconstruct the
+        // plaintext key handed to the invitee.
+        let stored = state
+            .api_keys
+            .find_user_id(&crate::auth::hash_api_key(&raw_key))
+            .await
+            .unwrap()
+            .expect("minted key resolves to the accepted user");
+        assert_eq!(stored.to_string(), user_id);
+    }
+
+    /// Review d6b8a97, dedupe arm: a SECOND invitation to an already
+    /// accepted tenant+email finds the local-mode account via the
+    /// tenant:email namespace — acceptance must deliver a FRESH key
+    /// (a prior accept that failed mid-flight never delivered its key to
+    /// the invitee, and the plaintext is unrecoverable) that
+    /// authenticates as the SAME user, not a parallel account.
+    #[tokio::test]
+    async fn reinvite_acceptance_mints_fresh_key_for_existing_local_account() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .route("/api/v1/users/me", get(crate::api::users::get_me))
+            .with_state(state.clone());
+
+        let (status, json) = http_invite(&app, "oscar@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token1 = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, json) = http_accept(&app, &token1, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["mode"], "created");
+        let key1 = json["api_key"]["key"].as_str().unwrap().to_string();
+        let user_id = json["user_id"].as_str().unwrap().to_string();
+
+        // Re-invite the same email (e.g. the invitee lost the first key,
+        // or the first accept failed after the claim rolled back).
+        let (status, json) = http_invite(&app, "oscar@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token2 = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, json) = http_accept(&app, &token2, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["mode"], "linked",
+            "the namespace lookup finds the existing local account"
+        );
+        assert_eq!(json["user_id"], user_id.as_str());
+        let key2 = json["api_key"]["key"]
+            .as_str()
+            .expect("re-acceptance must deliver a fresh credential")
+            .to_string();
+        assert_ne!(
+            key2, key1,
+            "a fresh key is minted, not the old one replayed"
+        );
+
+        // The fresh key authenticates as the SAME user — no parallel
+        // account was created.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {key2}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let me: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(me["id"], user_id.as_str());
+        assert_eq!(me["username"], "oscar");
     }
 
     /// Review F2: usernames are globally unique across tenants; a second
