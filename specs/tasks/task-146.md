@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["e1088342c4f52d501dc18f12b26bcb9a8b93987e", "9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["e1088342c4f52d501dc18f12b26bcb9a8b93987e", "9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "7c4d29085fae6a15cd2645da93d165dc643e78cd"]
 ---
 
 ## Spec Excerpt
@@ -96,64 +96,83 @@ pub struct AnalyticsEvent {
 
 ## Shipped
 
-### Review round 2 F1 repair: server-side group_by aggregation
+Task-146's analytics implementation (event schema with all spec scope
+fields, all 12 auto-emitted events with spec-required properties,
+query API with the full filter set + server-side `group_by` aggregation)
+was completed and reviewed in earlier rounds — the commit list above is
+that shipped surface. This round reconciles the branch with main
+`cd58a166` (task-202: `search_indexer`, `search_sync` index-on-write
+repository decorators, real full reindex), which conflicted in five
+files.
 
-- **The finding:** `GET /api/v1/analytics/events?group_by=event_name`
-  aggregated the limit-truncated event list (default 100, cap 10_000) in
-  memory, so grouped totals silently disagreed with `/count` on the same
-  question — 150 seeded `mr.merged` events grouped as 100. Analytics is
-  agent-consumable (analytics.md §Purpose), so truncated counts fed
-  wrong data into the autonomous decision loop.
-- **The fix:** new port-level grouped-count query
-  `AnalyticsRepository::count_grouped(filter, group_by)` with an
-  `AnalyticsGroupBy` enum (`EventName`/`AgentId`/`WorkspaceId`/`Day`),
-  implemented on all three adapters:
-  - SQLite/Postgres: SQL `SELECT <key>, COUNT(*) ... GROUP BY ... ORDER BY
-    key LIMIT ?` with the WHERE clause mirroring `query_filtered` exactly
-    (exact or trailing-`*` event_name, scope equality, inclusive
-    since/until); conditional binds via diesel's `into_boxed()` loop-binding
-    pattern.
-  - mem: same filter predicate (factored into a shared
-    `analytics_event_matches_filter` helper so the grouped path cannot
-    drift from `query_filtered`) over the full store, grouped into a
-    BTreeMap.
-  - `limit` bounds the number of returned GROUPS (per the review:
-  "for a grouped response the results are the groups"), never the input
-  to the aggregation; NULL agent/workspace groups under `"(none)"`.
-- **Handler:** `query_events`'s `group_by` branch now delegates to the
-  port (raw-event path unchanged); the in-memory grouping and its
-  now-unused `epoch_day_string` helper are removed.
-- **Rebase repair:** `merge_processor.rs`'s
-  `attestation_abac_deny_blocks_merge` test did not compile after the
-  task-128 rebase (main changed `Policy::created_by` to `Id`);
-  `cargo check -p gyre-server --tests` failed at the assignment base and
-  passes now.
+### Rebase reconciliation (merge commit 7c4d2908)
+
+- **Event properties vs scope facets** (`merge_requests.rs`, `spawn.rs`,
+  `merge_processor.rs`): kept task-146's spec-required properties
+  (`mr.merged` `gate_count`/`queue_wait_secs`, `mr.closed` `reason`,
+  `agent.spawned` `compute_target`/`persona`, `agent.completed`
+  `task_id`/`duration_secs`, `merge_queue.processed`
+  `outcome`/`wait_secs`) over main's duplicate property copies of
+  `workspace_id`/`repo_id`. Scope is carried by the event's
+  `with_scope` fields instead.
+- **`activity_event_document` scope sourcing** (`search_indexer.rs`):
+  the document builder now reads workspace/repo facets from the event's
+  scope fields first (set server-side by every auto-emit site, and
+  caller-validated on the POST path), falling back to the properties
+  copy. Without this, every task-146 emission site would produce search
+  documents with no workspace/repo facets — silently losing the
+  filterability task-202 requires — because main's builder only read
+  `properties.workspace_id`/`properties.repo_id`.
+- **Orchestrator spawn emission** (`orchestrator.rs`): kept task-146's
+  post-launch `agent.spawned` emission (reports the compute target the
+  process actually launched on, review f3f37604) over main's pre-launch
+  copy; it now records through main's `record_and_index_activity`
+  helper so the helper stays live.
+- **Task status emission** (`tasks.rs`): kept the
+  `record_task_status_changed` helper (spec requires `old_status`,
+  which main's inline emission lacked) over main's inline copy.
+- **Group merge path** (`merge_processor.rs`): kept both the deferred
+  `emit_mr_merged` side effect (rollback safety) and main's on-write
+  search index call.
+- **Port extension vs decorator** (`search_sync.rs`): main's
+  `IndexingAnalyticsRepository` (wired around `state.analytics` in
+  `build_state` and `test_state`) implements task-146's
+  `query_filtered`/`count_grouped` port additions as read delegations.
+  With the decorator in place, every auto-emitted analytics event —
+  task-146's included — is indexed on write, so search.md's
+  "index updated synchronously on every write" now covers the whole
+  auto-emit surface.
 
 ### Test evidence (this round)
 
-- `cargo test -p gyre-adapters sqlite::analytics` — 15 passed,
-  including the two new tests:
-  `analytics_count_grouped_over_full_filtered_set` (150 events > limit;
-  grouped totals equal `count()`; limit=1 returns one group;
-  `"(none)"` bucket; prefix + workspace filters) and
-  `analytics_count_grouped_by_day` (UTC day buckets).
-- Full `cargo test -p gyre-adapters` — 506 passed, 0 failed.
-- `cargo check -p gyre-server --tests` — passes (failed at base on the
-  merge_processor rebase break).
-- Clippy on changed lines clean (the `QueryableByName` derive's
-  `redundant_field_names` false positive is scoped off with the
-  module-level allow pattern already established in
-  `postgres/search.rs`); `cargo fmt --check` clean; arch, mem-port,
-  inert-enforcement, byte-slice, lossy-secret, relative-path,
-  fabricated-scope, scope-literal, forwarded-header, and unbounded-http
-  mechanical checks all pass.
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
+  — clean (the `--tests` check failed at the merge base on the missing
+  decorator methods; fixed in 7c4d2908).
+- `cargo check --workspace` — clean.
+- `cargo test -p gyre-domain -p gyre-ports` — 516 passed, 0 failed.
+- `cargo test -p gyre-adapters` — 514 passed, 0 failed, 6 ignored
+  (includes task-202's search adapter suites and task-146's
+  sqlite/postgres analytics suites, 331s).
+- `cargo fmt --check` — clean; mechanical checks pass: arch,
+  migration versions + SQL portability, mem port contracts, inert
+  enforcement, forged-scope fields, ABAC route registry + exempt
+  handlers, byte-slice truncation, relative-path defaults, fail-open
+  ref resolution, lossy-secret conversion, fabricated/scope-literal
+  defaults, forwarded-header trust, unbounded external HTTP, dead
+  message kinds, MCP write tools, in-memory state stores, task commit
+  attribution.
 
-### Verifier must run (gyre-server tests, too large for the sandbox budget)
+### Verifier must execute (server test compilation is out of sandbox budget)
 
-- `cargo test -p gyre-server --lib api::analytics::tests`
-  (includes the new `query_events_group_by_counts_full_filtered_set`
-  regression: 150 seeded events, grouped total 150 == `/count`, limit=1
-  returns one group, prefix filter keeps full totals)
-- `cargo test -p gyre-server --lib analytics_query_tests::count_grouped_over_full_filtered_set`
-- `cargo test -p gyre-server --lib merge_processor::tests::attestation_abac_deny_blocks_merge`
-  (rebase repair)
+- `cargo test -p gyre-server --lib` — in particular the analytics
+  auto-emit suites (`api::analytics`,
+  `orchestrator_spawn_emits_agent_spawned_analytics_event` and the
+  compute-target regression test), `spawn.rs` lifecycle emission tests,
+  and `merge_processor` gate/queue emission tests.
+- `cargo test -p gyre-server --test search_wiring` — task-202's
+  end-to-end index-on-write suites; these now also exercise
+  task-146's scoped analytics events through the decorator and the
+  modified `activity_event_document`.
+- `cargo test -p gyre-server --test api_integration` — analytics query
+  API endpoints (`POST/GET /api/v1/analytics/events`,
+  `GET /api/v1/analytics/count`, `GET /api/v1/analytics/daily`).
