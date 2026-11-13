@@ -7,6 +7,13 @@ from pathlib import PurePosixPath
 from .execution import Attention
 
 
+def task_document_repair(task, repair):
+    findings=repair.get('details')
+    return (repair.get('category')=='review' and isinstance(findings,list) and bool(findings)
+            and all(isinstance(f,dict) and isinstance(f.get('file'),str)
+                    and f['file'].split(':',1)[0]==f"specs/tasks/{task}.md" for f in findings))
+
+
 def source_findings(findings):
     if not isinstance(findings,list):return findings,[]
     source=[];generated=[]

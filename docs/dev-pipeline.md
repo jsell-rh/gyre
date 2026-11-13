@@ -24,6 +24,27 @@ The stages are triage, implementation, independent review, verification,
 publication/merge, CI observation, and cleanup. Review and verification bind to an exact candidate
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
+Verifier readiness uses the authorized verification timeout (four hours by
+default). Pinned Fullsend 0.50.0 constrains its readiness polling and create
+subprocess to 600 seconds; both its harness and CLI boundary stay within that
+supported bound (and any shorter authorized model budget). Readiness expiry is reported as provisioning failure,
+including to the stress guard.
+When the owned pod's latest scoped scheduler evidence confirms insufficient
+CPU/memory, provisioning failure instead becomes a backend-capacity retry.
+Its backoff grows from one to fifteen minutes across work identities and main
+advances, scoped to the task/stage/requirements generation. Successful stage
+completion clears that backoff. Confirmed capacity shortage does not trip the
+structural-fault guard; missing, foreign, stale or superseded scheduling evidence
+cannot downgrade a provisioning fault.
+
+Discovery reconciles obsolete runtime holds against installed recovery policy.
+An owned, current-generation 4 GiB OOM hold is released once when its evidence
+qualifies for the authorized 6 GiB profile. Historical unknown-verifier-health
+holds recover once after fresh gateway health and inventory observations.
+Manual task pauses, 6 GiB OOMs, storage failures, spec conflicts and unrelated
+stalled repairs remain held. Recovery records the original reason and policy;
+source receipts, historical attempts and exact-source review/verification stay
+intact. Desired slots remain an upper bound on useful dependency-ready work.
 
 ## Thin workers and runtime recovery
 
@@ -70,6 +91,13 @@ compilation, no dev/test DWARF symbols, and one mold linker thread. Debug
 assertions, test selection, and required verification checks stay enabled.
 The coding agent's JavaScript heap is bounded separately from build tools.
 
+The trusted implementation finalizer restores accidentally toggled task
+checkbox markers only when every protected requirement otherwise matches the
+assignment exactly. It commits the restoration before publishing the checkpoint;
+normative edits still fail the contract guard. A repair specifically reviewed
+in the task's own document may advance to fresh review without an unrelated
+production edit. Only old holds matching these corrected cases recover once.
+
 Source/checkpoints and the agent spool remain on the gateway-provided workspace.
 Rebuildable Cargo target/registry and npm caches use disk-backed
 `/tmp/gyre-build`, which survives transport reconnects but may require rebuilding
@@ -101,6 +129,10 @@ a stop. Another stop requires
 attention. OOM recovery can salvage source before retiring the failed allocation;
 it does not restart the coding process at the insufficient tier. Verification
 also reconnects to its detached process and may resume after an owned restart.
+Unknown health during a control-plane outage keeps that same verifier and its
+output offsets within the assignment deadline; it does not purge the build or
+create a permanent hold after six failed polls. Authoritatively terminal
+sandboxes and the verification deadline still enforce safety stops.
 Infrastructure backoff retains its task checkpoint without blocking other
 candidates; claims and exact-source checks still gate publication.
 Cleanup salvages source only from implementation assignments; reviewers and

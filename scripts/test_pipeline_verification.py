@@ -1,5 +1,6 @@
 """Fail-closed receipts, real process failure/timeout, and shared gateway capacity."""
 import importlib.util
+import base64
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,32 @@ spec.loader.exec_module(remote)
 
 
 class VerificationTests(unittest.TestCase):
+    def test_unknown_health_reconnects_without_new_build_or_permanent_hold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store=Store(directory);self.addCleanup(store.close)
+            store.put_task('task-001','g','body',{})
+            store.enqueue('verify','task-001','g',{})
+            execution=Execution(store,store.claim('verify','verifier'))
+            identity={'candidate':'candidate','head':'head','base':'head','tree':'tree'}
+            receipt=identity|{'passed':False,'checks':[{'command':COMMANDS[0],'exit_code':1}]}
+            polls=[];launches=[]
+            def transport(name,*args,**kwargs):
+                if 'launch' in args:launches.append(name)
+                if 'poll' not in args:return subprocess.CompletedProcess([],0,'','')
+                polls.append(args[args.index('--offset')+1])
+                if 1<len(polls)<9:raise RuntimeError('temporary gateway transport outage')
+                value={'offset':3 if len(polls)==1 else 6,'log':base64.b64encode(b'abc' if len(polls)==1 else b'def').decode(),
+                       'alive':len(polls)==1,'receipt':None if len(polls)==1 else receipt}
+                return subprocess.CompletedProcess([],0,'GYRE_VERIFY_POLL '+json.dumps(value),'')
+            with patch.object(execution,'login'),patch.object(execution,'wait_ready'),patch.object(execution,'remote',side_effect=transport),patch.object(execution,'os',return_value=subprocess.CompletedProcess([],0,'','')) as commands,patch.object(execution.cancelled,'wait',return_value=False),patch('pipeline.verification.gateway.inventory',return_value=[]),patch('pipeline.runtime.snapshot',return_value=None):
+                result=run(execution,Path(directory),identity)
+            self.assertFalse(result['passed'])
+            self.assertEqual(len(launches),1)
+            self.assertEqual(polls,['0']+['3']*8)
+            self.assertIn('abcdef',execution.log.read_text())
+            self.assertEqual(sum(c.args[:2]==('sandbox','create') for c in commands.call_args_list),1)
+            self.assertIsNone(store.setting(store.runtime_hold_key('task-001','verify','g')))
+
     def test_exhausted_budget_does_not_restart_the_same_build_on_main_advance(self):
         with tempfile.TemporaryDirectory() as directory:
             store=Store(directory);self.addCleanup(store.close)

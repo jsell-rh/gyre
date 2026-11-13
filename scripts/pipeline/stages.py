@@ -106,6 +106,11 @@ def implement(execution, task):
         changed = execution.command('git', 'diff', '--name-only', seed, result['head'], cwd=path).stdout.splitlines()
         substantive = [name for name in changed if name != f"specs/tasks/{task['name']}.md"
                        and not name.startswith(('web/dist/', 'specs/reviews/'))]
+        from .repair_budget import task_document_repair
+        if complete and task_document_repair(task['name'],repair) and f"specs/tasks/{task['name']}.md" in changed:
+            # Correcting a specifically reviewed Shipped statement is valid
+            # work. It still needs a fresh independent exact-source review.
+            substantive.append(f"specs/tasks/{task['name']}.md")
         if not substantive:
             from .repair_budget import check
             check(execution,task,path,result['head'],{'category':'contract','delta':contract_delta} if contract_changed else

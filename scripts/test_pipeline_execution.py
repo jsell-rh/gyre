@@ -125,6 +125,23 @@ class CrashTest(unittest.TestCase):
             execution.wait_ready('pod')
         self.assertEqual([call.args[0] for call in wait.call_args_list], [5, 10])
 
+    def test_pending_allocation_survives_old_thirty_minute_window(self):
+        execution=Execution(self.store,self.claim)
+        inventory=[[{'name':'pod','phase':'Pending'}],[{'name':'pod','phase':'Ready'}]]
+        with patch('pipeline.execution.time.monotonic',side_effect=[0,1801]),patch('pipeline.execution.gateway.inventory',side_effect=inventory),patch.object(execution.cancelled,'wait',return_value=False) as wait:
+            execution.wait_ready('pod')
+        self.assertEqual(wait.call_count,1)
+
+    def test_readiness_inventory_outage_keeps_the_same_allocation(self):
+        execution=Execution(self.store,self.claim)
+        responses=[RuntimeError('temporary gateway outage'),[{'name':'pod','phase':'Pending'}],[{'name':'pod','phase':'Ready'}]]
+        with patch('pipeline.execution.gateway.inventory',side_effect=responses),patch.object(execution.cancelled,'wait',return_value=False) as wait:
+            execution.wait_ready('pod')
+        self.assertEqual([c.args[0] for c in wait.call_args_list],[5,10])
+        phases=[json.loads(r['detail']) for r in self.store.db.execute("SELECT detail FROM events WHERE kind='phase'")]
+        self.assertEqual([p['phase'] for p in phases],['WaitingForGateway','WaitingForInfrastructure'])
+        self.assertTrue(all(p['sandbox']=='pod' for p in phases))
+
     def test_failed_capture_still_purges_expensive_compute(self):
         self.store.reserve('pod', self.work, self.claim['token'], 'sandbox', 1)
         self.store.finish(self.work, self.claim['token'], {})

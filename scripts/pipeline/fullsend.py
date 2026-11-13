@@ -127,7 +127,7 @@ def prepare(execution, task, prompt):
     (bundle / 'bin').mkdir(exist_ok=True)
     for name in ('cargo', 'npm', 'npx'):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
+    for name in ('pipeline-remote.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
     if claim['stage'] in ('review', 'assess', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
@@ -180,6 +180,8 @@ def prepare(execution, task, prompt):
                'providers': [forge_provider],
                'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage', 'assess':'review'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
+               # Pinned Fullsend 0.50.0 validates this field in [30,600].
+               # Model/CLI budgets and capacity backoff are separate bounds.
                'sandbox_timeout_seconds': 600,
                'timeout_minutes': max(1, (execution.store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT) + 59) // 60),
                'host_files': [{'src': str(p), 'dest': '/tmp/stage/' + str(p.relative_to(bundle))}
@@ -244,9 +246,9 @@ def collect(execution, sandbox, success):
     if not job.exists():
         raise ValueError('fullsend assignment bundle missing')
     # Re-upload trusted checkpoint code after the model has finished.
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py', 'pipeline-agent.py', 'job.json'):
+    for name in ('pipeline-remote.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py', 'pipeline-agent.py', 'job.json'):
         source = execution.directory / 'bundle' / name
-        if name == 'pipeline-agent.py' or (name == 'pipeline-artifacts.py' and not source.exists()):
+        if name == 'pipeline-agent.py' or (name in ('pipeline-artifacts.py','dev-contract.py') and not source.exists()):
             source = ROOT / 'scripts' / name
         execution.os('sandbox', 'upload', sandbox, str(source), '/tmp/stage/' + name, '--no-git-ignore', timeout=120)
     # Tools can outlive Pi in detached groups. No checkpoint may race a writer.

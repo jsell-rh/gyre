@@ -113,6 +113,9 @@ def main():
         spec=importlib.util.spec_from_file_location('artifacts',STAGE/'pipeline-artifacts.py')
         artifacts=importlib.util.module_from_spec(spec);spec.loader.exec_module(artifacts)
         artifacts.restore_generated(checkout,job['input']['base'])
+        spec=importlib.util.spec_from_file_location('contract',STAGE/'dev-contract.py')
+        contract=importlib.util.module_from_spec(spec);spec.loader.exec_module(contract)
+        path.write_text(contract.restore_checkbox_markers(job['body'],path.read_text()))
     run('git', 'add', '-A')
     if run('git', 'diff', '--cached', '--quiet', check=False).returncode:
         run('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', f'{role}({task}): pipeline checkpoint')
