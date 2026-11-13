@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d", "ed6a9adc819dd87a141af3fecee543c909233f97"]
 ---
 
 ## Spec Excerpt
@@ -70,16 +70,16 @@ Users can:
 
 ## Acceptance Criteria
 
-- [ ] `UserSession` domain entity in gyre-domain
-- [ ] `SessionRepository` port trait and SQLite implementation
-- [ ] DB migration creates `user_sessions` table
-- [ ] Sessions created on auth, `last_active_at` updated (throttled)
-- [ ] GET endpoint lists current user's active sessions
-- [ ] DELETE endpoint revokes individual session
-- [ ] POST revoke-all revokes all sessions for user
-- [ ] Revoked sessions rejected in auth middleware
-- [ ] Routes registered with ABAC mappings
-- [ ] `cargo test --all` passes
+- [x] `UserSession` domain entity in gyre-domain
+- [x] `SessionRepository` port trait and SQLite implementation
+- [x] DB migration creates `user_sessions` table
+- [x] Sessions created on auth, `last_active_at` updated (throttled)
+- [x] GET endpoint lists current user's active sessions
+- [x] DELETE endpoint revokes individual session
+- [x] POST revoke-all revokes all sessions for user
+- [x] Revoked sessions rejected in auth middleware
+- [x] Routes registered with ABAC mappings
+- [ ] `cargo test --all` passes (deferred to the independent verifier; see below)
 
 ## Agent Instructions
 
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management is implemented end-to-end against `user-management.md` §Session Management. The implementation is this branch's prior reviewed work; this round repaired the durable verification finding by merging the assigned base `f7f5c59f` into the branch and adapting the incoming fixtures.
+Session management is implemented end-to-end against `user-management.md` §Session Management. The implementation is this branch's prior reviewed work (commit list above); this round (`ed6a9adc`) repaired the durable verification finding on the newly assigned base.
 
 ### Implementation (branch history)
 
@@ -97,24 +97,23 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 - **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with Admin-role **and tenant-containment** per-handler checks (ABAC-exempt routes); target-user existence 404s.
 - **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
 
-### Verification repair (this round: `eb7d56cd`, `6a8d4a7c`)
+### Verification repair (this round: `ed6a9adc`)
 
-The durable finding (`e02879e3`, `bash /tmp/stage/checks.sh` exit 1) was `gyre-server` **lib test** compilation failing with 16 errors: the verification merges this branch onto the mainline base, whose task-159 drift-gate fixtures construct MRs with the old 6-arg `MergeRequest::new` + post-hoc `workspace_id` assignment, while this branch's domain (commit `74749334`, scope-fabrication repair) requires `workspace_id` as a constructor parameter (7 args). Repairs:
+Durable finding `08f72f21` (`bash /tmp/stage/checks.sh`, exit 1) was `gyre-server` **lib test** compilation failing with 4 errors (E0061/E0277 at `gate_executor.rs:4421/4427/5068/5074`): the assigned base `6f5a631c` (task-195, manifest-driven gate selection) added two fixtures that construct MRs with the old 6-arg `MergeRequest::new`, while this branch's domain (commit `74749334`, scope-fabrication repair) requires `workspace_id` as a positional constructor argument. Repair: pass `ws.id` / `repo.workspace_id` positionally in both fixtures and drop the post-hoc assignment. For the `mr-mg-4` fixture this also replaces the old constructor's fabricated `Id::new("default")` with the repo's real workspace — the only non-fabricated value under the 7-arg contract, and required by the scope-literal-defaults invariant. Same failure class as the prior round's `merge_processor.rs`/`reconciliation.rs` adaptation (`6a8d4a7c`).
 
-- Merged assigned base `f7f5c59f` into the branch: union of `users::` handler imports in `api/mod.rs` (session + task-125 notification handlers), combined coverage audit note in `specs/coverage/system/user-management.md` with post-merge counts recomputed from the merged table (11 n/a, 17 task-assigned, 8 implemented).
-- Adapted the 7 incoming 6-arg call sites to pass the workspace `Id` positionally and dropped the redundant post-assignments (`merge_processor.rs`: `create_drift_mr` + four drift tests; `reconciliation.rs`: attested-MR helper + no-attestation skip test); cleaned a passing `unused_mut`.
-- The finding's exact 16 errors were reproduced locally at the merge commit before the fix (`/tmp/stage/review-evidence/pre-fix-reproduction.txt`) and are gone after it.
+The finding's Svelte/a11y/CSS-warning log tail is pre-existing web-build noise (the vite build itself succeeded); no web source was changed this round.
 
-### Test evidence (at head `6a8d4a7c`; logs under `/tmp/stage/review-evidence/`)
+### Test evidence (at head `ed6a9adc`; logs under `/tmp/stage/review-evidence/`)
 
-In-sandbox (build wrapper):
+In-sandbox (offline — no crates.io access from this stage, so Rust compilation is deferred):
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` — clean (0 errors, 0 warnings); `--workspace` and `--workspace --tests` — clean; `cargo fmt --all --check` — clean; clippy on the server test target — exit 0, no findings in touched hunks.
-- `cargo test -p gyre-common` — 125 passed; `cargo test -p gyre-domain` — 507 + 8 passed; `cargo test -p gyre-adapters --lib` — 524 passed, 0 failed (incl. the 9 `user_profile::session*` tests and base's task-125 notification adapter tests).
-- All 19 mechanical gate scripts pass, including the exemption-freeze gate (scope-literal-defaults still 6 entries / frozen 6 — unregressed by the merge).
+- `rustfmt --edition 2021 --check crates/gyre-server/src/gate_executor.rs` — clean (project edition; the 19 mechanical gate scripts listed in AGENTS.md all PASS, re-run at head, including exemption freezes; see `mechanical-gates.log`).
+- All other `MergeRequest::new` call sites in the repo verified 7-arg by inspection (`gate_executor.rs` remaining sites, `tests/task134_review_probe.rs`, adapters — the verifier log already showed adapters/cli compiling clean).
+- `bash scripts/check-task-commit-attribution.sh` — PASS once this round's commit was recorded (see below).
 
-Required in the independent verifier (gyre-server test compilation exceeds the in-sandbox 4 GiB budget):
+Required in the independent verifier (this sandbox has no network and no restored build cache; server test compilation exceeds the in-sandbox budget anyway):
 
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — full suite (previous round: 1724 passed; includes the 22 session-management tests in `auth.rs` and `api/users.rs` and the 7 adapted drift-gate tests).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` — the exact failing target of finding `08f72f21`; must now compile clean.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — full suite (previous round: 1724 passed; includes the 22 session-management tests in `auth.rs` and `api/users.rs` and the manifest-gate tests adapted here).
 - `SKIP_WEB_BUILD=1 cargo test --all` — repo-wide acceptance criterion.
 - `bash /tmp/stage/checks.sh` — the previously failing verification command.
