@@ -20,6 +20,7 @@ type Snapshot struct {
 	RecoveryError                string
 	Rows                         []Row
 	Gateway, Connection, Message string
+	Admission                    string
 	Errors                       []string
 	Busy, Monitoring, Recovering bool
 	Active, Ready                int
@@ -28,9 +29,10 @@ type Snapshot struct {
 	Exit                         int
 }
 type discovery struct {
-	Jobs   []Job    `json:"jobs"`
-	Errors []string `json:"errors"`
-	Err    error
+	Jobs      []Job    `json:"jobs"`
+	Errors    []string `json:"errors"`
+	Err       error
+	Admission string `json:"admission"`
 }
 type authResult struct{ Err error }
 type recoveryRequest struct {
@@ -344,6 +346,7 @@ func (e *Engine) run(ctx context.Context) (exit int) {
 				s.NextDiscovery = next
 				if result.Err == nil {
 					s.Errors = result.Errors
+					s.Admission = result.Admission
 				}
 			})
 			if e.c.DryRun {

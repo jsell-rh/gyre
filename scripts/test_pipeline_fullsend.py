@@ -273,6 +273,15 @@ p.write_text(json.dumps(v))
 if a[:2]==['sandbox','exec']:
  import time
  p.with_suffix('.pid').write_text(str(os.getpid()))
+ if os.environ.get('STAGING_TEST'):
+  mode=os.environ['STAGING_TEST'];n=sum(c[:2]==['sandbox','exec'] for c in v['calls'])
+  if mode=='hold':time.sleep(60)
+  if mode=='always' or (mode=='once' and n==1):
+   print('Error:   × connect error: transport error',file=sys.stderr);sys.exit(1)
+  if mode=='remote':
+   print('remote command failed: transport error',file=sys.stderr);sys.exit(1)
+  v['executions']=v.get('executions',0)+1;p.write_text(json.dumps(v))
+  print('staged fixture');sys.exit(0)
  time.sleep(60)
 if os.environ.get('WARN_ONCE') and not any(x[:2]==['gateway','login'] for x in v['calls']):
  print('Warning: OIDC token refresh failed; continuing with cached token',file=sys.stderr)
@@ -337,6 +346,62 @@ else: print('fixture control operation')
                 process.kill()
                 process.wait(timeout=5)
             process.stderr.close()
+
+    def staging_args(self):
+        path='/tmp/fs-upload-'+'a'*20+'/fixture'
+        return ['sandbox','exec','--name',self.name,'--no-tty','--timeout','120','--','sh','-c',
+                f"test -f '{path}' && mkdir -p -- '/tmp/stage/bin' && mv -fT -- '{path}' '/tmp/stage/bin/fixture'"]
+
+    def test_bootstrap_connect_retry_keeps_the_same_sandbox_and_executes_once(self):
+        result=self.invoke(*self.staging_args(),extra={'STAGING_TEST':'once'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        state=json.loads((self.root/'backend.json').read_text())
+        calls=[c for c in state['calls'] if c[:2]==['sandbox','exec']]
+        self.assertEqual(len(calls),2)
+        self.assertEqual(calls[0],calls[1])
+        self.assertEqual(state['executions'],1)
+        self.assertFalse(any(c[:2] in (['sandbox','create'],['sandbox','delete']) for c in state['calls']))
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='bootstrap_connect_retry'").fetchone()[0],1)
+
+    def test_bootstrap_retries_are_bounded_and_do_not_replay_remote_failures(self):
+        for mode,count in [('always',3),('remote',1)]:
+            with self.subTest(mode=mode):
+                path=self.root/'backend.json'
+                if path.exists():path.unlink()
+                result=self.invoke(*self.staging_args(),extra={'STAGING_TEST':mode})
+                self.assertEqual(result.returncode,1,result.stderr)
+                state=json.loads(path.read_text())
+                self.assertEqual(sum(c[:2]==['sandbox','exec'] for c in state['calls']),count)
+                self.assertNotIn('executions',state)
+
+    def test_preconnect_diagnostic_does_not_enable_arbitrary_command_replay(self):
+        args=self.staging_args();args[-1]='echo arbitrary-command'
+        result=self.invoke(*args,extra={'STAGING_TEST':'once'})
+        self.assertEqual(result.returncode,1)
+        state=json.loads((self.root/'backend.json').read_text())
+        self.assertEqual(sum(c[:2]==['sandbox','exec'] for c in state['calls']),1)
+
+    def test_bootstrap_wrapper_death_does_not_orphan_the_cli(self):
+        process=subprocess.Popen([str(self.shim/'openshell'),*self.staging_args()],
+            env={**self.env,'STAGING_TEST':'hold'},stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        child=None
+        try:
+            marker=self.root/'backend.pid';deadline=time.monotonic()+5
+            while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(marker.exists())
+            child=int(marker.read_text());self.assertNotEqual(child,process.pid)
+            process.kill();process.wait(timeout=5)
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                stat=Path(f'/proc/{child}/stat')
+                if not stat.exists() or stat.read_text().rsplit(')',1)[1].split()[0]=='Z':break
+                time.sleep(.02)
+            else:self.fail('bootstrap CLI survived its killed wrapper')
+        finally:
+            if process.poll() is None:process.kill();process.wait(timeout=5)
+            if child and Path(f'/proc/{child}').exists():
+                try:os.kill(child,9)
+                except ProcessLookupError:pass
 
     def test_checkpoint_hook_consumes_matching_scope_and_refuses_other_gateway(self):
         result = self.invoke('--gateway', 'gyre-gyre', 'provider', 'list')

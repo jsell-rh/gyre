@@ -132,8 +132,8 @@ def run(execution, path, identity, probe=None):
         execution.phase('Provisioning', sandbox=name, engine='verification')
         # The reservation precedes create, so even an uncertain response is
         # owned and charged. Readiness polling retains the same allocation.
-        from .compute import profile
-        budget=profile(store,execution.claim['task'],'verify')
+        from .compute import assigned_profile
+        budget=assigned_profile(store,execution.claim)
         resources=['--cpu',budget['cpu'],'--memory',budget['memory']]
         record=store.db.execute('SELECT data,state FROM resources WHERE name=?',(name,)).fetchone()
         store.resource_state(name,record['state'],json.loads(record['data']) | {'compute':budget})
