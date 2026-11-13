@@ -79,16 +79,16 @@ From §Notification Routing for Agent Escalations:
 
 ## Acceptance Criteria
 
-- [x] `NotificationChannels` extended with email, webhook, Slack configs
-- [x] `NotificationDispatcher` routes to all configured channels
-- [x] Webhook delivery signs payload with HMAC-SHA256
-- [x] Slack delivery posts to incoming webhook
-- [x] Email delivery queues messages (at minimum, the interface — actual SMTP can be stubbed)
-- [x] Routing table maps events to correct recipients per spec
-- [x] Agent escalation routing checks online status and escalates
-- [x] Notification preferences API (GET/PUT)
-- [x] Priority threshold filtering works per channel
-- [x] `cargo test --all` passes
+- [ ] `NotificationChannels` extended with email, webhook, Slack configs
+- [ ] `NotificationDispatcher` routes to all configured channels
+- [ ] Webhook delivery signs payload with HMAC-SHA256
+- [ ] Slack delivery posts to incoming webhook
+- [ ] Email delivery queues messages (at minimum, the interface — actual SMTP can be stubbed)
+- [ ] Routing table maps events to correct recipients per spec
+- [ ] Agent escalation routing checks online status and escalates
+- [ ] Notification preferences API (GET/PUT)
+- [ ] Priority threshold filtering works per channel
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
