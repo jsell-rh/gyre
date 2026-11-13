@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61", "3571156517e360f1b7e9d34570dc15ea79827b11"]
 ---
 
 ## Spec Excerpt
@@ -145,88 +145,63 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ## Shipped
 
-### Round 3: system-full-access privilege escalation + dead-code bypass repair (commit `9ba4dd40`)
+### Round 4: scope applicability on the evaluation path (commit `35711565`)
 
 The engine, CRUD/dry-run/decisions/effective API, audit integration,
-builtin seeding, caching, and the round-1/round-2 repairs
-(agent-repo-scope containment, `?subject=` param binding) are in the
-earlier commits listed above. Round 3 repairs the two remaining review
-findings on the newly-seeded `system-full-access` builtin:
+builtin seeding, caching, the round-1/2 repairs (agent-repo-scope
+containment, `?subject=` binding) and the round-3 repairs (reserved
+system identity, policy-allowed global token) are in the earlier commits
+listed above. Round 4 closes the two remaining review findings:
 
-**1. Privilege escalation via a spoofed reserved identity.** The policy
-matches `subject.id == "gyre-system-token"`, but the live middleware
-resolves `subject.id` from `auth.agent_id` — the user's display_name for
-JWT/API-key principals, caller-settable through PUT /api/v1/users/me,
-admin user creation, SCIM provisioning, and the SSO `preferred_username`
-claim. The identity is now **reserved** (`gyre_domain::SYSTEM_ABAC_IDENTITY`,
-next to the seed that uses it):
+**1. Scope applicability (the escalation).** `evaluate` retained
+policies only on `enabled && applies_to(action, resource_type)` —
+`Policy::applies_to` never checks `scope`/`scope_id`, and the middleware
+fed it the entire store, so a ws-A-scoped Allow granted Developers in
+ws-B (and other tenants) and a scoped Deny restricted globally. The fix
+is ONE canonical filter, `policy_engine::scope_applies`, applied inside
+`evaluate` so every caller shares it:
 
-- PUT /api/v1/users/me rejects the string as display_name (400, nothing
-  applied — `put_me_rejects_reserved_system_display_name`);
-- admin POST /api/v1/users rejects it as a username (display_name derives
-  from it — `create_user_rejects_reserved_system_username`);
-- SCIM create/update reject it as displayName, including the
-  userName-fallback case (`scim_rejects_reserved_system_identity`);
-- SSO provisioning fails closed on `preferred_username` = the reserved
-  string, and re-login of a pre-existing user whose stored display_name is
-  the reserved string is rejected (401, no user row created —
-  `jwt_rejects_reserved_system_identity_provisioning`);
-- **evaluation-time containment**: the middleware denies (403, warn log,
-audited PolicyDecision) any NON-system principal whose agent_id is the
-reserved string — covers pre-existing rows and direct DB edits that no
-write-path validation can reach (`spoofed_system_identity_denied_before_evaluation`:
-an API-key user whose display_name is the reserved string gets 403 before
-any policy, including system-full-access, is evaluated).
+- `scope_id: Some(id)` requires the addressed resource's scope-chain
+  attribute (`resource.repo_id` / `resource.workspace_id` /
+  `resource.tenant_id`, extracted before evaluation per §Evaluation Flow
+  steps 1-4) to be present AND equal — a ws-A policy never applies to a
+  ws-B request, a t-1 policy never governs t-2 resources, and no scope
+  is fabricated when the level is unaddressed;
+- `scope_id: None` means all entities at that level — every seeded
+  builtin (all Tenant/None) stays global.
 
-**2. Dead-code mitigation / unreachable policy.** The
-`ctx.set("subject.id", "gyre-system-token")` mapping was unreachable — the
-identical `is_system_principal()` predicate returned the request earlier
-(system token bypassed ABAC entirely), so the genuine global
-GYRE_AUTH_TOKEN never reached the policy that exists to allow it, and the
-seeded policy could only ever be matched by the spoofed identity above.
-The early bypass is **removed**: the system principal now flows through
-the normal evaluation flow — attribute extraction, immutable-Deny check,
-priority sort — and is allowed BY `system-full-access` at priority 1000
-(above tenant-isolation 950 and every role band; the only immutable Deny
-`builtin:require-human-spec-approval` keys on `subject.type != "user"` and
-does not match the system principal, whose Admin-role type derivation is
-"user", so spec-approval behavior is unchanged). The decision audit trail
-now proves the mechanism instead of a misleading rationale:
-`system_token_allowed_by_system_full_access_policy` (renamed from
-`system_token_bypasses_abac`) asserts the recorded decision has
-`matched_policy == builtin-system-access`, and
-`builtin_tenant_isolation_denies_cross_tenant_live` asserts the same for
-the global token's cross-tenant 200. Blast-radius analysis: api-module
-tests never layer the ABAC middleware (only `build_router` does); the
-only two global-token usages in middleware tests use builtin-seeded
-states; no seeded or test-created policy outranks (1000, tenant, allow).
+Call-site alignment: `evaluate_merge_abac` drops its private
+workspace-only filter and delegates to the canonical one (its ctx now
+sets `resource.tenant_id`, so tenant-scoped policies are tenant-scoped
+at merge time too); `evaluate_attestation_abac` and the git-http
+push-attestation ctx carry the full resource scope chain (the push path
+resolves the tenant from the repo's workspace, never the caller's
+claim); the dry-run endpoint accepts `resource.tenant_id`; the effective
+endpoint gained optional `workspace_id`/`repo_id`/`tenant_id` params so
+scoped policies can be assessed against a concrete scope.
 
-The spec (abac-policy-engine.md §Built-In Policies) and the coverage
-matrix row 11 were amended to document the reservation and the
-allowed-by-policy (no-bypass) mechanism.
+**2. Stale security-model comments.** `auth.rs` (`jwt_claims` doc) and
+`git_http.rs` (`resolve_repo_by_slug`) claimed the global token/API keys
+"bypass ABAC" — false since round 3 (API keys always evaluate; the
+global token is allowed BY `system-full-access`). Both now state the
+actual behavior, so the comments no longer misdocument the escalation
+surface.
 
 ### Test evidence
 
-Run in this sandbox (gyre-server codegen is blocked by the build
-wrapper — server tests are deferred to the independent verifier):
+New tests: five engine unit tests (workspace/repo/tenant
+non-applicability, None-means-all/keeps-builtins-global, immutable-Deny
+still overrides an in-scope Allow), two live middleware tests
+(`scoped_workspace_deny_does_not_apply_out_of_scope_live`,
+`scoped_workspace_allow_does_not_escalate_across_workspaces_live` — the
+reviewer's exact repro shape, each asserting both the out-of-scope
+non-effect and the in-scope effect via the decision audit's
+`matched_policy`), and a dry-run API test
+(`evaluate_respects_policy_scope`).
 
-- `cargo check -p gyre-server --tests` — exit 0 (all new code, including
-  test code, type-checks).
-- `cargo test -p gyre-domain` — 507 + 8 passed, 0 failed.
-- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-scope-literal-defaults.sh`, `check-fabricated-scope-defaults.sh`,
-  `check-inert-enforcement.sh`, `check-mem-port-contracts.sh`,
-  `check-fail-open-ref-resolution.sh`, `check-lossy-secret-conversion.sh`
-  — all pass.
-
-Verifier must run (focused, then full):
-
-- `cargo test -p gyre-server --lib system_token_allowed_by_system_full_access_policy`
-- `cargo test -p gyre-server --lib spoofed_system_identity_denied_before_evaluation`
-- `cargo test -p gyre-server --lib builtin_tenant_isolation_denies_cross_tenant_live`
-- `cargo test -p gyre-server --lib put_me_rejects_reserved_system_display_name`
-- `cargo test -p gyre-server --lib create_user_rejects_reserved_system_username`
-- `cargo test -p gyre-server --lib jwt_rejects_reserved_system_identity_provisioning`
-- `cargo test -p gyre-server --lib scim_rejects_reserved_system_identity`
-- full `cargo test --all` (prior rounds' suites unchanged:
-  agent_repo_scope, policies API, decisions audit, dry-run, effective)
+In this sandbox `cargo check -p gyre-server` and `cargo check -p
+gyre-server --tests` pass (exit 0, no warnings); gyre-server test
+compilation exceeds the 4 GiB cgroup budget and is delegated to the
+independent verifier — the required probes (focused new tests plus
+abac/policy/merge/git_http regression scopes) are listed in
+`/tmp/stage/review-evidence/round4-scope-applicability.md`.
