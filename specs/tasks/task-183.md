@@ -2,10 +2,10 @@
 title: "Architectural Timeline — time scrubber for historical architecture views"
 spec_ref: "system-explorer.md §6"
 depends_on: [task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §6. Architectural Timeline"
-commits: ["c8e33c3c33c38a3f4aaabf8998d02c98fa8d946f", "f5a45295b4d7bbee06549f64427dcbc291843050", "8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe", "f793571c271a16432ba5dda02865ce2258a39996"]
+commits: ["6b9fb4e2be51bd1d6d702c959878a8f9331dc6fe", "cf8069ea85fed1a2737e5765cd150d4ceb61627e", "8405c8e479d1d1accbe7ab78ad2448c0a77eb97e", "f5a45295b4d7bbee06549f64427dcbc291843050", "8f7b7a7b1cf5ab6e28fa03f0bd910e2e3a1d10d6", "c8e33c3c33c38a3f4aaabf8998d02c98fa8d946f", "f793571c271a16432ba5dda02865ce2258a39996", "2044643a5b7447ab662b04041613385368861c6d"]
 ---
 
 ## Spec Excerpt
@@ -83,12 +83,13 @@ Read `system-explorer.md` §6 "Architectural Timeline" for the full specificatio
 ## Shipped
 
 The Architectural Timeline (system-explorer.md §6) is implemented on a
-real point-in-time graph API. Implementation commits: 6b9fb4e2b,
-cf8069ea8 (review repairs: fetcher race, reconciliation narrative from
+real point-in-time graph API. Implementation commits: 6b9fb4e2b
+(point-in-time graph API, scrubber, ghosts, delta panel, key moments),
+cf8069ea8 (review repair: fetcher race, reconciliation narrative from
 real payload), 8405c8e47 (rustfmt repair), f5a45295b (clippy gate
-repair), c8e33c3c3 (verified asset build). This round (a50b041a3,
-rebase repair) merged current main (44a01390c, task-171 LLM Endpoint
-Contract) into the branch — see "Rebase repair" below.
+repair), 8f7b7a7b1 (verify reconcile with main), c8e33c3c3 + f793571c2
+(verified asset builds). This round (2044643a5, rebase repair) merged
+current main a8bd7d09 (task-179 Moldable Views) into the branch.
 
 ### Behavior
 
@@ -114,18 +115,20 @@ Contract) into the branch — see "Rebase repair" below.
   `reconciliation_completed` payload carries `specs: [{name, version}]`
   provenance labels for the narrative).
 
-### Rebase repair (a50b041a3)
+### Rebase repair (2044643a5)
 
-The published PR conflicted with current main (merge conflict
-  category). Resolved by merging main 44a01390c into the branch:
-  conflicts were confined to generated `web/dist` assets (resolved to
-  main's build; final integration rebuilds and publishes those
-  remotely). The three source files touched by both sides
-  (`crates/gyre-server/src/api/graph.rs`, `web/src/lib/api.js`,
-  `docs/api-reference.md`) auto-merged; verified both sides' work
-  coexists (task-183 `?at=` point-in-time handling + task-171
-  llm_helpers/rate-limit changes). All other task-183 implementation
-  files are byte-identical to the retained approved candidate.
+The published PR conflicted with current main (merge-conflict repair
+category). Resolved by merging main a8bd7d09 into the branch:
+conflicts were confined to generated `web/dist` assets (resolved to
+main's build; final integration rebuilds and publishes those
+remotely). All source changes auto-merged; verified both sides' work
+coexists on the merged tree — task-183's `?at=` point-in-time handling
+in `api/graph.rs` + `api.js` timeline fetchers alongside task-179's
+moldable view routing in `NodeDetailPanel.svelte` +
+`web/src/lib/moldable/` (ExplorerView.svelte carries both the timeline
+scrubber wiring and the moldable agent-reference detail-panel wiring).
+All other task-183 implementation files are byte-identical to the
+retained approved candidate.
 
 ### Test evidence
 
@@ -136,12 +139,15 @@ Focused probes on the merged tree (this round; logs in
   (cargo-check-merged.txt).
 - `cargo test -p gyre-adapters sqlite::graph::tests::list_` — 3/3
   passed, including both point-in-time reconstruction tests
-  (merged-sqlite-graph-tests.txt).
+  (sqlite-graph-tests.txt).
 - `npx vitest run timeline-utils.test.js TimelineScrubber.test.js` —
-  60/60 passed (merged-frontend-timeline-tests.txt);
-  `ExplorerViewNavigableArchitecture.test.js` — 12/12 passed
-  (merged-explorerview-tests.txt).
+  60/60 passed (vitest-timeline.txt).
+- `npx vitest run MoldableViews.test.js` — 23/23 passed, confirming
+  main's merged-in views are intact on this tree
+  (vitest-moldable.txt).
 
-The verifier should run the full workspace suites, architecture
-  checks, all-target Clippy, and GitHub CI, plus the focused suites
-  above on the merge commit.
+Server-side tests the independent verifier should execute:
+`cargo test -p gyre-adapters sqlite::graph::tests` and the
+`graph::` handler tests in gyre-server covering the `?at=` parameter
+(including the 400 on invalid `at`), plus the full workspace suite
+and web vitest suite.
