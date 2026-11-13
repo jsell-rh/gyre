@@ -3,10 +3,10 @@ title: "Implement budget enforcement actions: warn/graceful-stop with grace, kil
 spec_ref: "platform-model.md §Enforcement Behavior"
 depends_on:
   - task-190
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "platform-model.md §Enforcement Behavior"
-commits: ["2edf9f01c0a1dac4de43daa6fac6926cde8059a9", "1f28b18839adaa0092f89b9167688768a0d0de16", "c39c673ce4a88ab3ccd36cf3c5c0c45a310ce80c", "75adf7def12eeecb1e92e600e1b57deffcc9fe3c", "b3dea29003054abbca3c29b2a0ad83f586504d86"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -71,66 +71,3 @@ This depends on task-190 (real usage counters). Once `tokens_used_today`/`cost_t
 - This shares subject with task-119 (agent-runtime §4). Implement enforcement once here as the canonical path; task-119 should consume it, not fork it.
 - Verify the merge-queue pause mechanism (for `QueuePause`) and the kill path by reading the relevant handlers before editing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters.
-
-## Shipped
-
-Budget enforcement is real end-to-end (platform-model.md §5 Enforcement
-Behavior): the task-190 usage counters drive the specced actions on every
-usage recording, via the single `check_and_enforce_budget` helper invoked
-only from `record_llm_call_usage` (no per-call-site threshold logic).
-
-This round repaired the CI Clippy failure from run 43331768394 at head
-`9b14e0c8e`: the merge with base `44a01390` (task-171) added the
-`prompt_template_sha` audit field to `LlmCallUsage`, but the task-191
-enforcement test struct literals predated it, so the gyre-server test
-targets no longer compiled (E0063 at `api/budget.rs:1449`/`:1533`).
-Commit `2edf9f01c` passes `prompt_template_sha: None` in the two
-enforcement fixtures — same repair class as `1f28b1883` in the prior
-round. No production code changed this round.
-
-### Behavior (unchanged from the verified rounds)
-
-- `BudgetEnforcementAction` (Warn/GracefulStop/HardKill/QueuePause,
-  serde snake_case) in `gyre-domain/src/budget.rs`, re-exported;
-  `BudgetConfig.enforcement_action: Option<...>` (None = spec default)
-  persisted through migration `2026-10-10-000058`, the SQLite + Postgres
-  row mappings, and the budget API DTOs (PUT/GET round-trip tested).
-- Utilization = higher of `max_tokens_per_day` / `max_cost_per_day`
-  (None/zero guarded). ≥80% <100%: `MessageKind::BudgetWarning` per
-  active agent (workspace feed + Directed `Destination::Agent` copy for
-  the MCP poll channel) and a spawner notification. ≥100%: default
-  `GracefulStop` — `MessageKind::BudgetExhausted` per active agent, then
-  an injectable grace timer (default 60s); still-Active agents are killed
-  via the shared `kill_agent` helper (extracted from `admin_kill_agent`,
-  clean cutover): Dead transition, process kill, budget counter
-  decrement, worktree/branch preserved, reassignment task
-  "Agent hit budget limit on {task-id}, needs reassignment or budget
-  increase" created. `HardKill` kills inline; `QueuePause` pauses each
-  workspace repo's merge queue (kv pause + `MergeQueuePaused` event)
-  without killing. Emission is de-duplicated per daily period via a
-  persisted kv marker keyed to `period_start`.
-
-### Test evidence
-
-- `cargo clippy -p gyre-server --all-targets --all-features -- -W
-  clippy::all`: exit 0, zero warnings on PR-changed lines; the exact CI
-  gate `python3 scripts/check-clippy-diff.py HEAD^1` passes ("changed
-  lines clean").
-- `cargo test -p gyre-domain`: 474 + 8 passed.
-- `bash scripts/check-arch.sh`, `bash scripts/check-migration-versions.sh`:
-  pass.
-- gyre-server test compilation is blocked in this sandbox by the 4 GiB
-  codegen budget (wrapper-refused; infrastructure restriction, not a code
-  defect). The independent verifier must run: `cargo test -p gyre-server
-  --lib api::budget` — covering `warn_at_80pct_emits_message_and_notification_no_kill`,
-  `below_threshold_emits_neither_message_nor_notification`,
-  `exhausted_graceful_stop_kills_preserves_work_creates_reassignment`,
-  `exhausted_hardkill_override_kills_immediately_without_timer`,
-  `exhausted_queuepause_override_pauses_workspace_merge_queues`,
-  `exhausted_crossing_cost_limit_also_fires`,
-  `budget_threshold_notifications_fire_once_per_period`,
-  `budget_enforcement_action_serde_round_trips`,
-  `enforcement_action_persists_through_budget_api`, and the task-190
-  counter tests. These tests fail if enforcement is removed (assertions
-  on emitted message/notification counts, Dead transition, reassignment
-  task, and below-threshold silence).
