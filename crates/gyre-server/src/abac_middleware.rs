@@ -47,18 +47,23 @@ const MR_COMMENTS_ROUTE: &str = "/api/v1/merge-requests/:id/comments";
 const MR_REVIEWS_ROUTE: &str = "/api/v1/merge-requests/:id/reviews";
 const MR_DIFF_ROUTE: &str = "/api/v1/merge-requests/:id/diff";
 const MR_GATES_ROUTE: &str = "/api/v1/merge-requests/:id/gates";
+const AGENT_MESSAGES_ROUTE: &str = "/api/v1/agents/:id/messages";
 const MR_SPEC_ROUTE: &str = "/api/v1/merge-requests/:id/spec";
 
 /// Routes a `review:submit` gate agent may touch: read MR context, submit
 /// its verdict, read comments and gate state, and fetch the pinned spec
 /// (GYRE_SPEC_URL — agent-gates.md §Integration with Agent Gates step 1:
-/// the gate agent receives the spec at the pinned SHA).
+/// the gate agent receives the spec at the pinned SHA). The inbox poll
+/// route lets a forge-spawned manifest-gate agent receive its ReviewRequest
+/// over REST (the handler restricts non-admin callers to their own inbox,
+/// and the /mcp `gyre_message_poll` tool is outside this allow-list's reach).
 const REVIEWER_ALLOWED_ROUTES: &[&str] = &[
     MR_DETAIL_ROUTE,
     MR_REVIEWS_ROUTE,
     MR_DIFF_ROUTE,
     MR_COMMENTS_ROUTE,
     MR_GATES_ROUTE,
+    AGENT_MESSAGES_ROUTE,
     MR_SPEC_ROUTE,
     "/api/v1/version",
 ];
@@ -268,7 +273,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/agents/:id/heartbeat", "agent", Some("write")),
                 RouteResourceMapping::api("/api/v1/agents/:id/complete", "agent", Some("complete")),
                 RouteResourceMapping::api("/api/v1/agents/:id/card", "agent", Some("write")),
-                RouteResourceMapping::api("/api/v1/agents/:id/messages", "message", None),
+                RouteResourceMapping::api(AGENT_MESSAGES_ROUTE, "message", None),
                 RouteResourceMapping::api(
                     "/api/v1/agents/:id/messages/:message_id/ack",
                     "message",
