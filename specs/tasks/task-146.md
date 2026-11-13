@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b"]
 ---
 
 ## Spec Excerpt
@@ -142,13 +142,21 @@ pub struct AnalyticsEvent {
   orchestrator, and asserts the recorded event carries the resolved
   target id — it fails against the pre-fix code, which recorded
   "local".
+- Rustfmt repair (round b49cea80, verification c5e74d38): the
+  verification run failed rustfmt on changed lines 18-23 of
+  `crates/gyre-server/src/mem.rs` — the `gyre_ports` use list wrapped
+  differently than rustfmt's canonical layout. Reformatted with
+  `cargo fmt`; whitespace-only, no semantic change. Repo-wide
+  `cargo fmt --all -- --check` and `cargo check -p gyre-server` pass at
+  b49cea80.
 
 ### Test evidence
 
-- `cargo check -p gyre-server` passes at commit 9bf30a10 (this sandbox;
+- `cargo check -p gyre-server` passes at commit b49cea80 (this sandbox;
   the build wrapper correctly blocks full server test compilation under
   the 4 GiB model budget — server tests belong to the independent
-  verifier).
+  verifier). Evidence:
+  `/tmp/stage/review-evidence/cargo-check-gyre-server.log`.
 - Verifier must execute (gyre-server lib tests):
   `cargo test -p gyre-server --lib orchestrator_spawn_analytics_reports_resolved_compute_target orchestrator_spawn_emits_agent_spawned_analytics_event spawn_reports_truthful_launch_outcome orchestrator_launch_injects_system_prompts orchestrator_launch_fails_closed_on_unapproved_persona`,
   plus the full `cargo test -p gyre-server --lib` suite for the
