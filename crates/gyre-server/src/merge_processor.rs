@@ -9557,6 +9557,238 @@ mod tests {
         assert!(advisory.body.contains(&v1_blob));
     }
 
+    /// agent-gates.md §Forge Enforcement Policies, `require_spec_ref`:
+    /// "MRs must include a spec_ref. MRs without one are rejected." A
+    /// policy-configured repo must fail the merge queue entry for an MR
+    /// with no spec_ref, with a reason naming the missing field, while an
+    /// MR that carries one merges.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn require_spec_ref_blocks_mr_without_spec_ref() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "spec-ref-repo", "ws-1").await;
+
+        // Enable the policy.
+        state
+            .spec_policies
+            .set_for_repo(
+                repo.id.as_str(),
+                gyre_domain::SpecPolicy {
+                    require_spec_ref: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // MR with NO spec_ref — the attack row "code without a spec".
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-no-spec-ref"),
+            repo.id.clone(),
+            "No spec_ref MR",
+            "feat/nospec",
+            "main",
+            4000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.author_agent_id = Some(Id::new("author-agent-specref"));
+        state.merge_requests.create(&mr).await.unwrap();
+        let entry = MergeQueueEntry::new(Id::new("entry-no-spec-ref"), mr.id.clone(), 50, 4000);
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let entry_after = state
+            .merge_queue
+            .find_by_id(&entry.id)
+            .await
+            .unwrap()
+            .expect("no-spec-ref entry persists after processing");
+        assert_eq!(
+            entry_after.status,
+            MergeQueueEntryStatus::Failed,
+            "MR without spec_ref must be rejected under require_spec_ref"
+        );
+        let err = entry_after
+            .error_message
+            .as_deref()
+            .expect("no-spec_ref failure carries a reason");
+        assert!(
+            err.contains("spec_ref"),
+            "failure reason must name the missing spec_ref, got: {err}"
+        );
+
+        // The author was told why the merge was blocked.
+        let author_notifications = state
+            .notifications
+            .list_for_user(
+                &Id::new("author-agent-specref"),
+                None,
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            author_notifications
+                .iter()
+                .any(|n| n.title.contains("Spec policy blocked merge")),
+            "author must be notified of the spec_ref violation, got: {:?}",
+            author_notifications
+                .iter()
+                .map(|n| &n.title)
+                .collect::<Vec<_>>()
+        );
+
+        // Control: the same MR WITH a spec_ref merges (no other policy is
+        // configured, so the presence of the reference is the only gate).
+        let mut mr2 = gyre_domain::MergeRequest::new(
+            Id::new("mr-with-spec-ref"),
+            repo.id.clone(),
+            "Spec_ref MR",
+            "feat/withspec",
+            "main",
+            4001,
+        );
+        mr2.workspace_id = Id::new("ws-1");
+        mr2.spec_ref = Some(format!("system/identity.md@{}", "a".repeat(40)));
+        state.merge_requests.create(&mr2).await.unwrap();
+        let entry2 = MergeQueueEntry::new(Id::new("entry-with-spec-ref"), mr2.id.clone(), 50, 4001);
+        state.merge_queue.enqueue(&entry2).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let entry2_after = state
+            .merge_queue
+            .find_by_id(&entry2.id)
+            .await
+            .unwrap()
+            .expect("entry survives processing");
+        assert_eq!(
+            entry2_after.status,
+            MergeQueueEntryStatus::Merged,
+            "MR with a spec_ref must not be blocked by require_spec_ref (error: {:?})",
+            entry2_after.error_message
+        );
+    }
+
+    /// agent-gates.md §Forge Enforcement Policies, `require_approved_spec`:
+    /// an MR whose referenced spec SHA has no active approval in the
+    /// ledger must be blocked at merge — including when a Pending ledger
+    /// row exists (a started-but-unfinished approval authorizes nothing).
+    /// Approving that exact (path, sha) version releases the block.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn require_approved_spec_blocks_unapproved_spec() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "approved-spec-repo", "ws-1").await;
+
+        state
+            .spec_policies
+            .set_for_repo(
+                repo.id.as_str(),
+                gyre_domain::SpecPolicy {
+                    require_approved_spec: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let sha = "c3".repeat(20);
+
+        // Ledger row for the referenced version exists but is PENDING —
+        // never approved. An entry that exists yet is inactive must not
+        // satisfy the policy (an approval ledger row is not an approval).
+        let pending_id = Id::new("apr-pending-unapproved");
+        state
+            .spec_approvals
+            .create(&gyre_domain::SpecApproval::new(
+                pending_id.clone(),
+                "system/unapproved.md",
+                &sha,
+                "user:someone",
+            ))
+            .await
+            .unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-unapproved-spec"),
+            repo.id.clone(),
+            "Unapproved spec MR",
+            "feat/unapproved",
+            "main",
+            5000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.author_agent_id = Some(Id::new("author-agent-unapproved"));
+        mr.spec_ref = Some(format!("system/unapproved.md@{sha}"));
+        state.merge_requests.create(&mr).await.unwrap();
+        let entry = MergeQueueEntry::new(Id::new("entry-unapproved-spec"), mr.id.clone(), 50, 5000);
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let entry_after = state
+            .merge_queue
+            .find_by_id(&entry.id)
+            .await
+            .unwrap()
+            .expect("unapproved entry persists after processing");
+        assert_eq!(
+            entry_after.status,
+            MergeQueueEntryStatus::Failed,
+            "unapproved spec_ref must block the merge with a Failed entry"
+        );
+        let err = entry_after
+            .error_message
+            .as_deref()
+            .expect("unapproved-spec failure carries a reason");
+        assert!(
+            err.contains("no active approval"),
+            "failure reason must name the missing approval, got: {err}"
+        );
+
+        // Control: approving that exact (path, sha) version releases the
+        // block and the MR merges.
+        state
+            .spec_approvals
+            .approve(&pending_id, 1700000300)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        let mut mr2 = gyre_domain::MergeRequest::new(
+            Id::new("mr-approved-spec"),
+            repo.id.clone(),
+            "Approved spec MR",
+            "feat/approved",
+            "main",
+            5001,
+        );
+        mr2.workspace_id = Id::new("ws-1");
+        mr2.spec_ref = Some(format!("system/unapproved.md@{sha}"));
+        state.merge_requests.create(&mr2).await.unwrap();
+        let entry2 = MergeQueueEntry::new(Id::new("entry-approved-spec"), mr2.id.clone(), 50, 5001);
+        state.merge_queue.enqueue(&entry2).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let entry2_after = state
+            .merge_queue
+            .find_by_id(&entry2.id)
+            .await
+            .unwrap()
+            .expect("entry survives processing");
+        assert_eq!(
+            entry2_after.status,
+            MergeQueueEntryStatus::Merged,
+            "approved spec_ref must not be blocked by require_approved_spec (error: {:?})",
+            entry2_after.error_message
+        );
+    }
+
     // ── TASK-077 / HSI §2 (F5): merge-time ABAC enforcement tests ─────────
     //
     // The merge processor evaluates ABAC with its internal service identity
