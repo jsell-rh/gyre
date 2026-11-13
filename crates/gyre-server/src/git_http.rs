@@ -2401,7 +2401,7 @@ async fn process_persona_changes(
                             notif.source.entity_type = "persona".to_string();
                             notif.source.entity_id = slug.clone();
                             notif.source.repo_id = Some(repo.id.clone());
-                            if let Err(e) = state.notifications.create(&notif).await {
+                            if let Err(e) = state.create_notification(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
                             }
                         }
@@ -2839,7 +2839,7 @@ async fn notify_cross_workspace_dependents(
             notif.source.entity_type = "spec".to_string();
             notif.source.entity_id = changed_spec_path.to_string();
 
-            if let Err(e) = state.notifications.create(&notif).await {
+            if let Err(e) = state.create_notification(&notif).await {
                 tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
             }
         }
@@ -8411,7 +8411,7 @@ specs:
         // The owner was notified.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-1"), None, None, None, None, 100, 0)
+            .list_for_user(&Id::new("user-1"), None, None, None, None, None, 100, 0)
             .await
             .unwrap();
         let notif = notifs

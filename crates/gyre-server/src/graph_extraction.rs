@@ -2333,6 +2333,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 50,
                 0,
             )
@@ -2359,6 +2360,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-view"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,
@@ -2397,6 +2399,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 50,
                 0,
             )
@@ -2426,6 +2429,7 @@ mod tests {
             .list_for_user(
                 &Id::new("user-dev"),
                 Some(&Id::new("ws-1")),
+                None,
                 None,
                 None,
                 None,

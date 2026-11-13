@@ -92,7 +92,7 @@ pub async fn notify(
         now,
     );
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
     }
 }
@@ -157,7 +157,7 @@ pub async fn notify_rich(
         }
     };
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
     }
 }
@@ -584,7 +584,7 @@ mod tests {
     async fn notifs_for(state: &crate::AppState, user: &str) -> Vec<gyre_common::Notification> {
         state
             .notifications
-            .list_for_user(&Id::new(user), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new(user), None, None, None, None, None, 50, 0)
             .await
             .unwrap()
     }
