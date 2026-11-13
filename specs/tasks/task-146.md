@@ -2,14 +2,14 @@
 title: "Complete analytics event schema and auto-emitted events coverage"
 spec_ref: "analytics.md §Event Schema"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "analytics.md §Purpose"
   - "analytics.md §Event Schema"
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["fe61a49ffea2e7e0fe6341ebf261a6a9579ad79a", "08123b833c31d5c56fb62fa332caa58bb6a69257", "f17756774160de561cc1e0a9c1576a43e18b7505", "e1088342c4f52d501dc18f12b26bcb9a8b93987e", "9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -93,42 +93,3 @@ pub struct AnalyticsEvent {
 - Read `crates/gyre-server/src/api/specs.rs` for spec approval events
 - Read `crates/gyre-server/src/api/search.rs` for search endpoint
 - Do NOT create new endpoints — the query API routes already exist. Only add missing auto-emitted events and verify completeness.
-
-## Shipped
-
-The task-146 analytics surface shipped across the `commits:` rounds: the
-event schema with all 9 spec fields, all 12 auto-emitted events with
-spec-required properties at their real trigger points (including the
-kill-path and terminal-path repairs), and the query API with the full
-spec filter set plus server-side `group_by` aggregation (semantics
-identical across the mem, SQLite, and Postgres adapters).
-
-### This round (verification repair fe61a49f)
-
-Verification round 64bdabd5 exited 1 on the changed-lines clippy gate:
-`crates/gyre-server/src/api/admin.rs:385 clippy::needless_borrow`.
-`kill_agent` holds `state: &AppState`, so the task-146 kill-path
-`task.status_changed` emission passed `&state`, building a `&&AppState`
-the compiler immediately dereferences. The call now passes `state`
-directly — identical runtime behavior, gate clean. No other warning in
-the workspace falls on a line this branch changed relative to base
-7daca25d (checked all 204 clippy warning locations against the diff
-hunks; the remaining warnings are pre-existing base debt on unchanged
-lines).
-
-### Test evidence
-
-- `cargo fmt -- --check` — clean.
-- `cargo clippy -p gyre-server --lib` — finishes; no warning in
-  `admin.rs`; no warning on any changed line vs base 7daca25d.
-- `cargo check -p gyre-server --lib --tests` — passes.
-- `bash scripts/check-task-commit-attribution.sh` — passes with the
-  restored frontmatter (this round's commit recorded).
-
-The change is a one-token borrow removal with identical semantics, so
-the existing analytics test suite is unaffected; the verifier should
-run the same focused tests as the prior round:
-
-- `cargo test -p gyre-server --lib stale_agents`
-- `cargo test -p gyre-server --lib budget_kill_records_agent_failed_analytics_event`
-- `cargo test -p gyre-server --lib analytics`
