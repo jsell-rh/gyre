@@ -5233,7 +5233,7 @@ specs:
             .await
             .unwrap();
 
-        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone()).await;
+        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone(), None).await;
 
         let events = analytics_events(&state, "gate.passed").await;
         assert_eq!(events.len(), 1, "one gate.passed event expected");
@@ -5269,7 +5269,7 @@ specs:
             .await
             .unwrap();
 
-        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone()).await;
+        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone(), None).await;
 
         let events = analytics_events(&state, "gate.failed").await;
         assert_eq!(events.len(), 1, "one gate.failed event expected");
