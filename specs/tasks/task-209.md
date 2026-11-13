@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,55 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-HSI §12 profile gaps (notification filtering, judgment ledger, auth
-provider info) are implemented in production code across the commits
-listed in the frontmatter; coverage row 53 is `implemented`. This round
-repairs the review finding from the f7f5c59f merge (task-125
-repo_id + task-209 exclude_types both extended
-`NotificationRepository::list_for_user`).
-
-### This round: test-arity repair (commit 28b9ac50)
-
-The merge commit 0f41df8b raised `list_for_user` to the 9-parameter
-signature (user_id, workspace_id, min/max priority, notification_type,
-repo_id, exclude_types, limit, offset) across all four trait impls
-(sqlite/postgres/mem/SSE decorator), but five in-crate test call sites
-kept pre-merge arities and failed to compile (`cargo test -p
-gyre-adapters --lib` → error[E0061]/error[E0308] ×7):
-
-- `sqlite/notification.rs` `list_for_user_filters_by_repo` — the two
-  repo-filtered calls (hit/miss) and the unfiltered `all` call used the
-  base's signature (no `exclude_types`).
-- `sqlite/user_profile.rs`
-  `notifications_exclude_types_applies_to_list_and_count` — both calls
-  used the branch's pre-merge signature (no task-125 `repo_id`), so the
-  task's own notification-filtering proof never compiled.
-
-All five sites now pass the full 10-argument form (`None` for unused
-filters, `&[]` where no types are excluded). No production code changed
-this round — the adapters, write paths, and endpoints are those verified
-in earlier rounds.
-
-### Test evidence (this round, sandbox probes)
-
-- `cargo test -p gyre-adapters --lib` — 522 passed, 0 failed (log:
-  /tmp/stage/review-evidence/task-209-repair-tests.log), including the
-  previously non-compiling
-  `notifications_exclude_types_applies_to_list_and_count`,
-  `list_for_user_filters_by_repo`, and the full `judgment_ledger_*`
-  suite (merge/sources reverse-chron, workspace filter, type filter,
-  pagination, rejection attribution, detail_zstd decompression).
-- `cargo check --workspace --lib` — clean (all crates type-check).
-- `rustfmt --check` clean on both modified files.
-- Scripted arity audit: every `list_for_user` call site in the workspace
-  matches its trait's parameter count (notification 9 params, ledger 6,
-  team 2, tokens/prefs 1).
-
-Server test compilation and full gates stay with the independent
-verifier: `SKIP_WEB_BUILD=1 cargo check --all-targets --workspace`,
-`SKIP_WEB_BUILD=1 cargo nextest run --all` (with `GYRE_JJ_TESTS_MUST_RUN=1`,
-jj v0.39.0), clippy/rustfmt diff gates vs `f7f5c59f`, `cd web && npm ci
-&& npm test`, and exact-head GitHub checks.
