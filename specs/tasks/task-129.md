@@ -147,15 +147,16 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ### Contract repair round (this commit)
 
-The controller flagged repair a0c5b5a998064ab6be494e76aa7d58eb (category:
-contract): the previous checkpoint had removed the protected
-`## Agent Instructions` section while recording progress. The executor
-restored the assigned contract; this round re-applies the progress state
-(frontmatter, acceptance-criteria checkboxes, these Shipped notes) with the
-assigned contract text preserved verbatim — `## Agent Instructions` stays
-in place. No product source changed this round: the two product commits
-(0dcb1017, 81ccc284) are intact on the branch, `cargo check -p
-gyre-server` exits 0 at the merged HEAD, and
+The controller flagged repair d33c298f8d9e4838b785f1d177bfb7cc (category:
+contract): the assigned task text changed, and the executor restored the
+assigned contract in this checkout. This round re-applies the progress
+state (frontmatter, acceptance-criteria checkboxes, these Shipped notes)
+on the restored contract with the assigned text preserved verbatim —
+`## Agent Instructions` stays in place. No product source changed this
+round: the two product commits (0dcb1017, 81ccc284) are intact on the
+branch; re-verified at the merged HEAD this round: `cargo check -p
+gyre-server` exits 0, `cargo test -p gyre-domain` passes (8/8),
+`scripts/check-arch.sh` passes, and
 `scripts/check-abac-route-registry.sh` passes. Probe evidence and the
 verifier-owned test list are in
 `/tmp/stage/review-evidence/task-129-evidence.md`.
