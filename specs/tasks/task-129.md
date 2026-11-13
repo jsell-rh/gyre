@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
 ---
 
 ## Spec Excerpt
@@ -145,75 +145,88 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ## Shipped
 
-### Round 6: repair the seven review findings from checkpoint a989d27 (commit `3471b92b`)
+### What is implemented (all in the listed commits)
 
-The engine, CRUD/dry-run/decisions/effective API, builtin seeding,
-caching, and the round-1 through round-5 repairs are in the earlier
-merged commits. Round 6 closes all seven findings of the round-5
-review:
+The ABAC evaluation engine and its full surface are in production code:
 
-1. **Re-spawn containment (agent-repo-scope).**
-   `relaunch_agent_session` now mints the fresh session JWT via
-   `mint_worker_scoped` — the same worker-scope shape as the first
-   spawn (`workspace_id` + `repo_id` claims, attestation level mirrored
-   from the resolved compute target) — instead of `mint_with_workload`,
-   which hardcoded `repo_id: None`. A re-spawned agent's requests now
-   carry a real `subject.repo_scope`, so the `builtin-agent-repo-scope`
-   containment Deny (750) fires against out-of-scope repos instead of
-   `builtin-agent-scoped-access` (700) granting tenant-wide access.
-2. **Fail-closed attestation gates.** `evaluate_attestation_abac`
-   (enforced merge path) propagates workspace-store and policy-store
-   read errors as `Err`; both merge-path callers requeue the queue entry
-   (hold-then-retry, same semantics as `supervised_trust_hold`) instead
-   of evaluating with a silently missing tenant scope.
-   `evaluate_push_attestation_abac` propagates the same reads; its
-   caller logs a warn and skips the audit-only evaluation on error.
-3. **Reserved-prefix invariant on update/delete.** `update_policy`
-   and `delete_policy` now reject when the STORED policy name carries
-   the `trust:`/`builtin:` prefix, so trust-preset policies (built_in:
-   false, immutable: false) can no longer be disabled, rewritten, or
-   deleted by id — only the atomic, transition-validated
-   `apply_trust_transition` path mutates them.
-4. **§Audit Integration log-level contract + AbacDenied events** on
-   both attestation paths: denials at `warn`, allowances at `debug`, and
-   a Deny emits an `AbacDenied` audit event via the new
-   `record_abac_denied_service` (marked `enforced: true` on the merge
-   gate, `enforced: false` on the audit-only push path).
-5. **Concrete decision resource ids.** `PolicyDecision.resource_id`
-   now records the addressed entity id (`resource.id` from the
-   evaluation context / path extraction; `addressed_resource_id` /
-   `path_resource_id` helpers), falling back to the route pattern only
-   on collection routes.
-6. **Visible audit-write failures.** All six `record_decision` sites go
-   through `policy_engine::record_decision_audit`, which warn-logs on
-   store failure — a dropped decision is distinguishable from "no
-   decisions".
-7. **`subject.global_role` set semantics.** Empty roles leave the
-   attribute unset (fail closed — the fabricated `ReadOnly` that
-   matched `builtin-readonly-get-only` is gone); multi-role callers
-   get a list-valued attribute, and `eval_condition` evaluates
-   Equals/NotEquals on list values with membership semantics. The
-   effective-permissions endpoint's extraction was aligned.
+- **Evaluation engine** (`gyre-server/src/policy_engine.rs`): the
+  10-step flow — subject/resource/action/environment attribute
+  extraction, repo → workspace → tenant policy collection, immutable
+  Deny evaluated first (bypasses priority ordering and cannot be
+  overridden), then priority-DESC ordering with scope specificity as
+  tiebreaker, AND-condition evaluation, first-match-wins with
+  short-circuit, and a `PolicyDecision` audit record per evaluation.
+- **Policy composition** per §Policy Composition: scope precedence
+  (repo > workspace > tenant) at equal priority, higher priority wins
+  regardless of scope, Deny overrides Allow at the same priority+scope,
+  tenant-level `default-deny` catches the rest.
+- **Built-ins**: all seven policies from §Built-In Policies are seeded
+  on startup (`system-full-access`, `tenant-isolation`,
+  `agent-repo-scope`, `workspace-membership-required`,
+  `persona-human-approval`, `builtin:require-human-spec-approval`
+  (immutable, priority 999), `default-deny`). Built-ins cannot be
+  deleted; immutable ones cannot be overridden; trust-preset names
+  (`trust:`/`builtin:` prefix) are protected on update/delete by id.
+- **Performance**: per-scope policy-set cache with invalidation on
+  every policy write (`policy_cache.rs`); membership lookups
+  precomputed in the auth context; benchmark test asserts the <1ms
+  evaluation target.
+- **Audit integration**: every decision is persisted to the
+  `policy_decisions` table and logged (Deny at `warn`, Allow at
+  `debug`); audit-write failures warn via
+  `policy_engine::record_decision_audit` so a dropped decision is
+  distinguishable from "no decisions".
+- **API**: `GET/POST /api/v1/policies`, `GET/PUT/DELETE
+  /api/v1/policies/{id}` (create admin-only, built-ins undeletable),
+  `POST /api/v1/policies/evaluate` (dry-run), `GET
+  /api/v1/policies/decisions` (audit query), `GET
+  /api/v1/policies/effective` (effective permissions), all registered
+  in `api/mod.rs` with ABAC route-registry entries.
+- **Middleware migration**: `abac_middleware.rs` evaluates through the
+  new engine; attestation-gate paths fail closed on store errors
+  (hold-then-requeue on the enforced merge path, warn+skip on the
+  audit-only push path).
+
+Review rounds 1–6 (findings and fixes) are recorded in the earlier
+listed commits; round 6 closed the last seven findings, including
+re-spawn JWT worker-scope claims (`mint_worker_scoped`), reserved-
+prefix protection on policy update/delete, concrete decision resource
+ids, visible audit-write failures, and set-semantics
+`subject.global_role` handling.
+
+### Round 7 (this commit): verification-gate formatting repair
+
+The round-6 checkpoint failed the deterministic formatting gates —
+one trailing-whitespace line (`policy_engine.rs:524`) and rustfmt
+violations on task-129-changed lines in nine files. Because the gate
+truncates each file's violation list at twelve lines, each flagged
+file was fully reformatted with the gate's exact invocation
+(`rustfmt --edition 2021 --config skip_children=true`). Formatting
+only — no behavior change.
 
 ### Test evidence
 
-Seven new focused tests (one per finding, each with a documented
-killing direction): `respawn_jwt_carries_worker_scope_claims`,
-`condition_equals_on_list_attribute_uses_set_semantics`,
-`roleless_caller_gets_no_fabricated_readonly_role`,
-`decision_records_concrete_resource_id`,
-`trust_preset_policy_cannot_be_updated_or_deleted_by_id`,
-`attestation_deny_records_abac_denied_audit_event`, and
-`attestation_abac_fails_closed_on_workspace_store_error` (injects a
-failing workspace store and asserts the `Err`).
+- `python3 scripts/check-rustfmt-diff.py f7f5c59` → "changed lines
+  clean (45 Rust files checked)" (exit 0); `git diff --check` on the
+  branch → no whitespace errors. Evidence saved under
+  `/tmp/stage/review-evidence/`.
+- `cargo check -p gyre-server` passes on the reformatted tree
+  (exit 0, ~6 min).
+- Behavior tests from rounds 1–6 (one per finding, each with a
+  documented killing direction): `respawn_jwt_carries_worker_scope_claims`,
+  `condition_equals_on_list_attribute_uses_set_semantics`,
+  `roleless_caller_gets_no_fabricated_readonly_role`,
+  `decision_records_concrete_resource_id`,
+  `trust_preset_policy_cannot_be_updated_or_deleted_by_id`,
+  `attestation_deny_records_abac_denied_audit_event`,
+  `attestation_abac_fails_closed_on_workspace_store_error`, plus the
+  engine/benchmark/cache/API suites in `policy_engine`,
+  `abac_middleware`, `api::policies`, `merge_processor`,
+  `ralph_loop`, and `git_http` tests.
 
 This sandbox is cgroup-capped at 4 GiB, so gyre-server test-binary
-compilation is deferred to the independent verifier per the assignment
-instructions: `cargo check -p gyre-server --tests` (which type-checks
-every new test) passes — evidence in
-`/tmp/stage/review-evidence/`. The verifier must run the seven tests
-above plus the touched-surface suites (`abac_middleware`,
-`merge_processor`, `ralph_loop`, `policy_engine`, `api::policies`,
-`git_http`) — see `review-evidence/README.md` for the exact commands.
-All mechanical repo checks (arch, inert-enforcement, abac-route-registry
-and the other frozen-count scripts) pass.
+compilation is deferred to the independent verifier: the verifier
+must run the tests above (`cargo test -p gyre-server policy_engine
+abac_middleware api::policies merge_processor ralph_loop git_http`
+plus the seven named round-6 tests) — `cargo check -p gyre-server
+--tests` type-checks all of them.
