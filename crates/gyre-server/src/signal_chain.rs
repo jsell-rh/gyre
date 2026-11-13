@@ -2159,6 +2159,9 @@ mod tests {
                 id: "link-1".to_string(),
                 source_path: "specs/system/api.md".to_string(),
                 source_repo_id: Some("r-2".to_string()),
+                // Blob SHA of the source spec at link-creation time
+                // (spec_links.source_sha, NOT NULL per spec).
+                source_sha: "src-sha-2".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "specs/system/auth.md".to_string(),
                 target_repo_id: Some("r-1".to_string()),
