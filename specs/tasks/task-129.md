@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61", "a9f254b21b69ff07384f379502f5fc1cdff789b8"]
 ---
 
 ## Spec Excerpt
@@ -187,31 +187,58 @@ The ABAC evaluation engine and its full surface are in production code:
   (hold-then-requeue on the enforced merge path, warn+skip on the
   audit-only push path).
 
-Review rounds 1–6 (findings and fixes) are recorded in the earlier
+Review rounds 1–7 (findings and fixes) are recorded in the earlier
 listed commits; round 6 closed the last seven findings, including
 re-spawn JWT worker-scope claims (`mint_worker_scoped`), reserved-
 prefix protection on policy update/delete, concrete decision resource
 ids, visible audit-write failures, and set-semantics
-`subject.global_role` handling.
+`subject.global_role` handling; round 7 was a formatting-only repair
+of the verification gates.
 
-### Round 7 (this commit): verification-gate formatting repair
+### Round 8 (this commit): merge reconciliation + round-7 lint repair
 
-The round-6 checkpoint failed the deterministic formatting gates —
-one trailing-whitespace line (`policy_engine.rs:524`) and rustfmt
-violations on task-129-changed lines in nine files. Because the gate
-truncates each file's violation list at twelve lines, each flagged
-file was fully reformatted with the gate's exact invocation
-(`rustfmt --edition 2021 --config skip_children=true`). Formatting
-only — no behavior change.
+Review 2f0ffde2 (round 7) found the enforced pre-commit lint
+`scripts/check-abac-context-parity.sh` failing with 3 violations on the
+candidate (it passed at the assigned merge-base 7daca25d). Both sites
+fixed in `abac_middleware.rs`:
+
+- `path_resource_id` builds a scratch `AttributeContext` for resource-id
+  extraction only (it never evaluates policies); the sanctioned
+  `// abac-context:ok` exemption now sits on the construction line.
+- The canonical evaluation context sets `subject.tenant_id` after the
+  `global_role` block; round-6 comment blocks had pushed that set past
+  the lint's 30-line scan window. The set is hoisted above the block —
+  the attribute was always set, only the lint window moved.
+
+The same commit closes a CI-advisory `check-dead-parameters.sh`
+regression the candidate had introduced (4th finding at
+`git_http.rs evaluate_push_attestation_abac`; merge-base and base both
+have 3): `task_id` is now consumed in real logic — the push-path
+`PolicyDecision`'s `request_id` is the triggering push task (the chain
+under evaluation is located via `find_by_task(task_id)`, and no HTTP
+request exists on this path) instead of an opaque random UUID, so the
+audit trail answers "which task's push produced this decision".
+
+The branch was also reconciled with the assignment base 6f5a631
+(merge commit `verify(task-129): reconcile candidate with main`):
+auto-merge clean, main's task-195 deletion of the unrouted legacy
+inbox handlers honored, web/dist at base's committed assets.
 
 ### Test evidence
 
-- `python3 scripts/check-rustfmt-diff.py f7f5c59` → "changed lines
-  clean (45 Rust files checked)" (exit 0); `git diff --check` on the
-  branch → no whitespace errors. Evidence saved under
-  `/tmp/stage/review-evidence/`.
-- `cargo check -p gyre-server` passes on the reformatted tree
-  (exit 0, ~6 min).
+- `bash scripts/check-abac-context-parity.sh` → exit 0 (was 1 with 3
+  violations). `bash scripts/check-dead-parameters.sh` → 3 findings,
+  identical to the merge-base 7daca25d and base 6f5a631 baseline (the
+  candidate's 4th finding is gone).
+- All 22 CI-workflow scripts pass except the two environmental failures
+  that also fail identically at the merge-base (`check-tenant-filter.sh`
+  — sandbox awk is mawk, no gawk; `ci-install-mold.sh` — no network) and
+  the advisory `check-dead-parameters.sh` baseline of 3. The 30
+  pre-commit-hook script failures on this candidate are byte-identical
+  in set to the merge-base's — no regressions.
+- `cargo fmt --check` → exit 0; `cargo check -p gyre-server` and
+  `cargo check -p gyre-server --tests` → ok; `cargo test -p gyre-domain
+  policy` → 6/6; `cargo test -p gyre-adapters policy` → 14/14.
 - Behavior tests from rounds 1–6 (one per finding, each with a
   documented killing direction): `respawn_jwt_carries_worker_scope_claims`,
   `condition_equals_on_list_attribute_uses_set_semantics`,
@@ -222,11 +249,14 @@ only — no behavior change.
   `attestation_abac_fails_closed_on_workspace_store_error`, plus the
   engine/benchmark/cache/API suites in `policy_engine`,
   `abac_middleware`, `api::policies`, `merge_processor`,
-  `ralph_loop`, and `git_http` tests.
+  `ralph_loop`, and `git_http` tests. Round 8 strengthens
+  `push_attestation_abac_records_decision_to_audit_trail` to assert the
+  new `request_id` task correlation.
 
 This sandbox is cgroup-capped at 4 GiB, so gyre-server test-binary
 compilation is deferred to the independent verifier: the verifier
-must run the tests above (`cargo test -p gyre-server policy_engine
-abac_middleware api::policies merge_processor ralph_loop git_http`
-plus the seven named round-6 tests) — `cargo check -p gyre-server
---tests` type-checks all of them.
+must run `cargo test -p gyre-server` for the `policy_engine`,
+`policy_cache`, `abac_middleware`, `api::policies`, `auth`,
+`merge_processor`, `ralph_loop`, and `git_http` suites (including the
+seven named round-6 tests and the round-8 request_id assertion) —
+`cargo check -p gyre-server --tests` type-checks all of them.
