@@ -440,6 +440,7 @@ mod tests {
             max_cost_per_day: Some(12.5),
             max_concurrent_agents: Some(3),
             max_agent_lifetime_secs: Some(3600),
+            enforcement_action: Some(gyre_domain::BudgetEnforcementAction::QueuePause),
         });
         RepoRepository::create(&s, &r).await.unwrap();
 
@@ -455,6 +456,12 @@ mod tests {
         assert!((budget.max_cost_per_day.unwrap() - 12.5).abs() < 1e-9);
         assert_eq!(budget.max_concurrent_agents, Some(3));
         assert_eq!(budget.max_agent_lifetime_secs, Some(3600));
+        // The JSON document round-trips the whole BudgetConfig, including
+        // the task-191 per-level enforcement action override.
+        assert_eq!(
+            budget.enforcement_action,
+            Some(gyre_domain::BudgetEnforcementAction::QueuePause)
+        );
 
         // Update path: replace the override, then clear it.
         found.budget = Some(gyre_domain::BudgetConfig {
