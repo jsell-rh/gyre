@@ -2,7 +2,7 @@
 title: "Index all searchable entity types and implement real full reindex"
 spec_ref: "search.md §Searchable Entities"
 depends_on: [task-201]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "search.md §Searchable Entities"
 commits: ["5acae62c983d21a1288b652a6628e8f81392fd59", "3e5f747b95b46e48c02e9431c8126dfe833e1d31", "1f80f64f4fa013634d38e985b271fb20d4a09a1a", "b316bc37f64c6f032c563b9e590a823ee8a626e4", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9", "2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
