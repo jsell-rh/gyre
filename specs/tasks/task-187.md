@@ -5,7 +5,7 @@ depends_on: [task-171, task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
-commits: ["d363ce7d5f4a374530ccde7548bb52b31f242a12", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df"]
+commits: ["7737e532ffab9166fa2a2310dc472f2de39289df", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "d363ce7d5f4a374530ccde7548bb52b31f242a12", "a69f76ec549374252e1d8d475ccd8b69be7c72d9"]
 ---
 
 ## Spec Excerpt
@@ -86,16 +86,19 @@ Read `system-explorer.md` §8 "Conversational Exploration" for the full specific
 ## Shipped
 
 Conversational exploration (system-explorer.md §8) as a real question →
-knowledge-graph → grounded-answer pipeline, in commit 7737e532, plus
-the verification repair fa8568c5 (rustfmt + clippy `len_zero` on the
-new lines; no behavior change) and the review repair d363ce7d:
+knowledge-graph → grounded-answer pipeline, shipped across commits
+7737e532 (feature), fa8568c5 (rustfmt/clippy repair, no behavior
+change), d363ce7d (review repair: unknown-kind citation tokens preserved
+literally in `validate_entity_refs`), and a69f76ec (review repair:
+corrected the `short_sha` unicode test expectation to the char-based
+value — see Test evidence):
 
-- **Backend** — new `POST /api/v1/workspaces/:id/explorer-views/ask`
+- **Backend** — `POST /api/v1/workspaces/:id/explorer-views/ask`
   (`ask_explorer` in `api/explorer_views.rs`): the LLM prompt is grounded
   in the workspace's live graph — nodes with spec linkage and commit/agent
   provenance (`created_sha`, `last_modified_sha`, `last_modified_by`,
   recency-ranked, capped), edge summaries, and recent architectural
-  timeline deltas — via the new `explorer-ask` prompt template
+  timeline deltas — via the `explorer-ask` prompt template
   (`specs/prompts/explorer-ask.md` + `PROMPT_EXPLORER_ASK` fallback).
   **Grounding enforcement**: the server parses every
   `[entity:node|spec|commit|agent:id]` citation from the answer and
@@ -111,74 +114,50 @@ new lines; no behavior change) and the review repair d363ce7d:
   `view_spec` validated through the same chain as the generate endpoint
   (grammar, repo ownership, flow-trace backing with an in-answer fallback
   note); "what would happen if…" questions set `predict`, and the server
-  runs the structural prediction through `run_structural_prediction` —
-  the core extracted from `POST /repos/:id/graph/predict` so both
-  surfaces share one prediction machinery — returning
-  `{repo_id, predictions}`.
-- **Frontend** — `ConversationalExplorer.svelte`, the third Explorer chat
-  mode ("Ask the graph"), also reachable from the control bar's view
-  selector ("Ask the graph…" entry). Answers render with clickable,
-  distinctly-styled entity references: node → detail panel + canvas
-  camera focus, spec → inline spec editor, commit → git remote commit
-  page (or copied SHA), agent → highlight the nodes it last modified.
-  Node references in a response highlight those nodes on the canvas
-  (concept-scope query, search-highlight visual language); view specs
-  apply via the existing generated-view path; predictions render as
-  ghost overlays through the shared `predictionOverlays` mapping now used
-  by both the spec-edit prediction flow and the conversational flow.
-  Conversation history lives in component state only (not persisted).
+  resolves the repo scope and runs the task-186 structural prediction
+  machinery, returning the impact overlay data for ghost rendering.
+- **Frontend** — `ExplorerChat.svelte`: chat panel opened from the Ask
+  input in the control bar, conversation history in component state (not
+  persisted), responses render validated `[entity:...]` citations as
+  clickable links (commit → git, spec → inline open, node → canvas
+  highlight, agent → provenance), and apply returned view specs /
+  predictions to the canvas.
+- **Tests** — server: unit tests for `validate_entity_refs` and
+  `short_sha` (pure functions, probe-run this round — see below) plus
+  tokio integration tests for the ask endpoint (503 without LLM,
+  membership/rate-limit/history-validation paths). Frontend: vitest
+  component tests for panel rendering, citation link rendering,
+  follow-up context, and view-spec application.
 
-### Review repair d363ce7d
+### This round's repair (a69f76ec)
 
-The prior round shipped `validate_entity_refs` reducing a well-formed
-token of an unknown kind (e.g. `[entity:unknown:x]`) to its bare id,
-while the unit test asserted literal preservation — the suite failed
-(review a8fa631b; the round had only compile-checked the server tests
-because the 4 GiB sandbox wrapper blocks gyre-server test builds).
-Fix: an unknown kind is not citation grammar the validator governs —
-the token is now preserved verbatim (a diverging match arm), while a
-known kind with an unresolvable id remains a hallucinated citation
-(stripped to bare id, excluded from `entity_refs`). The frontend link
-regex only matches node/spec/commit/agent, so an unknown-kind token
-renders as plain text and can never become an ungrounded clickable
-reference.
+Review round b5c63ebe found the shipped
+`short_sha_never_panics_on_short_or_unicode_input` test asserted the
+first 7 **bytes** of `"déadbeef"` (`"déadbe"`), while the production
+`short_sha` is `chars().take(7)` and returns `"déadbee"` — the
+expectation matched the forbidden byte-truncation semantics, so the
+suite failed at runtime. Fixed the assertion to the char-based value.
 
 ### Test evidence
 
-- `web/src/__tests__/ConversationalExplorer.test.js` (vitest, 6 tests,
-  passing in the 7737e532 round): Q&A rendering, per-type entity-ref
-  click dispatch, canvas highlight + view-spec application, prediction
-  application, follow-up history replay, error surfacing.
-- Server tests in `api/explorer_views.rs`: grounding/citation validation
-  (valid tokens kept, hallucinated stripped, unknown-kind and malformed
-  tokens preserved literally, labels resolved), view-spec passthrough
-  vs. invalid-spec drop, prediction trigger against the single-repo
-  scope, prompt grounding (provenance reaches the LLM fully
-  substituted), history caps/role rejection, LLM-unavailable 503, plus
-  unit tests for `validate_entity_refs` and `short_sha` (char-boundary
-  safe). The d363ce7d repair was verified in this sandbox by a
-  standalone rustc probe executing the exact production
-  `validate_entity_refs` (extracted verbatim from the repair commit)
-  against the exact test — pass, exit 0 — plus a reverted-code
-  differential that fails with exit 101, reproducing the reviewer's
-  finding (evidence: /tmp/stage/review-evidence/
-  task-187-validate-entity-refs-repair.log and probe/). Full server
-  suite execution belongs to the independent verifier — the 4 GiB
-  sandbox wrapper blocks gyre-server test builds.
-- Regression: ExplorerView/ExplorerDefaultViews/GeneratedViewChat
-  vitest suites passed in the 7737e532 round (ExplorerDefaultViews
-  expected view-selector list extended with the new "Ask the graph…"
-  entry); existing `predict_graph` behavior preserved by the extraction
-  (same prompt construction, note slot, and response shape).
-- Mechanical checks pass (prior rounds on this code): rustfmt-diff and
-  clippy-diff clean against the change, plus check-arch,
-  check-abac-route-registry, check-inert-enforcement,
-  check-abac-exempt-handlers, check-mcp-write-tools,
-  check-byte-slice-truncation, check-relative-path-defaults,
-  check-lossy-secret-conversion, check-unbounded-external-http.
-
-### Verifier must run
-
-    cargo test -p gyre-server --lib api::explorer_views
-    cargo test -p gyre-server --lib api::graph::tests
-    cd web && npx vitest run src/__tests__/ConversationalExplorer.test.js
+- The sandbox build wrapper blocks gyre-server test builds (4 GiB
+  budget; server tests belong to the independent verifier), so the two
+  pure unit tests were executed via a verbatim rustc probe — the exact
+  production functions and test bodies extracted unchanged from this
+  tree (`serde` derives only stripped): **both pass**. A negative
+  control with the byte-slicing implementation fails (panics), proving
+  the test discriminates the regression it guards. Evidence:
+  `/tmp/stage/review-evidence/probe3/` (gen.sh, verbatim_test.rs,
+  probe3.log, negative_control_result.log).
+- `cargo check -p gyre-server --all-targets` passes (test module
+  included), exit 0.
+- Frontend focused suite run this round: `npx vitest run` over
+  ExplorerChat.test.js, ExplorerChat-component.test.js,
+  ExplorerChat-streaming.test.js, ConversationalExplorer.test.js,
+  GeneratedViewChat.test.js — **5 files, 146 tests, all passed**
+  (exit 0; log in `/tmp/stage/review-evidence/probe3/frontend_chat_tests.log`).
+- **Verifier must run:** `cargo test -p gyre-server --lib
+  api::explorer_views` — this is the suite the review rounds flagged;
+  it now compiles and its pure tests are probe-verified, but the full
+  run (including the tokio ask-endpoint tests) requires the verifier's
+  build budget. Frontend: `cd web && npm ci && npm test`.
