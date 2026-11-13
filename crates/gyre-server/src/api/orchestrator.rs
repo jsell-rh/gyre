@@ -125,6 +125,12 @@ pub(crate) struct LaunchOutcome {
     pub launch_status: String,
     /// Failure reason when launch_status == "launch_failed".
     pub launch_detail: Option<String>,
+    /// Label of the compute target the launch resolved to (workspace
+    /// assignment -> tenant default -> local); same convention as the
+    /// worker path's AgentLaunchResult::compute_target_label. Carried on
+    /// the outcome so the agent.spawned analytics event reports the target
+    /// the process actually launched on, not a hardcoded value.
+    pub compute_target_label: String,
 }
 
 /// Launch the orchestrator process on the workspace's compute target (§3:
@@ -183,6 +189,17 @@ pub(crate) async fn launch_orchestrator_process(
                 config: e.config.clone(),
             }),
     };
+
+    // Label of the resolved target for the outcome/analytics: the target
+    // entity's id, or "local" when no workspace/tenant target is
+    // configured (same convention as api/spawn.rs). Computed once from the
+    // resolved config so every return path — including the fail-closed
+    // early returns below, which happen after resolution — reports the
+    // target that was selected for this launch.
+    let compute_target_label = target_config
+        .as_ref()
+        .map(|cfg| cfg.id.clone())
+        .unwrap_or_else(|| "local".to_string());
 
     // Server-controlled command: compute-target config, GYRE_ORCHESTRATOR_COMMAND,
     // or the agent image entrypoint (same contract as api/spawn.rs).
@@ -263,6 +280,7 @@ pub(crate) async fn launch_orchestrator_process(
                     return LaunchOutcome {
                         launch_status: "launch_failed".to_string(),
                         launch_detail: Some(detail),
+                        compute_target_label,
                     };
                 }
                 env.insert("GYRE_PROMPT_PERSONA".to_string(), persona.system_prompt);
@@ -368,6 +386,7 @@ pub(crate) async fn launch_orchestrator_process(
                              for remote container use"
                                 .to_string(),
                         ),
+                        compute_target_label,
                     };
                 }
                 let image = cfg.config["image"].as_str().unwrap_or("gyre-agent:latest");
@@ -495,11 +514,13 @@ pub(crate) async fn launch_orchestrator_process(
             LaunchOutcome {
                 launch_status: "running".to_string(),
                 launch_detail: None,
+                compute_target_label,
             }
         }
         Err(e) => LaunchOutcome {
             launch_status: "launch_failed".to_string(),
             launch_detail: Some(format!("{e}")),
+            compute_target_label,
         },
     }
 }
@@ -601,7 +622,25 @@ async fn spawn_orchestrator(
     // children (authorization-provenance.md §4.5).
     bootstrap_agent_keypair(state, &agent.id.to_string(), now).await;
 
-    // Auto-track spawn (analytics.md §Auto-Emitted Events).
+    budget::increment_active_agents(state, &workspace_id.to_string()).await;
+
+    // F3: launch the orchestrator process (workspace compute target). The
+    // outcome is returned so the REST/MCP responses report a truthful
+    // status -- a persisted row alone is not "running".
+    let workspace = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    let launch = launch_orchestrator_process(state, &agent, &workspace, &token).await;
+
+    // Auto-track spawn (analytics.md §Auto-Emitted Events). Emitted after
+    // the launch so the spec-required compute_target property reports the
+    // target the process actually launched on (review f3f37604: previously
+    // a hardcoded "local", wrong for any workspace/tenant compute target) —
+    // the same shape as the worker path, which records
+    // launch.compute_target_label.
     let persona_name = match orchestrator_type {
         OrchestratorType::Worker => "default-worker",
         OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
@@ -616,7 +655,7 @@ async fn spawn_orchestrator(
             // orchestrator's own id only for gyre_agent_complete compat) —
             // the spec's task_id property is null here, not a fabricated id.
             "task_id": serde_json::Value::Null,
-            "compute_target": "local",
+            "compute_target": launch.compute_target_label.clone(),
             "persona": persona_name,
             "orchestrator_type": orchestrator_type.to_string(),
             "workspace_id": workspace_id.to_string(),
@@ -626,19 +665,6 @@ async fn spawn_orchestrator(
     )
     .with_scope(None, None, Some(workspace_id), repo_id);
     let _ = state.analytics.record(&ev).await;
-
-    budget::increment_active_agents(state, &workspace_id.to_string()).await;
-
-    // F3: launch the orchestrator process (workspace compute target). The
-    // outcome is returned so the REST/MCP responses report a truthful
-    // status -- a persisted row alone is not "running".
-    let workspace = state
-        .workspaces
-        .find_by_id(workspace_id)
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
-    let launch = launch_orchestrator_process(state, &agent, &workspace, &token).await;
 
     Ok((agent, token, launch))
 }
@@ -1536,11 +1562,78 @@ mod tests {
         assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
         assert_eq!(ev.properties["persona"], "workspace-orchestrator");
         assert_eq!(ev.properties["orchestrator_type"], "workspace_orchestrator");
+        // No workspace/tenant compute target is configured in this test, so
+        // the honest resolution of the priority chain (workspace assignment
+        // -> tenant default -> local) IS "local" here. The configured-target
+        // case is pinned by
+        // orchestrator_spawn_analytics_reports_resolved_compute_target.
         assert_eq!(ev.properties["compute_target"], "local");
         // Orchestrators are not task-bound: task_id must be null, not the
         // agent's own id (regression: previously fabricated from agent.id).
         assert!(ev.properties["task_id"].is_null());
         assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    /// Review f3f37604 regression: the spec-required `agent.spawned`
+    /// property `compute_target` must report the target the orchestrator
+    /// process actually launched on (workspace assignment -> tenant
+    /// default -> local), not a hardcoded "local". The pre-fix defect
+    /// recorded "local" while the process launched on the configured
+    /// workspace target — silently wrong in every deployment that
+    /// configures one.
+    #[tokio::test]
+    async fn orchestrator_spawn_analytics_reports_resolved_compute_target() {
+        let state = test_state();
+        seed(&state).await;
+
+        // Configure a workspace compute target — the exact deployment
+        // shape launch_with_command / orchestrator_launch_injects_system_prompts
+        // use. Kubernetes-typed targets dispatch via LocalTarget, so
+        // /bin/true launches deterministically in the test environment.
+        let mut ct = gyre_domain::ComputeTargetEntity::new(
+            Id::new("ct-analytics-resolved"),
+            Id::new("t1"),
+            "analytics-resolved-target",
+            gyre_domain::ComputeTargetType::Kubernetes,
+            0,
+        );
+        ct.config = serde_json::json!({ "command": "/bin/true" });
+        state.compute_targets.create(&ct).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+
+        let (agent, _token, launch) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+                .await
+                .unwrap();
+        assert_eq!(
+            launch.launch_status, "running",
+            "launch failed: {:?}",
+            launch.launch_detail
+        );
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
+        // The event must carry the RESOLVED target id, proving the property
+        // is looked up from the launch resolution, not hardcoded. This
+        // assertion fails against the pre-fix code (which recorded "local").
+        assert_eq!(
+            ev.properties["compute_target"], "ct-analytics-resolved",
+            "agent.spawned must report the compute target the process \
+             actually launched on"
+        );
     }
 
     #[tokio::test]
