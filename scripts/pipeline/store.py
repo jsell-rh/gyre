@@ -153,7 +153,12 @@ class Store:
         return f'runtime_hold:{task}:{stage}:{generation}'
 
     def runtime_held(self, work):
-        return bool(self.setting(self.runtime_hold_key(work['task'],work['stage'],work['generation'])))
+        return bool(self.setting(self.runtime_hold_key(work['task'],work['stage'],work['generation']))) or (
+            self.setting(self.capacity_retry_key(work),{}).get('retry_at',0)>time.time())
+
+    @staticmethod
+    def capacity_retry_key(work):
+        return f"backend_retry:{work['task']}:{work['stage']}:{work['generation']}"
 
     def claim(self, stage, owner, concurrency=1, lease_seconds=90, now=None, task=None, eligible=None,
               ident=None, capacity=None):
@@ -346,12 +351,19 @@ class Store:
                 self.db.execute('INSERT INTO task_history(task,generation,body,data,at) VALUES(?,?,?,?,?)',
                     (saved['name'],saved['generation'],saved['body'],json.dumps(saved['data']),time.time()))
             self.event('completed', result, row['task'], ident)
+            self.db.execute('DELETE FROM settings WHERE key=?',(self.capacity_retry_key(row),))
 
     def retry(self, ident, token, reason, delay=None, count_failure=True, attention=False):
         with self.transaction():
             row = self._current(ident, token)
             failures = row['failures'] + 1 if count_failure else 0
             delay = min(self.setting('retry_max_seconds', 900), self.setting('retry_base_seconds', 5) * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
+            if reason.get('category')=='backend_capacity':
+                key=self.capacity_retry_key(row);previous=self.setting(key,{})
+                attempt=previous.get('failures',0)+1
+                delay=min(self.setting('retry_max_seconds',900),60*2**min(attempt-1,5))
+                self.db.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                                (key,json.dumps({'failures':attempt,'retry_at':time.time()+delay,'capacity':reason.get('capacity')})))
             retry_at=time.time()+delay
             self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))

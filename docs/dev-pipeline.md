@@ -28,6 +28,13 @@ Sandbox readiness uses the authorized model/verification timeout (four hours
 by default), instead of independent ten/thirty-minute cutoffs that churned
 pending allocations while backend capacity was unavailable. Readiness expiry
 is reported as provisioning failure, including to the stress guard.
+When the owned pod's latest scoped scheduler evidence confirms insufficient
+CPU/memory, provisioning failure instead becomes a backend-capacity retry.
+Its backoff grows from one to fifteen minutes across work identities and main
+advances, scoped to the task/stage/requirements generation. Successful stage
+completion clears that backoff. Confirmed capacity shortage does not trip the
+structural-fault guard; missing, foreign, stale or superseded scheduling evidence
+cannot downgrade a provisioning fault.
 
 Discovery reconciles obsolete runtime holds against installed recovery policy.
 An owned, current-generation 4 GiB OOM hold is released once when its evidence
