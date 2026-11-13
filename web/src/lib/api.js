@@ -647,6 +647,14 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
+  // Conversational exploration Q&A (system-explorer.md §8): grounded text
+  // answer with server-validated entity refs, optional view spec ("show me
+  // X") and structural prediction ("what would happen if…").
+  explorerAsk: (workspaceId, body) =>
+    request(`/workspaces/${workspaceId}/explorer-views/ask`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   // Specs View (S4.5)
   specsForWorkspace: (workspaceId) =>
     request(`/specs${workspaceId ? '?workspace_id=' + encodeURIComponent(workspaceId) : ''}`),
