@@ -3,7 +3,7 @@ title: "Implement gate chain configuration and gate agent lifecycle"
 spec_ref: "agent-gates.md §Gate Chains"
 depends_on:
   - task-134
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
