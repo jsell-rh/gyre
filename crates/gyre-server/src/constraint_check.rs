@@ -1681,7 +1681,7 @@ async fn create_violation_notifications(
             notif.source.repo_id = Some(Id::new(repo_id.to_string()));
             notif.source.entity_id = format!("task:{task_id}");
 
-            if let Err(e) = state.notifications.create(&notif).await {
+            if let Err(e) = state.create_notification(&notif).await {
                 warn!(
                     constraint = %violation.constraint_name,
                     error = %e,
@@ -2202,6 +2202,7 @@ mod tests {
                 None,
                 None,
                 Some("ConstraintViolation"),
+                None,
                 100,
                 0,
             )

@@ -254,6 +254,7 @@ mod tests {
             audit: base.audit.clone(),
             siem_store: base.siem_store.clone(),
             audit_broadcast_tx: base.audit_broadcast_tx.clone(),
+            notification_broadcast_tx: base.notification_broadcast_tx.clone(),
             network_peers: base.network_peers.clone(),
             dependencies: base.dependencies.clone(),
             breaking_changes: base.breaking_changes.clone(),
