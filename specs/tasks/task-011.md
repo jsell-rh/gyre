@@ -92,31 +92,32 @@ When working on this task:
   `specs_assist.rs` test-module conflict by keeping both the write-through and
   prompt path-guard test families (merge commit, listed for visibility only —
   the product-surface commit is `3488a06bf`)
+- `9b5b3ff1` — merge of assignment base `f7f5c59f` (task-125 mainline head);
+  the `specs_assist.rs` resolution adapts the write-through call sites to the
+  evolved notification API (merge commit, listed for visibility only — the
+  product-surface commit is `3488a06bf`)
 
 ## Shipped
 
 The spec save git write-through is fully implemented in production code on this
 branch (inherited from mainline; review history in `specs/reviews/task-011.md`,
 R2 verdict `complete`). This round is a contract repair after the executor
-restored the assigned task document: the completion record is re-applied here,
-the assignment base `7daca25d` (task-159 mainline head) was merged in, and the
-one source conflict it produced was resolved while preserving the production
-fix.
+restored the assigned task document: the completion record is re-applied here
+and the assignment base `f7f5c59f` (task-125 mainline head) was merged in
+(`9b5b3ff1`), preserving the production fix.
 
-### Merge resolution (this round)
+### Merge resolution (this round, base `f7f5c59f`)
 
-The base and the candidate both added tests at the same spot in the
-`specs_assist.rs` test module: the candidate added end-to-end write-through
-tests (`3488a06bf`), the base added prompt path-guard tests
-(`save_prompt_rejects_paths_outside_specs_prompts`,
-`save_prompt_rejects_traversal_but_allows_normalized_subdirs`). The
-resolution keeps BOTH families — they are complementary, and the merged
-handler satisfies both: `save_prompt` and `validate_prompt_path` are
-byte-identical to the base versions (verified by diff), and `save_spec` is
-the base's evolved write-through (task-175 notification-body refresh,
-per-member notification fan-out, team routing) still driving the real
-`git_ops` port. The merged file type-checks including all `#[cfg(test)]`
-code (`cargo check -p gyre-server --tests`, exit 0).
+The base evolved the notification API (task-125: a `state.create_notification`
+helper and a new filter parameter on `list_for_user`). The merge resolution in
+`specs_assist.rs` adapts the write-through handler and its tests to that API —
+`state.notifications.create(...)` → `state.create_notification(...)` at the
+spec-conflict and spec-pending-approval notification sites, and the extra
+`None` argument in the test-module `list_for_user` calls. Nothing else in the
+write-through changed: the real `git_ops` calls (`write_file` at
+`specs_assist.rs:974/1053/1293`, `create_branch` at `:1046`) are preserved, and
+both retained test families (end-to-end write-through + prompt path-guard)
+remain in the merged test module.
 
 ### Actual behavior
 
@@ -162,19 +163,21 @@ code (`cargo check -p gyre-server --tests`, exit 0).
   nested paths, overwrite, `create_branch` from existing ref, and
   `branch_exists`.
 
-### Probes this round (merged head `a70b8e1c`)
+### Probes this round (merged head `9b5b3ff1`)
 
 Exit codes and full output retained in `/tmp/stage/review-evidence/task-011/`:
 
-- `cargo check -p gyre-server --tests` → exit 0 (9m20s cold) — the merged
-  `specs_assist.rs`, including both retained test families, type-checks.
+- `cargo check -p gyre-server --tests` → exit 0 (8m00s) — the merged
+  `specs_assist.rs`, including both retained test families adapted to the
+  evolved notification API, type-checks.
 - `cargo test -p gyre-adapters --lib git2_ops` → 35 passed, 0 failed, exit 0.
+- Stub scan of `specs_assist.rs` (`placeholder`, `does not yet expose`,
+  `todo!`, `unimplemented!`) → no stubs; the sole "placeholder" hit is an
+  unrelated prompt-injection-containment comment.
 - `cargo test -p gyre-server --lib api::specs_assist` was NOT re-run in this
   sandbox (gyre-server test compilation is deferred to the independent
-  verifier per the 4 GiB build budget). Previous merged-head rounds recorded
-  24 passed / 0 failed; the verifier should execute
-  `cargo test -p gyre-server --lib api::specs_assist` at this head. The only
-  test-module change this round is the union of two already-passing test
-  families over handlers verified byte-identical (path-guard) or evolved-only
-  in notification bookkeeping (write-through family asserts none of the
-  changed notification code paths).
+  verifier per the 4 GiB build budget). The verifier should execute
+  `cargo test -p gyre-server --lib api::specs_assist` at this head. This
+  round's only test-module change is the mechanical `None`-parameter
+  adaptation of `list_for_user` calls, which `cargo check --tests` verifies
+  compiles.
