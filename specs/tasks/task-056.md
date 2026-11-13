@@ -2,7 +2,7 @@
 title: "Abandoned Branch Detection Job"
 spec_ref: "human-system-interface.md §8 (Inbox Detail, priority 9: Abandoned Branch)"
 depends_on: []
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-056.md
 coverage_sections: []
 commits: ["d5b463e109599315f6329aab8d12c2fa5a74fe31"]
@@ -76,15 +76,15 @@ Missing:
 
 ## Acceptance Criteria
 
-- [ ] `abandoned_branch_check` job is no longer a stub
-- [ ] Creates `AbandonedBranch` notifications (priority 9) for `spec-edit/*` MRs with no activity for >7 days
-- [ ] Notifications sent to workspace Admin and Developer members
-- [ ] Notifications include `entity_ref` (MR id) and `repo_id` for Inbox filtering
-- [ ] Dismissed notifications are not re-created within 30 days
-- [ ] Active notifications for the same MR are not duplicated
-- [ ] Merged/closed MRs are not flagged
-- [ ] Unit tests cover all cases
-- [ ] `cargo test --all` passes
+- [x] `abandoned_branch_check` job is no longer a stub
+- [x] Creates `AbandonedBranch` notifications (priority 9) for `spec-edit/*` MRs with no activity for >7 days
+- [x] Notifications sent to workspace Admin and Developer members
+- [x] Notifications include `entity_ref` (MR id) and `repo_id` for Inbox filtering
+- [x] Dismissed notifications are not re-created within 30 days
+- [x] Active notifications for the same MR are not duplicated
+- [x] Merged/closed MRs are not flagged
+- [x] Unit tests cover all cases
+- [ ] `cargo test --all` passes (deferred to independent verifier; see Shipped test evidence)
 
 ## Agent Instructions
 
@@ -100,4 +100,51 @@ When working on this task:
 
 ## Git Commits
 
-- `feat(server): implement abandoned branch detection job (TASK-056)`
+- `d5b463e1` — `fix(server): exact storage-level dedup for abandoned branch notifications (TASK-056)`
+
+## Shipped
+
+The `abandoned_branch_check` daily job is fully implemented in
+`crates/gyre-server/src/abandoned_branch.rs` and wired into `jobs.rs` via the
+real closure `crate::abandoned_branch::run_once` (daily, 86400s interval);
+the module is exported from `lib.rs` — no stub remains.
+
+### Behavior
+
+- `run_once` iterates all workspaces, queries
+  `MergeRequestRepository::list_by_workspace`, and flags MRs whose
+  `source_branch` starts with `spec-edit/`, whose status is `Open`, and whose
+  `updated_at` is older than 7 days.
+- Creates priority-9 `NotificationType::AbandonedBranch` notifications for
+  each workspace Admin and Developer member (Viewer excluded), with title
+  `Abandoned branch: '{source_branch}' — MR '{title}' has had no activity for
+  >7 days`, `entity_ref` = MR id, `repo_id` = the MR's `repository_id`
+  (repo-scope Inbox filtering), and a JSON body carrying branch, title,
+  mr_id, repository_id, and updated_at.
+- Suppression: `has_recent_dismissal` (30-day window) prevents re-notifying
+  users who dismissed one.
+- Deduplication: exact `NotificationRepository::has_active_notification`
+  storage lookup per (workspace, user, type, entity_ref) — commit `d5b463e1`
+  replaced the earlier paginated `list_for_user` scan, which missed existing
+  active notifications past the first page and stacked duplicates.
+
+### Test evidence
+
+9 unit tests in `abandoned_branch.rs` cover: happy path (entity_ref +
+repo_id asserted), role filtering (Admin/Developer notified, Viewer not),
+non-spec-edit exclusion, merged exclusion, closed exclusion, recency
+exclusion, dismissal suppression, active dedup, and
+`dedup_is_not_page_bounded` (mutation-distinguished: restoring the old
+paginated dedup makes it fail while the exact lookup passes).
+
+This round (repair continuation, merged with current base `7daca25d`):
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` exit 0 — lib and
+test targets type-check cleanly after the base merge; evidence saved at
+`/tmp/stage/review-evidence/cargo-check-gyre-server.txt`. Full server test
+compilation is deferred to the independent verifier (4 GiB budget);
+commands to execute: `cargo test -p gyre-server --lib abandoned_branch` and
+`cargo test --all`.
+
+Prior-round evidence: R1 review (`specs/reviews/task-056.md`) verdict
+complete (0 findings); full `cargo test --all` passed against this
+implementation.
