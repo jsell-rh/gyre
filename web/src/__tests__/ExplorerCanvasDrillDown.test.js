@@ -201,16 +201,17 @@ describe('ExplorerCanvas — §5 progressive drill-down', () => {
     expect(l1.has('other-service')).toBe(false);
     expect(l1.has('User')).toBe(false);
 
-    // Lens toggle works at this drill level (structural ↔ evaluative)
-    const lensButtons = Array.from(container.querySelectorAll('.lens-group .tb-btn'));
-    const evaluative = lensButtons.find(b => b.textContent.trim() === 'Evaluative');
-    const structural = lensButtons.find(b => b.textContent.trim() === 'Structural');
+    // Lens toggle works at this drill level (structural ↔ evaluative) —
+    // checkbox group (ui-navigation.md §3): Evaluative is a toggle overlay.
+    const lensChecks = Array.from(container.querySelectorAll('.lens-group input[type="checkbox"]'));
+    const evaluative = lensChecks.find((i) => i.closest('label').textContent.includes('Evaluative'));
+    const structural = lensChecks.find((i) => i.closest('label').textContent.includes('Structural'));
     expect(evaluative && structural).toBeTruthy();
     await evaluative.click();
-    expect(evaluative.classList.contains('active')).toBe(true);
+    expect(evaluative.checked).toBe(true);
     expect(container.querySelector('.eval-no-trace')).toBeTruthy(); // no trace data → message, not a crash
-    await structural.click();
-    expect(structural.classList.contains('active')).toBe(true);
+    await evaluative.click();
+    expect(evaluative.checked).toBe(false);
 
     // ── Level 1 → 2: double-click the module ─────────────────────────
     dblclick(canvas, l1.get('greeting').x, l1.get('greeting').y);

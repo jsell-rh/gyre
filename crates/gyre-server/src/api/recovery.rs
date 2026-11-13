@@ -432,10 +432,12 @@ pub async fn set_post_merge_gates(
             command: Some(dto.command.clone()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: dto.required,
             gate_phase: GatePhase::PostMerge,
             timeout_secs: dto.timeout_secs,
             created_at: now,
+            position: 0,
         };
         state.quality_gates.save(&gate).await?;
     }
@@ -741,10 +743,12 @@ mod tests {
                 command: Some("true".to_string()),
                 required_approvals: None,
                 persona: None,
+                validation_type: None,
                 required: true,
                 gate_phase: GatePhase::PostMerge,
                 timeout_secs: Some(10),
                 created_at: 1000,
+                position: 0,
             })
             .await
             .unwrap();
@@ -787,10 +791,12 @@ mod tests {
                 command: Some("false".to_string()),
                 required_approvals: None,
                 persona: None,
+                validation_type: None,
                 required: true,
                 gate_phase: GatePhase::PostMerge,
                 timeout_secs: Some(10),
                 created_at: 1000,
+                position: 0,
             })
             .await
             .unwrap();

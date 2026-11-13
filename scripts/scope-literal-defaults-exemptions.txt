@@ -17,9 +17,9 @@
 crates/gyre-adapters/src/sqlite/activity.rs:56
 crates/gyre-adapters/src/sqlite/analytics.rs:115
 crates/gyre-adapters/src/sqlite/analytics.rs:225
-crates/gyre-adapters/src/sqlite/repository.rs:94
+crates/gyre-adapters/src/sqlite/repository.rs:132
 crates/gyre-adapters/src/postgres/activity.rs:56
 crates/gyre-adapters/src/postgres/analytics.rs:115
 crates/gyre-adapters/src/postgres/analytics.rs:225
-crates/gyre-adapters/src/postgres/repository.rs:94
-crates/gyre-domain/src/task.rs:99
+crates/gyre-adapters/src/postgres/repository.rs:132
+crates/gyre-domain/src/task.rs:104

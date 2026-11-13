@@ -19,6 +19,7 @@
    */
 
   import { elkLayout } from '../lib/layout-engines.js';
+  import DependencyDetail from './DependencyDetail.svelte';
 
   let {
     nodes = [],
@@ -28,6 +29,7 @@
     onNodeClick = () => {},
     onNodeDblClick = null,
     showScopeToggle = true,
+    onRefresh = null,
   } = $props();
 
   // ── Layout state ──────────────────────────────────────────────────────────
@@ -42,6 +44,12 @@
 
   // ── Hover state ───────────────────────────────────────────────────────────
   let hoveredNodeId = $state(null);
+
+  // ── Edge selection (dependency detail panel) ──────────────────────────────
+  let selectedEdgeId = $state(null);
+  // Rebound against the current data — after a refresh (e.g. an acknowledge)
+  // the panel reflects the fresh edge state, and a removed edge deselects.
+  const selectedEdge = $derived(edges.find(e => e.id === selectedEdgeId) ?? null);
 
   // ── Node dimensions ───────────────────────────────────────────────────────
   const NODE_W = 160;
@@ -81,8 +89,10 @@
     const repoEdges = edges.filter(e => e.source === repoId || e.target === repoId);
     const hasBreaking = repoEdges.some(e => e.status === 'breaking');
     const hasStale = repoEdges.some(e => e.status === 'stale');
+    const hasOrphaned = repoEdges.some(e => e.status === 'orphaned');
     if (hasBreaking) return 'breaking';
     if (hasStale) return 'stale';
+    if (hasOrphaned) return 'orphaned';
     return 'healthy';
   }
 
@@ -90,6 +100,7 @@
     switch (health) {
       case 'breaking': return { fill: '#450a0a', stroke: '#ef4444', text: '#fecaca', badge: '#ef4444' };
       case 'stale':    return { fill: '#422006', stroke: '#eab308', text: '#fef9c3', badge: '#eab308' };
+      case 'orphaned': return { fill: '#111214', stroke: '#9ca3af', text: '#d1d5db', badge: '#9ca3af' };
       default:         return { fill: '#1e293b', stroke: '#60a5fa', text: '#e2e8f0', badge: '#22c55e' };
     }
   }
@@ -98,6 +109,7 @@
   function edgeStyle(edge) {
     const isStale = edge.status === 'stale';
     const isBreaking = edge.status === 'breaking';
+    const isOrphaned = edge.status === 'orphaned';
     const depType = edge.type ?? '';
 
     if (isBreaking) {
@@ -105,6 +117,9 @@
     }
     if (isStale) {
       return { stroke: '#eab308', dasharray: '', width: 2, label: depType };
+    }
+    if (isOrphaned) {
+      return { stroke: '#9ca3af', dasharray: '2 4', width: 1.5, label: 'orphaned' };
     }
 
     switch (depType) {
@@ -192,7 +207,7 @@
 
   // ── Pan handlers ──────────────────────────────────────────────────────────
   function handlePointerDown(e) {
-    if (e.target.closest('.dep-node')) return;
+    if (e.target.closest('.dep-node') || e.target.closest('.dep-edge')) return;
     isPanning = true;
     panStart = { x: e.clientX, y: e.clientY };
     svgEl.setPointerCapture(e.pointerId);
@@ -231,8 +246,20 @@
     switch (health) {
       case 'breaking': return '!';
       case 'stale':    return '~';
+      case 'orphaned': return '○';
       default:         return '✓';
     }
+  }
+
+  // ── Edge selection (dependency detail panel) ──────────────────────────────
+  function selectEdge(edge) {
+    selectedEdgeId = edge.id;
+  }
+
+  async function handleAcknowledge(bcId) {
+    // Refresh the parent's graph data after an acknowledge — the server may
+    // revert the edge status to active once all breaking changes are cleared.
+    if (onRefresh) await onRefresh(bcId);
   }
 </script>
 
@@ -262,6 +289,7 @@
     <span class="dep-legend-item"><span class="dep-legend-swatch dep-legend-dotted" style="border-color: #34d399"></span>API</span>
     <span class="dep-legend-item"><span class="dep-legend-swatch" style="background: #eab308"></span>Stale</span>
     <span class="dep-legend-item"><span class="dep-legend-swatch" style="background: #ef4444"></span>Breaking</span>
+    <span class="dep-legend-item"><span class="dep-legend-swatch dep-legend-dotted" style="border-color: #9ca3af"></span>Orphaned</span>
   </div>
 
   {#if !layoutReady}
@@ -269,6 +297,7 @@
   {:else if nodes.length === 0}
     <div class="dep-empty" data-testid="dep-empty">No cross-repo dependencies to display.</div>
   {:else}
+    <div class="dep-graph-body">
     <svg
       bind:this={svgEl}
       class="dep-svg"
@@ -291,6 +320,7 @@
           { id: 'manual', color: '#9ca3af' },
           { id: 'stale', color: '#eab308' },
           { id: 'breaking', color: '#ef4444' },
+          { id: 'orphaned', color: '#9ca3af' },
           { id: 'dep', color: '#9ca3af' },
         ] as marker}
           <marker
@@ -317,10 +347,16 @@
         {#if path}
           <g
             class="dep-edge"
+            class:selected={selectedEdge?.id === edge.id}
             data-testid="dep-edge-{i}"
             data-type={edge.type}
             data-status={edge.status}
             opacity={dimmed ? 0.15 : 1}
+            tabindex="0"
+            role="button"
+            aria-label="Dependency {edge.type} from {edge.source} to {edge.target}, status {edge.status}"
+            onclick={() => selectEdge(edge)}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectEdge(edge); } }}
           >
             <path d={path} fill="none" stroke="transparent" stroke-width="12" />
             <path
@@ -441,6 +477,17 @@
         {/if}
       {/each}
     </svg>
+    <!-- Dependency detail panel (§UI: click an edge for version drift +
+         breaking-change context) -->
+    {#if selectedEdge}
+      <DependencyDetail
+        edge={selectedEdge}
+        {nodes}
+        onClose={() => { selectedEdgeId = null; }}
+        onAcknowledge={handleAcknowledge}
+      />
+    {/if}
+    </div>
   {/if}
 </div>
 
@@ -514,6 +561,14 @@
     height: 0;
   }
 
+  .dep-graph-body {
+    display: flex;
+    flex: 1;
+    gap: 8px;
+    min-height: 0;
+    align-items: stretch;
+  }
+
   .dep-svg {
     width: 100%;
     flex: 1;
@@ -556,7 +611,16 @@
   }
 
   .dep-edge {
+    cursor: pointer;
     transition: opacity 0.15s;
+  }
+
+  .dep-edge.selected path {
+    stroke-width: 4;
+  }
+
+  .dep-edge:focus-visible path {
+    stroke-width: 4;
   }
 
   .dep-edge-label {

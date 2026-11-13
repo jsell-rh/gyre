@@ -1,12 +1,34 @@
 use gyre_common::Id;
 
+/// Action taken when a budget threshold is crossed
+/// (platform-model.md §5 Resource Governance → Enforcement Behavior).
+/// Configurable per level via `BudgetConfig::enforcement_action`;
+/// `None` means the spec default (80% → Warn, 100% → GracefulStop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetEnforcementAction {
+    /// Log warning, continue.
+    Warn,
+    /// Send BudgetExhausted message, grace period, then kill.
+    GracefulStop,
+    /// Immediate termination.
+    HardKill,
+    /// Pause merge queue until budget is reviewed.
+    QueuePause,
+}
+
 /// Budget configuration for a workspace, tenant, or repo level.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BudgetConfig {
     pub max_tokens_per_day: Option<u64>,
     pub max_cost_per_day: Option<f64>,
     pub max_concurrent_agents: Option<u32>,
     pub max_agent_lifetime_secs: Option<u64>,
+    /// Per-level override for the action taken when utilization reaches
+    /// 100% of a limit. `None` = spec default (GracefulStop with a 60s
+    /// grace period). The 80% threshold is always `Warn`.
+    #[serde(default)]
+    pub enforcement_action: Option<BudgetEnforcementAction>,
 }
 
 /// Real-time budget usage snapshot for an entity (workspace or tenant).
@@ -18,6 +40,12 @@ pub struct BudgetUsage {
     pub cost_today: f64,
     pub active_agents: u32,
     pub period_start: u64,
+    /// Agent wall-clock compute time charged to this entity, in whole
+    /// minutes (spawn → complete/kill; agent-runtime.md §4 What's Tracked).
+    /// Tracking-only: `BudgetConfig` has no compute-minute limit field —
+    /// the value is the consumption record surfaced by the budget API.
+    #[serde(default)]
+    pub compute_minutes: u64,
 }
 
 /// Per-call LLM budget audit record. Appended for every LLM invocation —
@@ -39,5 +67,10 @@ pub struct BudgetCallRecord {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub model: String,
+    /// Git SHA of the prompt template version used for this call
+    /// (ui-layout.md §2: "prompt template version (git SHA) recorded in
+    /// cost entries"). None when the template came from a DB override or
+    /// the hardcoded default — those have no git provenance.
+    pub prompt_template_sha: Option<String>,
     pub timestamp: u64,
 }

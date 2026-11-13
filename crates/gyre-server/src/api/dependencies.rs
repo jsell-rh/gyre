@@ -83,6 +83,33 @@ pub struct GraphNode {
     pub name: String,
 }
 
+/// Breaking-change summary attached to a graph edge (dependency-graph.md §UI
+/// dependency detail panel: "breaking changes, acknowledgment status").
+#[derive(Serialize)]
+pub struct BreakingChangeSummary {
+    pub id: String,
+    pub commit_sha: String,
+    pub description: String,
+    pub detected_at: u64,
+    pub acknowledged: bool,
+    pub acknowledged_by: Option<String>,
+    pub acknowledged_at: Option<u64>,
+}
+
+impl From<gyre_domain::BreakingChange> for BreakingChangeSummary {
+    fn from(bc: gyre_domain::BreakingChange) -> Self {
+        Self {
+            id: bc.id.to_string(),
+            commit_sha: bc.commit_sha,
+            description: bc.description,
+            detected_at: bc.detected_at,
+            acknowledged: bc.acknowledged,
+            acknowledged_by: bc.acknowledged_by,
+            acknowledged_at: bc.acknowledged_at,
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct GraphEdgeResponse {
     pub id: String,
@@ -91,12 +118,102 @@ pub struct GraphEdgeResponse {
     #[serde(rename = "type")]
     pub edge_type: DependencyType,
     pub status: DependencyStatus,
+    /// File or artifact in the source repo declaring the dependency.
+    pub source_artifact: String,
+    /// Artifact in the target repo being depended on (crate name, spec path…).
+    pub target_artifact: String,
+    /// Version the source pins, if any.
+    pub version_pinned: Option<String>,
+    /// Current version of the target, if known.
+    pub target_version_current: Option<String>,
+    /// How many versions the source is behind the target, if known.
+    pub version_drift: Option<u32>,
+    /// Breaking changes recorded against this edge (acknowledged and not).
+    pub breaking_changes: Vec<BreakingChangeSummary>,
 }
 
 #[derive(Serialize)]
 pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdgeResponse>,
+}
+
+/// Builds the graph response shared by the tenant-wide and workspace-scoped
+/// graph endpoints: resolves node names, and enriches each edge with version
+/// drift and breaking-change detail so the UI dependency panel has real data.
+async fn build_graph_response(
+    state: &AppState,
+    edges: Vec<DependencyEdge>,
+) -> Result<GraphResponse, ApiError> {
+    let mut repo_ids: HashSet<String> = HashSet::new();
+    for edge in &edges {
+        repo_ids.insert(edge.source_repo_id.to_string());
+        repo_ids.insert(edge.target_repo_id.to_string());
+    }
+
+    let mut nodes = Vec::new();
+    for rid in repo_ids {
+        let name = state
+            .repos
+            .find_by_id(&Id::new(&rid))
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name)
+            .unwrap_or_else(|| rid.clone());
+        nodes.push(GraphNode { repo_id: rid, name });
+    }
+    nodes.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
+
+    // Breaking changes grouped by dependency edge. Fetched per distinct
+    // target repo — BreakingChange.source_repo_id is the repo that
+    // introduced the change, i.e. the TARGET of the dependency edge (the
+    // repo being depended on) — and matched to edges via
+    // dependency_edge_id. Real queries, no fabrication.
+    let mut breaking_by_edge: std::collections::HashMap<String, Vec<BreakingChangeSummary>> =
+        std::collections::HashMap::new();
+    let mut target_repo_ids: Vec<Id> = Vec::new();
+    for edge in &edges {
+        if !target_repo_ids.contains(&edge.target_repo_id) {
+            target_repo_ids.push(edge.target_repo_id.clone());
+        }
+    }
+    for src in target_repo_ids {
+        let bcs = state
+            .breaking_changes
+            .list_by_source_repo(&src)
+            .await
+            .map_err(ApiError::Internal)?;
+        for bc in bcs {
+            breaking_by_edge
+                .entry(bc.dependency_edge_id.to_string())
+                .or_default()
+                .push(bc.into());
+        }
+    }
+
+    let edges = edges
+        .into_iter()
+        .map(|e| {
+            let id = e.id.to_string();
+            let breaking_changes = breaking_by_edge.remove(&id).unwrap_or_default();
+            GraphEdgeResponse {
+                id,
+                source: e.source_repo_id.to_string(),
+                target: e.target_repo_id.to_string(),
+                edge_type: e.dependency_type,
+                status: e.status,
+                source_artifact: e.source_artifact,
+                target_artifact: e.target_artifact,
+                version_pinned: e.version_pinned,
+                target_version_current: e.target_version_current,
+                version_drift: e.version_drift,
+                breaking_changes,
+            }
+        })
+        .collect();
+
+    Ok(GraphResponse { nodes, edges })
 }
 
 #[derive(Serialize)]
@@ -254,38 +371,8 @@ pub async fn get_graph(
         .await
         .map_err(ApiError::Internal)?;
 
-    let mut repo_ids: HashSet<String> = HashSet::new();
-    for edge in &all_edges {
-        repo_ids.insert(edge.source_repo_id.to_string());
-        repo_ids.insert(edge.target_repo_id.to_string());
-    }
-
-    let mut nodes = Vec::new();
-    for rid in repo_ids {
-        let name = state
-            .repos
-            .find_by_id(&Id::new(&rid))
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.name)
-            .unwrap_or_else(|| rid.clone());
-        nodes.push(GraphNode { repo_id: rid, name });
-    }
-    nodes.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
-
-    let edges = all_edges
-        .into_iter()
-        .map(|e| GraphEdgeResponse {
-            id: e.id.to_string(),
-            source: e.source_repo_id.to_string(),
-            target: e.target_repo_id.to_string(),
-            edge_type: e.dependency_type,
-            status: e.status,
-        })
-        .collect();
-
-    Ok(Json(GraphResponse { nodes, edges }))
+    let graph = build_graph_response(&state, all_edges).await?;
+    Ok(Json(graph))
 }
 
 /// GET /api/v1/workspaces/{id}/dependency-graph
@@ -327,39 +414,8 @@ pub async fn get_workspace_dependency_graph(
         })
         .collect();
 
-    // Collect all repo IDs referenced by filtered edges.
-    let mut repo_ids: HashSet<String> = HashSet::new();
-    for edge in &filtered_edges {
-        repo_ids.insert(edge.source_repo_id.to_string());
-        repo_ids.insert(edge.target_repo_id.to_string());
-    }
-
-    let mut nodes = Vec::new();
-    for rid in repo_ids {
-        let name = state
-            .repos
-            .find_by_id(&Id::new(&rid))
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.name)
-            .unwrap_or_else(|| rid.clone());
-        nodes.push(GraphNode { repo_id: rid, name });
-    }
-    nodes.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
-
-    let edges = filtered_edges
-        .into_iter()
-        .map(|e| GraphEdgeResponse {
-            id: e.id.to_string(),
-            source: e.source_repo_id.to_string(),
-            target: e.target_repo_id.to_string(),
-            edge_type: e.dependency_type,
-            status: e.status,
-        })
-        .collect();
-
-    Ok(Json(GraphResponse { nodes, edges }))
+    let graph = build_graph_response(&state, filtered_edges).await?;
+    Ok(Json(graph))
 }
 
 /// GET /api/v1/repos/{id}/blast-radius

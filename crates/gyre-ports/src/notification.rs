@@ -7,11 +7,10 @@ use gyre_common::{Id, Notification};
 /// Per-handler auth — callers MUST verify that the notification's `user_id` and
 /// `tenant_id` match the authenticated user before invoking mutating methods.
 #[async_trait]
-// async_trait generates a must_use future per method; `list_for_user`'s
-// 7 filter parameters (workspace scoping, priority band, type, pagination)
-// are the pre-existing HSI §2 inbox filter surface.
+// async_trait generates a must_use future per method; the pre-existing HSI §2
+// inbox filter surface (`list_for_user`'s 7 filter/pagination parameters) is
+// allowed at the method site below.
 #[allow(clippy::double_must_use)]
-#[allow(clippy::too_many_arguments)]
 pub trait NotificationRepository: Send + Sync {
     async fn create(&self, notification: &Notification) -> Result<()>;
 
@@ -21,6 +20,7 @@ pub trait NotificationRepository: Send + Sync {
 
     /// List notifications for a user. Optionally filtered by workspace and priority range.
     /// When `workspace_id` is None, returns notifications across all workspaces (tenant Inbox).
+    #[allow(clippy::too_many_arguments)] // filter + pagination parameters; pre-existing signature
     async fn list_for_user(
         &self,
         user_id: &Id,
@@ -31,6 +31,20 @@ pub trait NotificationRepository: Send + Sync {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>>;
+
+    /// Replace the body of unresolved notifications of the given type whose
+    /// `entity_ref` matches. Returns the number of rows updated. Used by
+    /// save_spec's append-to-existing-MR path to keep the SpecPendingApproval
+    /// card's `spec_sha` in sync with iterative saves — a stale SHA would make
+    /// every later Approve record an approval for content that never becomes
+    /// the ledger's current_sha. Resolved/dismissed cards are left untouched
+    /// (their historical body is an audit record of what was acted on).
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64>;
 
     /// Set `dismissed_at` to now. Used by trust suggestions (30-day suppression).
     async fn dismiss(&self, id: &Id, user_id: &Id) -> Result<()>;

@@ -22,10 +22,12 @@ struct QualityGateRow {
     command: Option<String>,
     required_approvals: Option<i32>,
     persona: Option<String>,
+    validation_type: Option<String>,
     required: i32,
     gate_phase: String,
     timeout_secs: Option<i64>,
     created_at: i64,
+    position: i32,
 }
 
 impl QualityGateRow {
@@ -47,10 +49,12 @@ impl QualityGateRow {
             command: self.command,
             required_approvals: self.required_approvals.map(|v| v as u32),
             persona: self.persona,
+            validation_type: self.validation_type,
             required: self.required != 0,
             gate_phase: GatePhase::parse(&self.gate_phase).unwrap_or_default(),
             timeout_secs: self.timeout_secs.map(|v| v as u64),
             created_at: self.created_at as u64,
+            position: self.position as u32,
         }
     }
 }
@@ -65,10 +69,12 @@ struct NewQualityGateRow<'a> {
     command: Option<&'a str>,
     required_approvals: Option<i32>,
     persona: Option<&'a str>,
+    validation_type: Option<&'a str>,
     required: i32,
     gate_phase: &'a str,
     timeout_secs: Option<i64>,
     created_at: i64,
+    position: i32,
 }
 
 fn gate_type_str(gt: &GateType) -> &'static str {
@@ -97,10 +103,12 @@ impl QualityGateRepository for SqliteStorage {
                 command: g.command.as_deref(),
                 required_approvals: g.required_approvals.map(|v| v as i32),
                 persona: g.persona.as_deref(),
+                validation_type: g.validation_type.as_deref(),
                 required: if g.required { 1 } else { 0 },
                 gate_phase: g.gate_phase.as_str(),
                 timeout_secs: g.timeout_secs.map(|v| v as i64),
                 created_at: g.created_at as i64,
+                position: g.position as i32,
             };
             diesel::insert_into(quality_gates::table)
                 .values(&row)
@@ -112,9 +120,11 @@ impl QualityGateRepository for SqliteStorage {
                     quality_gates::command.eq(row.command),
                     quality_gates::required_approvals.eq(row.required_approvals),
                     quality_gates::persona.eq(row.persona),
+                    quality_gates::validation_type.eq(row.validation_type),
                     quality_gates::required.eq(row.required),
                     quality_gates::gate_phase.eq(row.gate_phase),
                     quality_gates::timeout_secs.eq(row.timeout_secs),
+                    quality_gates::position.eq(row.position),
                 ))
                 .execute(&mut *conn)
                 .context("upsert quality gate")?;
@@ -145,7 +155,10 @@ impl QualityGateRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = quality_gates::table
                 .filter(quality_gates::repo_id.eq(&repo_id))
-                .order(quality_gates::created_at.asc())
+                .order((
+                    quality_gates::position.asc(),
+                    quality_gates::created_at.asc(),
+                ))
                 .load::<QualityGateRow>(&mut *conn)
                 .context("list quality gates by repo")?;
             Ok(rows.into_iter().map(QualityGateRow::into_gate).collect())
@@ -312,5 +325,76 @@ impl GateResultRepository for SqliteStorage {
             Ok(rows.into_iter().map(GateResultRow::into_result).collect())
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sqlite::SqliteStorage;
+    use tempfile::NamedTempFile;
+
+    fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, storage)
+    }
+
+    fn sample_gate() -> QualityGate {
+        QualityGate {
+            id: Id::new("gate-upsert-1"),
+            repo_id: Id::new("repo-1"),
+            name: "domain-validation".to_string(),
+            gate_type: GateType::AgentValidation,
+            command: Some("true".to_string()),
+            required_approvals: None,
+            persona: Some("personas/accountability.md".to_string()),
+            validation_type: Some("license-scan".to_string()),
+            required: true,
+            gate_phase: GatePhase::PreMerge,
+            timeout_secs: Some(30),
+            position: 1,
+            created_at: 1000,
+        }
+    }
+
+    /// task-134 regression guard: the upsert `.set(...)` clause must update
+    /// EVERY mutable config column. The checkpoint that added
+    /// `validation_type` accidentally dropped `required` from the set list —
+    /// re-saving a gate silently kept the old blocking flag (PG kept it;
+    /// SQLite drifted). This test fails on that class of drift: flip every
+    /// mutable column, re-save, and assert the persisted row carries the new
+    /// values.
+    #[tokio::test]
+    async fn save_upsert_updates_all_config_columns() {
+        let (_tmp, storage) = tmp_storage();
+        let gate = sample_gate();
+        QualityGateRepository::save(&storage, &gate).await.unwrap();
+
+        let mut updated = gate.clone();
+        updated.required = false;
+        updated.validation_type = Some("accessibility".to_string());
+        updated.position = 7;
+        QualityGateRepository::save(&storage, &updated)
+            .await
+            .unwrap();
+
+        let reloaded = QualityGateRepository::find_by_id(&storage, "gate-upsert-1")
+            .await
+            .unwrap()
+            .expect("gate survives upsert");
+        assert_eq!(
+            reloaded.validation_type.as_deref(),
+            Some("accessibility"),
+            "upsert must persist validation_type changes"
+        );
+        assert!(
+            !reloaded.required,
+            "upsert must persist required changes — the task-134 checkpoint dropped this column from .set()"
+        );
+        assert_eq!(
+            reloaded.position, 7,
+            "upsert must persist position changes (drag-to-reorder, repo-lifecycle §3)"
+        );
     }
 }

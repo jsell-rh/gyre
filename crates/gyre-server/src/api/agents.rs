@@ -5,9 +5,8 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{Agent, AgentStatus};
-use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::AppState;
 
@@ -60,6 +59,9 @@ pub struct AgentResponse {
     /// Persona attached at spawn time (orchestrators; task-099 F2).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona_id: Option<String>,
+    /// Orchestration tier (platform-model.md §3): "worker",
+    /// "workspace_orchestrator", or "repo_orchestrator".
+    pub orchestrator_type: String,
 }
 
 /// Returned only from POST /api/v1/agents — includes a one-time auth token.
@@ -88,6 +90,7 @@ impl From<Agent> for AgentResponse {
             spec_path: None,
             mr_id: None,
             persona_id: a.persona_id.map(|id| id.to_string()),
+            orchestrator_type: a.orchestrator_type.to_string(),
         }
     }
 }
@@ -126,21 +129,9 @@ pub async fn create_agent(
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);
     state.agents.create(&agent).await?;
-    // Index for search.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "idle".to_string());
-    let _ = state
-        .search
-        .index(SearchDocument {
-            entity_type: "agent".to_string(),
-            entity_id: agent.id.to_string(),
-            title: agent.name.clone(),
-            body: String::new(),
-            workspace_id: None,
-            repo_id: None,
-            facets,
-        })
-        .await;
+    // Index for search (search.md §Searchable Entities: agent facets status,
+    // workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::agent_document(&agent)).await;
     state
         .emit_event(
             Some(agent.workspace_id.clone()),
@@ -281,6 +272,8 @@ pub async fn update_agent_status(
         .transition_status(new_status)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.update(&agent).await?;
+    // search.md §Index Updates: agent status changed -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::agent_document(&agent)).await;
     // Platform Model §7 (task-100 review round-3 F2): a terminal status
     // transition (Dead/Failed/Stopped — Stopped has no exit transitions)
     // ends the agent's run, so the task-scoped ephemeral secrets must be
@@ -870,13 +863,23 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let events = crate::agent_audit::recorded_events(&state, "agent_heartbeat").await;
-        let ev = events
+        let mine: Vec<_> = events
             .iter()
-            .rev()
-            .find(|e| e.resource_id.as_deref() == Some(id.as_str()))
-            .expect("second agent_heartbeat event for hb-pid-agent");
-        assert_eq!(ev.detail["pid"], dead_pid);
-        assert_eq!(ev.detail["pid_alive"], false);
+            .filter(|e| e.resource_id.as_deref() == Some(id.as_str()))
+            .collect();
+        // Two heartbeats were sent for this agent, no more, no fewer.
+        assert_eq!(mine.len(), 2, "two agent_heartbeat events for hb-pid-agent");
+        // Audit queries return newest-first, but equal second-granularity
+        // timestamps tie under the mem adapter's stable sort, so positional
+        // selection is flaky. The first heartbeat was pinned to
+        // (live_pid, true) above; identify the second by its content: it
+        // must carry the dead child's PID. A handler that re-read a stale
+        // attestation would leave no dead-pid event and fail here.
+        let second = mine
+            .iter()
+            .find(|e| e.detail["pid"] == serde_json::json!(dead_pid))
+            .expect("second heartbeat reports the attested dead pid");
+        assert_eq!(second.detail["pid_alive"], false);
     }
 
     #[tokio::test]
@@ -909,6 +912,112 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_response_exposes_orchestrator_type() {
+        // HSI §4 scoped-chat recipient lookup (requirements gap d382faa3):
+        // the agents API must expose the domain orchestration tier
+        // (platform-model.md §3) so the workspace overview can select the
+        // workspace orchestrator by ROLE, not by name convention. The
+        // custom-named orchestrator ("coord") must be distinguishable from
+        // a name-matching repo orchestrator ("payments-orchestrator") and
+        // a plain worker.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        state
+            .tenants
+            .create(&gyre_domain::Tenant::new(
+                gyre_common::Id::new("default"),
+                "Default",
+                "default",
+                now,
+            ))
+            .await
+            .unwrap();
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-orch-role"),
+            gyre_common::Id::new("default"),
+            "Orch Role WS",
+            "orch-role-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mk = |id: &str, name: &str, ty: gyre_domain::OrchestratorType| {
+            let mut a = gyre_domain::Agent::new(gyre_common::Id::new(id), name, now);
+            a.workspace_id = gyre_common::Id::new("ws-orch-role");
+            a.orchestrator_type = ty;
+            a
+        };
+        for agent in [
+            mk(
+                "ws-orch-1",
+                "coord",
+                gyre_domain::OrchestratorType::WorkspaceOrchestrator,
+            ),
+            mk(
+                "repo-orch-1",
+                "payments-orchestrator",
+                gyre_domain::OrchestratorType::RepoOrchestrator,
+            ),
+            mk(
+                "worker-1",
+                "search-orchestrator-worker",
+                gyre_domain::OrchestratorType::Worker,
+            ),
+        ] {
+            state.agents.create(&agent).await.unwrap();
+        }
+
+        // List scoped to the workspace.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/ws-orch-role/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let by_id = |v: &serde_json::Value, id: &str| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["id"] == id)
+                .unwrap_or_else(|| panic!("agent {id} missing from list: {v:?}"))
+                .clone()
+        };
+        assert_eq!(
+            by_id(&json, "ws-orch-1")["orchestrator_type"],
+            "workspace_orchestrator"
+        );
+        assert_eq!(
+            by_id(&json, "repo-orch-1")["orchestrator_type"],
+            "repo_orchestrator"
+        );
+        assert_eq!(by_id(&json, "worker-1")["orchestrator_type"], "worker");
+
+        // Single-agent GET carries the same field.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/ws-orch-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["orchestrator_type"], "workspace_orchestrator");
     }
 
     #[tokio::test]
