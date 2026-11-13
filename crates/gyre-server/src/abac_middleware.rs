@@ -253,6 +253,7 @@ impl ResourceResolver {
                     "graph",
                     None,
                 ),
+                RouteResourceMapping::api("/api/v1/repos/:id/graph/concepts", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/timeline", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/risks", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/diff", "graph", None),
@@ -571,6 +572,7 @@ impl ResourceResolver {
                     "graph",
                     None,
                 ),
+                RouteResourceMapping::api("/api/v1/workspaces/:id/graph/concepts", "graph", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/briefing", "workspace", None),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/briefing/ask",

@@ -76,10 +76,15 @@ const GRAPH = {
     { id: 'pkg-1', node_type: 'package', name: 'payment-domain', qualified_name: 'payment-domain', visibility: 'public', spec_confidence: 'none' },
     { id: 'mod-1', node_type: 'module', name: 'retry', qualified_name: 'payment-domain::retry', visibility: 'public', spec_confidence: 'none' },
     { id: 'n-1', node_type: 'type', name: 'RetryPolicy', qualified_name: 'payment-domain::retry::RetryPolicy', spec_path: 'specs/system/payment-retry.md', spec_confidence: 'high', visibility: 'public' },
+    // Unrelated top-level package: nothing here mentions "retry", so a
+    // concept view must fade it to background (task-182 fade assertions).
+    { id: 'pkg-2', node_type: 'package', name: 'shipping-domain', qualified_name: 'shipping-domain', visibility: 'public', spec_confidence: 'none' },
+    { id: 'mod-2', node_type: 'module', name: 'logistics', qualified_name: 'shipping-domain::logistics', visibility: 'public', spec_confidence: 'none' },
   ],
   edges: [
     { id: 'c1', source_id: 'pkg-1', target_id: 'mod-1', edge_type: 'contains' },
     { id: 'c2', source_id: 'mod-1', target_id: 'n-1', edge_type: 'contains' },
+    { id: 'c3', source_id: 'pkg-2', target_id: 'mod-2', edge_type: 'contains' },
   ],
 };
 
@@ -93,6 +98,7 @@ const GRAPH = {
 // frame drawn AFTER the interaction really omits the label.
 let frameCount;
 let frameLabels;
+let frameLabelAlphas;
 
 beforeEach(() => {
   fns.clear();
@@ -130,6 +136,7 @@ beforeEach(() => {
 
   frameCount = 0;
   frameLabels = [];
+  frameLabelAlphas = [];
   // One stable 2d context per canvas element (the main canvas and the
   // minimap each get their own) so draw calls can be attributed per canvas.
   HTMLCanvasElement.prototype.getContext = vi.fn(function () {
@@ -139,11 +146,16 @@ beforeEach(() => {
       clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
       beginPath: vi.fn(), closePath: vi.fn(), arc: vi.fn(), fill: vi.fn(),
       stroke: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
-      fillText: vi.fn((text) => { if (isMain) frameLabels.push(String(text)); }),
+      fillText: vi.fn((text) => {
+        if (isMain) {
+          frameLabels.push(String(text));
+          frameLabelAlphas.push({ text: String(text), alpha: ctx.globalAlpha });
+        }
+      }),
       strokeText: vi.fn(),
       measureText: vi.fn(() => ({ width: 40 })),
       scale: vi.fn(),
-      setTransform: vi.fn(() => { if (isMain) { frameCount++; frameLabels = []; } }),
+      setTransform: vi.fn(() => { if (isMain) { frameCount++; frameLabels = []; frameLabelAlphas = []; } }),
       save: vi.fn(), restore: vi.fn(),
       translate: vi.fn(), rotate: vi.fn(),
       fillStyle: '', strokeStyle: '', lineWidth: 0, globalAlpha: 1,
@@ -187,6 +199,12 @@ function drawnLabels() {
   return [...frameLabels];
 }
 
+/** Draw opacity of each label in the latest drawn frame — the composed
+ *  drawOp at the fillText call (concept-view fade assertions read this). */
+function drawnLabelAlphas() {
+  return [...frameLabelAlphas];
+}
+
 /** Wait until the render loop settles (no new frames for two consecutive
  *  reads) — interactions below capture a frame baseline afterwards. */
 async function waitForCanvasSettled() {
@@ -211,6 +229,14 @@ async function labelsOfNextRedraw(count) {
     expect(frameCount).toBeGreaterThan(count);
   }, { timeout: 5000 });
   return drawnLabels();
+}
+
+/** Label → latest draw opacity within the current frame (last write wins —
+ *  a label may draw more than once per frame via LOD passes). */
+function labelAlphaMap() {
+  const m = new Map();
+  for (const { text, alpha } of drawnLabelAlphas()) m.set(text, alpha);
+  return m;
 }
 
 // ── Lens selector: checkbox group + risk overlay ──────────────────────────
@@ -295,7 +321,7 @@ describe('ExplorerView — in-view filter panel (ui-navigation.md §3)', () => {
     const boundaries = within(panel).getByTestId('filter-category-boundaries');
     expect(boundaries.querySelector('input').checked).toBe(true);
     expect(boundaries.textContent).toContain('Boundaries');
-    expect(boundaries.textContent).toContain('2'); // package + module
+    expect(boundaries.textContent).toContain('4'); // 2 packages + 2 modules (task-182 fade fixture)
     for (const id of ['interfaces', 'data', 'specs']) {
       expect(within(panel).getByTestId(`filter-category-${id}`)).toBeTruthy();
     }
@@ -339,21 +365,24 @@ describe('ExplorerView — in-view filter panel (ui-navigation.md §3)', () => {
     expect(restored).toContain('payment-domain');
   });
 
-  it('selecting a discovered concept focuses the canvas on matching nodes', async () => {
+  it('selecting a discovered concept fades non-concept nodes to background (not removed)', async () => {
     renderRepoScope();
     await waitForCanvas();
 
-    // The unfiltered canvas draws the top-level boundary summary.
+    // The unfiltered canvas draws the top-level boundary summaries.
     await waitFor(() => {
       expect(drawnLabels()).toContain('payment-domain');
+      expect(drawnLabels()).toContain('shipping-domain');
     }, { timeout: 5000 });
     await waitForCanvasSettled();
+    const baseline = labelAlphaMap();
+    expect(baseline.get('shipping-domain')).toBeGreaterThan(0);
 
     await fireEvent.click(screen.getByTestId('filter-panel-toggle'));
     const panel = document.querySelector('[data-testid="explorer-filter-panel"]');
 
     // Concepts are discovered from the graph: "retry" spans the retry module
-    // and RetryPolicy; "payment" spans all three nodes.
+    // and RetryPolicy; "payment" spans the payment-domain nodes.
     const retryChip = within(panel).getByTestId('filter-concept-retry');
     expect(retryChip).toBeTruthy();
     expect(within(panel).getByTestId('filter-concept-payment')).toBeTruthy();
@@ -362,18 +391,32 @@ describe('ExplorerView — in-view filter panel (ui-navigation.md §3)', () => {
     await fireEvent.click(retryChip);
     expect(retryChip.getAttribute('aria-pressed')).toBe('true');
 
-    // Nodes unrelated to the concept (the payment-domain package, whose
-    // name matches no "retry") disappear from the frame drawn after the
-    // selection — the concept filter reaches the tree-group containers,
-    // not just the leaf nodes.
-    const labels = await labelsOfNextRedraw(framesBefore);
-    expect(labels).not.toContain('payment-domain');
+    // The concept filter chip appears in the control bar (click to clear).
+    const chip = document.querySelector('[data-testid="concept-filter-chip"]');
+    expect(chip).toBeTruthy();
+    expect(chip.textContent).toContain('retry');
 
-    // Clearing the concepts restores the full graph.
+    // Fade, not removal (system-explorer.md §4): the unrelated shipping
+    // package is STILL DRAWN after the selection, at ~15% of its baseline
+    // opacity — everything else fades to background. The payment-domain
+    // package contains the retry concept nodes, so it stays at full draw
+    // opacity.
+    await labelsOfNextRedraw(framesBefore);
+    const faded = labelAlphaMap();
+    expect(faded.get('shipping-domain'), 'non-concept node must stay drawn (faded, not removed)').toBeDefined();
+    expect(
+      faded.get('shipping-domain') / baseline.get('shipping-domain')
+    ).toBeCloseTo(0.15, 5);
+    expect(
+      faded.get('payment-domain') / baseline.get('payment-domain')
+    ).toBeCloseTo(1.0, 5);
+
+    // Clearing the concept (control-bar chip ✕) restores the full graph.
     const framesBeforeClear = frameCount;
-    await fireEvent.click(within(panel).getByRole('button', { name: /clear concepts/i }));
-    const restored = await labelsOfNextRedraw(framesBeforeClear);
-    expect(restored).toContain('payment-domain');
+    await fireEvent.click(document.querySelector('[data-testid="concept-filter-chip-clear"]'));
+    await labelsOfNextRedraw(framesBeforeClear);
+    const restored = labelAlphaMap();
+    expect(restored.get('shipping-domain') / baseline.get('shipping-domain')).toBeCloseTo(1.0, 5);
   });
 });
 
