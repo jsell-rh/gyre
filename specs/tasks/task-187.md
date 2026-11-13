@@ -2,10 +2,10 @@
 title: "Conversational Exploration — AI Q&A grounded in knowledge graph"
 spec_ref: "system-explorer.md §8"
 depends_on: [task-171, task-178]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
-commits: ["7737e532ffab9166fa2a2310dc472f2de39289df"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -82,80 +82,3 @@ The answer is **grounded in the knowledge graph**: provenance records, spec link
 ## Agent Instructions
 
 Read `system-explorer.md` §8 "Conversational Exploration" for the full specification. The Ask input in the control bar is built in task-178 and connects to `POST /workspaces/:id/explorer-views/generate`. For conversational exploration, the response may be a text answer rather than a view spec — check how the generate endpoint handles questions that cannot produce a view spec (the spec says `{view_spec: null, explanation: "..."}` pattern). The knowledge graph context should include provenance data — check `graph.rs` for how nodes include `spec_path`, `created_by`, `last_modified_by` fields. For structural prediction integration, use the predict endpoint from task-186. The LLM prompt template at `specs/prompts/explorer-generate.md` may need to be extended to support Q&A-style questions alongside view generation.
-
-## Shipped
-
-Conversational exploration (system-explorer.md §8) as a real question →
-knowledge-graph → grounded-answer pipeline, in commit 7737e532:
-
-- **Backend** — new `POST /api/v1/workspaces/:id/explorer-views/ask`
-  (`ask_explorer` in `api/explorer_views.rs`): the LLM prompt is grounded
-  in the workspace's live graph — nodes with spec linkage and commit/agent
-  provenance (`created_sha`, `last_modified_sha`, `last_modified_by`,
-  recency-ranked, capped), edge summaries, and recent architectural
-  timeline deltas — via the new `explorer-ask` prompt template
-  (`specs/prompts/explorer-ask.md` + `PROMPT_EXPLORER_ASK` fallback).
-  **Grounding enforcement**: the server parses every
-  `[entity:node|spec|commit|agent:id]` citation from the answer and
-  validates it against the same graph the prompt was built from
-  (`validate_entity_refs`); hallucinated ids are stripped to plain text
-  and excluded from the returned `entity_refs` (which carry resolved
-  labels — node name, spec path, 7-char SHA, agent id). Follow-up turns
-  replay client-owned history (max 20, rejected beyond, roles validated).
-  Rate limit, budget/cost recording, and template-SHA audit match the
-  other LLM endpoints; ABAC maps the route to `explorer_view`/`generate`
-  (Developer+ workspace role), registered before `/:view_id`.
-- **Canvas actions in the answer** — "show me X" questions return a
-  `view_spec` validated through the same chain as the generate endpoint
-  (grammar, repo ownership, flow-trace backing with an in-answer fallback
-  note); "what would happen if…" questions set `predict`, and the server
-  runs the structural prediction through `run_structural_prediction` —
-  the core extracted from `POST /repos/:id/graph/predict` so both
-  surfaces share one prediction machinery — returning
-  `{repo_id, predictions}`.
-- **Frontend** — `ConversationalExplorer.svelte`, the third Explorer chat
-  mode ("Ask the graph"), also reachable from the control bar's view
-  selector ("Ask the graph…" entry). Answers render with clickable,
-  distinctly-styled entity references: node → detail panel + canvas
-  camera focus, spec → inline spec editor, commit → git remote commit
-  page (or copied SHA), agent → highlight the nodes it last modified.
-  Node references in a response highlight those nodes on the canvas
-  (concept-scope query, search-highlight visual language); view specs
-  apply via the existing generated-view path; predictions render as
-  ghost overlays through the shared `predictionOverlays` mapping now used
-  by both the spec-edit prediction flow and the conversational flow.
-  Conversation history lives in component state only (not persisted).
-
-### Test evidence
-
-- `web/src/__tests__/ConversationalExplorer.test.js` (vitest, 6 tests,
-  passing here): Q&A rendering, per-type entity-ref click dispatch,
-  canvas highlight + view-spec application, prediction application,
-  follow-up history replay, error surfacing.
-- Server tests in `api/explorer_views.rs` (compile-verified here via
-  `cargo check -p gyre-server --lib --tests`; **execution belongs to the
-  independent verifier** — the 4 GiB sandbox wrapper blocks gyre-server
-  test builds): grounding/citation validation (valid tokens kept,
-  hallucinated stripped, labels resolved), view-spec passthrough vs.
-  invalid-spec drop, prediction trigger against the single-repo scope,
-  prompt grounding (provenance reaches the LLM fully substituted),
-  history caps/role rejection, LLM-unavailable 503, plus unit tests for
-  `validate_entity_refs` and `short_sha` (char-boundary safe).
-- Regression: ExplorerView/ExplorerDefaultViews/GeneratedViewChat
-  vitest suites pass (ExplorerDefaultViews expected view-selector list
-  extended with the new "Ask the graph…" entry); existing
-  `predict_graph` behavior preserved by the extraction (same prompt
-  construction, note slot, and response shape).
-- Mechanical checks pass: check-arch, check-abac-route-registry,
-  check-inert-enforcement (it caught one real flaw mid-development — a
-  discarded `enforce_flow_trace_backing` result — fixed by binding it and
-  appending the fallback note to the answer), check-abac-exempt-handlers,
-  check-mcp-write-tools, check-byte-slice-truncation,
-  check-relative-path-defaults, check-lossy-secret-conversion,
-  check-unbounded-external-http.
-
-### Verifier must run
-
-    cargo test -p gyre-server --lib api::explorer_views
-    cargo test -p gyre-server --lib api::graph::tests
-    cd web && npx vitest run src/__tests__/ConversationalExplorer.test.js
