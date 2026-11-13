@@ -22,15 +22,27 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
-use diesel::sql_types::{Array, BigInt, Double, Text};
+use diesel::sql_types::{BigInt, Double, Text};
 use gyre_ports::search::{
-    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+    FacetCounts, FacetFilter, SearchDocument, SearchPort, SearchQuery, SearchResult,
+    SearchSuggestion,
 };
 use std::{collections::HashMap, sync::Arc};
 
 use super::PgStorage;
 
+/// Current unix time in seconds (document timestamps for `since:`/`until:`).
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// PG-only schema: scope columns + JSONB facets + generated tsvector + GIN index.
+/// `updated_at` backs the `since:`/`until:` facets (§Query Language); the
+/// ALTER covers tables created before the column existed (regular PG table,
+/// so unlike FTS5 it can be extended in place).
 pub(crate) const TSVECTOR_DDL: &str = "
 CREATE TABLE IF NOT EXISTS search_index (
     entity_type TEXT NOT NULL,
@@ -41,10 +53,12 @@ CREATE TABLE IF NOT EXISTS search_index (
     title TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL DEFAULT '',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at BIGINT NOT NULL DEFAULT 0,
     tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED,
     PRIMARY KEY (entity_type, entity_id)
 );
 CREATE INDEX IF NOT EXISTS idx_search_index_tsv ON search_index USING gin (tsv);
+ALTER TABLE search_index ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT 0;
 ";
 
 /// Create the tsvector search table + GIN index on the PG-only init path.
@@ -157,125 +171,193 @@ fn count_facet_row(counts: &mut FacetCounts, row: FacetRow) {
     }
 }
 
-/// A typed bind emitted by [`scope_filter_sql`].
-enum ScopeBind {
-    Text(String),
-    TextArray(Vec<String>),
-}
-
-/// §Access Scoping WHERE fragments for a query over `search_index`: the
-/// user-supplied `entity_type`/`workspace_id` narrowing filters plus the
+/// §Access Scoping WHERE clauses for a query over `search_index`: the
 /// caller's resolved scope (tenant boundary + accessible workspace/repo
-/// sets), as `$N` placeholders numbered from `*next` (advanced past every
-/// emitted bind on return).
-///
-/// Callers append this to their boxed raw query before the ORDER BY/LIMIT
-/// tail so every restriction is evaluated by the index query itself — never
-/// post-filtered — keeping result, suggestion, and facet counts from leaking
-/// inaccessible documents (search.md §Access Scoping). An empty accessible
-/// set compiles to `AND FALSE` (zero rows, by query).
-fn scope_filter_sql(query: &SearchQuery, next: &mut usize) -> (String, Vec<ScopeBind>) {
-    let mut sql = String::new();
-    let mut binds = Vec::new();
-    let mut n = *next;
-
-    if let Some(et) = &query.entity_type {
-        sql.push_str(&format!(" AND s.entity_type = ${n}"));
-        binds.push(ScopeBind::Text(et.clone()));
-        n += 1;
-    }
-    if let Some(ws) = &query.workspace_id {
-        // User-supplied narrowing filter — intersects with the accessible
-        // set below, so it can only narrow, never widen.
-        sql.push_str(&format!(" AND s.workspace_id = ${n}"));
-        binds.push(ScopeBind::Text(ws.clone()));
-        n += 1;
-    }
+/// sets), pushed into the same WHERE builder as the user filters so every
+/// restriction is evaluated by the index query itself — never
+/// post-filtered — keeping result, suggestion, and facet counts from
+/// leaking inaccessible documents (search.md §Access Scoping). Every
+/// clause references the `s` alias, so the base SQL in
+/// `search()`/`suggest()`/`facet_counts()` MUST alias `search_index` AS
+/// `s` (an unaliased FROM makes PG reject the query with 42P01). An empty
+/// accessible set compiles to `FALSE` (zero rows, by query).
+fn build_scope(query: &SearchQuery, w: &mut PgWhereBuilder) {
+    // Tenant boundary — every result must belong to this tenant.
+    let t = w.text(query.tenant_id.clone());
+    w.push(format!("s.tenant_id = {t}"));
+    // Accessible-workspace set: None = unscoped within the tenant (Admin);
+    // an empty set excludes everything.
     match &query.accessible_workspace_ids {
         None => {}
-        Some(ids) if ids.is_empty() => {
-            // Caller has access to no workspace: no rows, by query.
-            sql.push_str(" AND FALSE");
-        }
+        Some(ids) if ids.is_empty() => w.push("FALSE".to_string()),
         Some(ids) => {
-            sql.push_str(&format!(" AND s.workspace_id = ANY(${n})"));
-            binds.push(ScopeBind::TextArray(ids.clone()));
-            n += 1;
+            let placeholders: Vec<String> = ids.iter().map(|v| w.text(v.clone())).collect();
+            w.push(format!("s.workspace_id IN ({})", placeholders.join(", ")));
         }
     }
+    // Accessible-repo set: repo-less (workspace-level) documents stay
+    // visible — repo scope restricts repos, not the workspace itself.
     match &query.accessible_repo_ids {
         None => {}
-        Some(ids) if ids.is_empty() => {
-            sql.push_str(" AND FALSE");
-        }
+        Some(ids) if ids.is_empty() => w.push("FALSE".to_string()),
         Some(ids) => {
-            // Repo-less (workspace-level) documents stay visible: repo scope
-            // restricts repos, not the workspace itself.
-            sql.push_str(&format!(" AND (s.repo_id = '' OR s.repo_id = ANY(${n}))"));
-            binds.push(ScopeBind::TextArray(ids.clone()));
-            n += 1;
+            let placeholders: Vec<String> = ids.iter().map(|v| w.text(v.clone())).collect();
+            w.push(format!(
+                "(s.repo_id = '' OR s.repo_id IN ({}))",
+                placeholders.join(", ")
+            ));
         }
     }
-    sql.push_str(&format!(" AND s.tenant_id = ${n}"));
-    binds.push(ScopeBind::Text(query.tenant_id.clone()));
-    n += 1;
-
-    *next = n;
-    (sql, binds)
 }
 
 const INSERT_SQL: &str = "
-INSERT INTO search_index (entity_type, entity_id, tenant_id, workspace_id, repo_id, title, body, metadata)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+INSERT INTO search_index (entity_type, entity_id, tenant_id, workspace_id, repo_id, title, body, metadata, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
 ON CONFLICT (entity_type, entity_id) DO UPDATE SET
     tenant_id  = EXCLUDED.tenant_id,
     workspace_id = EXCLUDED.workspace_id,
     repo_id    = EXCLUDED.repo_id,
     title      = EXCLUDED.title,
     body       = EXCLUDED.body,
-    metadata   = EXCLUDED.metadata
+    metadata   = EXCLUDED.metadata,
+    updated_at = EXCLUDED.updated_at
 ";
 
-/// Base SQL for `search()`: full-text match over the tsvector index. Aliases
-/// `search_index` AS `s` because the §Access Scoping fragments appended by
-/// [`scope_filter_sql`] reference `s.*`. $1 = websearch tsquery; scope
-/// fragments continue from $2.
-const SEARCH_BASE_SQL: &str = "
-SELECT s.entity_type,
-       s.entity_id,
-       s.title,
-       ts_rank(s.tsv, q)::float8 AS rank,
-       ts_headline('english', s.body, q,
-                   'StartSel=**,StopSel=**,MaxFragments=1,MinWords=5,MaxWords=12') AS snip,
-       s.metadata::text AS metadata
-FROM search_index s, websearch_to_tsquery('english', $1) q
-WHERE s.tsv @@ q";
+/// Build the `websearch_to_tsquery` input for a parsed query (§Query
+/// Language): terms joined by spaces plus phrases in double quotes.
+/// websearch_to_tsquery AND-composes the pieces, treats `"…"` as an exact
+/// phrase, and never raises a syntax error. The parser guarantees terms are
+/// alphanumeric-only and phrases contain no `"`, so the reconstruction is
+/// inert as syntax.
+fn build_websearch_text(parsed: &gyre_ports::search::ParsedQuery) -> String {
+    let mut parts: Vec<String> = parsed.terms.clone();
+    parts.extend(parsed.phrases.iter().map(|p| format!("\"{p}\"")));
+    parts.join(" ")
+}
 
-/// Base SQL for `suggest()`: prefix match on the title column. MUST alias
-/// `search_index` AS `s` — the §Access Scoping fragments appended by
-/// [`scope_filter_sql`] reference `s.*`, and an unaliased FROM makes
-/// PostgreSQL reject the whole query with 42P01 "missing FROM-clause entry
-/// for table \"s\"" (every suggest call would 500 on PG). $1 = LIKE
-/// pattern; scope fragments continue from $2.
-const SUGGEST_BASE_SQL: &str = "
-SELECT s.entity_type, s.entity_id, s.title
-FROM search_index s
-WHERE s.title ILIKE $1 ESCAPE '\\'";
+/// A dynamically bound SQL parameter — the WHERE clauses vary with the
+/// parsed query's facet filters, so the statement shape is built per query.
+enum PgParam {
+    Text(String),
+    BigInt(i64),
+}
 
-/// Base SQL for `facet_counts()` with a text query: aggregates the same
-/// filtered match set `search()` uses. $1 = websearch tsquery.
-const FACET_TEXT_BASE_SQL: &str = "
-SELECT s.entity_type, s.workspace_id, s.metadata::text
-FROM search_index s, websearch_to_tsquery('english', $1) q
-WHERE s.tsv @@ q";
+/// Incremental builder for the filter WHERE clause: emits numbered,
+/// explicitly-cast placeholders (`$1::text`, `$2::bigint`, …) in bind order
+/// and collects the values.
+struct PgWhereBuilder {
+    clauses: Vec<String>,
+    params: Vec<PgParam>,
+    n: usize,
+}
 
-/// Base SQL for `facet_counts()` with blank text: aggregates the caller's
-/// whole accessible set. `WHERE TRUE` anchors the scope fragments appended
-/// below. Placeholders start at $1 (no tsquery bind).
-const FACET_BLANK_BASE_SQL: &str = "
-SELECT s.entity_type, s.workspace_id, s.metadata::text
-FROM search_index s
-WHERE TRUE";
+impl PgWhereBuilder {
+    fn new() -> Self {
+        PgWhereBuilder {
+            clauses: vec![],
+            params: vec![],
+            n: 0,
+        }
+    }
+
+    fn text(&mut self, value: String) -> String {
+        self.n += 1;
+        self.params.push(PgParam::Text(value));
+        format!("${}::text", self.n)
+    }
+
+    fn bigint(&mut self, value: i64) -> String {
+        self.n += 1;
+        self.params.push(PgParam::BigInt(value));
+        format!("${}::bigint", self.n)
+    }
+
+    fn push(&mut self, clause: String) {
+        self.clauses.push(clause);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.clauses.is_empty()
+    }
+
+    fn sql(&self) -> String {
+        if self.clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", self.clauses.join(" AND "))
+        }
+    }
+}
+
+/// Shared filter construction for `search()` and `facet_counts()`: full-text
+/// match plus entity_type/workspace_id shortcuts plus facet filters plus
+/// `since:`/`until:` bounds, AND-composed. When text is present its tsquery
+/// parameter is reserved FIRST (it is referenced in the FROM clause, ahead of
+/// the WHERE placeholders) and the FROM fragment is returned.
+fn build_filters(query: &SearchQuery, w: &mut PgWhereBuilder) -> (bool, String) {
+    let parsed = &query.parsed;
+    let ws_text = build_websearch_text(parsed);
+    let has_text = !ws_text.is_empty();
+    let from_tsq = if has_text {
+        let p = w.text(ws_text);
+        format!(", websearch_to_tsquery('english', {p}) q")
+    } else {
+        String::new()
+    };
+    // The tsquery join alone filters nothing (it would be a cross join that
+    // only feeds ranking); the full-text predicate `s.tsv @@ q` is the actual
+    // row filter for terms and quoted phrases (§Simple Search / §Quoted
+    // Phrases). It must be emitted here so both search() and facet_counts()
+    // restrict to the text-matched rows.
+    if has_text {
+        w.push("s.tsv @@ q".to_string());
+    }
+    if let Some(et) = &query.entity_type {
+        let p = w.text(et.clone());
+        w.push(format!("s.entity_type = {p}"));
+    }
+    if let Some(ws) = &query.workspace_id {
+        let p = w.text(ws.clone());
+        w.push(format!("s.workspace_id = {p}"));
+    }
+    for filter in parsed.facet_filters() {
+        match filter {
+            FacetFilter::EntityType(values) => {
+                let placeholders: Vec<String> = values.iter().map(|v| w.text(v.clone())).collect();
+                w.push(format!("s.entity_type IN ({})", placeholders.join(", ")));
+            }
+            FacetFilter::Workspace(values) => {
+                let placeholders: Vec<String> = values.iter().map(|v| w.text(v.clone())).collect();
+                w.push(format!("s.workspace_id IN ({})", placeholders.join(", ")));
+            }
+            FacetFilter::Repo(values) => {
+                let placeholders: Vec<String> = values.iter().map(|v| w.text(v.clone())).collect();
+                w.push(format!("s.repo_id IN ({})", placeholders.join(", ")));
+            }
+            // Metadata facets (status/priority/label/…) live in the JSONB
+            // column; the key is a bound parameter and the key set is
+            // whitelisted by the parser, so no user text is interpolated.
+            FacetFilter::Metadata { key, values } => {
+                let key_p = w.text(key);
+                let placeholders: Vec<String> = values.iter().map(|v| w.text(v.clone())).collect();
+                w.push(format!(
+                    "s.metadata->>{key_p} IN ({})",
+                    placeholders.join(", ")
+                ));
+            }
+        }
+    }
+    let time = parsed.time_bounds(now_secs());
+    if let Some(since) = time.since {
+        let p = w.bigint(since);
+        w.push(format!("s.updated_at >= {p}"));
+    }
+    if let Some(until) = time.until {
+        let p = w.bigint(until);
+        w.push(format!("s.updated_at <= {p}"));
+    }
+    (has_text, from_tsq)
+}
 
 #[async_trait]
 impl SearchPort for PgStorage {
@@ -317,6 +399,7 @@ impl SearchPort for PgStorage {
                 .bind::<Text, _>(&doc.title)
                 .bind::<Text, _>(&doc.body)
                 .bind::<Text, _>(&metadata_json)
+                .bind::<BigInt, _>(doc.updated_at.unwrap_or_else(now_secs))
                 .execute(&mut *conn)?;
             Ok(())
         })
@@ -326,37 +409,61 @@ impl SearchPort for PgStorage {
 
     async fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let pool = Arc::clone(&self.pool);
-        Ok(
-            tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
-                let mut conn = pool.get().context("get db connection")?;
-                if query.query.trim().is_empty() {
-                    return Ok(vec![]);
-                }
-                // websearch_to_tsquery applies implicit AND between terms (spec
-                // §Simple Search default) and tolerates punctuation without a
-                // syntax error. entity_type/workspace_id filters and the
-                // §Access Scoping constraints (tenant + accessible workspace/repo
-                // sets) are WHERE clauses evaluated by the index query itself,
-                // never post-filtered, so result counts cannot leak inaccessible
-                // documents. ts_headline wraps matches in ** markers, mirroring
-                // the FTS5 adapter.
-                let mut q = diesel::sql_query(SEARCH_BASE_SQL).into_boxed();
-                q = q.bind::<Text, _>(query.query.clone());
-                let mut n = 2;
+        Ok(tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
+            let mut conn = pool.get().context("get db connection")?;
 
-                let (scope_sql, scope_binds) = scope_filter_sql(&query, &mut n);
-                q = q.sql(scope_sql);
-                for bind in scope_binds {
-                    q = match bind {
-                        ScopeBind::Text(v) => q.bind::<Text, _>(v),
-                        ScopeBind::TextArray(v) => q.bind::<Array<Text>, _>(v),
-                    };
-                }
-                q = q
-                    .sql(format!(" ORDER BY rank DESC LIMIT ${n}"))
-                    .bind::<BigInt, _>(query.limit as i64);
+            // §Query Language: full-text match (websearch_to_tsquery applies
+            // implicit AND between terms and honors "quoted phrases") plus
+            // facet filters, AND-composed; a facet-only query browses without
+            // a text match. All filters are WHERE clauses evaluated by the
+            // index query itself, not post-filtered.
+            let mut w = PgWhereBuilder::new();
+            let (has_text, from_tsq) = build_filters(&query, &mut w);
+            if !has_text && w.is_empty() {
+                return Ok(vec![]);
+            }
+            // §Access Scoping: the tenant boundary and accessible
+            // workspace/repo sets are WHERE clauses in this same index
+            // query — never post-filtered — so result counts cannot leak
+            // inaccessible documents.
+            build_scope(&query, &mut w);
 
-                let rows = q.load::<TsRow>(&mut conn)?;
+            // ts_rank/ts_headline need the tsquery; without one (facet-only
+            // browse) rank is a constant and the snippet is a body prefix.
+            let (rank_snip, order) = if has_text {
+                (
+                    "ts_rank(s.tsv, q)::float8 AS rank,
+                        ts_headline('english', s.body, q,
+                                    'StartSel=**,StopSel=**,MaxFragments=1,MinWords=5,MaxWords=12') AS snip"
+                        .to_string(),
+                    "ORDER BY rank DESC".to_string(),
+                )
+            } else {
+                (
+                    "0.0::float8 AS rank,
+                        substr(replace(s.body, chr(10), ' '), 1, 120) AS snip".to_string(),
+                    "ORDER BY s.updated_at DESC".to_string(),
+                )
+            };
+            let limit = w.bigint(query.limit as i64);
+            let sql = format!(
+                "SELECT s.entity_type,
+                        s.entity_id,
+                        s.title,
+                        {rank_snip},
+                        s.metadata::text AS metadata
+                 FROM search_index s{from_tsq}{} {order} LIMIT {limit}",
+                w.sql()
+            );
+
+            let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::pg::Pg>();
+            for param in w.params {
+                stmt = match param {
+                    PgParam::Text(v) => stmt.bind::<Text, _>(v),
+                    PgParam::BigInt(v) => stmt.bind::<BigInt, _>(v),
+                };
+            }
+            let rows = stmt.load::<TsRow>(&mut conn)?;
 
                 Ok(rows
                     .into_iter()
@@ -409,25 +516,42 @@ impl SearchPort for PgStorage {
                 let mut conn = pool.get().context("get db connection")?;
                 // ILIKE is case-insensitive prefix matching on the title column —
                 // what autocomplete needs (mid-word terms are unreachable from a
-                // prefix). §Access Scoping: the same WHERE fragments as
-                // `search()` are part of this index query — suggestions never
-                // include titles the caller cannot access.
-                let mut q = diesel::sql_query(SUGGEST_BASE_SQL).into_boxed();
-                q = q.bind::<Text, _>(pattern);
-                let mut n = 2;
-
-                let (scope_sql, scope_binds) = scope_filter_sql(&query, &mut n);
-                q = q.sql(scope_sql);
-                for bind in scope_binds {
-                    q = match bind {
-                        ScopeBind::Text(v) => q.bind::<Text, _>(v),
-                        ScopeBind::TextArray(v) => q.bind::<Array<Text>, _>(v),
+                // prefix).
+                //
+                // §Access Scoping: the same scope WHERE clauses as `search()`
+                // are part of this index query — suggestions never include
+                // titles the caller cannot access. The entity_type/
+                // workspace_id shortcuts narrow within that scope. The FROM
+                // aliases `search_index` AS `s` because the scope clauses
+                // reference `s.*`.
+                let mut w = PgWhereBuilder::new();
+                let p = w.text(pattern);
+                w.push(format!("s.title ILIKE {p} ESCAPE '\\'"));
+                if let Some(et) = &query.entity_type {
+                    let p = w.text(et.clone());
+                    w.push(format!("s.entity_type = {p}"));
+                }
+                if let Some(ws) = &query.workspace_id {
+                    // User-supplied narrowing — intersects with the accessible
+                    // set, so it can only narrow, never widen.
+                    let p = w.text(ws.clone());
+                    w.push(format!("s.workspace_id = {p}"));
+                }
+                build_scope(&query, &mut w);
+                let limit = w.bigint(limit as i64);
+                let sql = format!(
+                    "SELECT s.entity_type, s.entity_id, s.title
+                 FROM search_index s{} ORDER BY s.title LIMIT {limit}",
+                    w.sql()
+                );
+                let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::pg::Pg>();
+                for param in w.params {
+                    stmt = match param {
+                        PgParam::Text(v) => stmt.bind::<Text, _>(v),
+                        PgParam::BigInt(v) => stmt.bind::<BigInt, _>(v),
                     };
                 }
-                q = q
-                    .sql(format!(" ORDER BY s.title LIMIT ${n}"))
-                    .bind::<BigInt, _>(limit as i64);
-                let rows = q.load::<SuggestRow>(&mut conn)?;
+                let rows = stmt.load::<SuggestRow>(&mut conn)?;
 
                 Ok(rows
                     .into_iter()
@@ -447,34 +571,29 @@ impl SearchPort for PgStorage {
         Ok(tokio::task::spawn_blocking(move || -> Result<FacetCounts> {
             let mut conn = pool.get().context("get db connection")?;
 
-            // Two shapes, both §Access-scoped: a blank text query aggregates
-            // the caller's whole accessible set (the /search/facets endpoint);
-            // a text query aggregates the same filtered match set `search()`
-            // uses, without the result limit — facet counts must describe the
-            // full filtered set, not the truncated page, and must never count
-            // documents the caller cannot access.
-            let has_text = !query.query.trim().is_empty();
-            let base_sql = if has_text {
-                FACET_TEXT_BASE_SQL
-            } else {
-                FACET_BLANK_BASE_SQL
-            };
-            let mut q = diesel::sql_query(base_sql).into_boxed();
-            let mut n = 1;
-            if has_text {
-                q = q.bind::<Text, _>(query.query.clone());
-                n = 2;
-            }
-
-            let (scope_sql, scope_binds) = scope_filter_sql(&query, &mut n);
-            q = q.sql(scope_sql);
-            for bind in scope_binds {
-                q = match bind {
-                    ScopeBind::Text(v) => q.bind::<Text, _>(v),
-                    ScopeBind::TextArray(v) => q.bind::<Array<Text>, _>(v),
+            // Both shapes are §Access-scoped: a blank query (no text, no
+            // user filters) aggregates the caller's whole accessible set
+            // (the /search/facets endpoint); any text, facet, or shortcut
+            // filter restricts the aggregation to the same filtered match
+            // set `search()` uses — without the result limit, since counts
+            // must describe the full filtered set, not the truncated page,
+            // and must never count documents the caller cannot access.
+            let mut w = PgWhereBuilder::new();
+            let (_, from_tsq) = build_filters(&query, &mut w);
+            build_scope(&query, &mut w);
+            let sql = format!(
+                "SELECT s.entity_type, s.workspace_id, s.metadata::text
+                         FROM search_index s{from_tsq}{}",
+                w.sql()
+            );
+            let mut stmt = diesel::sql_query(sql).into_boxed::<diesel::pg::Pg>();
+            for param in w.params {
+                stmt = match param {
+                    PgParam::Text(v) => stmt.bind::<Text, _>(v),
+                    PgParam::BigInt(v) => stmt.bind::<BigInt, _>(v),
                 };
             }
-            let rows = q.load::<FacetRow>(&mut conn)?;
+            let rows = stmt.load::<FacetRow>(&mut conn)?;
 
             let mut counts = FacetCounts::new();
             for row in rows {
@@ -504,18 +623,96 @@ impl SearchPort for PgStorage {
 
 #[cfg(test)]
 mod tests {
+    //! SQL-shape regression tests for the filter builder. The repo has no PG
+    //! server harness, so these capture the generated statement shape — the
+    //! exact surface where the task-154 review found the full-text predicate
+    //! (`s.tsv @@ q`) had been dropped, leaving a ranking-only cross join,
+    //! and where the access-scoping review guards the `s.*` alias and
+    //! placeholder contiguity a live PostgreSQL enforces at parse time.
+
     use super::*;
 
+    /// A text query MUST emit the `s.tsv @@ q` row filter — the tsquery FROM
+    /// fragment alone filters nothing (cross join feeding ts_rank only), so
+    /// without this predicate every text query returns all facet-passing
+    /// rows and facet_counts(Some(q)) aggregates the whole index.
+    #[test]
+    fn text_query_emits_tsv_match_predicate() {
+        let q = SearchQuery::parse("\"merge queue\" ordering");
+        let mut w = PgWhereBuilder::new();
+        let (has_text, from_tsq) = build_filters(&q, &mut w);
+        assert!(has_text);
+        assert!(from_tsq.contains("websearch_to_tsquery"));
+        let sql = w.sql();
+        assert!(
+            sql.contains("s.tsv @@ q"),
+            "full-text predicate missing from WHERE: {sql}"
+        );
+        // The WHERE clause is real (not empty), i.e. the predicate lands in
+        // the statement's filter position, not just the builder's internals.
+        assert!(sql.starts_with(" WHERE "));
+    }
+
+    /// Terms-only queries go through the same predicate (§Simple Search is
+    /// AND-of-terms enforced by websearch_to_tsquery + the tsv match).
+    #[test]
+    fn simple_terms_query_emits_tsv_match_predicate() {
+        let q = SearchQuery::parse("identity security JWT");
+        let mut w = PgWhereBuilder::new();
+        let (has_text, _) = build_filters(&q, &mut w);
+        assert!(has_text);
+        assert!(w.sql().contains("s.tsv @@ q"));
+    }
+
+    /// A facet-only query (§Faceted Filtering browse) intentionally has no
+    /// text match: no FROM fragment, no tsv predicate, but real WHERE
+    /// clauses for the facets.
+    #[test]
+    fn facet_only_query_has_no_tsv_predicate_but_real_filters() {
+        let q = SearchQuery::parse("type:spec status:approved");
+        let mut w = PgWhereBuilder::new();
+        let (has_text, from_tsq) = build_filters(&q, &mut w);
+        assert!(!has_text);
+        assert!(from_tsq.is_empty());
+        let sql = w.sql();
+        assert!(!sql.contains("@@"));
+        assert!(sql.contains("s.entity_type IN"));
+        assert!(sql.contains("s.metadata->>"));
+    }
+
+    /// The tsquery parameter is reserved FIRST (referenced in the FROM
+    /// clause, ahead of the WHERE placeholders), so the bind order emitted
+    /// by `search()`/`facet_counts()` matches the placeholder numbering.
+    #[test]
+    fn tsquery_parameter_is_bound_first() {
+        let q = SearchQuery::parse("\"merge queue\" type:spec workspace:platform-team");
+        let mut w = PgWhereBuilder::new();
+        let (_, from_tsq) = build_filters(&q, &mut w);
+        // FROM references $1; every WHERE placeholder must number after it.
+        assert!(from_tsq.contains("$1::text"), "from: {from_tsq}");
+        let sql = w.sql();
+        assert!(
+            !sql.contains("$1::"),
+            "WHERE reuses the FROM parameter: {sql}"
+        );
+        assert!(sql.contains("$2::text"));
+    }
+
+    // ── §Access Scoping (SQL-shape) ──────────────────────────────────────
+
+    /// Caller-scoped query shaped like a real handler call: parse-built
+    /// (raw query and its query-language parse stay consistent) with a
+    /// resolved access scope attached.
     fn scoped_query() -> SearchQuery {
-        SearchQuery {
-            query: "deploy".to_string(),
-            entity_type: Some("task".to_string()),
-            workspace_id: Some("ws-a".to_string()),
-            limit: 10,
-            tenant_id: "tenant-1".to_string(),
-            accessible_workspace_ids: Some(vec!["ws-a".to_string(), "ws-b".to_string()]),
-            accessible_repo_ids: Some(vec!["repo-1".to_string()]),
-        }
+        SearchQuery::parse("deploy".to_string())
+            .with_entity_type(Some("task".to_string()))
+            .with_workspace_id(Some("ws-a".to_string()))
+            .with_limit(10)
+            .with_scope(
+                "tenant-1".to_string(),
+                Some(vec!["ws-a".to_string(), "ws-b".to_string()]),
+                Some(vec!["repo-1".to_string()]),
+            )
     }
 
     /// Every `$N` placeholder referenced by a SQL string, in order of
@@ -545,62 +742,56 @@ mod tests {
         out
     }
 
-    /// Compose a base SQL with the §Access Scoping fragments exactly the way
-    /// `search()`/`suggest()`/`facet_counts()` do, then assert the invariants
-    /// a live PostgreSQL enforces at parse time:
+    /// §Access Scoping invariants a live PostgreSQL enforces at parse time:
     ///
-    /// - the scope fragments reference `s.*` columns, so the base SQL MUST
-    ///   alias `search_index` AS `s` — an unaliased FROM makes PG reject the
-    ///   whole query with 42P01 "missing FROM-clause entry for table \"s\""
-    ///   (the regression this guards: every suggest call 500ing on PG);
+    /// - the scope clauses reference `s.*` columns, so the SQL heads in
+    ///   `search()`/`suggest()`/`facet_counts()` MUST alias `search_index`
+    ///   AS `s` — an unaliased FROM makes PG reject the whole query with
+    ///   42P01 "missing FROM-clause entry for table \"s\"" (the regression
+    ///   this guards: every suggest call 500ing on PG);
     /// - the tenant boundary is a WHERE clause of the index query itself,
     ///   never post-filtered;
-    /// - placeholder numbering is contiguous 1..next, so every referenced
+    /// - placeholder numbering is contiguous, so every referenced
     ///   placeholder is one the caller actually binds.
-    fn assert_scope_composable(base: &str, first_free: usize) {
-        let mut n = first_free;
-        let (frag, _binds) = scope_filter_sql(&scoped_query(), &mut n);
-        let composed = format!("{base}{frag}");
+    #[test]
+    fn scope_clauses_are_s_prefixed_index_query_filters() {
+        let mut w = PgWhereBuilder::new();
+        build_filters(&scoped_query(), &mut w);
+        build_scope(&scoped_query(), &mut w);
+        let sql = w.sql();
         assert!(
-            composed.contains("FROM search_index s"),
-            "base SQL must alias search_index AS `s` (scope fragments reference s.*): {composed}"
+            sql.contains("s.tenant_id = $"),
+            "tenant boundary must be a WHERE clause of the index query: {sql}"
         );
         assert!(
-            composed.contains("AND s.tenant_id = $"),
-            "tenant boundary must be a WHERE clause of the index query: {composed}"
+            sql.contains("s.workspace_id IN ("),
+            "accessible workspaces must restrict inside the query: {sql}"
         );
+        assert!(
+            sql.contains("(s.repo_id = '' OR s.repo_id IN ("),
+            "repo scope must keep repo-less docs inside the query: {sql}"
+        );
+        // Contiguous numbering: the tsquery parameter is reserved first
+        // ($1, referenced from the FROM clause), every WHERE placeholder
+        // follows without gaps or reuse.
+        let n = w.n;
         assert_eq!(
-            placeholders(&composed),
-            (1..n).collect::<Vec<_>>(),
-            "placeholder numbering must be contiguous 1..{n} in: {composed}"
+            placeholders(&sql),
+            (2..=n).collect::<Vec<_>>(),
+            "placeholder numbering must be contiguous 2..={n} in: {sql}"
         );
-    }
-
-    #[test]
-    fn search_base_sql_defines_the_scope_alias() {
-        assert_scope_composable(SEARCH_BASE_SQL, 2);
-    }
-
-    #[test]
-    fn suggest_base_sql_defines_the_scope_alias() {
-        assert_scope_composable(SUGGEST_BASE_SQL, 2);
-    }
-
-    #[test]
-    fn facet_base_sqls_define_the_scope_alias() {
-        assert_scope_composable(FACET_TEXT_BASE_SQL, 2);
-        assert_scope_composable(FACET_BLANK_BASE_SQL, 1);
     }
 
     #[test]
     fn empty_accessible_set_compiles_to_no_rows() {
         let mut q = scoped_query();
         q.accessible_workspace_ids = Some(vec![]);
-        let mut n = 2;
-        let (frag, _) = scope_filter_sql(&q, &mut n);
+        let mut w = PgWhereBuilder::new();
+        build_scope(&q, &mut w);
         assert!(
-            frag.contains(" AND FALSE"),
-            "empty accessible set must yield zero rows by query, got: {frag}"
+            w.sql().contains("FALSE"),
+            "empty accessible set must yield zero rows by query, got: {}",
+            w.sql()
         );
     }
 }
