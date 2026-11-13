@@ -83,16 +83,16 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 
 ## Acceptance Criteria
 
-- [x] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
-- [x] Port traits for both invitation types
-- [x] SQLite adapter with migrations (check current migration number)
-- [x] All 5 tenant invitation API endpoints functional
-- [x] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
-- [x] Token generation uses cryptographically random bytes, stored as SHA-256 hash
-- [x] Invitation expiry background job marks expired invitations
-- [x] Bulk invite endpoint accepts array of invitations
-- [x] Routes registered in `api/mod.rs` with ABAC mappings
-- [x] `cargo test --all` passes
+- [ ] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
+- [ ] Port traits for both invitation types
+- [ ] SQLite adapter with migrations (check current migration number)
+- [ ] All 5 tenant invitation API endpoints functional
+- [ ] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
+- [ ] Token generation uses cryptographically random bytes, stored as SHA-256 hash
+- [ ] Invitation expiry background job marks expired invitations
+- [ ] Bulk invite endpoint accepts array of invitations
+- [ ] Routes registered in `api/mod.rs` with ABAC mappings
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
