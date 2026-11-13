@@ -163,7 +163,8 @@ def main():
     # control-plane calls on the precise CLI token-expiry diagnostic only.
     control = args and args[0] in ('gateway', 'provider', 'profile', 'settings') or create or delete or args[:2] in (['sandbox', 'get'], ['sandbox', 'list'])
     if control:
-        result = invoke(args, capture_output=True, text=True, timeout=600 if create else 180)
+        control_timeout=store.setting('model_timeout',14400) if create else 180
+        result = invoke(args, capture_output=True, text=True, timeout=control_timeout)
         output = result.stdout + result.stderr
         if 'cached OIDC token has expired' in output or 'OIDC token refresh failed' in output:
             previous = os.environ.get('OPENSHELL')
@@ -174,7 +175,7 @@ def main():
                 if previous is None: os.environ.pop('OPENSHELL', None)
                 else: os.environ['OPENSHELL'] = previous
             if result.returncode:
-                result = invoke(args, capture_output=True, text=True, timeout=600 if create else 180)
+                result = invoke(args, capture_output=True, text=True, timeout=control_timeout)
             else:
                 # A successful mutation must never be replayed. Remove only
                 # the CLI's cached-token warning after refreshing future calls.

@@ -311,6 +311,9 @@ if a[:2]==['sandbox','create']:
 elif a[:2]==['sandbox','delete'] and not os.environ.get('HOLD_DELETE'):
  v['pods']=[x for x in v['pods'] if x['name']!=a[2]]
 p.write_text(json.dumps(v))
+if a[:2]==['sandbox','create'] and os.environ.get('HOLD_CREATE'):
+ import time
+ time.sleep(2)
 if a[:2]==['sandbox','exec']:
  import time
  p.with_suffix('.pid').write_text(str(os.getpid()))
@@ -366,6 +369,15 @@ else: print('fixture control operation')
         self.assertEqual(sum(c[:2]==['sandbox','create'] for c in state['calls']),1)
         self.assertEqual(len(state['pods']),1)
         self.assertEqual(self.store.compute_used(),1)
+
+    def test_create_uses_authorized_budget_and_adopts_after_uncertain_timeout(self):
+        self.store.set_setting('model_timeout',1)
+        result=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity',extra={'HOLD_CREATE':'1'})
+        self.assertEqual(result.returncode,75,result.stderr)
+        adopted=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
+        self.assertEqual(adopted.returncode,0,adopted.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        self.assertEqual(sum(c[:2]==['sandbox','create'] for c in calls),1)
 
     def test_streaming_deadline_targets_the_real_cli_without_an_orphan_parent(self):
         process = subprocess.Popen([str(self.shim / 'openshell'), 'sandbox', 'exec',
