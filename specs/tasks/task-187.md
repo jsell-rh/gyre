@@ -5,7 +5,7 @@ depends_on: [task-171, task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
-commits: ["fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df"]
+commits: ["7737e532ffab9166fa2a2310dc472f2de39289df", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "d363ce7d5f4a374530ccde7548bb52b31f242a12"]
 ---
 
 ## Spec Excerpt
@@ -86,9 +86,9 @@ Read `system-explorer.md` §8 "Conversational Exploration" for the full specific
 ## Shipped
 
 Conversational exploration (system-explorer.md §8) as a real question →
-knowledge-graph → grounded-answer pipeline, in commit 7737e532, plus the
-verification repair fa8568c5 (rustfmt + clippy `len_zero` on the new lines;
-no behavior change):
+knowledge-graph → grounded-answer pipeline, in commit 7737e532, plus
+the verification repair fa8568c5 (rustfmt + clippy `len_zero` on the
+new lines; no behavior change) and the review repair d363ce7d:
 
 - **Backend** — new `POST /api/v1/workspaces/:id/explorer-views/ask`
   (`ask_explorer` in `api/explorer_views.rs`): the LLM prompt is grounded
@@ -128,35 +128,54 @@ no behavior change):
   by both the spec-edit prediction flow and the conversational flow.
   Conversation history lives in component state only (not persisted).
 
+### Review repair d363ce7d
+
+The prior round shipped `validate_entity_refs` reducing a well-formed
+token of an unknown kind (e.g. `[entity:unknown:x]`) to its bare id,
+while the unit test asserted literal preservation — the suite failed
+(review a8fa631b; the round had only compile-checked the server tests
+because the 4 GiB sandbox wrapper blocks gyre-server test builds).
+Fix: an unknown kind is not citation grammar the validator governs —
+the token is now preserved verbatim (a diverging match arm), while a
+known kind with an unresolvable id remains a hallucinated citation
+(stripped to bare id, excluded from `entity_refs`). The frontend link
+regex only matches node/spec/commit/agent, so an unknown-kind token
+renders as plain text and can never become an ungrounded clickable
+reference.
+
 ### Test evidence
 
 - `web/src/__tests__/ConversationalExplorer.test.js` (vitest, 6 tests,
   passing in the 7737e532 round): Q&A rendering, per-type entity-ref
   click dispatch, canvas highlight + view-spec application, prediction
   application, follow-up history replay, error surfacing.
-- Server tests in `api/explorer_views.rs` (compile-verified via
-  `cargo check -p gyre-server --all-targets` after the fa8568c5 repair;
-  **execution belongs to the independent verifier** — the 4 GiB sandbox
-  wrapper blocks gyre-server test builds): grounding/citation validation
-  (valid tokens kept, hallucinated stripped, labels resolved), view-spec
-  passthrough vs. invalid-spec drop, prediction trigger against the
-  single-repo scope, prompt grounding (provenance reaches the LLM fully
+- Server tests in `api/explorer_views.rs`: grounding/citation validation
+  (valid tokens kept, hallucinated stripped, unknown-kind and malformed
+  tokens preserved literally, labels resolved), view-spec passthrough
+  vs. invalid-spec drop, prediction trigger against the single-repo
+  scope, prompt grounding (provenance reaches the LLM fully
   substituted), history caps/role rejection, LLM-unavailable 503, plus
   unit tests for `validate_entity_refs` and `short_sha` (char-boundary
-  safe).
+  safe). The d363ce7d repair was verified in this sandbox by a
+  standalone rustc probe executing the exact production
+  `validate_entity_refs` (extracted verbatim from the repair commit)
+  against the exact test — pass, exit 0 — plus a reverted-code
+  differential that fails with exit 101, reproducing the reviewer's
+  finding (evidence: /tmp/stage/review-evidence/
+  task-187-validate-entity-refs-repair.log and probe/). Full server
+  suite execution belongs to the independent verifier — the 4 GiB
+  sandbox wrapper blocks gyre-server test builds.
 - Regression: ExplorerView/ExplorerDefaultViews/GeneratedViewChat
   vitest suites passed in the 7737e532 round (ExplorerDefaultViews
   expected view-selector list extended with the new "Ask the graph…"
   entry); existing `predict_graph` behavior preserved by the extraction
   (same prompt construction, note slot, and response shape).
-- Mechanical checks pass (re-run on the repaired head):
-  `check-rustfmt-diff.py 890a70de` clean, `check-clippy-diff.py 890a70de`
-  clean (900 pre-existing warnings outside the change), plus in the
-  verification round: check-arch, check-abac-route-registry,
-  check-inert-enforcement, check-abac-exempt-handlers,
-  check-mcp-write-tools, check-byte-slice-truncation,
-  check-relative-path-defaults, check-lossy-secret-conversion,
-  check-unbounded-external-http.
+- Mechanical checks pass (prior rounds on this code): rustfmt-diff and
+  clippy-diff clean against the change, plus check-arch,
+  check-abac-route-registry, check-inert-enforcement,
+  check-abac-exempt-handlers, check-mcp-write-tools,
+  check-byte-slice-truncation, check-relative-path-defaults,
+  check-lossy-secret-conversion, check-unbounded-external-http.
 
 ### Verifier must run
 
