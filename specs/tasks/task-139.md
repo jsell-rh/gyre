@@ -3,11 +3,11 @@ title: "Implement forge enforcement policies for spec-to-code binding at merge"
 spec_ref: "agent-gates.md §Forge Enforcement Policies"
 depends_on:
   - task-138
-progress: not-started
+progress: complete
 coverage_sections:
   - "agent-gates.md §Forge Enforcement Policies"
   - "agent-gates.md §Integration with Agent Gates"
-commits: []
+commits: ["533795f2a114e6c11ecb0a8f1d29ddc22eddac19", "d08359f1666233094a5ea0fda89c4bbbb80cde99", "87e2aed4a851148071f0fa3c7b625dcf561730c2", "c92e8f534ef8e9c24ac7228d8d453d472f7e90e7", "33cc4941521a7e94d9742f2f7bb626b18adc4e45", "ec05bf9afe4de6256b57ba977c6e5f63ea7e1fa4", "059586a37a49b184d7a32a47d8c11c59da5702a3", "99edd0bcaddd740a5b560e61ef2937b156d780fb"]
 ---
 
 ## Spec Excerpt
@@ -83,3 +83,67 @@ The `spec-alignment-review` gate type (using Accountability agent persona) is de
 ## Agent Instructions
 
 Read `specs/system/agent-gates.md` §Forge Enforcement Policies and §Integration with Agent Gates. Existing spec policy: check `gyre-server/src/api/spec_policy.rs` and routes at `GET/PUT /api/v1/repos/:id/spec-policy` (registered in `gyre-server/src/api/mod.rs` at line ~171). MR model: `gyre-domain/src/merge_request.rs` or equivalent. Merge processor: grep for `merge_processor\|process_merge` in `gyre-server/src/`. Spec approvals: depends on task-138's ledger. Git SHA comparison: need to resolve current HEAD SHA for a spec file path in the repo. Check migration numbering: currently at 000049.
+
+## Shipped
+
+The DIRTY merge state against current main is resolved: main (`a8bd7d09`,
+task-179 Moldable Views, web-only) is merged in as `af9ea6c13`. Main's
+delta since the previously verified base (`a218b95`) touches only
+`web/src`, `web/dist`, `docs/ui.md`, and `specs/tasks/task-179.md` — no
+`crates/` changes — so the merge conflicts were confined to generated
+`web/dist` assets (resolved to main's dist; the executor restores dist
+from the assignment base and the final integration rebuilds remotely).
+The merged tree's `crates/` sources are byte-identical to the reviewed,
+CI-green published head `2f6a1d0f` (verified: empty
+`git diff af9ea6c13 2f6a1d0f -- crates/`). No task-139 production code
+changed.
+
+### Retained behavior (unchanged by the merge)
+
+- `SpecPolicy` (`gyre-domain/src/spec_policy.rs`) carries all five flags
+  (`require_spec_ref`, `require_approved_spec`, `warn_stale_spec`,
+  `require_current_spec`, `require_signed_approval`), persisted via the
+  portable `require_signed_approval` migration (000059) across
+  SQLite/Postgres/mem stores; defaults false (opt-in); `GET/PUT
+  /api/v1/repos/:id/spec-policy` round-trips all five.
+- The merge processor enforces every policy before executing a merge:
+  missing `spec_ref` rejected; unapproved SHA rejected via the task-138
+  spec-approval ledger (`gates::verify_spec_ref`); unsigned active
+  approval rejected (`gates::verify_signed_spec_ref`, exact path@sha
+  ledger lookup, non-empty signature required); `require_current_spec`
+  rejects when the spec's current blob SHA
+  (`git_refs::resolve_spec_blob_sha`) differs from the referenced SHA.
+- Blocking violations fail the queue entry with the specific reason, emit
+  a `GateFailure` workspace event, and notify the author's spawning user
+  (`notifications::notify_spec_policy_violation`).
+- `warn_stale_spec` warns without blocking: `StaleSpecWarning` event plus
+  a deduplicated advisory MR comment (`forge:spec-policy` author).
+- `MergeRequest.spec_ref` (`path@sha`) pins the reviewed spec version;
+  `GET /api/v1/merge-requests/:id/spec` serves the spec blob at the
+  pinned SHA; `gate_executor` passes `GYRE_SPEC_URL` to gate agents so
+  the spec-alignment review runs against the pinned version, not HEAD.
+
+### Test evidence (merged tree `af9ea6c13`, this round)
+
+- `cargo test -p gyre-domain`: 474 lib + 8 integration tests passed,
+  0 failed.
+- `cargo test -p gyre-adapters --lib spec_policy`:
+  `set_and_get_round_trips_all_five_policies` passes on the merged
+  schema.
+- Mechanical checks on the merged tree (all exit 0):
+  `check-arch.sh`, `check-migration-versions.sh`,
+  `check-abac-route-registry.sh`, `check-mcp-write-tools.sh`,
+  `check-mem-port-contracts.sh`, `check-migration-sql-portability.sh`,
+  `check-inert-enforcement.sh`, `check-dead-message-kinds.sh`,
+  `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`,
+  `check-fail-open-ref-resolution.sh`, `check-forged-scope-fields.sh`,
+  `check-lossy-secret-conversion.sh`, `check-scope-literal-defaults.sh`,
+  `check-fabricated-scope-defaults.sh`,
+  `check-in-memory-state-stores.sh`, `check-unbounded-external-http.sh`,
+  `check-forwarded-header-trust.sh`.
+- For the verifier (gyre-server test compilation owned there per the
+  4 GiB budget): `cargo test -p gyre-server --lib merge_processor::`
+  (in particular `require_current_spec_blocks_stale_spec_ref` and the
+  other `spec_polic`-filtered enforcement tests), plus
+  `cargo test -p gyre-server --lib gates::` for the signed-spec-ref
+  ledger lookups.
