@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["a44ad8886416bd9de4defed02be1ad35cf8eb11e", "188b9f9482edeeb0550990fc15761137eef9dc76", "362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
+commits: ["39ba4fb6968847e2eb226cc5ae6e9e38394f7834", "362807160d14e186ac329eb185fab33754efc6f7", "188b9f9482edeeb0550990fc15761137eef9dc76", "a44ad8886416bd9de4defed02be1ad35cf8eb11e", "ce2418944b06143e1e0d4ea11e3abfd5c10e3bf7"]
 ---
 
 ## Spec Excerpt
@@ -76,9 +76,10 @@ Read `system-explorer.md` §4 "Concept Views" for the full specification. The co
 
 Concept views (system-explorer.md §4) on the task-178 canvas substrate,
 covering all three interaction modes and both data-source mechanisms.
-This round is the rebase repair against current main; no product code
-changed — the previously reviewed implementation was preserved through
-the merge and re-verified on the merged tree.
+This round merged the assignment base `a218b9565` (task-198 Spec Links)
+into the branch; no product code changed — the previously reviewed
+implementation was preserved through the merge and re-verified on the
+merged tree.
 
 ### Behavior
 
@@ -118,41 +119,39 @@ the merge and re-verified on the merged tree.
   flattened to `{scope:{type:'all'}}`. Selecting a saved ad-hoc concept
   from the view selector re-applies the grouping.
 
-### This round: rebase repair onto current main
+### This round: merge of assignment base (task-198)
 
-The published PR conflicted with main (merge_state DIRTY, repair
-category rebase). Resolved by merging main `3b734b1af` (task-168 repo
-lifecycle) into this branch as merge commit `3257e9fb8`: all source
-files merged cleanly — the only conflicted paths were generated
-web/dist assets, resolved to the candidate's verified build (final
-integration rebuilds and publishes those remotely). Verified the
-staged tree against both parents: vs main, the full task-182
-implementation is retained; vs the candidate, only main-side task-168
-changes appear. Both ABAC route-registry and migration-version checks
-pass on the merged tree (the concepts routes resolve; migration 000062
-is not duplicated).
+The assigned repair was a rebase whose auto-merge left one conflict in
+`docs/api-reference.md`, resolved as merge commit `ce2418944`: the
+base-side task-171 wording for `POST /workspaces/{id}/briefing/ask`
+(history cap, rate limit, `llm_query` budget charge) was kept, together
+with this branch's task-182 concept endpoints (workspace concept
+projection and the `/graph/concepts` browser listing). All source paths
+(graph.rs, abac_middleware.rs, explorer-generate.md) auto-merged
+cleanly; the task-198 spec-links code required no adaptation.
 
 ### Test evidence
 
-Focused matrix, run green on the merged tree (HEAD `3257e9fb8`),
-evidence: `/tmp/stage/review-evidence/focused-repair-round3.log`:
+Focused matrix, run green on the merged tree (HEAD `ce2418944`),
+evidence: `/tmp/stage/review-evidence/focused-merge-round.log`:
 
-- `web` vitest: ExplorerConceptViews (8 tests) plus the five other
+- `web` vitest: ExplorerConceptViews (8 tests) plus the other
   merge-affected suites (ExplorerViewNavigableArchitecture,
-  filter-categories, generated-view, view-query-scope, RepoSettings,
-  WorkspaceSettings) — 215 tests passed. ExplorerConceptViews pins the
-  manifest-concept fade against actual canvas draw output, the
-  end-to-end Ask flow, the saved-ad-hoc-concept reload round trip, the
-  multi-select → right-click → dialog → save persistence assert, and
-  dialog validation/error paths.
-- `cargo check -p gyre-server -p gyre-domain -p gyre-common` — clean.
+  filter-categories, generated-view, view-query-scope) — 5 files,
+  74 tests passed. ExplorerConceptViews pins the manifest-concept fade
+  against actual canvas draw output, the end-to-end Ask flow, the
+  saved-ad-hoc-concept reload round trip, the multi-select →
+  right-click → dialog → save persistence assert, and dialog
+  validation/error paths.
+- `cargo check -p gyre-server` — clean.
 - `cargo test -p gyre-common` — 124 pass.
 - `cargo test -p gyre-domain` — 486 pass (478 lib + 8 integration).
 - Mechanical checks (exit 0): check-arch.sh, check-abac-route-registry.sh,
-  check-migration-versions.sh, check-in-memory-state-stores.sh,
-  check-fabricated-scope-defaults.sh.
+  check-migration-versions.sh, check-mem-port-contracts.sh.
 
 Full workspace suites, architecture checks, all-target Clippy, and
 GitHub CI are owned by the independent verifier. Server tests for the
-verifier: `cargo test -p gyre-server graph`, plus full gyre-domain and
-gyre-common suites.
+verifier: `cargo test -p gyre-server graph_concept`,
+`cargo test -p gyre-server workspace_graph_concept`,
+`cargo test -p gyre-server list_graph_concepts`, plus full gyre-domain
+and gyre-common suites.
