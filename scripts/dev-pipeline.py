@@ -43,6 +43,8 @@ def source(store):
         reconcile_generated(store)
         from pipeline.integration import resolve_upstream_assessments
         resolve_upstream_assessments(store,path,revision)
+        from pipeline.recovery_policy import reconcile as recover_holds
+        recover_holds(store)
         store.set_setting('observed_main', revision)
         return revision
 

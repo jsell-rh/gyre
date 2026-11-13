@@ -203,9 +203,11 @@ class FullsendContracts(FullsendFixture):
         self.assertIn('/tmp/stage/findings.log', [item['dest'] for item in harness['host_files']])
 
     def test_actual_checkpoint_publishes_fixture_source_to_bare_remote(self):
+        self.body += '\n## Acceptance Criteria\n\n- [ ] Arithmetic performs real addition.\n'
+        self.store.put_task('task-9999','g',self.body,{})
         _, repo, _ = self.prepare()
         (repo / 'code.py').write_text('def add(a, b):\n    return a + b\n')
-        (repo / 'specs/tasks/task-9999.md').write_text(self.body.replace('not-started','ready-for-review'))
+        (repo / 'specs/tasks/task-9999.md').write_text(self.body.replace('not-started','ready-for-review').replace('- [ ]','- [x]'))
         stage = self.execution.directory / 'bundle'
         job = json.loads((stage / 'job.json').read_text());job['checkout'] = str(repo)
         (stage / 'job.json').write_text(json.dumps(job))
@@ -218,6 +220,9 @@ class FullsendContracts(FullsendFixture):
         receipt = json.loads((stage / 'outcome.json').read_text())
         actual = self.call('git', 'rev-parse', 'refs/heads/' + self.execution.branch, cwd=self.repo).strip()
         self.assertEqual(actual, receipt['head'])
+        published_task=self.call('git','show',actual+':specs/tasks/task-9999.md',cwd=self.repo)
+        self.assertIn('- [ ] Arithmetic performs real addition.',published_task)
+        self.assertNotIn('- [x]',published_task)
         self.assertEqual(receipt['tree'], self.call('git', 'rev-parse', actual + '^{tree}', cwd=self.repo).strip())
         self.assertIn('a + b', self.call('git','show',actual+':code.py',cwd=self.repo))
         self.assertTrue(receipt['published'] and receipt['valid'])
