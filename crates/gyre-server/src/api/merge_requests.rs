@@ -2810,7 +2810,7 @@ mod tests {
         );
 
         // MR without a spec_ref: nothing to serve.
-        let mut mr_no_spec = MergeRequest::new(
+        let mr_no_spec = MergeRequest::new(
             gyre_common::Id::new("mr-no-spec"),
             repo.id.clone(),
             gyre_common::Id::new("ws-1"),

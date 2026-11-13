@@ -8486,12 +8486,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(mr_id),
             repo.id.clone(),
+            Id::new(ws_id),
             format!("MR {mr_id}"),
             "feat/drift",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new(ws_id);
         mr.author_agent_id = Some(agent_id);
         state.merge_requests.create(&mr).await.unwrap();
         mr
@@ -8721,15 +8721,15 @@ mod tests {
         bind_drift_set(&state, ws_id).await;
 
         // No author agent, no attestation anywhere.
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-noatt"),
             repo.id.clone(),
+            Id::new(ws_id),
             "MR no attestation",
             "feat/noatt",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new(ws_id);
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-drift-noatt", 50, 1000).await;
 
@@ -8809,15 +8809,15 @@ mod tests {
         bind_drift_set(&state, ws_a).await;
         create_drift_mr(&state, "mr-drift-starve-head", ws_a, &repo_a, "deadbeef").await;
         enqueue_mr(&state, "mr-drift-starve-head", 100, 1000).await;
-        let mut clean_same_ws = gyre_domain::MergeRequest::new(
+        let clean_same_ws = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-starve-clean"),
             repo_a.id.clone(),
+            Id::new(ws_a),
             "MR clean same workspace",
             "feat/starve-clean",
             "main",
             1000,
         );
-        clean_same_ws.workspace_id = Id::new(ws_a);
         state.merge_requests.create(&clean_same_ws).await.unwrap();
         enqueue_mr(&state, "mr-drift-starve-clean", 50, 1001).await;
         crate::merge_policy::set_merge_policy(
@@ -8833,15 +8833,15 @@ mod tests {
         // Workspace B: clean MR, lowest priority, enqueued last.
         let ws_b = "ws-drift-starve-other";
         let repo_b = create_repo_in_workspace(&state, "repo-drift-starve-other", ws_b).await;
-        let mut clean_other_ws = gyre_domain::MergeRequest::new(
+        let clean_other_ws = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-starve-other"),
             repo_b.id.clone(),
+            Id::new(ws_b),
             "MR clean other workspace",
             "feat/starve-other",
             "main",
             1000,
         );
-        clean_other_ws.workspace_id = Id::new(ws_b);
         state.merge_requests.create(&clean_other_ws).await.unwrap();
         enqueue_mr(&state, "mr-drift-starve-other", 10, 1002).await;
 
@@ -8971,15 +8971,15 @@ mod tests {
         // drift possible), lower priority, enqueued last.
         let ws_b = "ws-drift-group-later";
         let later_repo = create_repo_in_workspace(&state, "repo-drift-group-later", ws_b).await;
-        let mut later_mr = gyre_domain::MergeRequest::new(
+        let later_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-group-later"),
             later_repo.id.clone(),
+            Id::new(ws_b),
             "MR behind a drift-held atomic group",
             "feat/drift-group-later",
             "main",
             1002,
         );
-        later_mr.workspace_id = Id::new(ws_b);
         state.merge_requests.create(&later_mr).await.unwrap();
         enqueue_mr(&state, "mr-drift-group-later", 50, 1002).await;
 
