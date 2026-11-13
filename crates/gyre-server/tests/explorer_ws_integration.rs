@@ -644,6 +644,7 @@ impl LlmPort for ScriptedLlmPort {
         &self,
         _system_prompt: &str,
         _user_prompt: &str,
+        _max_tokens: Option<u32>,
     ) -> anyhow::Result<serde_json::Value> {
         serde_json::from_str(self.responses.first().map(|s| s.as_str()).unwrap_or("{}"))
             .map_err(|e| anyhow::anyhow!("scripted response is not JSON: {e}"))
