@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61", "0dc466e798e554e648c46e608cf88ff91f86276d"]
 ---
 
 ## Spec Excerpt
@@ -145,63 +145,63 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ## Shipped
 
-### Round 4: scope applicability on the evaluation path (commit `35711565`)
+### Round 5: persist decisions on the supervised-trust-hold and push-time paths (commit `0dc466e7`)
 
-The engine, CRUD/dry-run/decisions/effective API, audit integration,
-builtin seeding, caching, the round-1/2 repairs (agent-repo-scope
-containment, `?subject=` binding) and the round-3 repairs (reserved
-system identity, policy-allowed global token) are in the earlier commits
-listed above. Round 4 closes the two remaining review findings:
+The engine, CRUD/dry-run/decisions/effective API, builtin seeding, caching,
+and the round-1 through round-4 repairs (agent-repo-scope containment,
+`?subject=` binding, reserved system identity + policy-allowed global
+token, scope applicability, stale security-model comments) are in the
+earlier commits listed above. Round 5 closes the round-4 review finding
+(360234bd): coverage row 13 claimed `record_decision` on every evaluation
+path, but `evaluate_merge_abac` (the supervised-trust hold) and the
+git_http push-time attestation evaluation only logged — they never
+persisted a PolicyDecision, so the "every evaluation is logged and
+queryable" acceptance criterion was not literally met on those two paths.
 
-**1. Scope applicability (the escalation).** `evaluate` retained
-policies only on `enabled && applies_to(action, resource_type)` —
-`Policy::applies_to` never checks `scope`/`scope_id`, and the middleware
-fed it the entire store, so a ws-A-scoped Allow granted Developers in
-ws-B (and other tenants) and a scoped Deny restricted globally. The fix
-is ONE canonical filter, `policy_engine::scope_applies`, applied inside
-`evaluate` so every caller shares it:
+**Repair (real recording, not a note correction):**
 
-- `scope_id: Some(id)` requires the addressed resource's scope-chain
-  attribute (`resource.repo_id` / `resource.workspace_id` /
-  `resource.tenant_id`, extracted before evaluation per §Evaluation Flow
-  steps 1-4) to be present AND equal — a ws-A policy never applies to a
-  ws-B request, a t-1 policy never governs t-2 resources, and no scope
-  is fabricated when the level is unaddressed;
-- `scope_id: None` means all entities at that level — every seeded
-  builtin (all Tenant/None) stays global.
+- `evaluate_merge_abac` now builds and records a PolicyDecision (subject
+  `merge-processor`/`system`, action `merge`, resource `mr`/MR id) after
+  evaluation. An explicit Deny match (the hold) logs at `warn`, everything
+  else at `debug` — the same log-level contract as the middleware.
+- The git_http push-time attestation evaluation was extracted into
+  `evaluate_push_attestation_abac` (identical attribute context, resource
+  scope chain, and engine call as the inline code it replaces) which
+  records its decision (subject `agent`, action `push`, resource
+  `attestation`/repo id) before the existing info log. The push call site
+  carries the documented `// enforcement:ok` exemption because the gate is
+  audit-only by spec (TASK-006 Phase 1) — decision recorded, never
+  enforced, exactly as at base.
 
-Call-site alignment: `evaluate_merge_abac` drops its private
-workspace-only filter and delegates to the canonical one (its ctx now
-sets `resource.tenant_id`, so tenant-scoped policies are tenant-scoped
-at merge time too); `evaluate_attestation_abac` and the git-http
-push-attestation ctx carry the full resource scope chain (the push path
-resolves the tenant from the repo's workspace, never the caller's
-claim); the dry-run endpoint accepts `resource.tenant_id`; the effective
-endpoint gained optional `workspace_id`/`repo_id`/`tenant_id` params so
-scoped policies can be assessed against a concrete scope.
-
-**2. Stale security-model comments.** `auth.rs` (`jwt_claims` doc) and
-`git_http.rs` (`resolve_repo_by_slug`) claimed the global token/API keys
-"bypass ABAC" — false since round 3 (API keys always evaluate; the
-global token is allowed BY `system-full-access`). Both now state the
-actual behavior, so the comments no longer misdocument the escalation
-surface.
+Four production `record_decision` call sites now exist: middleware
+requests, `evaluate_merge_abac`, `evaluate_attestation_abac`, and
+`evaluate_push_attestation_abac`. Coverage row 13 cites these real sites
+and the tests below.
 
 ### Test evidence
 
-New tests: five engine unit tests (workspace/repo/tenant
-non-applicability, None-means-all/keeps-builtins-global, immutable-Deny
-still overrides an in-scope Allow), two live middleware tests
-(`scoped_workspace_deny_does_not_apply_out_of_scope_live`,
-`scoped_workspace_allow_does_not_escalate_across_workspaces_live` — the
-reviewer's exact repro shape, each asserting both the out-of-scope
-non-effect and the in-scope effect via the decision audit's
-`matched_policy`), and a dry-run API test
-(`evaluate_respects_policy_scope`).
+Two new tests, one per repaired path, each seeding a real matching policy
+(so the record carries a non-default matched policy — a stub persisting a
+hardcoded decision cannot pass) and asserting the persisted decision via
+the same audit-store surface `GET /api/v1/policies/decisions` reads:
 
-In this sandbox `cargo check -p gyre-server` and `cargo check -p
-gyre-server --tests` pass (exit 0, no warnings); gyre-server test
-compilation exceeds the 4 GiB cgroup budget and is delegated to the
-independent verifier — the required probes (focused new tests plus
-abac/policy/merge/git_http regression scopes) are listed in
-`/tmp/stage/review-evidence/round4-scope-applicability.md`.
+- `evaluate_merge_abac_records_decision_to_audit_trail`
+  (merge_processor.rs): seeds an Allow for the merge-processor service
+  identity, asserts the returned EvalResult, then asserts the recorded
+  decision's subject_id/subject_type/action/resource_type/resource_id/
+  decision/matched_policy.
+- `push_attestation_abac_records_decision_to_audit_trail` (git_http.rs):
+  seeds an Allow keyed on `subject.attestation_chain_present`, calls the
+  extracted helper with a real single-root chain, and asserts the same
+  fields on the persisted decision.
+
+Removing either `record_decision` call fails its test
+  (`decisions.len() == 1`). In-sandbox probes: `cargo check -p gyre-server`
+  and `cargo check -p gyre-server --tests` both clean (build wrapper);
+  mechanical checks check-inert-enforcement, check-arch,
+  check-dead-message-kinds, check-mem-port-contracts,
+  check-fabricated-scope-defaults, check-lossy-secret-conversion,
+  check-relative-path-defaults all OK. gyre-server test execution is
+deferred to the independent verifier (4 GiB budget): run
+`cargo test -p gyre-server --lib evaluate_merge_abac_records_decision_to_audit_trail push_attestation_abac_records_decision_to_audit_trail`,
+then the full suite. Evidence: `/tmp/stage/review-evidence/task-129-round5-audit-recording.md`.
