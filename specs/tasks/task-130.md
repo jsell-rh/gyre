@@ -2,7 +2,7 @@
 title: "Implement token scoping: add hierarchy claims to AgentJwtClaims and validate in MCP"
 spec_ref: "platform-model.md §1 Token Scoping"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §Token Scoping"
 commits: ["c709b94ea17612d30a4437e1e8e407256293b2ef", "f3beafe789e921436efa8603d7c6412ebaf84502", "318f1fd0322c68304ae134434f74e57514449d82", "33468526f46ca5eb4dcf4afbd473d9960495ee0e", "25fc7ab37182951b5f63a09498e00f03f966ba35", "d500a34a88be3b0e0a1c967fc82b98d58b34f12b", "371bed863d11d347ac239d99921ea2ef7bed1b37", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0"]
