@@ -191,6 +191,7 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        oidc_issuer -> Nullable<Text>,
         // TASK-099 F1: tenant binding; nullable for legacy OIDC users
         // (the auth extractor fail-closes on unbound users).
         username -> Text,

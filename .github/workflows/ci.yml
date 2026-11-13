@@ -108,6 +108,8 @@ jobs:
         run: bash scripts/check-byte-slice-truncation.sh
       - name: Dead MessageKind lint
         run: bash scripts/check-dead-message-kinds.sh
+      - name: Notification toggle coverage lint
+        run: bash scripts/check-notification-toggle-coverage.sh
       - name: Em-dash check                                                                                                                     
         run: |                                                                                                                                  
           find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  
