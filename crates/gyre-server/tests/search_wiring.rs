@@ -714,6 +714,7 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
             "ws-a",
             Some("repo-1"),
             "repo_orchestrator",
+            "repo-orchestrator",
         )
         .unwrap();
     state
@@ -766,6 +767,7 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
             "ws-a",
             None,
             "workspace_orchestrator",
+            "workspace-orchestrator",
         )
         .unwrap();
     state
