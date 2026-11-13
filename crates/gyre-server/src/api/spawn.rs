@@ -1079,8 +1079,14 @@ pub(crate) async fn spawn_agent_core(
     }
 
     // Auto-track agent spawn (analytics.md §Auto-Emitted Events).
-    // Workers run the `default-worker` persona (agent-runtime.md §Bootstrap);
-    // orchestrators report their tier via the orchestrator spawn path.
+    // The persona property reports the persona actually bound to this
+    // agent (platform-model.md §4.3 resolution of req.persona_slug);
+    // an unbound worker runs the `default-worker` bootstrap persona
+    // (agent-runtime.md §Bootstrap), which is the honest label for None.
+    let persona_label = persona
+        .as_ref()
+        .map(|p| p.slug.clone())
+        .unwrap_or_else(|| "default-worker".to_string());
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.spawned",
@@ -1088,7 +1094,7 @@ pub(crate) async fn spawn_agent_core(
         serde_json::json!({
             "task_id": req.task_id,
             "compute_target": launch.compute_target_label,
-            "persona": "default-worker",
+            "persona": persona_label,
             "orchestrator_type": "worker",
         }),
         now,
@@ -3949,6 +3955,53 @@ mod tests {
                 .as_str()
                 .is_some_and(|p| !p.is_empty()),
             "persona must be a non-empty string"
+        );
+    }
+
+    /// analytics.md §Auto-Emitted Events / §Decision API: the
+    /// `agent.spawned` persona property must report the persona actually
+    /// bound at spawn (platform-model.md §4.3 resolution of
+    /// persona_slug), not a hardcoded bootstrap label — the persona-
+    /// performance decision signals ("Is this agent persona performing
+    /// well?") are keyed on this property. Regression: the emit site
+    /// hardcoded "default-worker" for every spawn.
+    #[tokio::test]
+    async fn spawn_analytics_persona_reports_bound_persona() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, ws_id) = create_workspace(app, "persona-analytics-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Persona analytics").await;
+        let persona_id = seed_spawn_persona(
+            &state,
+            "spec-reviewer",
+            "You are the spec-reviewer persona.",
+        )
+        .await;
+        let (_, spawn_json) = do_spawn_with_persona(
+            app,
+            "worker-persona-analytics",
+            &repo_id,
+            &task_id,
+            "feat/persona-analytics",
+            None,
+            "spec-reviewer",
+        )
+        .await;
+
+        // Sanity: the persona really was bound to the agent row — otherwise
+        // the analytics assertion below could pass vacuously.
+        assert_eq!(spawn_json["agent"]["persona_id"], persona_id);
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        assert_eq!(
+            events[0].properties["persona"], "spec-reviewer",
+            "persona property must report the bound persona's slug, not a hardcoded label"
         );
     }
 

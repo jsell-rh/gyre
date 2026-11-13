@@ -728,6 +728,17 @@ pub(crate) async fn relaunch_agent_session(
         None => None,
     };
 
+    // analytics.md §Auto-Emitted Events: the re-spawn's `agent.spawned`
+    // persona property reports the persona bound to the agent row (the
+    // same persona resolved above), not a hardcoded bootstrap label —
+    // persona-performance decision signals keyed on this property are
+    // garbage otherwise. Captured before `persona` moves into the
+    // launch ctx.
+    let persona_label = persona
+        .as_ref()
+        .map(|p| p.slug.clone())
+        .unwrap_or_else(|| "default-worker".to_string());
+
     let launch = crate::api::spawn::launch_agent_process(
         state,
         &crate::api::spawn::AgentLaunchCtx {
@@ -780,8 +791,8 @@ pub(crate) async fn relaunch_agent_session(
 
     // Auto-track agent spawn (analytics.md §Auto-Emitted Events — a
     // re-spawned session is an agent spawn). Same shape as the first-spawn
-    // event in spawn_agent_core: the worker persona, the launch's resolved
-    // compute target, scoped to the workspace/repo.
+    // event in spawn_agent_core: the persona bound to the agent row, the
+    // launch's resolved compute target, scoped to the workspace/repo.
     let ev = AnalyticsEvent::new(
         Id::new(uuid::Uuid::new_v4().to_string()),
         "agent.spawned",
@@ -789,7 +800,7 @@ pub(crate) async fn relaunch_agent_session(
         serde_json::json!({
             "task_id": task.id.to_string(),
             "compute_target": launch.compute_target_label,
-            "persona": "default-worker",
+            "persona": persona_label,
             "orchestrator_type": "worker",
             "respawn": true,
             "iteration": agent.iteration,
@@ -978,6 +989,22 @@ mod tests {
         std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
         let state = loop_state(None).await; // default ceiling: 10
 
+        // Bind an approved persona to the agent row so the re-spawn's
+        // `agent.spawned` persona property is observable: analytics.md
+        // §Auto-Emitted Events requires the property to report the
+        // persona bound to the agent row, not a hardcoded bootstrap label
+        // (regression: the emit site hardcoded "default-worker").
+        {
+            let mut bound = state
+                .agents
+                .find_by_id(&Id::new("agent-1"))
+                .await
+                .unwrap()
+                .unwrap();
+            bound.persona_id = Some(Id::new("repo-orchestrator-persona"));
+            state.agents.update(&bound).await.unwrap();
+        }
+
         on_gates_failed(&state, &Id::new("mr-1"), &Id::new("agent-1")).await;
 
         let agent = state
@@ -1063,11 +1090,9 @@ mod tests {
                 .is_some_and(|t| !t.is_empty()),
             "compute_target must be a non-empty string"
         );
-        assert!(
-            ev.properties["persona"]
-                .as_str()
-                .is_some_and(|p| !p.is_empty()),
-            "persona must be a non-empty string"
+        assert_eq!(
+            ev.properties["persona"], "repo-orchestrator",
+            "persona property must report the persona bound to the agent row, not a hardcoded label"
         );
         assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
         assert_eq!(ev.repo_id.as_deref(), Some("r-1"));
