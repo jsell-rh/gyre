@@ -200,7 +200,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -223,7 +223,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -253,7 +253,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -646,30 +646,54 @@ pub(crate) async fn spawn_agent_core(
         _ => None,
     };
 
-    // Pre-mint a JWT so it can be injected into the container environment at
-    // spawn time.  After spawn we create the workload attestation record
-    // (stored in state.workload_attestations) which is queryable via
-    // GET /api/v1/agents/{id}/workload.
+    // Pre-mint a JWT carrying the worker's repo scope so `subject.repo_scope`
+    // (§Attributes, source "Agent OIDC claim") is real on every request the
+    // agent makes, plus the `wl_image_hash` workload attestation claim
+    // resolved above. Further workload claims are attached via the workload
+    // attestation record (state.workload_attestations, queryable via
+    // GET /api/v1/agents/{id}/workload).
     let token = state
         .agent_signing_key
-        .mint_with_workload(
+        .mint_worker_scoped(
             &agent.id.to_string(),
             &req.task_id,
             &auth.agent_id,
             &state.base_url,
             jwt_ttl,
+            &repo.workspace_id.to_string(),
+            &req.repo_id,
+            // No persona input exists on the spawn request; workers run
+            // persona-less until a persona assignment mechanism exists.
             None,
-            None,
-            None,
-            None,
-            None,
+            // identity-security.md attestation levels: 1=raw subprocess,
+            // 2=CLI-managed, 3=Gyre-managed container with attestation.
+            // Every spawn-minted JWT carries attestation_level (Task-Scoped
+            // JWT Claims reference): no target (None) is a plain local
+            // subprocess — level 1, not an absent claim. An absent claim
+            // leaves subject.attestation_level unset at ABAC evaluation, so
+            // Deny policies keyed on the least-attested class would
+            // silently miss raw-subprocess agents.
+            Some(
+                resolved_ct_entity
+                    .as_ref()
+                    .map_or(1u8, |ct| match ct.target_type {
+                        ComputeTargetType::Container => 3,
+                        ComputeTargetType::Ssh => 2,
+                        // Kubernetes falls back to 1 until the runtime
+                        // reports workload attestations for pods
+                        // (tracked by task-129).
+                        ComputeTargetType::Kubernetes => 1,
+                    }),
+            ),
             wl_image_hash,
         )
         .unwrap_or_else(|e| {
             tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
             uuid::Uuid::new_v4().to_string()
         });
-    // Store now so the container can authenticate immediately upon start.
+    // Register the token so the spawned agent can authenticate immediately
+    // upon start (auth.rs path 2: agent_tokens lookup; a JWT missing from
+    // this map is treated as revoked — 401 before any handler runs).
     let _ = state
         .kv_store
         .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
@@ -2992,6 +3016,34 @@ mod tests {
         assert_eq!(json["branch"], "feat/build");
         // jj_change_id is present in the response (null when worktree doesn't exist on disk)
         assert!(json.get("jj_change_id").is_some());
+    }
+
+    /// identity-security.md §Task-Scoped JWT Claims: every JWT minted by
+    /// POST /api/v1/agents/spawn carries `attestation_level`. A spawn that
+    /// resolves no compute target is a plain local subprocess and must mint
+    /// level 1 — not omit the claim. An absent claim leaves
+    /// `subject.attestation_level` unset at ABAC evaluation, so Deny policies
+    /// keyed on the least-attested class (e.g. the spec's own
+    /// gate-approved-persona deny on attestation_level < 3) would silently
+    /// miss raw-subprocess agents (fail-open for those denies).
+    #[tokio::test]
+    async fn spawn_without_compute_target_mints_attestation_level_one() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "no-target spawn").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/no-target").await;
+
+        let token = json["token"].as_str().expect("spawn returns a token");
+        let claims = state
+            .agent_signing_key
+            .validate(token, &state.base_url)
+            .expect("spawn token is a valid agent JWT signed by this server");
+        assert_eq!(
+            claims.attestation_level,
+            Some(1),
+            "no-target (local subprocess) spawn must mint attestation_level 1"
+        );
     }
 
     #[tokio::test]
