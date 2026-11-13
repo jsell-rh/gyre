@@ -2,10 +2,10 @@
 title: "Wire meta-spec drift warnings into merge gates"
 spec_ref: "meta-spec-reconciliation.md §9"
 depends_on: [task-156]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["e0a97a8a6f011f8e60817782d75431763c7419e6", "51528a6c51b11f2714bf026c34bc9886d4a93d1d", "2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "04df217adba0528df3e0a54538c793bb9b0ec0e6"]
+commits: ["e0a97a8a6f011f8e60817782d75431763c7419e6", "51528a6c51b11f2714bf026c34bc9886d4a93d1d", "2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "04df217adba0528df3e0a54538c793bb9b0ec0e6", "cdf6908527d0a91af76750181c3dc92e6ce182e7"]
 ---
 
 ## Spec Excerpt
@@ -111,34 +111,49 @@ result into a `meta_spec_drift` node field;
 `web/src/components/MergeQueueGraph.svelte` renders the ⚠ badge with
 tooltip "Meta-spec drift: produced under v{old}, current is v{new}".
 
-### Rebase repair round — merge of assignment base 41f4d56e
+### Rebase repair round — merge of current main 4dc0eb9b (task-139)
 
-The published PR (head 0f9b52c5) conflicted with current main (merge
-state DIRTY). This round resolves the merge against main 41f4d56e: the
-two sides touch disjoint source files, so the retained implementation
-merged cleanly — `reconciliation.rs` drift evaluation,
-`merge_processor.rs` gate wiring, `merge_policy.rs`, `api/workspaces.rs`,
-`merge_deps.rs`, `MergeQueueGraph.svelte` and the coverage matrix §9 row
-(`implemented | task-159`) are intact at the merged head alongside
-main's pipeline/moldable changes. `web/dist` was resolved to the
-assignment-base build (regenerated assets are restored/republished by
-the executor and final integration). The assigned contract above is
-preserved verbatim; the `commits:` frontmatter was re-recorded (the
-restored contract blanked it, failing
+The published PR (head 4eca9f0) conflicted with current main (merge
+state DIRTY). This round merges main 4dc0eb9b (task-139 forge
+enforcement policies) into the branch as merge commit cdf69085. Unlike
+the previous disjoint-file round, both sides touched
+`merge_processor.rs`, `gate_executor.rs`, `abac_middleware.rs` and
+`api/mod.rs`; git auto-merged the source cleanly (conflicts were
+confined to `web/dist` and resolved to the assignment-base build;
+regenerated assets are restored/republished by the executor and final
+integration). Interaction points verified on the merged tree: the task-159
+selection-loop drift hold (`selection_meta_spec_drift_hold`) and the
+task-139 post-selection spec-policy block coexist with correct ordering;
+the new task-139 `MR_SPEC_ROUTE` and the task-159 merge-policy route are
+each registered exactly once in `api/mod.rs` and the ABAC resolver
+(`scripts/check-abac-route-registry.sh` passes); task-139's migration
+`2026-11-09-000059_require_signed_approval` has a unique date-prefixed
+Diesel version (`scripts/check-migration-versions.sh` passes). The
+retained implementation — `reconciliation.rs` drift evaluation,
+`merge_processor.rs` gate wiring, `merge_policy.rs`,
+`api/workspaces.rs`, `merge_deps.rs`, `MergeQueueGraph.svelte` and the
+coverage matrix §9 row (`implemented | task-159`) — is intact at the
+merged head. The assigned contract above is preserved verbatim; the
+`commits:` frontmatter re-records the merge commit (the restored
+contract blanked it, failing
 `scripts/check-task-commit-attribution.sh`).
 
 ### Test evidence
 
 In-sandbox (4 GiB budget), this round on the merged tree (evidence:
 /tmp/stage/review-evidence/task-159-rebase-repair.txt):
-`SKIP_WEB_BUILD=1 cargo check -p gyre-server` passes (6m 14s);
-`npx vitest run src/__tests__/MergeQueueGraph.test.js` — 29/29 pass
-(drift badge + tooltip); full `npm test` — 2245 passed / 41 skipped
-(merge-integration check against main's new web components);
-`scripts/check-arch.sh` and `scripts/check-abac-route-registry.sh` pass.
+`cargo check -p gyre-server` passes (8m 15s, via the build wrapper);
+`cargo check -p gyre-server --tests` passes (3m 40s — both tasks edited
+`merge_processor.rs` including its test module, so the merged test code
+is type-checked); `npx vitest run
+src/__tests__/MergeQueueGraph.test.js` — 29/29 pass (drift badge +
+tooltip); `scripts/check-arch.sh`,
+`scripts/check-abac-route-registry.sh` and
+`scripts/check-migration-versions.sh` pass.
 `cargo test -p gyre-server` is owned by the independent verifier (server
 test compilation exceeds the sandbox budget with the model resident) —
-the verifier must run the recorded server probes:
+the verifier must run the recorded server probes (all test names
+confirmed present in the merged tree):
 
     cargo test -p gyre-server --lib reconciliation::tests::drift_
     cargo test -p gyre-server --lib reconciliation::tests::drift_warning_parse
