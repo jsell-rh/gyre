@@ -140,12 +140,23 @@
       });
     }
 
-    // Deduplicate by index proximity (merge moments within 1 index)
+    // Deduplicate within event type (merge moments of the SAME type within
+    // 1 index). Different-type moments at the same index are BOTH kept: a
+    // reconciliation wave completing right after its tasks land a large
+    // structural delta is the expected collision (reconciliation_completed
+    // fires moments after the code-alignment deltas), and dropping the later
+    // moment made its narrative unreachable — spec §6 requires spec
+    // approvals, milestones, reconciliations AND structural changes to be
+    // marked. Colliding markers stack vertically (markerRows) so each stays
+    // visible and clickable.
     moments.sort((a, b) => a.index - b.index);
     const deduped = [];
+    const lastIndexByType = new Map();
     for (const m of moments) {
-      if (deduped.length > 0 && Math.abs(deduped[deduped.length - 1].index - m.index) < 2) continue;
+      const lastIdx = lastIndexByType.get(m.eventType);
+      if (lastIdx != null && Math.abs(lastIdx - m.index) < 2) continue;
       deduped.push(m);
+      lastIndexByType.set(m.eventType, m.index);
     }
     return deduped;
   });
@@ -208,6 +219,26 @@
     if (ms === null) return 0;
     return timeScale(new Date(ms));
   }
+
+  // Vertical stack row for markers sharing a track position (different-type
+  // key moments at the same timestamp — the expected reconciliation/
+  // structural collision). Row 0 is the track center; each collision adds a
+  // 10px step down so every marker stays visible and clickable instead of
+  // the top dot hiding the ones beneath it.
+  let markerRows = $derived.by(() => {
+    const rows = new Map();
+    const positioned = keyMoments
+      .map((m) => ({ m, left: markerPosition(m) }))
+      .sort((a, b) => a.left - b.left);
+    let prevLeft = null;
+    let row = 0;
+    for (const p of positioned) {
+      row = prevLeft != null && p.left - prevLeft < 1.5 ? row + 1 : 0;
+      rows.set(p.m, row);
+      prevLeft = p.left;
+    }
+    return rows;
+  });
 
   // Event type display properties
   function eventTypeLabel(type) {
@@ -291,7 +322,7 @@
           {#each keyMoments as moment}
             <button
               class="tl-marker"
-              style="left: {markerPosition(moment)}%; background: {eventTypeColor(moment.eventType)}"
+              style="left: {markerPosition(moment)}%; top: calc(50% + {(markerRows.get(moment) ?? 0) * 10}px); background: {eventTypeColor(moment.eventType)}"
               onclick={(e) => handleMarkerClick(moment, e)}
               type="button"
               title="{eventTypeLabel(moment.eventType)} — {formatDate(moment.delta?.timestamp)}"

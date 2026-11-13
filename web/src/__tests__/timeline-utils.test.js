@@ -25,9 +25,13 @@ const CURRENT_EDGES = [
 
 // Historical filtered graph (nodes with first_seen_at <= cutoff=1000)
 // Contains n1, n2 (first_seen_at=500). Does NOT contain n3 (1500) or n4 (2500).
+// n5 (OldTrait) is the shape the SERVER ?at= reconstruction returns: a node
+// soft-deleted after the scrub time is resurrected with its real id (the
+// client-side filter cannot contain it — it is absent from the current graph).
 const HISTORICAL_NODES = [
   { id: 'n1', name: 'Foo', node_type: 'type', qualified_name: 'crate::Foo', first_seen_at: 500, last_modified_sha: 'sha1' },
   { id: 'n2', name: 'Bar', node_type: 'type', qualified_name: 'crate::Bar', first_seen_at: 500, last_modified_sha: 'sha2_old' },
+  { id: 'n5', name: 'OldTrait', node_type: 'trait', qualified_name: 'crate::OldTrait', first_seen_at: 500, last_modified_sha: 'sha5' },
 ];
 
 const HISTORICAL_EDGES = [
@@ -273,8 +277,42 @@ describe('computeTimelineGhostOverlays', () => {
     expect(removeGhosts.length).toBe(1);
     expect(removeGhosts[0].name).toBe('OldTrait');
     expect(removeGhosts[0].type).toBe('trait');
-    expect(removeGhosts[0].id).toBe('removed:crate::OldTrait');
+    expect(removeGhosts[0].id).toBe('n5');
     expect(removeGhosts[0].confidence).toBe('confirmed');
+  });
+
+  it('keys the backward ghost by the historical node\'s real id (F1 regression: canvas layout resolution)', () => {
+    // ExplorerCanvas resolves remove ghosts through layoutNodeMap.get(ghost.id),
+    // keyed by REAL graph node id, and it draws the scrubbed-time graph — so the
+    // ghost is only rendered when its id is the historical node's id. The old
+    // synthetic `removed:<qualified_name>` key never matched a layout node and
+    // the red-dotted strikethrough was dead for every timeline ghost.
+    const overlays = computeTimelineGhostOverlays({
+      graph, timelineFilteredGraph, timeline: TIMELINE, scrubIndex: 1,
+    });
+    const removeGhost = overlays.find(o => o.action === 'remove');
+    expect(removeGhost).toBeTruthy();
+    expect(removeGhost.id).toBe('n5');
+    expect(removeGhost.id).not.toMatch(/^removed:/);
+    // The id must resolve to a node in the historical graph the canvas draws.
+    expect(HISTORICAL_NODES.some(n => n.id === removeGhost.id)).toBe(true);
+  });
+
+  it('falls back to the synthetic id when the removed node is absent from the historical graph', () => {
+    // Client-side fallback filter (server ?at= fetch not landed yet): the
+    // removed node cannot be in the filtered graph because the filter is
+    // derived from the current graph. The ghost keeps the synthetic id — it
+    // still counts toward the delta summary / "− Removed" chip.
+    const fallbackGraph = {
+      nodes: HISTORICAL_NODES.filter(n => n.qualified_name !== 'crate::OldTrait'),
+      edges: HISTORICAL_EDGES,
+    };
+    const overlays = computeTimelineGhostOverlays({
+      graph, timelineFilteredGraph: fallbackGraph, timeline: TIMELINE, scrubIndex: 1,
+    });
+    const removeGhost = overlays.find(o => o.action === 'remove');
+    expect(removeGhost).toBeTruthy();
+    expect(removeGhost.id).toBe('removed:crate::OldTrait');
   });
 
   it('produces modified ghost overlays for nodes changed since scrubber time', () => {

@@ -369,6 +369,107 @@ describe('TimelineScrubber', () => {
     expect(left).toBeLessThan(54);
   });
 
+  // ── Collision fixture (F2 regression) ────────────────────────────────
+  // The index nearest a reconciliation event's created_at holds a
+  // structural-change moment (>5 nodes added). Collision is the EXPECTED
+  // case: a reconciliation wave completes right after its tasks land large
+  // code-alignment deltas. The old index-proximity dedupe dropped the later
+  // moment (the reconciliation), making its narrative unreachable.
+  const COLLISION_TIMELINE = [
+    { id: 'c1', repo_id: 'r1', commit_sha: 'aa1', timestamp: NOW_TS - 86400 * 30, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'c2', repo_id: 'r1', commit_sha: 'bb2', timestamp: NOW_TS - 86400 * 20, spec_ref: null, agent_id: null, delta_json: null },
+    {
+      id: 'c3', repo_id: 'r1', commit_sha: 'cc3', timestamp: NOW_TS - 86400 * 10, spec_ref: null, agent_id: null,
+      delta_json: JSON.stringify({
+        nodes_added: [
+          { name: 'S1', node_type: 'type', qualified_name: 'x.S1' },
+          { name: 'S2', node_type: 'type', qualified_name: 'x.S2' },
+          { name: 'S3', node_type: 'type', qualified_name: 'x.S3' },
+          { name: 'S4', node_type: 'type', qualified_name: 'x.S4' },
+          { name: 'S5', node_type: 'type', qualified_name: 'x.S5' },
+          { name: 'S6', node_type: 'type', qualified_name: 'x.S6' },
+          { name: 'S7', node_type: 'type', qualified_name: 'x.S7' },
+          { name: 'S8', node_type: 'type', qualified_name: 'x.S8' },
+        ],
+      }),
+    },
+    { id: 'c4', repo_id: 'r1', commit_sha: 'dd4', timestamp: NOW_TS - 86400 * 5, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'c5', repo_id: 'r1', commit_sha: 'ee5', timestamp: NOW_TS, spec_ref: null, agent_id: null, delta_json: null },
+  ];
+  // Reconciliation completes at the same instant the structural delta lands.
+  const COLLISION_RECONCILIATION_EVENTS = [
+    {
+      id: 'mc1',
+      kind: 'reconciliation_completed',
+      created_at: (NOW_TS - 86400 * 10) * 1000,
+      payload: {
+        workspace_id: 'ws1',
+        wave_started_at: NOW_TS - 86400 * 11,
+        task_count: 7,
+        duration_secs: 86400,
+        specs: [{ name: 'architect', version: 4 }],
+      },
+    },
+  ];
+
+  it('renders BOTH markers when a reconciliation event collides with a structural change (F2 regression)', () => {
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: COLLISION_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: COLLISION_RECONCILIATION_EVENTS }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    // The structural-change moment AND the reconciliation moment both render;
+    // the old dedupe discarded the reconciliation marker here.
+    expect(markers.length).toBe(2);
+    const backgrounds = Array.from(markers).map((m) => m.style.background);
+    // Structural change marker (amber #f59e0b)
+    expect(backgrounds).toContain('rgb(245, 158, 11)');
+    // Reconciliation marker (purple #a855f7) — previously dropped
+    expect(backgrounds).toContain('rgb(168, 85, 247)');
+    // Same track position → stacked vertically so both stay clickable
+    const tops = Array.from(markers).map((m) => m.style.top);
+    expect(new Set(tops).size).toBe(2);
+  });
+
+  it('reconciliation narrative is reachable when colliding with a structural moment', async () => {
+    const onMarkerClick = vi.fn();
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: COLLISION_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: COLLISION_RECONCILIATION_EVENTS, onMarkerClick }
+    });
+    const markers = Array.from(container.querySelectorAll('.tl-marker'));
+    expect(markers.length).toBe(2);
+    // Click the reconciliation marker (purple) — under the old dedupe it
+    // never rendered, so this click and the narrative below were unreachable.
+    const reconMarker = markers.find((m) => m.style.background === 'rgb(168, 85, 247)');
+    expect(reconMarker).toBeTruthy();
+    await fireEvent.click(reconMarker);
+    expect(onMarkerClick).toHaveBeenCalledTimes(1);
+    const passedDelta = onMarkerClick.mock.calls[0][0];
+    expect(passedDelta.narrative).toContain('7 tasks');
+    expect(passedDelta.narrative).toContain('architect v4');
+    // Popover shows the narrative ("Click key moment → delta panel shows what
+    // changed and why", system-explorer.md §6)
+    const popover = container.querySelector('.tl-popover');
+    expect(popover).toBeTruthy();
+    expect(popover.textContent).toContain('Reconciliation wave complete: 7 tasks aligned code with architect v4 (1d).');
+  });
+
+  it('still dedupes same-type moments within 1 index', () => {
+    // Two reconciliation events landing at the same timeline index render as
+    // ONE marker (the within-type merge the dedupe exists for).
+    const twoWaves = [
+      ...COLLISION_RECONCILIATION_EVENTS,
+      { ...COLLISION_RECONCILIATION_EVENTS[0], id: 'mc2', created_at: (NOW_TS - 86400 * 10) * 1000 + 2000, payload: { workspace_id: 'ws1', wave_started_at: NOW_TS - 86400 * 11, task_count: 3, duration_secs: 3600, specs: [{ name: 'architect', version: 5 }] } },
+    ];
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: COLLISION_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: twoWaves }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    // One structural + ONE reconciliation (two same-type waves merged)
+    expect(markers.length).toBe(2);
+    const reconMarkers = Array.from(markers).filter((m) => m.style.background === 'rgb(168, 85, 247)');
+    expect(reconMarkers.length).toBe(1);
+  });
+
   it('reconciliation marker click shows the narrative in the popover and calls onMarkerClick', async () => {
     const onMarkerClick = vi.fn();
     const { container } = render(TimelineScrubber, {

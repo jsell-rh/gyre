@@ -170,10 +170,27 @@ export function computeTimelineGhostOverlays({ graph, timelineFilteredGraph, tim
   // Backward ghosts: removed since scrubber time (red strikethrough)
   // Use ArchitecturalDelta records to find nodes removed after the scrubber position,
   // since removed nodes are absent from graph.nodes and cannot be found by set subtraction.
+  //
+  // Id keying: the canvas draws the scrubbed-time graph (ExplorerView passes
+  // timelineFilteredGraph to ExplorerCanvas), and its ghost renderer resolves
+  // remove ghosts through layoutNodeMap.get(ghost.id) — keyed by REAL graph
+  // node id. The server's ?at= reconstruction resurrects soft-deleted nodes
+  // with their original ids, so a remove ghost for a node present in the
+  // historical graph MUST carry that node's real id or the red-dotted
+  // strikethrough never draws (the synthetic `removed:<qn>` id resolves
+  // nothing). The synthetic id remains only as a fallback for the
+  // client-side filter graph, which cannot contain the removed node.
+  const historicalByQualifiedName = new Map();
+  for (const h of timelineFilteredGraph.nodes) {
+    if (h.qualified_name && !historicalByQualifiedName.has(h.qualified_name)) {
+      historicalByQualifiedName.set(h.qualified_name, h);
+    }
+  }
   const removedNodes = extractRemovedNodesFromDeltas(timeline, scrubIndex, currentQualifiedNames);
   for (const rn of removedNodes) {
+    const histNode = historicalByQualifiedName.get(rn.qualified_name);
     overlays.push({
-      id: `removed:${rn.qualified_name}`,
+      id: histNode?.id ?? `removed:${rn.qualified_name}`,
       name: rn.name,
       type: rn.node_type ?? 'type',
       action: 'remove',
