@@ -1064,20 +1064,26 @@ async fn emit_budget_warn_tier(
                 )
                 .await;
         }
+        // Workspace-feed copy of the warning: the bus event is driven by
+        // the utilization crossing, not by whether the crossing report
+        // was agent-attributed — an unattributed crossing (user-initiated
+        // query, budget change) must still emit the documented workspace
+        // event. `agent_id` attributes the crossing when a reporter exists.
+        let mut feed_payload = serde_json::json!({
+            "workspace_id": workspace_id,
+            "usage_pct": (pct * 100.0).round(),
+        });
         if let Some(agent_id) = trigger_agent {
-            state
-                .emit_event(
-                    Some(workspace.clone()),
-                    gyre_common::Destination::Workspace(workspace.clone()),
-                    gyre_common::MessageKind::BudgetWarning,
-                    Some(serde_json::json!({
-                        "agent_id": agent_id.as_str(),
-                        "workspace_id": workspace_id,
-                        "usage_pct": (pct * 100.0).round(),
-                    })),
-                )
-                .await;
+            feed_payload["agent_id"] = serde_json::json!(agent_id.as_str());
         }
+        state
+            .emit_event(
+                Some(workspace.clone()),
+                gyre_common::Destination::Workspace(workspace.clone()),
+                gyre_common::MessageKind::BudgetWarning,
+                Some(feed_payload),
+            )
+            .await;
     }
 }
 
@@ -1412,9 +1418,16 @@ async fn save_enforcement_marker(state: &AppState, key: &str, marker: &Enforceme
 /// daily limit, High — needs attention soon) and `AgentBudgetExhausted`
 /// (≥ 100%, Urgent — work is stopped until the period resets).
 ///
-/// Recipients follow the spec's "Who Gets Notified" table: the agent's
-/// spawning user plus workspace Admins (warning) / the workspace Owner
-/// (exhausted). Emitted at most once per user per budget period via
+/// Recipients follow the spec's "Who Gets Notified" table: the spawning
+/// users of the affected agents plus workspace Admins (warning) / the
+/// workspace Owner (exhausted). The affected agents are the workspace's
+/// *active* agents — the population enforcement acts on — so a spawner
+/// whose agent is warned or stopped by budget enforcement is notified
+/// even when the crossing report is unattributed (a user-initiated query)
+/// or was filed by a different agent; the reporting agent's spawner is
+/// included explicitly (the reporter may have completed — Idle — by the
+/// time enforcement runs, but its spawner still triggered the crossing).
+/// Emitted at most once per user per budget period via
 /// `has_active_notification` so repeated usage reports within the same
 /// period do not spam the inbox. Returns the number of notifications
 /// newly created (0 when every recipient was already notified — the
@@ -1455,8 +1468,9 @@ async fn notify_budget_level(
         )
     };
 
-    // Recipients: the agent's spawning user (when the usage is
-    // agent-attributed) plus workspace Admins (warning) / Owner (exhausted).
+    // Recipients: the spawning users of the affected agents (the active
+    // workspace agents the enforcement acts on, plus the reporting agent)
+    // and workspace Admins (warning) / Owner (exhausted).
     let mut recipients: Vec<gyre_common::Id> = Vec::new();
     if let Some(agent_id) = agent_id {
         if let Ok(Some(agent)) = state.agents.find_by_id(agent_id).await {
@@ -1464,6 +1478,14 @@ async fn notify_budget_level(
                 recipients.push(gyre_common::Id::new(spawned_by));
             }
         }
+    }
+    if let Ok(agents) = state.agents.list_by_workspace(workspace_id).await {
+        recipients.extend(
+            agents
+                .into_iter()
+                .filter(|a| a.status == gyre_domain::AgentStatus::Active)
+                .filter_map(|a| a.spawned_by.map(gyre_common::Id::new)),
+        );
     }
     if let Ok(members) = state
         .workspace_memberships
