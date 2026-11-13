@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "2e15aff8db42ccb204636a307a4f6550dd03a030"]
+commits: ["5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "2e15aff8db42ccb204636a307a4f6550dd03a030", "a640c67f3a0cca0ac8f4d231b05689cf99328381"]
 ---
 
 ## Spec Excerpt
@@ -123,42 +123,45 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 HSI §12 profile gaps (notification filtering, judgment ledger, auth
 provider info) are implemented in production code across the commits
-listed in the frontmatter. This round repairs the single verification
-failure on the merged head (main ccfd4bc5 + retained task-209
-implementation).
+listed in the frontmatter. This round repairs the CI Clippy failure on
+the PR merge head.
 
-### This round: verification repair (E0061 compile error)
+### This round: CI repair (Clippy E0061 on the merge ref)
 
-The verification run against candidate 2465305b failed with
-`crates/gyre-server/src/merge_processor.rs:9374: E0061: this method
-takes 8 arguments but 7 arguments were supplied` — the in-module test
-`author_notification_names_missing_sigstore_signature` still used the
-pre-task-209 7-argument `notifications.list_for_user` form after the
-main merge. Fixed in 5065605d by passing the explicit empty exclude
-list (`&[]`), which the port doc specifies for surfaces that must see
-every notification regardless of the recipient's toggles (this test
-asserts delivery of a Sigstore violation notification).
+CI run 43395891760 (Clippy) failed at PR head 002881ad. The Clippy job
+runs `scripts/check-clippy-diff.py HEAD^1` on the PR merge ref — the
+merge of the PR head into main 4ec1e526. Main's task-122 team-routing
+work added two in-module test call sites in
+`crates/gyre-server/src/api/specs_assist.rs`
+(`save_spec_notifies_team_members_from_manifest_approvers`) using the
+pre-task-209 7-argument `NotificationRepository::list_for_user` form;
+task-209 added the `exclude_types` parameter to that port (HSI §12
+notification preference filtering). The semantic merge conflict failed
+compilation with E0061. Fixed in a640c67f by passing the explicit
+empty exclude list (`&[]`) at both call sites — the port doc specifies
+`&[]` for surfaces that must see every notification regardless of the
+recipient's toggles, and these tests assert delivery of the
+SpecApprovalRequested card to team members.
 
-Verified on the repaired tree (exit codes and output retained under
+Verified locally on the repaired merge tree (evidence under
 /tmp/stage/review-evidence/):
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` → exit 0
-  (type-checks the server crate and all in-module test bodies; this
-  was the failing step in verification)
-- `cargo test -p gyre-adapters --lib user_profile` → 12 passed, 0 failed
-- `cargo test -p gyre-adapters --lib audit` → 15 passed, 0 failed
-- `rustfmt --check` on the changed file → clean
+- `SKIP_WEB_BUILD=1 cargo clippy --all-targets --all-features --
+  -W clippy::all` (the CI invocation, full workspace) → exit 0, no
+  errors or warnings on changed lines
+- `python3 scripts/check-clippy-diff.py 4ec1e526` (exact CI gate
+  against the merge-ref base) → "changed lines clean (42 Rust files)"
+- `python3 scripts/check-rustfmt-diff.py 4ec1e526` → clean
+- `bash scripts/check-arch.sh` → exit 0;
+  `GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh` → exit 0
 
-Server tests the independent verifier must execute (large server test
-compilation is deferred to the verifier per the 4 GiB budget):
-`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib`, notably
-`trust_transition_writes_trust_change_audit_event`,
-`human_approval_on_failed_gate_writes_gate_override_event`,
-`disabled_preference_excludes_type_from_inbox_and_count`,
-`get_me_returns_recorded_auth_provider_info`,
-`publish_writes_meta_spec_publish_audit_event`, and the in-module
-`/users/me/judgments?type=` probes in specs.rs/meta_specs.rs; then the
-full gates `cargo test --all` and `cd web && npm ci && npm test`.
+Server tests the independent verifier must execute (server test
+compilation is deferred to the verifier per the 4 GiB budget; clippy
+--all-targets already type-checked every test body on this tree):
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib
+specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers`
+(the two repaired call sites), then the full gates
+`SKIP_WEB_BUILD=1 cargo test --all` and `cd web && npm ci && npm test`.
 
 ### Implementation (intact on this branch)
 
