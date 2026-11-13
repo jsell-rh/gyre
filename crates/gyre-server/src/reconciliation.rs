@@ -1887,7 +1887,7 @@ async fn notify_drift_members(
         );
         notif.source.entity_type = "workspace".to_string();
         notif.source.entity_id = ws.id.to_string();
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
                 user = %member.user_id,
                 error = %e,
@@ -3564,6 +3564,7 @@ mod tests {
                 Some(6),
                 Some(6),
                 None,
+                None,
                 10,
                 0,
             )
@@ -4091,6 +4092,7 @@ mod tests {
                 Some(&ws.id),
                 Some(6),
                 Some(6),
+                None,
                 None,
                 10,
                 0,
