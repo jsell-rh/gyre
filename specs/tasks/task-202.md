@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["3e5f747b95b46e48c02e9431c8126dfe833e1d31", "1f80f64f4fa013634d38e985b271fb20d4a09a1a", "b316bc37f64c6f032c563b9e590a823ee8a626e4", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9", "2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: ["5acae62c9"]
 ---
 
 ## Spec Excerpt
@@ -70,61 +70,61 @@ indexed with real content and the specced indexed fields and facets, and
 domain storage. The production implementation is commits `80f13a70`/
 `309fc7dd` (plus review/verification repairs `3e223c8a`, `e2583917`,
 `2faf26af2`, `3dc6cdcc5`, `b522dd5cd`, `b316bc37f`, rebase repairs
-`f38e8ad07`/`1f80f64f4`, clippy repair `3e5f747b9`). This round
-(`9f8461dd2`) resolves the rebase against assignment base `3b734b1af`,
-whose lineage had evolved `SearchPort` with §Access Scoping semantics
-(tenant-scoped documents/queries; `suggest`/`facet_counts` carrying the
-caller's resolved scope) that the task-202 candidate predated.
+`f38e8ad07`/`1f80f64f4`, clippy repair `3e5f747b9`, rebase onto assignment
+base `a218b956` in merge `babb77f7c`). This round (`5acae62c9`) repairs
+review findings from checkpoint `5fe0f18c`.
 
 ### Behavior
 
 - Spec: indexed on push from the pushed git blob (`index_repo_specs`),
   with ledger-sourced title/owner/approval_status/links facets; commit:
-  message/author read from the git object store on the post-receive path;
-  file/code search: `search_code_index` `JobRegistry` job walks the
-  default-branch tree, skipping binary (NUL-sniffed) and >1 MiB blobs;
-  task/mr/agent/persona/review/activity-event/audit-event: indexed on
-  every repository write via the `search_sync` decorators plus handler
-  and emit-path calls, with the full specced facet maps.
-- `reindex_all` (server coordinator) clears the index through the port,
-  then rebuilds every type from the domain repositories and git object
-  store, returning the true document count.
+  indexed on push from `git show` (`index_pushed_commit`); persona,
+  activity event, audit event, review: indexed on their write paths via
+  `search_sync` repository decorators and handler callsites; file (code
+  search): indexed asynchronously on push via the `JobRegistry` job
+  `search_code_index` (binary and >1 MiB blobs skipped, real content
+  indexed). Every write path funnels through the document builders in
+  `crates/gyre-server/src/search_indexer.rs`, so builder fields are the
+  single source of truth for every index path.
+- `reindex_all` (search_indexer.rs) clears the index then rebuilds from
+  every entity repository (spec ledger + git blobs, tasks, MRs + reviews,
+  agents, personas, analytics, audit, agent-commit mappings + git
+  messages, default-branch file trees) and returns the true document
+  count. `POST /api/v1/admin/search/reindex` invokes this coordinator.
 
-### Rebase resolution (this round)
+### This round: review-finding repairs (checkpoint 5fe0f18c)
 
-- Handler conflicts (tasks/agents/merge_requests): kept the task-202
-  `search_indexer` document builders (full specced facets) over the
-  base's partial inline `search_scope::index_doc` documents.
-- Port-shape adaptation: document builders carry `tenant_id` (unset);
-  the new `search_scope::with_tenant_resolution` port decorator resolves
-  a document's tenant from the workspace's real scope row at index time,
-  uniformly for every index path (handlers, decorators, jobs, reindex) —
-  mem mode has no workspace table to derive it from, and per-callsite
-  resolution was the fragile pattern `search_sync` exists to avoid.
-  Wired in both `build_state` and the mem test states.
-- `postgres/search.rs` test module: both merged test sets kept (PK
-  reconciliation + §Access Scoping query composition) — all referenced
-  helpers exist in the merged implementation.
+Both findings were specced Indexed Fields implemented as filter-only
+facets (or missing entirely), which `GET /api/v1/search` — it has no
+facet-value filter params — could neither search nor filter:
+
+- **Agent persona** (was never indexed): `Agent.persona_id` is now folded
+  into the document body and carried as a `persona` facet, so
+  `?q=<persona-id>` returns the agent.
+- **Commit author/branch, review decision/reviewer, spec owner,
+  activity/audit event agent_id**: all folded into the document body
+  (the MR-author pattern), keeping their facets for filtering.
 
 ### Test evidence
 
-- Local (this sandbox): `cargo check --workspace --all-targets` clean;
-  `cargo clippy -p gyre-server -p gyre-adapters --all-targets` — no
-  findings in touched files (remaining warnings are pre-existing
-  tool-version noise in untouched files); `cargo test -p gyre-adapters
-  --lib search` — 30/30 pass (both merged postgres test sets, SQLite
-  FTS5 incl. §Access Scoping); `bash scripts/check-arch.sh` and all
-  invariant check scripts pass (migration versions, ABAC registry,
-  mem-port contracts, attribution after restoring the commits list).
-- The build wrapper defers gyre-server test compilation to the
-  independent verifier (4 GiB budget). Required probes:
-  `cargo test -p gyre-server --lib search_indexer search_scope
-  search_sync`, `cargo test -p gyre-server --lib api::tasks`,
-  `cargo test -p gyre-server --test search_wiring`,
-  `cargo test -p gyre-server --test git_integration`, then the full
-  `cargo test --all`. The `search_indexer` suite is the acceptance test:
-  it seeds all 10 entity types against a real SQLite FTS5 backend,
-  poisons the index with a stale doc, and asserts each type is
-  retrievable (spec-by-body-content, commit-by-message) after a rebuild
-  that drops the stale doc; it fails if any type is skipped or reindex
-  counts stale docs.
+- `search_indexer::tests::full_reindex_rebuilds_all_entity_types_from_real_storage`
+  seeds all 10 entity types against a real SQLite FTS5 backend, poisons
+  the index with a stale doc, and asserts the true rebuild count (12),
+  idempotency, stale-doc removal, and per-type retrieval — including
+  spec-by-body-content, commit-by-message, and now agent-by-persona,
+  commit-by-author/branch, review-by-decision/reviewer, spec-by-owner,
+  and event-by-agent_id (each seeded so the value appears nowhere else
+  in the document, so the assertion fails on the pre-fix builders).
+- Push-path and code-search tests: `index_repo_specs_extracts_blob_content_from_pushed_commit`,
+  `index_repo_specs_indexes_linked_ids_from_ledger`,
+  `index_pushed_commit_reads_message_and_author`,
+  `file_indexing_skips_binary_and_oversized_blobs`.
+- Executed in this sandbox: `cargo check -p gyre-server --lib --tests`,
+  `cargo clippy -p gyre-server --lib --tests` (no warnings in changed
+  files), `cargo test -p gyre-adapters --lib sqlite::search` (13 passed
+  — FTS semantics the new assertions rely on: AND-of-terms, porter
+  stemming), `cargo fmt -p gyre-server -- --check` (clean). gyre-server
+  test compilation exceeds this sandbox's 4 GiB budget (build-wrapper
+  refusal, recorded for remote verification); the verifier must run:
+  `cargo test -p gyre-server --lib search_indexer::`,
+  `cargo test --all`, and `bash scripts/check-arch.sh`.
