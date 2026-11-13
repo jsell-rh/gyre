@@ -216,12 +216,21 @@ request") — previously only denials logged.
 
 All 8 endpoints were already registered with ABAC route mappings; the CRUD
 guards (built-in update/delete refusal, reserved `trust:`/`builtin:`
-prefixes) were verified. `/policies/effective` was hollow — it built a
-context from a bare `subject.id`, which can never match the role-keyed
-builtin allows, so every real user got "deny everything". It now loads the
-subject's real attributes from the user/membership/team stores (agent
-subjects resolve their type; unknown subjects fall back to id-only with
-other conditions failing closed).
+prefixes) were verified. Two gaps closed:
+
+- **"Create policy (Admin only)" was not enforced**: a Developer's blanket
+  write Allow (developer-write-access, 800) reached the policy resource, so
+  any Developer could create/update/delete policies — mutating the
+  authorization surface itself. A seeded `builtin:policy-admin-only` Deny
+  (860, non-Admin, write/delete on `policy`) now blocks it, live-verified
+  by `policy_management_is_admin_only_live` (Developer 403, Admin passes;
+  reads and the dry-run `evaluate` action stay role-permitted).
+- **`/policies/effective` was hollow**: it built a context from a bare
+  `subject.id`, which can never match the role-keyed builtin allows, so
+  every real user got "deny everything". It now loads the subject's real
+  attributes from the user/membership/team stores (agent subjects resolve
+  their type; unknown subjects fall back to id-only with other conditions
+  failing closed).
 
 ### Test evidence
 
@@ -239,15 +248,16 @@ other conditions failing closed).
   `api::policies::`, `gate_executor::`, `merge_processor::`,
   `api::workspaces::`, then `cargo test --all`. The full probe list is
   recorded in `/tmp/stage/review-evidence/task-129-evidence.md`.
-- **New tests**: 4 live end-to-end builtin enforcement tests in
+- **New tests**: 5 live end-to-end builtin enforcement tests in
   abac_middleware (each new Deny enforced by the seeded set alone, no custom
   policies; the tenant-isolation test also proves the global token passes
-  via system-full-access 1000 > 950), a seed-table test asserting all 7 rows
-  with flags and the delete guard, 6 engine-level composition tests for the
-  new builtins (including fail-closed-on-missing-attribute), the latency
-  benchmark, and 5 cache behavior tests (read-through, per-scope keys,
-  mutation invalidation, explicit out-of-band invalidation, passthrough
-  lookups).
+  via system-full-access 1000 > 950; the policy-management test proves
+  "Create policy (Admin only)" — Developer 403, Admin passes), a seed-table
+  test asserting all 7 rows with flags and the delete guard, 6 engine-level
+  composition tests for the new builtins (including
+  fail-closed-on-missing-attribute), the latency benchmark, and 5 cache
+  behavior tests (read-through, per-scope keys, mutation invalidation,
+  explicit out-of-band invalidation, passthrough lookups).
 - **Existing tests updated, not weakened**: now that tenant-isolation and
   workspace-membership-required enforce by default, the middleware test
   fixtures that intentionally accessed t-1 entities from a default-tenant

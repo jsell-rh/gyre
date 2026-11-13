@@ -1313,6 +1313,37 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Priority 860: Policy management is Admin-only (§API: "Create
+        // policy (Admin only)"). The create/update/delete handlers on
+        // /api/v1/policies mutate the authorization surface itself, so a
+        // Developer's blanket write Allow (developer-write-access, 800)
+        // must not reach them — same pattern as builtin:secret-admin-only.
+        // Reads (list/get/decisions/effective) and the dry-run `evaluate`
+        // action stay role-permitted.
+        Policy {
+            id: Id::new("builtin-policy-admin-only"),
+            name: "builtin:policy-admin-only".to_string(),
+            description:
+                "Policy management (create/update/delete) is restricted to the Admin role"
+                    .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 860,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::NotEquals,
+                value: ConditionValue::String("Admin".to_string()),
+            }],
+            actions: vec!["write".to_string(), "delete".to_string()],
+            resource_types: vec!["policy".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Priority 800: Developer role → allow read + write + agent actions.
         Policy {
             id: Id::new("builtin-developer-write-access"),
@@ -6591,6 +6622,87 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "the seeded persona-human-approval builtin must deny agent persona approvals"
+        );
+    }
+
+    /// `builtin:policy-admin-only` (§API "Create policy (Admin only)"):
+    /// a Developer JWT POSTing /api/v1/policies is denied by the seeded
+    /// builtin — the blanket developer write Allow (800) must not reach the
+    /// authorization surface itself. An Admin JWT passes through to the
+    /// handler.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn policy_management_is_admin_only_live() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::post;
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/policies", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let developer_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-pol-sub",
+                "preferred_username": "dev-pol",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("Authorization", format!("Bearer {developer_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "policy creation must be Admin-only (§API): a Developer's blanket write Allow \
+             (800) must not reach the policy resource"
+        );
+
+        let admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "admin-pol-sub",
+                "preferred_username": "admin-pol",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("Authorization", format!("Bearer {admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Admin role must pass through to the policy create handler"
         );
     }
 }
