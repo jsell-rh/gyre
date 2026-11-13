@@ -658,8 +658,7 @@ pub async fn create_mirror_repo(
                     let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     // §API > Notifications: broadcasting wrapper so import
                     // notifications reach live stream subscribers.
-                    let divergence_notifications =
-                        state_for_extract.broadcasting_notifications();
+                    let divergence_notifications = state_for_extract.broadcasting_notifications();
                     let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
                         notification_repo: &divergence_notifications,
                         membership_repo: state_for_extract.workspace_memberships.as_ref(),

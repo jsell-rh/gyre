@@ -2545,9 +2545,12 @@ mod tests {
         let msg = rx.try_recv().expect(
             "push-check notification must be broadcast to the SSE channel, not only persisted",
         );
-        let notif: gyre_common::Notification =
-            serde_json::from_str(&msg).expect("broadcast payload must be serialized Notification JSON");
-        assert_eq!(notif.notification_type, NotificationType::SpecAssertionFailure);
+        let notif: gyre_common::Notification = serde_json::from_str(&msg)
+            .expect("broadcast payload must be serialized Notification JSON");
+        assert_eq!(
+            notif.notification_type,
+            NotificationType::SpecAssertionFailure
+        );
         assert_eq!(notif.user_id.as_str(), "user-dev");
         assert_eq!(notif.workspace_id.as_str(), "ws-1");
         assert_eq!(

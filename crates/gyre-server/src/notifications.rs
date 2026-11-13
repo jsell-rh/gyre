@@ -630,7 +630,12 @@ impl NotificationRepository for BroadcastingNotificationRepo {
         self.inner.dismiss(id, user_id).await
     }
 
-    async fn resolve(&self, id: &Id, user_id: &Id, action_taken: Option<&str>) -> anyhow::Result<()> {
+    async fn resolve(
+        &self,
+        id: &Id,
+        user_id: &Id,
+        action_taken: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.inner.resolve(id, user_id, action_taken).await
     }
 
@@ -638,7 +643,11 @@ impl NotificationRepository for BroadcastingNotificationRepo {
         self.inner.mark_read(id, user_id, read).await
     }
 
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> anyhow::Result<u64> {
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+    ) -> anyhow::Result<u64> {
         self.inner.count_unresolved(user_id, workspace_id).await
     }
 
