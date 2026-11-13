@@ -288,19 +288,22 @@ pub async fn admin_audit(
 /// clean up interrogation state, and release the budget active-agent slot
 /// when the agent held one.
 ///
-/// Shared kill path for the admin kill handler and budget enforcement
-/// (platform-model.md §5 Enforcement Behavior) — the kill/decrement/notify
-/// sequence must not be forked per caller.
+/// Kill path for the admin kill route. Budget enforcement uses its own
+/// `budget_stop_agent` (api/budget.rs) with materially different terminal
+/// semantics mandated by agent-runtime.md §4 / platform-model.md §5:
+/// status `Stopped` (not Dead — the run is recoverable), task left
+/// InProgress (not Blocked), worktree preserved, compute minutes charged.
+/// The two paths are deliberately distinct; do not funnel budget stops
+/// through this admin-terminal helper.
 ///
-/// `preserve_worktree`: budget kills preserve the agent's in-progress work
-/// (worktree, branch, partial MR) for reassignment; admin kills clean up.
+/// `preserve_worktree`: preserve the agent's in-progress work (worktree,
+/// branch, partial MR); admin kills clean up.
 ///
 /// `killed_by`: identity attributed in the `AgentKilled` audit event (the
-/// admin's user/agent id on admin kills, "budget_enforcement" on budget
-/// kills).
+/// admin's user/agent id on admin kills).
 ///
 /// `revoke_reason`: short cause tag recorded on the `AgentTokenRevoked`
-/// audit event ("admin_kill" / "budget_kill").
+/// audit event ("admin_kill").
 pub(crate) async fn kill_agent(
     state: &AppState,
     agent: &gyre_domain::Agent,
@@ -456,6 +459,12 @@ pub async fn admin_kill_agent(
             }
         }
     }
+
+    // The kill ended the run — charge the wall-clock compute minutes
+    // (spawn → kill, agent-runtime.md §4 What's Tracked). The budget
+    // active-agent slot is already released inside `kill_agent` (exactly
+    // once — only an Active agent ever held one).
+    crate::api::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

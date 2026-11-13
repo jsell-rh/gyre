@@ -7902,6 +7902,7 @@ mod tests {
                     scope: "workspace".to_string(),
                 },
             ],
+            rendered_prompt: None,
         };
         crate::prompt_assembly::store_prompt_set_record(&state, &record).await;
 
