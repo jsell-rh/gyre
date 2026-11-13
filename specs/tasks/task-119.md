@@ -11,7 +11,7 @@ coverage_sections:
   - "agent-runtime.md §What's Tracked"
   - "agent-runtime.md §Budget Reset"
   - "agent-runtime.md §5. Agent Prompt Structure"
-commits: ["199e47c4a6db536f0c1a729e76cb6becbfac0803", "d00113b22ab971ea5b5586e6e4841e0ab68f162e", "dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5"]
+commits: ["199e47c4a6db536f0c1a729e76cb6becbfac0803", "d00113b22ab971ea5b5586e6e4841e0ab68f162e", "dc09d6950d1df2d7498448e66642908a747c4b0a", "29d1a9618ee5181319aacccb704397b88242d3c7", "bfb2dc3dec94916312b1688752ce6401b06dc9c0", "7bdc6060362e759c303d4890302c9c0181a78091", "4bfdf85b8c1f992f0aa604c753d5277ab0a739b5", "af627d03a43a12ffede27b8bee37a5feaa0748f6"]
 ---
 
 ## Spec Excerpt
@@ -113,50 +113,66 @@ Structure) are implemented in production code:
 - **Cascade validation** (repo ≤ workspace ≤ tenant, effective-limit
   semantics; repo `max_agents` ≤ workspace `max_agents_per_repo`,
   spawn-time enforcement with scheduler queuing).
-- **Enforcement levels**: 80% BudgetWarning notification (priority 7)
-  + bus event; 100% BudgetExhausted-to-inbox + 60s grace timer then
-  kill; beyond-limit immediate kill. Worktree preserved, task stays
+- **Enforcement levels**: 80% BudgetWarning notification + bus event;
+  100% BudgetExhausted-to-inbox + 60s grace timer then kill;
+  beyond-limit immediate kill. Worktree preserved, task stays
   InProgress, token revoked, AgentKilled audit.
-- **Tracking**: llm_tokens/llm_cost_usd per cred-proxy call,
-  compute_minutes charged on every terminal transition from
-  spawned_at wall clock, llm_query charged to workspace only.
+- **Tracking**: llm_tokens/llm_cost_usd per cred-proxy call (see the
+  reporting repair below), compute_minutes charged on every terminal
+  transition from spawned_at wall clock, llm_query charged to
+  workspace only.
 - **Budget reset**: hourly rolling-24h job recomputed from per-call
   records (budget_calls port + SQLite/Postgres adapters).
 - **Prompt structure (§5)**: three-section assembly at spawn
   (GYRE_META_SPEC_PROMPT/SET_SHA + GYRE_PROTOCOL_PROMPT +
-  GYRE_ITERATION) and four MCP prompts (system://persona, ://protocol,
-  ://context, ://constraints) delivering the assembled content;
-  system://persona serves the pinned meta-spec set verbatim from the
-  spawn-time record, never the protocol section.
+  GYRE_ITERATION) and four MCP prompts (system://persona,
+  ://protocol, ://context, ://constraints) delivering the assembled
+  content; system://persona serves the pinned meta-spec set verbatim
+  from the spawn-time record, never the protocol section.
 
-### This round — verification-gate repair (commit 199e47c4)
+### This round — cred-proxy usage reporting + merge repairs (commit af627d03a)
 
-The `cargo test --all` verification gate failed on exactly one test:
-`api::spawn::tests::mcp_persona_prompt_serves_meta_spec_section_only`
-(assertion 404 ≠ 200). Root cause: the test posted to `/mcp` on an app
-built from `api_router()`, but `/mcp` is registered on the full server
-router (`build_router`, lib.rs) — the request 404'd at the routing
-layer before reaching the MCP dispatcher. Fixed by routing the
-`prompts/get` call through `build_router` over the same shared
-`AppState` (fixture calls stay on the bare api_router app; the spawned
-agent's JWT is stored in the shared kv `agent_tokens` store, so the
-`AuthenticatedAgent` extractor resolves it and the persona record
-stored at spawn is served).
+Review b8330483e finding 1: the §4 "What's Tracked" reporting
+mechanism had no production caller — cred-proxy.mjs never POSTed
+usage, so the enforcement cascade never fired for agent LLM usage.
+Fixed in `docker/gyre-agent/cred-proxy.mjs`: after every proxied LLM
+call whose response carries a usage block (JSON or buffered SSE, with
+cumulative `message_delta` output tokens), the proxy POSTs
+`{tokens_input, tokens_output, cost_usd}` to
+`POST $GYRE_SERVER_URL/api/v1/agents/$GYRE_AGENT_ID/usage` with the
+agent's Bearer token. Cost comes from a model-specific pricing table
+(`GYRE_PRICING_JSON` override). Reports are best-effort and
+latency-bounded (10 s) — a failed report never fails the LLM call.
+Supporting fixes: `GYRE_ANTHROPIC_BASE` upstream override; gyre-server
+Bearer injection takes precedence over upstream key injection;
+`GYRE_CRED_ALLOWED_HOSTS` read at startup (previously scrubbed before
+the per-request read could see it — dead configuration);
+`GYRE_CRED_SOCK_PATH` socket override. Five integration tests run the
+real proxy child against a fake Anthropic upstream and a fake gyre
+server (`docker/gyre-agent` `npm test`, 17/17 pass in-sandbox).
+
+The merge of base 44a01390 into this branch left two semantic
+conflicts that broke compilation; both repaired in the same commit:
+`MemBudgetCallRepository::list_since` used unqualified
+`BudgetCallRecord` (mem.rs), and six `api::budget.rs` test
+initializers lacked main's new `prompt_template_sha` field
+(task-171).
 
 ### Test evidence
 
-- `cargo check -p gyre-server --lib --tests` — clean at this round's
-  head (sandbox blocks gyre-server test compilation under the 4 GiB
-  budget; evidence: /tmp/stage/review-evidence/).
-- All mechanical gate scripts pass at this head (arch, ABAC route
-  registry, exempt handlers, MCP write tools, migrations, dead message
-  kinds, byte-slice, relative paths, fail-open refs, mem port
-  contracts, fabricated scope defaults, lossy secrets, scope literals,
-  inert enforcement, forwarded headers, in-memory stores, unbounded
-  HTTP, migration portability, forged scope fields).
-- Verifier must execute (server tests blocked in sandbox):
-  `cargo test --all` and, focused,
-  `cargo test -p gyre-server --lib api::spawn::tests::mcp_persona_prompt_serves_meta_spec_section_only`.
-- Prior rounds' focused tests (budget cascade, thresholds, grace kill,
-  compute minutes, rolling window, prompt assembly) are unchanged and
-  passed the last full gate run (1862 passed / 1 failed → this fix).
+- `npm test` in `docker/gyre-agent` — 17/17 pass, exit 0 (includes
+  the five new usage-reporting integration tests). Log:
+  `/tmp/stage/review-evidence/gyre-agent-npm-test.log`.
+- `cargo check -p gyre-server --lib --tests` and
+  `cargo check --workspace --all-targets` — clean, exit 0, at this
+  round's head (evidence:
+  `/tmp/stage/review-evidence/cargo-check-and-verifier-tests.md`).
+- Verifier must execute (gyre-server test compilation blocked in
+  sandbox under the 4 GiB budget): `cargo test --all`; focused
+  `cargo test -p gyre-server --lib api::budget::tests` (task-119
+  enforcement suite; also proves the prompt_template_sha merge
+  repair compiles+passes) and `cargo test -p gyre-server --lib
+  api::spawn::tests::mcp_persona_prompt_serves_meta_spec_section_only`
+  (commit 199e47c4a repair; the prior full-suite failure at candidate
+  8a7571754, durable finding a3663ce1, has zero recorded executions
+  since the fix).
