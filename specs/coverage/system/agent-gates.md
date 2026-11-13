@@ -1,8 +1,8 @@
 # Coverage: Agents as Gates & Spec-to-Code Binding
 
 **Spec:** [`system/agent-gates.md`](../../system/agent-gates.md)
-**Last audited:** 2026-04-13
-**Coverage:** 0/25 (9 n/a)
+**Last audited:** 2026-04-13 (row 23 marked implemented 2026-04-14 by task-145 on commit `f4b7f151` — validation tests for every attack/drift row: `tests/spec_enforcement.rs` (real surfaces: REST policy config, real git blob SHAs, `run_once` merge cycle, spec approval ledger, ABAC `builtin:require-human-spec-approval` deny + human control, real `agent_review` gate process reviewing against the pinned SHA) plus merge-level unit tests for `require_spec_ref`/`require_approved_spec`; independent verification pending — server test binaries exceed the sandbox build budget, probes recorded in specs/tasks/task-145.md. Remaining rows: task-134–task-144.)
+**Coverage:** 1/25 (9 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -28,6 +28,6 @@
 | 20 | The Provenance Chain | 3 | task-assigned | task-138 | 9-step chain from spec authoring through merge. |
 | 21 | Spec Approval Ledger | 3 | task-assigned | task-138 | spec_approvals table, ApprovalStatus enum, transitions. |
 | 22 | Forge Enforcement Policies | 3 | task-assigned | task-139 | 5 policies: require_spec_ref, require_approved_spec, etc. |
-| 23 | What This Prevents | 3 | task-assigned | task-145 | Attack/drift prevention — validation tests for enforcement. |
+| 23 | What This Prevents | 3 | implemented | task-145 | Validation tests for every attack/drift row: `tests/spec_enforcement.rs` drives the real surfaces (REST policy config, real git blob SHAs, `run_once` merge cycle, spec approval ledger, ABAC middleware incl. `builtin:require-human-spec-approval` deny + human control) plus merge-level unit tests for `require_spec_ref` and `require_approved_spec`. Commit `f4b7f151`. |
 | 24 | Integration with Agent Gates | 3 | task-assigned | task-139 | Spec-alignment-review gate with accountability persona. |
 | 25 | Relationship to Existing Specs | 2 | n/a | - | Cross-reference section — no implementable requirement. |
