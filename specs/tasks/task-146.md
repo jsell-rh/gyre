@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092"]
 ---
 
 ## Spec Excerpt
@@ -117,9 +117,6 @@ pub struct AnalyticsEvent {
   10_000), `group_by` — implemented on SQLite, Postgres, and mem
   adapters. The sqlite adapter test `analytics_query_filtered_all_params`
   asserts each scope filter individually.
-
-### Review repairs carried by this branch
-
 - Caller-bound identity: `record_event` derives `agent_id`/`user_id`
   from the verified caller and validates `workspace_id`/`repo_id`
   against the caller's tenant (cross-tenant Forbidden, unknown
@@ -129,43 +126,60 @@ pub struct AnalyticsEvent {
   gate-failure close, `agent.failed` via a shared `record_agent_failed`
   helper on every agent-death path, `task.status_changed` on re-open
   and iteration-ceiling paths.
-- The rebase onto base f98b179 composed both search scoping behaviors:
-  the base's caller-scope narrowing of returned documents AND this
-  task's tenant-level `workspace_id` validation of the persisted
-  analytics attribution.
 
-### Merge repair: base 3b734b1af (round 24b2d851a)
+### Persona attribution repair (round 5fb9e9b83)
 
-- The base merge collided Diesel versions: task-168's
-  `2026-10-08-000062_gate_position` vs this branch's
-  `2026-10-08-000062_analytics_scope_columns` — only one migration runs
-  per version, so fresh databases silently lost `analytics_events.user_id`
-  (adapters analytics tests failed with "no such column"). Renumbered to
-  `2026-10-08-000063_analytics_scope_columns` (content unchanged);
-  `check-migration-versions.sh` and
-  `check-migration-sql-portability.sh` pass.
-- Completed the base's QualityGate fixture merge in merge_processor.rs
-  tests: the auto-merge added the new `position` field to four test
-  initializers but missed the gate-failure-selection fixture (E0063).
+- `agent.spawned`'s spec-required `persona` property reports the
+  persona actually bound at spawn instead of a hardcoded
+  "default-worker": `spawn_agent_core` reports the slug resolved from
+  `req.persona_slug` (platform-model.md §4.3 chain), and the ralph-loop
+  re-spawn reports the persona bound to the agent row (resolved from
+  `agent.persona_id`, fail-closed on non-Approved). An unbound worker
+  keeps the honest `default-worker` bootstrap label
+  (agent-runtime.md §Bootstrap). The orchestrator spawn path derives
+  its persona label from `orchestrator_type` and is unchanged.
+- Tests: `spawn_analytics_persona_reports_bound_persona` spawns with an
+  approved `persona_slug` and asserts the recorded slug (with the bound
+  `persona_id` asserted first so the analytics assertion cannot pass
+  vacuously); `gate_failure_respawns_agent_with_fresh_context` binds an
+  approved persona to the re-spawned agent and asserts the recorded
+  slug instead of the previous non-empty-string check.
+
+### Merge repairs carried by this branch
+
+- Base 3b734b1af (round 24b2d851a): the base merge collided Diesel
+  versions — task-168's `2026-10-08-000062_gate_position` vs this
+  branch's `2026-10-08-000062_analytics_scope_columns` — renumbered to
+  `000063` (content unchanged); completed the base's QualityGate
+  fixture merge in merge_processor.rs tests (gate-failure-selection
+  fixture, E0063).
+- Base f98b179 (round 8b7d7ee8a): composed the base's caller-scope
+  narrowing of returned search documents AND this task's tenant-level
+  `workspace_id` validation of the persisted analytics attribution.
+- Base a218b956 (round 5fb9e9b83): union of the `gyre_ports` import
+  list in mem.rs (dropping `BudgetCallRepository` from the top-level
+  import — the merged body uses the fully-qualified path);
+  specs/coverage/SUMMARY.md regenerated mechanically via
+  `scripts/update-coverage-summary.sh`.
 
 ### Test evidence
 
-- In-sandbox (head 24b2d851a): `cargo test -p gyre-domain --lib
-  analytics` — 3 passed; `cargo test -p gyre-adapters --lib analytics`
-  — 13 passed; `cargo test -p gyre-adapters --lib sqlite::tests` — 9
-  passed (migration guards incl.
-  `no_duplicate_migration_version_prefixes` and
-  `migrations_create_previously_shadowed_columns`);
-  `cargo check -p gyre-server --tests` — clean. Gate-suite diff vs base
-  3b734b1af: only `check-task-commit-attribution.sh` differed (fixed by
-  this round's frontmatter rebuild); the other script failures are
-  identical on the base and owned by verification.
+- In-sandbox (head 5fb9e9b83): `cargo check -p gyre-server --tests` —
+  clean, no warnings. Earlier rounds (head 24b2d851a):
+  `cargo test -p gyre-domain --lib analytics` — 3 passed;
+  `cargo test -p gyre-adapters --lib analytics` — 13 passed;
+  `cargo test -p gyre-adapters --lib sqlite::tests` — 9 passed
+  (migration guards incl. `no_duplicate_migration_version_prefixes` and
+  `migrations_create_previously_shadowed_columns`).
 - Server test binaries exceed this sandbox's 4 GiB build budget — the
   independent verifier must run: `cargo test -p gyre-server --lib
-  api::analytics`, `api::search`, `ralph_loop`, `api::agents`,
+  api::spawn::tests::spawn_analytics_persona_reports_bound_persona`,
+  `ralph_loop::tests::gate_failure_respawns_agent_with_fresh_context`,
+  `api::analytics`, `api::search`, `ralph_loop`, `api::agents`,
   `signal_chain`, `api::orchestrator`, `api::spawn`, `api::budget`,
   `api::specs`, `api::merge_requests`, `merge_processor`,
   `gate_executor`, `api::tasks`, `api::mcp`, `stale_agents`,
   `--test search_wiring`, `--test api_integration analytics`, plus the
   full `cargo test --all` workspace suite and `scripts/check-*.sh`
-  gates owned by verification.
+  gates owned by verification. Evidence:
+  /tmp/stage/review-evidence/task-146-persona-repair.log.
