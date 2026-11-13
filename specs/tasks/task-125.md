@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §Teams"
   - "user-management.md §Notifications"
-commits: ["bc0d0eac099f133695f07aeb09b3ccb22d72afac"]
+commits: ["e4af712a72e9e8618f126f691df3e060bed26da6", "bc0d0eac099f133695f07aeb09b3ccb22d72afac"]
 ---
 
 ## Spec Excerpt
@@ -89,10 +89,11 @@ Read `specs/system/user-management.md` §API > Teams and §API > Notifications. 
 
 ## Shipped
 
-Production fix: commit `bc0d0eac` (feat(task-125)). The assigned task body above is left
-byte-identical to the assigned contract, including the unchecked acceptance
-criteria — per the contract-repair finding, checking those boxes is a normative
-change reserved for the independent reviewer.
+Production work: commit `bc0d0eac` (feat(task-125)) plus repair commit `e4af712a`
+(fix(task-125), verification-finding repair). The assigned task body above is
+left byte-identical to the assigned contract, including the unchecked
+acceptance criteria — checking those boxes is a normative change reserved for
+the independent reviewer.
 
 ### Teams (§API > Teams) — audit only, no code needed
 
@@ -107,54 +108,60 @@ members limited to workspace members. Covered by task-122's test suite
 (team_crud_slug_lead_and_membership_flow, team_routes_are_workspace_scoped,
 team_management_requires_owner_admin_or_tenant_admin, …).
 
-### Notifications (§API > Notifications) — new spec-path surface
+### Notifications (§API > Notifications) — spec-path surface
 
 - `GET /api/v1/notifications` — caller-scoped listing, limit/offset pagination,
-  filters: `?type=`, `?priority=` (case-insensitive; widens to its HSI §8 rank
-  band via `NotificationPriority::rank_band`/`from_level_str` in gyre-common;
-  unknown level → 400), `?workspace_id=`, `?repo_id=` (pushed down through
-  `NotificationRepository::list_for_user` into SQLite, PostgreSQL, and mem —
-  real storage filtering, not handler post-filtering), plus pre-existing
+  filters `?type=`, `?priority=` (case-insensitive; widens to its HSI §8 rank
+  band via `NotificationPriority::rank_band`/`from_level_str`; unknown level →
+  400), `?workspace_id=`, `?repo_id=` — pushed down through
+  `NotificationRepository::list_for_user` into SQLite, PostgreSQL, and mem
+  (real storage filtering, not handler post-filtering), plus pre-existing
   `?min_priority=&max_priority=` rank filters. Legacy
   `/users/me/notifications` shares the same implementation.
 - `GET /api/v1/notifications/unread-count` — new `count_unread` port method
   (SQLite/PG/mem): active (unresolved, undismissed) AND unread rows; optional
-  `?workspace_id=`. The legacy unresolved-count badge endpoint is unchanged.
-- `PUT /api/v1/notifications/{id}/read` — spec method registered on the existing
+  `?workspace_id=`.
+- `PUT /api/v1/notifications/{id}/read` — spec method on the existing
   per-handler-auth mark-read handler (POST kept for pre-existing callers).
 - `POST /api/v1/notifications/mark-all-read` — new `mark_all_read` port method
   (SQLite/PG/mem): stamps `read_at` on every unread row owned by the caller;
-  optional `?workspace_id=` narrows the sweep; returns `{marked: n}`. After the
-  sweep `unread-count` is deterministically zero.
+  optional `?workspace_id=` narrows the sweep; returns `{marked: n}`.
 - `GET/PUT /api/v1/notifications/preferences` — spec path bound to the existing
   HSI §12 preference handlers (same per-user scoping).
 - `GET /api/v1/notifications/stream` — real-time SSE. `AppState::
   create_notification` is the single fan-out point: persist via the repository,
-  then broadcast. All ~30 production emitters (notifications.rs helpers,
-  git_http, signal_chain, constraint_check, spec_patrol, reconciliation,
-  impersonation, specs_assist, secret_rotation, mcp, abandoned_branch,
-  workspace_ownership, prompt_assembly, trust_suggestion, spec_link_staleness,
-  lib.rs) route through it. The stream handler filters every event against the
-caller — user id AND `auth.tenant_id` match, optional `?workspace_id=` — before
-  the wire, with a 30 s poll heartbeat and axum keep-alive (same pattern as
-  `/api/v1/audit/stream`). Broadcast is fire-and-forget so a lagged or absent
-  subscriber can never fail a persist.
+  then broadcast; every production emitter routes through it. The stream
+  filters each event against the caller (user id AND `auth.tenant_id`, optional
+  `?workspace_id=`) before the wire, with a 30 s heartbeat (same pattern as
+  `/api/v1/audit/stream`). Broadcast is fire-and-forget so a lagged subscriber
+  can never fail a persist.
 
-All new routes are registered in `api/mod.rs` with
-`RouteResourceMapping::exempt` entries in `abac_middleware.rs` (per-handler
-auth, same model as every existing notification route); no exemption-file
-entries were added. `docs/api-reference.md` documents the new endpoints.
+All new routes are registered in `api/mod.rs` with `RouteResourceMapping::exempt`
+entries in `abac_middleware.rs` (per-handler auth, same model as every existing
+notification route); no exemption-file entries were added.
+`docs/api-reference.md` documents the new endpoints.
+
+### This round's repair (commit `e4af712a`)
+
+The prior verification run failed its changed-lines clippy gate on exactly one
+finding: `api/users.rs:2164: clippy::let_and_return` — the seed closure in
+`spec_path_unread_count_and_mark_all_read` bound `Notification::new(...)` to a
+local only to return it. The repair returns the constructor call directly; no
+behavior change. Because the task-128 ABAC-engine merge
+(`276918d2` → merge `a3b25d8a`) landed between the failing run and this
+checkout, the merge-sensitive mechanical gates were re-run on the repaired
+head: ABAC route registry, ABAC exempt-handler per-handler auth (79 handlers),
+and architecture lint — all pass post-merge.
 
 ### Test evidence
 
-Server tests are deferred to the independent verifier (gyre-server test
-codegen is blocked by the 4 GiB build wrapper in this stage). New server
-tests: `spec_path_notifications_list_with_filters`,
+New server tests (in `bc0d0eac`): `spec_path_notifications_list_with_filters`,
 `spec_path_unread_count_and_mark_all_read`, `put_read_is_the_spec_method`,
 `spec_path_preferences_roundtrip`,
 `notification_stream_delivers_own_notifications_only` (SSE delivery +
-cross-user/cross-tenant filtering before the wire). Required verifier
-commands:
+cross-user/cross-tenant filtering before the wire). Server test codegen is
+blocked by the 4 GiB build wrapper in this stage; the independent verifier
+must execute:
 
 ```
 SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::users
@@ -162,21 +169,8 @@ SKIP_WEB_BUILD=1 cargo test -p gyre-server --all
 SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --all-targets
 ```
 
-Re-verified on this round's checkout (HEAD == reviewed candidate 5114498f,
-working tree differs only in this task document):
-
-- `cargo test -p gyre-common notification` — 9 passed (incl.
-  `rank_band_is_inverse_of_from_rank_and_level_str_parses`).
-- `cargo test -p gyre-adapters notification` — 9 passed against real SQLite
-  (incl. `count_unread_and_mark_all_read_scope_semantics`,
-  `list_for_user_filters_by_repo`).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean.
-- All mechanical repo gates pass: arch, ABAC route registry (no growth), ABAC
-  exempt-handler per-handler auth (79 handlers), mem port contracts, dead
-  message kinds, in-memory state stores, unbounded HTTP, inert enforcement,
-  MCP write gates, byte-slice, relative-path, fail-open refs, fabricated
-  scopes (lookup + construction), lossy secrets, forwarded headers, forged
-  scope fields, migration versions/portability; task-commit-attribution passes
-  with `bc0d0eac` recorded in the frontmatter above.
-
-Evidence retained under /tmp/stage/review-evidence/probes.md.
+Focused probes re-run on this checkout: `cargo test -p gyre-common
+notification` (9 passed, incl. rank-band round-trip) and `cargo test -p
+gyre-adapters notification` (9 passed against real SQLite, incl.
+`count_unread_and_mark_all_read_scope_semantics`, `list_for_user_filters_by_repo`).
+Evidence under /tmp/stage/review-evidence/.
