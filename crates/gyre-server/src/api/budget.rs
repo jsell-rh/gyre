@@ -1934,6 +1934,7 @@ mod tests {
                 output_tokens: 0,
                 cost_usd: 0.0,
                 model: "test-model".to_string(),
+                prompt_template_sha: None,
             },
         )
         .await;
@@ -2071,6 +2072,7 @@ mod tests {
                 output_tokens: 0,
                 cost_usd: 0.0,
                 model: "test-model".to_string(),
+                prompt_template_sha: None,
             },
         )
         .await;
@@ -2181,6 +2183,7 @@ mod tests {
                 output_tokens: 30,
                 cost_usd: 0.01,
                 model: "test-model".to_string(),
+                prompt_template_sha: None,
             },
         )
         .await;
@@ -2373,6 +2376,7 @@ mod tests {
             output_tokens: 0,
             cost_usd: 0.0,
             model: "m".to_string(),
+            prompt_template_sha: None,
             timestamp: ts,
         };
         // One record 25h old (expired), one 2h old (in window).
@@ -2449,6 +2453,7 @@ mod tests {
             output_tokens: 0,
             cost_usd: 0.0,
             model: "m".to_string(),
+            prompt_template_sha: None,
         };
         // Agent reports 900 tokens (agent_run: repo + workspace).
         super::record_llm_call_usage(&state, &mk_usage("agent_run", 900)).await;
@@ -2509,6 +2514,7 @@ mod tests {
                 output_tokens: 400,
                 cost_usd: 0.10,
                 model: "m".to_string(),
+                prompt_template_sha: None,
             },
         )
         .await;

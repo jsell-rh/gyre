@@ -3052,9 +3052,13 @@ impl gyre_ports::BudgetCallRepository for MemBudgetCallRepository {
         Ok(records)
     }
 
-    async fn list_since(&self, since: u64, limit: i64) -> Result<Vec<BudgetCallRecord>> {
+    async fn list_since(
+        &self,
+        since: u64,
+        limit: i64,
+    ) -> Result<Vec<gyre_domain::BudgetCallRecord>> {
         let store = self.store.lock().await;
-        let mut records: Vec<BudgetCallRecord> = store
+        let mut records: Vec<gyre_domain::BudgetCallRecord> = store
             .iter()
             .filter(|r| r.timestamp >= since)
             .cloned()
