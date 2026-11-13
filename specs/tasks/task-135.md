@@ -3,11 +3,11 @@ title: "Implement gate chain configuration and gate agent lifecycle"
 spec_ref: "agent-gates.md §Gate Chains"
 depends_on:
   - task-134
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: ["9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -99,50 +99,3 @@ From §Gate Agent Lifecycle:
 ## Agent Instructions
 
 Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Existing merge processor: grep for `merge_processor\|merge_queue` in `gyre-server/src/`. Gate storage: `gyre-server/src/api/gates.rs`. Merge queue: `gyre-server/src/api/merge_queue.rs`. Agent spawn: `gyre-server/src/api/spawn.rs`. The key integration point is the merge processor's gate evaluation loop — find where it currently checks TestCommand/LintCommand gates and extend it to handle AgentReview gates. Check migration numbering: currently at 000049.
-
-## Shipped
-
-Both coverage sections are implemented in production code and were
-independently approved in prior rounds; this round resolved the fresh
-rebase conflict against main (task-128's ABAC policy engine).
-
-### Behavior
-
-- **Gate chains:** repos configure an ordered list of mixed gate types
-  (TestCommand, LintCommand, AgentReview, AgentValidation,
-  RequiredApprovals) with per-gate `required` flags and type-specific
-  config; the merge processor runs all gates in parallel per MR and waits
-  until every required gate passes. Required-gate failure blocks the MR
-  and notifies the author agent with failure details; `required = false`
-  gates record results and attach advisory comments without blocking.
-  Per-MR gate status is tracked Pending → Running → Passed/Failed.
-- **Gate agent lifecycle:** review/validation agents are spawned per gate
-  run with a scoped OIDC token (`review:submit` only — no push, no task
-  creation), attributed to their persona and gate config, torn down
-  (token revoked) after the verdict, and their full context window
-  captured to the audit trail.
-
-### This round: rebase resolution
-
-Main gained task-128's ABAC policy engine, which refactored the route
-literals in `abac_middleware.rs` into constants. The only conflicted file
-was `crates/gyre-server/src/abac_middleware.rs`; the resolution keeps
-task-128's `REPOS_WORKTREES_ID_ROUTE`/`REPOS_GATES_ROUTE`/
-`REPOS_GATES_ID_ROUTE` constants and preserves task-135's
-`/api/v1/repos/:id/gate-chain` resolver mapping (required: the route is
-registered in `api/mod.rs` and an unregistered route gets no policy
-evaluation). All other task-128 files auto-merged.
-
-### Test evidence
-
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean on the merged
-  tree (no semantic conflict between task-128's policy engine and
-  task-135's gate/merge-processor code).
-- `scripts/check-abac-route-registry.sh` — OK: all registered
-  `/api/v1/` routes resolve in the ABAC registry, no duplicate entries,
-  no exemption growth.
-- `scripts/check-arch.sh` — passed.
-- Behavior tests for gate chains and agent lifecycle live in
-  `crates/gyre-server/src/api/gates.rs` and
-  `crates/gyre-server/src/merge_processor.rs` (unchanged this round;
-  full `cargo test --all` runs in the independent verifier).
