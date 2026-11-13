@@ -1014,6 +1014,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::get_graph_concept),
         )
         .route(
+            "/api/v1/repos/:id/graph/concepts",
+            get(graph::list_graph_concepts),
+        )
+        .route(
             "/api/v1/repos/:id/graph/timeline",
             get(graph::get_graph_timeline),
         )
@@ -1047,6 +1051,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/graph/concept/:concept_name",
             get(graph::get_workspace_graph_concept),
+        )
+        .route(
+            "/api/v1/workspaces/:id/graph/concepts",
+            get(graph::list_workspace_graph_concepts),
         )
         .route(
             "/api/v1/workspaces/:id/briefing",
