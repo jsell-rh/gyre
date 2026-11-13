@@ -54,21 +54,19 @@ Read `specs/system/message-bus.md` §"Relationship to Notifications" and §"Impl
 
 ## Shipped
 
-### Round 5 — contract restore re-verification
+### Round 6 — merged-head verification after contract restore
 
-The executor restored the assigned task contract (progress reset, shipped
-notes stripped) while preserving the production fix on the branch. This
-round re-verified the merged head `49858412` (production fix merged with
-assigned base `41f4d56e`): `git diff --name-only 88ceb71d..49858412`
-shows **zero changes under `crates/`** — the task-162 server source
-(`message_dispatcher.rs`, `main.rs` wiring, all tests) is byte-identical
-to the previously verified checkpoint. On this head,
-`SKIP_WEB_BUILD=1 cargo check -p gyre-server` passes (exit 0, 6m09s) and
-`cargo check -p gyre-server --tests` passes (exit 0, 2m47s). Server test
-execution is deferred to the independent verifier (4 GiB budget rule):
-run `cargo test -p gyre-server message_dispatcher`, then the full
-`cargo test --all` acceptance gate. Evidence:
-`/tmp/stage/review-evidence/task-162-round5.txt`.
+The executor restored the assigned task contract while the production fix
+stayed on the branch. This round re-verified the merged head `80dbfe00`
+(production fix merged with assigned base `48b3d47e`):
+`git diff --name-only 49858412..80dbfe00 -- crates/` shows **zero changes**
+— the task-162 server source is byte-identical to the previously verified
+checkpoint. On this head, `SKIP_WEB_BUILD=1 cargo check -p gyre-server`
+passes (exit 0, 6m13s) and `SKIP_WEB_BUILD=1 cargo check -p gyre-server
+--tests` passes (exit 0, 2m55s). Server test execution is deferred to the
+independent verifier (4 GiB budget rule): run `cargo test -p gyre-server
+message_dispatcher`, then the full `cargo test --all` acceptance gate.
+Evidence: `/tmp/stage/review-evidence/task-162-round6.txt`.
 
 ### Dispatcher (§Relationship to Notifications)
 
@@ -84,8 +82,8 @@ channel drops the message with a warning log — consumers are downstream
 observers and cannot block delivery.
 
 The first registered consumer is `NotificationBridge`, which derives
-user-facing notifications from bus messages via the shared
-`notify_rich` creation path:
+user-facing notifications from bus messages via the shared `notify_rich`
+creation path:
 
 - `GateFailure` → rank-3 `GateFailure` notification for the MR author
   agent's spawning user. Only the Workspace/Broadcast-targeted event is
