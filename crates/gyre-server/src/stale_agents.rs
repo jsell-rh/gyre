@@ -89,6 +89,9 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         &agent.workspace_id.to_string(),
                     )
                     .await;
+                    // agent-runtime.md §4: wall-clock compute time
+                    // (spawn → dead).
+                    crate::api::budget::record_compute_minutes_for_agent(state, &agent).await;
                 }
 
                 // Agent lifecycle audit event (observability.md §Audit Event Types):
