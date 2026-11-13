@@ -1894,7 +1894,7 @@ mod tests {
         // The §1 gate-agent mint resolves MR → workspace → tenant to scope
         // the review token; an unseeded workspace row fails that lookup
         // (fail-closed, never a fabricated tenant).
-        ensure_workspace_row(state, &Id::new("ws-test")).await;
+        ensure_workspace_row(&state, &Id::new("ws-test")).await;
         state.merge_requests.create(&mr).await.unwrap();
 
         let mut gate = make_gate(GateType::AgentReview, Some("true".to_string()));
