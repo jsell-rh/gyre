@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: ["089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d"]
+commits: ["9ff6b00307d5e2b9038e1bcf21f3e8930dd26f66"]
 ---
 
 ## Spec Excerpt
@@ -102,82 +102,28 @@ Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Exi
 
 ## Shipped
 
-Both coverage sections were implemented in prior rounds and verified; this
-round (repair `2f69d822`, category rebase) resolved the DIRTY merge of the
-published candidate `d35ada4ea` against current main `3b734b1af` (task-168
-"Repo lifecycle — archive push rejection, admin repos tab, gate config UI"),
-preserving the retained gate-chain implementation and reconciling it with
-main's parallel gate-position work.
+Both coverage sections (§Gate Chains (Composable Policies), §Gate Agent
+Lifecycle) were implemented and independently approved in prior rounds; the
+implementation rides this branch from the published candidate `daf79bc8`
+merged with current main `48b3d47e` (merge `2c764462`).
 
-### Merge resolution (commit `a2ba501ac`)
+### This round: verification repair (`9ff6b003`)
 
-- **Duplicate `quality_gates.position` column**: both branches added it via
-  differently-versioned migrations (main's published
-  `2026-10-08-000062_gate_position`, version `20261008000062`, runs first;
-  task-135's `2026-11-12-000062_gate_chain_config`, version
-  `20261112000062`). Diesel runs both on fresh databases, so the second
-  `ADD COLUMN` would fail there while single-branch test DBs stayed green.
-  Resolution: the published task-168 migration owns the column;
-  task-135's migration now adds only the `reviews.reviewer_persona` /
-  `reviews.gate_id` attribution columns (its down.sql drops only those).
-- **Auto-merge artifacts**: duplicate `position` entries in `schema.rs`,
-  the sqlite/postgres `QualityGateRow` structs, insert literals, and 12
-  test-fixture sites (recovery, merge_processor, gate_executor,
-  mr_timeline, ralph_loop) — all deduplicated; kept the negative-clamping
-  row conversion and `(position, created_at)` ordering everywhere
-  (sqlite, postgres, mem adapters, `GET /repos/:id/gates`).
-- **`create_gate` position semantics unified**: an explicit `position` in
-  the request is honored (task-168 drag-to-reorder); otherwise the gate
-  appends to the end of the chain (task-135 ordered chains).
-- **Both endpoint sets kept**: task-135's `PUT/GET /repos/:id/gate-chain`
-  TOML chain configuration and task-168's per-gate
-  `PUT /repos/:id/gates/:gate_id` (`update_gate`); routes and ABAC
-  mappings cover both.
-- **New guard (commit `089cdce38`)**: `update_gate` renames now enforce
-  per-repo name uniqueness (409 on collision) — the chain endpoint's
-  by-name replacement semantics make that invariant load-bearing once both
-  surfaces exist. Regression test
-  `update_gate_rename_to_sibling_name_rejected` covers it.
-
-### Prior-round behavior (unchanged, retained)
-
-- Ordered gate chains: `quality_gates.position` with `(position,
-  created_at)` read ordering across all three adapters; `create_gate`
-  appends; `GET /repos/:id/gates` returns chain order.
-- TOML chain configuration: `PUT/GET /api/v1/repos/:id/gate-chain` in the
-  spec's `[[gates]]` format; atomic replace (validation-before-mutation,
-  JSON → 415); same-named gates keep ids; absent pre-merge gates deleted;
-  post-merge recovery gates preserved and name-collision rejected.
-- Parallel gate execution: enqueue triggers one tokio task per gate;
-  `decide_gate_readiness` is a pure order-independent pass — all required
-  gates must pass before merge, any required failure blocks the MR and
-  notifies the author with details, advisory (`required = false`) gates
-  record results without blocking; RequiredApprovals counts distinct
-  approved reviewers with live re-evaluation per cycle.
-- Gate agent lifecycle: ephemeral single-purpose review agents torn down
-  after verdict; read-only repo access; OIDC-scoped tokens limited to
-  `review:submit` (ABAC allow-list in `abac_middleware`); reviews carry
-  `reviewer_persona` + `gate_id` attribution; context windows captured in
-  the audit trail.
+The prior round's `cargo test --all` failed one test:
+`api::gates::tests::update_gate_rename_to_sibling_name_rejected` panicked
+because the 409 rename-conflict response body was a bare `{"error": ...}`
+with no gate state, while the test (and the endpoint's contract) requires
+the unchanged gate to be visible in the conflict body. `update_gate` now
+returns the unchanged `GateResponse` at the top level of the 409 body
+alongside the `error` message; the rejection still happens before any
+mutation and before `save`, so the stored gate keeps its name. The success
+path and every other error path are unchanged.
 
 ### Test evidence
 
-In-sandbox (via the build wrapper; cgroup memory limit is 4 GiB, so
-gyre-server test compilation is deferred to the verifier):
-
-- `cargo check --workspace --all-targets` — clean, no warnings.
-- `cargo test -p gyre-adapters quality_gate` — 3 passed (chain ordering,
-  position tiebreak, upsert persists position).
-- `cargo test -p gyre-adapters migration` — 8 passed, including
-  `migration_is_idempotent` / `migrations_create_tables`, proving both
-  000062 migrations apply cleanly on a fresh database (the duplicate-ADD
-  hazard is gone).
-- `cd web && npm test` — 110 files, 2218 passed, 41 skipped.
-- `cargo fmt --check`, `check-arch.sh`, `check-migration-versions.sh`,
-  `check-migration-sql-portability.sh`, `check-abac-route-registry.sh`,
-  `check-mem-port-contracts.sh` — all pass.
-
-Verifier must run (see /tmp/stage/review-evidence/task-135-merge-resolution.md):
-`cargo test --all`; focused triage: `cargo test -p gyre-server --lib
-api::gates`, `--lib merge_processor`, `--lib gate_executor`, `--test
-git_integration`, `cargo test -p gyre-adapters`.
+- `cargo check -p gyre-server --lib --tests` — clean (in-sandbox probe,
+log in `/tmp/stage/review-evidence/`).
+- gyre-server test builds exceed the in-sandbox 4 GiB budget; the verifier
+  must run: `cargo test -p gyre-server --lib update_gate` (covers
+  `update_gate_rename_to_sibling_name_rejected` and sibling update tests),
+  then the full `cargo test --all`.
