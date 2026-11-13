@@ -60,25 +60,30 @@ const MERGE_REQUESTS_ID_ROUTE: &str = "/api/v1/merge-requests/:id";
 const MERGE_REQUESTS_COMMENTS_ROUTE: &str = "/api/v1/merge-requests/:id/comments";
 const MERGE_REQUESTS_REVIEWS_ROUTE: &str = "/api/v1/merge-requests/:id/reviews";
 const MERGE_REQUESTS_DIFF_ROUTE: &str = "/api/v1/merge-requests/:id/diff";
+const MERGE_REQUESTS_SPEC_ROUTE: &str = "/api/v1/merge-requests/:id/spec";
 const AGENTS_ID_STATUS_ROUTE: &str = "/api/v1/agents/:id/status";
 const AGENTS_MESSAGES_ACK_ROUTE: &str = "/api/v1/agents/:id/messages/:message_id/ack";
-
 /// Routes a `review:submit` gate agent may touch: read MR context, submit
-/// its verdict, read comments and gate state.
+/// its verdict, read comments and gate state, and fetch the pinned spec
+/// (GYRE_SPEC_URL — agent-gates.md §Integration with Agent Gates step 1:
+/// the gate agent receives the spec at the pinned SHA).
 const REVIEWER_ALLOWED_ROUTES: &[&str] = &[
     MERGE_REQUESTS_ID_ROUTE,
     MERGE_REQUESTS_REVIEWS_ROUTE,
     MERGE_REQUESTS_DIFF_ROUTE,
     MERGE_REQUESTS_COMMENTS_ROUTE,
     MERGE_REQUESTS_GATES_ROUTE,
+    MERGE_REQUESTS_SPEC_ROUTE,
     "/api/v1/version",
 ];
 
 /// Routes a `validation:report` gate agent may touch: read-only MR context
-/// for its check and nothing else (its contract is the process exit code).
+/// and the pinned spec for its check and nothing else (its contract is the
+/// process exit code).
 const VALIDATOR_ALLOWED_ROUTES: &[&str] = &[
     MERGE_REQUESTS_ID_ROUTE,
     MERGE_REQUESTS_DIFF_ROUTE,
+    MERGE_REQUESTS_SPEC_ROUTE,
     "/api/v1/version",
 ];
 
@@ -305,6 +310,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api(MERGE_REQUESTS_COMMENTS_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(MERGE_REQUESTS_REVIEWS_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(MERGE_REQUESTS_DIFF_ROUTE, "merge_request", None),
+                RouteResourceMapping::api(MERGE_REQUESTS_SPEC_ROUTE, "merge_request", None),
                 RouteResourceMapping::api(
                     "/api/v1/merge-requests/:id/attestation",
                     "merge_request",
@@ -5310,6 +5316,7 @@ pub mod tests {
                     entity_id: gyre_common::Id::new("ws-1"),
                     tokens_used_today: 400,
                     cost_today: 0.0,
+                    compute_minutes: 0,
                     active_agents: 0,
                     period_start: 0,
                 },
@@ -5388,6 +5395,7 @@ pub mod tests {
                     entity_id: gyre_common::Id::new("ws-1"),
                     tokens_used_today: 950,
                     cost_today: 0.0,
+                    compute_minutes: 0,
                     active_agents: 0,
                     period_start: 0,
                 },

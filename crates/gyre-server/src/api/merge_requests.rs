@@ -398,6 +398,8 @@ pub async fn create_mr(
             repo_id: Some(mr.repository_id.to_string()),
             tenant_id: None,
             facets,
+            // Entity's own update time — the since:/until: facets filter on it.
+            updated_at: Some(mr.updated_at as i64),
         },
     )
     .await;
@@ -1221,6 +1223,81 @@ pub async fn get_diff(
         insertions: diff.insertions,
         deletions: diff.deletions,
         files,
+    }))
+}
+
+// ── Spec at pinned SHA ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct MrSpecResponse {
+    pub mr_id: String,
+    /// The full "path@sha" spec reference carried by the MR.
+    pub spec_ref: String,
+    /// Path portion of the spec_ref (ledger path form).
+    pub spec_path: String,
+    /// Pinned blob SHA the MR's code was written against.
+    pub spec_sha: String,
+    /// Spec file content at the pinned SHA — NOT at HEAD
+    /// (agent-gates.md §Integration with Agent Gates step 1: "Gate agent
+    /// receives the MR diff AND the spec at the pinned SHA").
+    pub content: String,
+}
+
+/// `GET /api/v1/merge-requests/{id}/spec`
+///
+/// Serves the spec content at the MR's pinned spec_ref SHA. The
+/// spec-alignment-review gate agent fetches this (GYRE_SPEC_URL) so its
+/// review is against the exact spec version the code was written for —
+/// resolving at HEAD instead would let a spec edited after the MR was
+/// opened silently change what the gate reviews.
+pub async fn get_spec(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MrSpecResponse>, ApiError> {
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
+
+    let spec_ref = mr
+        .spec_ref
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "merge request {id} has no spec_ref — there is no pinned spec to serve"
+            ))
+        })?
+        .to_string();
+
+    let (path, sha) = spec_ref.rsplit_once('@').ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "invalid spec_ref format '{spec_ref}': expected 'path@sha'"
+        ))
+    })?;
+    let (path, sha) = (path.to_string(), sha.to_string());
+
+    let repo = state
+        .repos
+        .find_by_id(&mr.repository_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {} not found", mr.repository_id)))?;
+
+    let content = crate::git_refs::read_blob(&repo.path, &sha)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "spec blob {sha} ({path}) not found in repository — the pinned \
+             spec version is not reachable from this repo"
+            ))
+        })?;
+
+    Ok(Json(MrSpecResponse {
+        mr_id: mr.id.to_string(),
+        spec_ref,
+        spec_path: path.to_string(),
+        spec_sha: sha.to_string(),
+        content,
     }))
 }
 
@@ -2610,5 +2687,145 @@ mod tests {
         // limit alone: most recent MRs of the unfiltered set.
         let limited = ids(app, "/api/v1/workspaces/ws-list/merge-requests?limit=2").await;
         assert_eq!(limited, vec!["mr-c", "mr-b"], "newest first, capped at 2");
+    }
+
+    /// agent-gates.md §Integration with Agent Gates step 1: the gate agent
+    /// receives the spec at the **pinned SHA**, not HEAD. `GET
+    /// /api/v1/merge-requests/{id}/spec` must serve the blob content at the
+    /// MR's spec_ref SHA even after the spec file has moved on at HEAD —
+    /// resolving at HEAD would let a later spec edit silently change what
+    /// the gate reviews against.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_mr_spec_serves_pinned_sha_not_head() {
+        let state = test_state();
+
+        // Real repo: spec v1 committed, then v2 lands on HEAD.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("pinned-spec-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v1\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v1"]);
+        let v1_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
+
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v2 — EDITED AT HEAD\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v2"]);
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-pinned-spec"),
+            gyre_common::Id::new("ws-1"),
+            "pinned-spec-repo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let mut mr = MergeRequest::new(
+            gyre_common::Id::new("mr-pinned-spec"),
+            repo.id.clone(),
+            "Pinned spec MR",
+            "feat/pinned",
+            "main",
+            1000,
+        );
+        mr.workspace_id = gyre_common::Id::new("ws-1");
+        mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Pinned content is v1 — NOT the v2 currently at HEAD.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-pinned-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["spec_ref"], format!("system/identity.md@{v1_blob}"));
+        assert_eq!(json["spec_path"], "system/identity.md");
+        assert_eq!(json["spec_sha"], v1_blob);
+        assert_eq!(json["content"], "# Identity v1\n");
+        assert_ne!(
+            json["content"], "# Identity v2 — EDITED AT HEAD\n",
+            "endpoint must serve the PINNED spec version, not HEAD"
+        );
+
+        // MR without a spec_ref: nothing to serve.
+        let mut mr_no_spec = MergeRequest::new(
+            gyre_common::Id::new("mr-no-spec"),
+            repo.id.clone(),
+            "No spec MR",
+            "feat/nospec",
+            "main",
+            1001,
+        );
+        mr_no_spec.workspace_id = gyre_common::Id::new("ws-1");
+        state.merge_requests.create(&mr_no_spec).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-no-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Pinned SHA that does not exist in the repo: unreachable version.
+        let mut mr_ghost = MergeRequest::new(
+            gyre_common::Id::new("mr-ghost-spec"),
+            repo.id.clone(),
+            "Ghost spec MR",
+            "feat/ghost",
+            "main",
+            1002,
+        );
+        mr_ghost.workspace_id = gyre_common::Id::new("ws-1");
+        mr_ghost.spec_ref = Some(format!("system/identity.md@{}", "e".repeat(40)));
+        state.merge_requests.create(&mr_ghost).await.unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-ghost-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
