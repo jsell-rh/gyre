@@ -110,11 +110,19 @@ with `NotificationType::InvitationReceived` (user-management.md
 sibling `invite_member` handler) and extends
 `invite_notification_carries_accept_path` to assert `notification_type`
 is `InvitationReceived` and not `TrustSuggestion` — the old code fails
-that assertion, so the mis-typing cannot silently return. Type-checked
-with `cargo check -p gyre-server --lib --tests` (exit 0); the gyre-server
-test build exceeds this sandbox's 4 GiB budget and is recorded for the
-independent verifier:
-`cargo test -p gyre-server --lib api::invitations::tests::invite_notification_carries_accept_path`.
+that assertion, so the mis-typing cannot silently return.
+
+### Verification (re-confirmed this round at head a7799ac0)
+
+- `cargo check -p gyre-server --lib --tests` — exit 0.
+- `cargo test -p gyre-domain invitation` — 4 passed, 0 failed.
+- `cargo test -p gyre-adapters invitation` — 5 passed, 0 failed.
+- All seven frontmatter commits verified as ancestors of this head.
+- Evidence retained at `/tmp/stage/review-evidence/task-110-verification.md`.
+- The gyre-server test build exceeds this sandbox's 4 GiB budget and is
+  recorded for the independent verifier:
+  `cargo test -p gyre-server --lib api::invitations` (26 tests, incl.
+  `invite_notification_carries_accept_path`), then `cargo test --all`.
 
 ### Shipped behavior (carried from prior rounds, unchanged this round)
 
