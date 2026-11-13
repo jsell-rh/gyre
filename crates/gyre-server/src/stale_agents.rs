@@ -68,6 +68,9 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         &agent.workspace_id.to_string(),
                     )
                     .await;
+                    // agent-runtime.md §4: wall-clock compute time
+                    // (spawn → dead).
+                    crate::api::budget::record_compute_minutes_for_agent(state, &agent).await;
                 }
 
                 // Agent lifecycle audit event (observability.md §Audit Event Types):
@@ -271,6 +274,13 @@ async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, 
     } else {
         None
     };
+    // F2: the replacement keeps the dead orchestrator's persona binding —
+    // the persona claim names the tier's persona slug.
+    let persona = match dead.orchestrator_type {
+        gyre_domain::OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        gyre_domain::OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+        gyre_domain::OrchestratorType::Worker => "worker",
+    };
     let token = state.agent_signing_key.mint_orchestrator(
         &replacement.id.to_string(),
         dead.spawned_by.as_deref().unwrap_or("system"),
@@ -281,6 +291,7 @@ async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, 
         dead.repo_id.as_ref().map(|r| r.to_string()).as_deref(),
         repo_name.as_deref(),
         &dead.orchestrator_type.to_string(),
+        persona,
     );
     // Register the replacement's token so the auth middleware accepts it —
     // an unstored JWT leaves the restarted orchestrator unable to authenticate.

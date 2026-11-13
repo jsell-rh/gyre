@@ -104,11 +104,15 @@ pub struct AgentJwtClaims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator_type: Option<String>,
 
-    // -- §1 Token Scoping: persona + attestation claims ------------------------
-    /// Persona slug the agent was spawned under (e.g. "security").
+    /// Persona slug the agent was spawned under (e.g. "security")
+    /// (platform-model.md §1 Token Scoping; identity-security.md
+    /// §Task-Scoped JWT Claims). Absent when the agent was spawned
+    /// without a persona assignment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
-    /// Workload attestation confidence level (0-3).
+    /// Workload attestation confidence level (platform-model.md §1;
+    /// identity-security.md): 1=raw subprocess, 2=CLI-managed,
+    /// 3=Gyre-managed container with attestation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_level: Option<u32>,
 
@@ -403,6 +407,7 @@ impl AgentSigningKey {
         repo_id: Option<&str>,
         repo_name: Option<&str>,
         orchestrator_type: &str,
+        persona: &str,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -433,7 +438,7 @@ impl AgentSigningKey {
             workspace_id: Some(workspace_id.to_string()),
             repo_id: repo_id.map(|r| r.to_string()),
             orchestrator_type: Some(orchestrator_type.to_string()),
-            persona: Some(orchestrator_type.to_string()),
+            persona: Some(persona.to_string()),
             attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
@@ -453,6 +458,58 @@ impl AgentSigningKey {
             .map_err(|e| format!("JWT mint error: {e}"))
     }
 
+    /// Mint a worker JWT scoped to the repo it was spawned against.
+    ///
+    /// Workers always carry `workspace_id` + `repo_id` claims so ABAC subject
+    /// attributes (`subject.repo_scope`, §Attributes "Agent OIDC claim") are
+    /// real for every request the agent makes. Unlike orchestrator JWTs there
+    /// is no `orchestrator_type` claim. `wl_image_hash` carries the resolved
+    /// image digest (agent-runtime.md §3, best-effort: `None` when the image
+    /// runtime could not resolve it).
+    ///
+    /// §1 Token Scoping: the worker's fine-grained scope list
+    /// (`["repo:{repo_name}:write"]`), `tenant_id`, and the hierarchy claims
+    /// are minted from spawn context via [`AgentSigningKey::mint_with_workload`]
+    /// — a worker agent's token is scoped to its repo.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_worker_scoped(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        tenant_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        repo_name: &str,
+        persona: Option<&str>,
+        attestation_level: Option<u8>,
+        wl_image_hash: Option<String>,
+    ) -> Result<String, String> {
+        self.mint_with_workload(
+            agent_id,
+            task_id,
+            spawned_by,
+            issuer,
+            ttl_secs,
+            tenant_id,
+            workspace_id,
+            repo_id,
+            repo_name,
+            persona,
+            // identity-security.md attestation levels are 1-3; the §1 claim
+            // is the widened `u32` form (platform-model.md §1 Token Scoping).
+            attestation_level.map(|level| level as u32),
+            None,
+            None,
+            None,
+            None,
+            None,
+            wl_image_hash,
+        )
+    }
+
     /// Mint a scoped agent JWT (task-134 gate-agent protocol).
     ///
     /// Gate agents are ephemeral, single-purpose identities. An AgentReview
@@ -470,6 +527,7 @@ impl AgentSigningKey {
     /// scope check reads the array form. `tenant_id` is the tenant of the
     /// gated MR's workspace, resolved fail-closed by the caller — never a
     /// fabricated literal. `persona` is the gate persona's slug.
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_scoped(
         &self,
         agent_id: &str,
@@ -512,7 +570,6 @@ impl AgentSigningKey {
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(|e| format!("JWT mint error: {e}"))
     }
-
     /// Mint an impersonation JWT (identity-security.md §Impersonation).
     ///
     /// `sub` is the **target** user (so permissions match theirs) while
@@ -2584,6 +2641,7 @@ mod tests {
                 None,
                 None,
                 "workspace_orchestrator",
+                "workspace-orchestrator",
             )
             .unwrap();
         state

@@ -17,6 +17,9 @@ diesel::table! {
         description -> Nullable<Text>,
         status -> Text,
         updated_at -> BigInt,
+        max_agents -> Nullable<Integer>,
+        max_agent_iterations -> Nullable<Integer>,
+        budget_json -> Nullable<Text>,
     }
 }
 
@@ -68,6 +71,7 @@ diesel::table! {
         task_type -> Nullable<Text>,
         order -> Nullable<Integer>,
         depends_on -> Text,
+        generation -> Integer,
     }
 }
 
@@ -351,9 +355,18 @@ diesel::table! {
         id -> Text,
         workspace_id -> Text,
         name -> Text,
+        slug -> Text,
         description -> Nullable<Text>,
-        member_ids -> Text,
+        lead -> Text,
         created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    team_memberships (team_id, user_id) {
+        team_id -> Text,
+        user_id -> Text,
+        added_at -> BigInt,
     }
 }
 
@@ -366,6 +379,17 @@ diesel::table! {
         invited_by -> Text,
         accepted -> Integer,
         accepted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    repo_access_overrides (id) {
+        id -> Text,
+        repo_id -> Text,
+        user_id -> Text,
+        restricted_role -> Text,
+        created_by -> Text,
         created_at -> BigInt,
     }
 }
@@ -498,6 +522,7 @@ diesel::table! {
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,
         created_at -> BigInt,
+        position -> Integer,
     }
 }
 
@@ -527,6 +552,7 @@ diesel::table! {
         require_approved_spec -> Integer,
         warn_stale_spec -> Integer,
         require_current_spec -> Integer,
+        require_signed_approval -> Integer,
         enforce_manifest -> Integer,
     }
 }
@@ -580,6 +606,24 @@ diesel::table! {
 }
 
 diesel::table! {
+    spec_links (id) {
+        id -> Text,
+        source_repo_id -> Text,
+        source_path -> Text,
+        source_sha -> Text,
+        link_type -> Text,
+        target_repo_id -> Nullable<Text>,
+        target_path -> Text,
+        target_sha -> Text,
+        target_display -> Nullable<Text>,
+        reason -> Nullable<Text>,
+        status -> Text,
+        created_at -> BigInt,
+        stale_since -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
     budget_usages (entity_key) {
         entity_key -> Text,
         entity_type -> Text,
@@ -589,6 +633,7 @@ diesel::table! {
         active_agents -> Integer,
         period_start -> BigInt,
         updated_at -> BigInt,
+        compute_minutes -> BigInt,
     }
 }
 
@@ -649,6 +694,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    tenant_meta_spec_sets (tenant_id) {
+        tenant_id -> Text,
+        json -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     rollout_policies (workspace_id) {
         workspace_id -> Text,
         json -> Text,
@@ -669,6 +722,7 @@ diesel::table! {
         output_tokens -> BigInt,
         cost_usd -> Double,
         model -> Text,
+        prompt_template_sha -> Nullable<Text>,
         timestamp -> BigInt,
     }
 }
@@ -705,6 +759,7 @@ diesel::table! {
 }
 
 diesel::joinable!(trace_spans -> gate_traces (gate_trace_id));
+diesel::joinable!(team_memberships -> teams (team_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     repositories,
@@ -730,7 +785,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     workspaces,
     personas,
     teams,
+    team_memberships,
     workspace_memberships,
+    repo_access_overrides,
     notifications,
     policies,
     policy_decisions,
@@ -747,10 +804,12 @@ diesel::allow_tables_to_appear_in_same_query!(
     attestation_bundles,
     container_audit_records,
     spec_ledger_entries,
+    spec_links,
     spec_approval_events,
     tenants,
     messages,
     meta_spec_sets,
+    tenant_meta_spec_sets,
     budget_call_records,
     user_workspace_state,
     gate_traces,
@@ -769,6 +828,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     key_bindings,
     chain_attestations,
     secrets,
+    breaking_changes,
+    dependency_policies,
     commit_signatures,
     spec_assertion_results,
 );
@@ -1017,6 +1078,32 @@ diesel::table! {
         expires_at -> Nullable<BigInt>,
         last_rotated_at -> Nullable<BigInt>,
         tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    breaking_changes (id) {
+        id -> Text,
+        dependency_edge_id -> Text,
+        source_repo_id -> Text,
+        commit_sha -> Text,
+        description -> Text,
+        detected_at -> BigInt,
+        acknowledged -> Integer,
+        acknowledged_by -> Nullable<Text>,
+        acknowledged_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    dependency_policies (workspace_id) {
+        workspace_id -> Text,
+        breaking_change_behavior -> Text,
+        max_version_drift -> Integer,
+        stale_dependency_alert_days -> Integer,
+        require_cascade_tests -> Integer,
+        auto_create_update_tasks -> Integer,
+        updated_at -> BigInt,
     }
 }
 

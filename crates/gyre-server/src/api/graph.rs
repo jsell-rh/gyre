@@ -1,12 +1,13 @@
 //! Knowledge graph API endpoints (realized-model.md §7).
 //!
 //! Endpoints:
-//!   GET  /api/v1/repos/{id}/graph              — full knowledge graph (nodes + edges)
+//!   GET  /api/v1/repos/{id}/graph              — full knowledge graph (nodes + edges, ?at= point-in-time)
 //!   GET  /api/v1/repos/{id}/graph/types        — nodes by NodeType::Type with edges
 //!   GET  /api/v1/repos/{id}/graph/modules      — nodes by NodeType::Module + containment
 //!   GET  /api/v1/repos/{id}/graph/node/{nid}   — single node + all connected edges
 //!   GET  /api/v1/repos/{id}/graph/spec/{path}  — nodes governed by a spec path
 //!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view projection (manifest-defined)
+//!   GET  /api/v1/repos/{id}/graph/concepts     — concept browser listing (manifest-defined)
 //!   GET  /api/v1/repos/{id}/graph/timeline     — architectural deltas (?since=&until=)
 //!   GET  /api/v1/repos/{id}/graph/risks        — risk metrics per module
 //!   GET  /api/v1/repos/{id}/graph/diff         — graph diff between commits (?from=&to=)
@@ -22,7 +23,7 @@ use axum::{
     response::sse::{Event, Sse},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::GateStatus;
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
@@ -166,6 +167,63 @@ pub struct NodeWithEdgesResponse {
 pub struct RepoGraphQuery {
     /// Optional case-insensitive substring filter on node name / qualified_name.
     pub concept: Option<String>,
+    /// Optional point-in-time filter (system-explorer.md §6 Architectural
+    /// Timeline): return the graph as it existed at this instant. Accepts
+    /// either a unix-epoch-second integer or an RFC 3339 / ISO 8601
+    /// timestamp ("2024-06-01T12:00:00Z"). Invalid values yield 400.
+    pub at: Option<String>,
+}
+
+impl RepoGraphQuery {
+    /// Resolve the `at` parameter to unix epoch seconds.
+    ///
+    /// Accepts epoch seconds (`1712000000`) or RFC 3339 timestamps
+    /// (`2024-04-01T16:00:00Z`, `2024-04-01T16:00:00+02:00`). Returns
+    /// `Err(message)` on unparseable input — the caller maps that to a 400.
+    fn resolve_at(&self) -> Result<Option<u64>, String> {
+        let Some(raw) = self.at.as_deref() else {
+            return Ok(None);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(secs) = raw.parse::<u64>() {
+            return Ok(Some(secs));
+        }
+        let parsed =
+            time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+                .map_err(|e| format!("invalid 'at' timestamp {raw:?}: {e}"))?;
+        let secs = parsed.unix_timestamp();
+        if secs < 0 {
+            return Err(format!("'at' timestamp {raw:?} is before the unix epoch"));
+        }
+        Ok(Some(secs as u64))
+    }
+}
+
+/// One predefined concept from a repo's spec manifest (realized-model.md §4)
+/// — the concept-browser listing entry (system-explorer.md §4).
+#[derive(Serialize)]
+pub struct ConceptSummary {
+    pub name: String,
+    pub description: String,
+}
+
+/// GET /api/v1/repos/{id}/graph/concepts response.
+#[derive(Serialize)]
+pub struct RepoConceptListResponse {
+    pub repo_id: String,
+    pub concepts: Vec<ConceptSummary>,
+}
+
+/// GET /api/v1/workspaces/{id}/graph/concepts response: manifest concepts
+/// unioned across the workspace's repos (case-insensitive name dedupe —
+/// the first repo defining a name supplies the description).
+#[derive(Serialize)]
+pub struct WorkspaceConceptListResponse {
+    pub workspace_id: String,
+    pub concepts: Vec<ConceptSummary>,
 }
 
 #[derive(Deserialize)]
@@ -386,6 +444,9 @@ fn parse_confidence(s: &str) -> SpecConfidence {
 /// Returns the full knowledge graph (all nodes + all edges) for a repository.
 /// Optional `?concept=<substring>` filters nodes by case-insensitive substring
 /// match on `name` or `qualified_name`.
+/// Optional `?at=<epoch-seconds|RFC3339>` returns the point-in-time graph
+/// (system-explorer.md §6 Architectural Timeline): nodes/edges that existed
+/// at that instant, including ones that have since been soft-deleted.
 pub async fn get_repo_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -394,11 +455,20 @@ pub async fn get_repo_graph(
     require_repo(&state, &id).await?;
     let repo_id = Id::new(&id);
 
-    let all_nodes = state
-        .graph_store
-        .list_nodes(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
+    let at = q.resolve_at().map_err(ApiError::BadRequest)?;
+
+    let (all_nodes, all_edges) = match at {
+        Some(at) => (
+            state.graph_store.list_nodes_at(&repo_id, at).await,
+            state.graph_store.list_edges_at(&repo_id, at).await,
+        ),
+        None => (
+            state.graph_store.list_nodes(&repo_id, None).await,
+            state.graph_store.list_edges(&repo_id, None).await,
+        ),
+    };
+    let all_nodes = all_nodes.map_err(ApiError::Internal)?;
+    let all_edges = all_edges.map_err(ApiError::Internal)?;
 
     let nodes: Vec<GraphNode> = if let Some(pattern) = &q.concept {
         let pat = pattern.to_lowercase();
@@ -412,12 +482,6 @@ pub async fn get_repo_graph(
     } else {
         all_nodes
     };
-
-    let all_edges = state
-        .graph_store
-        .list_edges(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
 
     // When concept filtering is active, restrict edges to those where both
     // endpoints are in the matched node set (consistent with /graph/concept/:name).
@@ -699,6 +763,29 @@ pub async fn assemble_workspace_concept_projection(
     })
 }
 
+/// Read the `concepts:` block of the repo's `specs/manifest.yaml` at its
+/// default branch. Returns an empty vector when the repo has no manifest
+/// or the manifest is unparseable — a repo without a manifest simply
+/// defines no predefined concepts.
+async fn manifest_concepts(
+    repo: &gyre_domain::Repository,
+) -> Vec<crate::spec_registry::ConceptDef> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = crate::spec_registry::read_git_file(
+        &git_bin,
+        &repo.path,
+        &repo.default_branch,
+        "specs/manifest.yaml",
+    )
+    .await;
+    let Some(yaml) = yaml else {
+        return Vec::new();
+    };
+    crate::spec_registry::parse_manifest(&yaml)
+        .map(|m| m.concepts)
+        .unwrap_or_default()
+}
+
 /// Resolve the `ConceptView` named `concept_name` (case-insensitive exact
 /// match on the concept name) from the `concepts:` block of the repo's
 /// `specs/manifest.yaml` at its default branch. Returns `None` when the repo
@@ -708,17 +795,8 @@ async fn resolve_concept_view(
     repo: &gyre_domain::Repository,
     concept_name: &str,
 ) -> Option<gyre_common::graph::ConceptView> {
-    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let yaml = crate::spec_registry::read_git_file(
-        &git_bin,
-        &repo.path,
-        &repo.default_branch,
-        "specs/manifest.yaml",
-    )
-    .await?;
-    let manifest = crate::spec_registry::parse_manifest(&yaml).ok()?;
-    manifest
-        .concepts
+    manifest_concepts(repo)
+        .await
         .iter()
         .find(|c| c.name.eq_ignore_ascii_case(concept_name))
         .map(gyre_common::graph::ConceptView::from)
@@ -746,6 +824,38 @@ pub async fn get_graph_concept(
     Ok(Json(
         assemble_concept_projection(&state, &repo, &concept_name).await?,
     ))
+}
+
+/// GET /api/v1/repos/{id}/graph/concepts
+/// Concept browser listing (system-explorer.md §4): the repo's predefined
+/// concepts from its spec manifest. A repo without a manifest (or with an
+/// unparseable one) defines no predefined concepts — an empty list is the
+/// valid answer, distinct from the single-concept projection endpoint's
+/// 404 on an undefined concept name.
+pub async fn list_graph_concepts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RepoConceptListResponse>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    let concepts = manifest_concepts(&repo)
+        .await
+        .into_iter()
+        .map(|c| ConceptSummary {
+            name: c.name,
+            description: c.description,
+        })
+        .collect();
+
+    Ok(Json(RepoConceptListResponse {
+        repo_id: id,
+        concepts,
+    }))
 }
 
 // ── Narrative generation (realized-model.md §6) ─────────────────────────────
@@ -1628,12 +1738,13 @@ pub async fn briefing_ask(
         ));
     }
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2 /
+    // HSI §6): 10 req/60 s, keyed on the auth-context user_id.
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -1710,18 +1821,10 @@ pub async fn briefing_ask(
 
     let workspace_id_obj = Id::new(&id);
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&workspace_id_obj, "briefing-ask")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_BRIEFING_ASK.to_string());
-
-    // Grounding context: JSON-serialized briefing + conversation history.
-    // The server is stateless (HSI §1325); the client owns the conversation
-    // state, so we replay exactly what was sent as prompt context.
+    // Grounding context: JSON-serialized briefing + conversation history
+    // (HSI §1327). The server is stateless (HSI §1325); the client owns
+    // the conversation state, so we replay exactly what was sent as prompt
+    // context.
     let briefing_json =
         serde_json::to_string(&briefing).map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
     let mut context = format!("Briefing data:\n{briefing_json}");
@@ -1743,24 +1846,89 @@ pub async fn briefing_ask(
         ));
     }
 
-    let system_prompt = template_content
-        .replace("{{workspace_id}}", &id)
-        .replace("{{context}}", &context)
-        .replace("{{question}}", &req.question);
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &workspace_id_obj,
+        None,
+        "briefing-ask",
+        crate::llm_defaults::PROMPT_BRIEFING_ASK,
+    )
+    .await;
+
+    // Prompt template (ui-layout.md §2): DB override → git tree
+    // (specs/prompts/briefing-ask.md) → hardcoded fallback. `sha` carries
+    // git provenance for the cost entry. Variables match the committed
+    // template (`{{briefing_json}}`, `{{graph_summary}}`, `{{history}}`);
+    // the hardcoded default uses `{{context}}` (briefing JSON + history
+    // transcript) — each variable gets its own faithful value.
+    // The user's question travels as the user prompt only (injection
+    // containment), so the template's `{{question}}` placeholder is
+    // explicitly blanked — the same rule the other two LLM endpoints
+    // apply — rather than leaking literal placeholder text.
+    let graph_summary =
+        crate::llm_helpers::workspace_graph_summary(&state, &workspace_id_obj, None).await;
+    let history_transcript: String = req
+        .history
+        .as_deref()
+        .map(|h| {
+            h.iter()
+                .map(|e| format!("{}: {}", e.role, e.content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("workspace_id", id.as_str()),
+            ("context", context.as_str()),
+            ("briefing_json", briefing_json.as_str()),
+            ("graph_summary", graph_summary.as_str()),
+            ("history", history_transcript.as_str()),
+            ("question", ""),
+        ],
+    );
     let user_prompt = req.question.clone();
 
-    // Resolve model and call streaming LLM.
-    let (model, _) =
-        crate::llm_helpers::resolve_llm_model(&state, &Id::new(&id), "briefing-ask").await;
-    let stream = factory
+    // Model + per-endpoint max output tokens (ui-layout.md §2).
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(&state, &workspace_id_obj, "briefing-ask").await;
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let stream = match factory
         .for_model(&model)
-        .stream_complete(&system_prompt, &user_prompt, None)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(model = %model, workspace_id = %id, error = ?e, "LLM stream_complete failed in briefing_ask");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
-
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
     // Budget tracking (ui-layout.md §3, platform-model.md §Budget Tracking):
     // the LlmPort does not return actual usage, so estimate — ~4 chars per
     // token for prompts (input) and the produced text (output).
@@ -1781,8 +1949,10 @@ pub async fn briefing_ask(
     }
 
     // Per-call budget record + workspace/tenant counter increment
-    // (platform-model.md §Budget Tracking). User-initiated query:
-    // agent_id/task_id/repo_id are None.
+    // (platform-model.md §Budget Tracking), with the prompt-template git
+    // SHA for audit (ui-layout.md §2). User-initiated query:
+    // agent_id/task_id/repo_id are None. Skip and log if the workspace
+    // cannot be resolved rather than fabricating a tenant scope.
     let ws_for_budget = state
         .workspaces
         .find_by_id(&workspace_id_obj)
@@ -1803,6 +1973,7 @@ pub async fn briefing_ask(
                 output_tokens: estimated_output as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
+                prompt_template_sha: template.sha.clone(),
             },
         )
         .await;
@@ -1826,7 +1997,8 @@ pub async fn briefing_ask(
     .unwrap_or_default();
     events.push(Ok(Event::default().event("complete").data(complete_data)));
 
-    Ok(Sse::new(stream::iter(events)).keep_alive(
+    let s = stream::iter(events);
+    Ok(Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
@@ -1884,6 +2056,22 @@ pub async fn link_node_to_spec(
     ))
 }
 
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+fn sse_error_stream(
+    message: String,
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
 /// GET /workspaces/{id}/graph/concept/{name}
 /// Workspace-scoped concept view projection (realized-model.md §4): each
 /// repo in the workspace resolves the named concept from its own spec
@@ -1898,6 +2086,68 @@ pub async fn get_workspace_graph_concept(
     Ok(Json(
         assemble_workspace_concept_projection(&state, &Id::new(&id), &concept_name).await?,
     ))
+}
+
+/// GET /api/v1/workspaces/{id}/graph/concepts
+/// Workspace-scoped concept browser listing (system-explorer.md §4): the
+/// union of predefined concepts across the workspace's repos' spec
+/// manifests, deduped by case-insensitive name with a deterministic
+/// winner (the lexicographically smallest spelling/description pair, so
+/// the result is independent of repo iteration order). Repos without
+/// manifests contribute nothing — an empty union is a valid workspace-wide
+/// answer.
+pub async fn list_workspace_graph_concepts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkspaceConceptListResponse>, ApiError> {
+    require_workspace(&state, &id).await?;
+
+    let repos = state
+        .repos
+        .list_by_workspace(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Order-independent dedupe: the port does not guarantee repo iteration
+    // order (the mem adapter returns HashMap order), so first-wins would
+    // make the surviving spelling of a case-variant name depend on adapter
+    // internals. Instead each case-insensitive name keeps one deterministic
+    // winner — the lexicographically smallest (name, description) pair —
+    // and the listing is sorted by name so every adapter returns the same
+    // response for the same manifest set.
+    let mut by_key: std::collections::BTreeMap<String, ConceptSummary> =
+        std::collections::BTreeMap::new();
+    for repo in &repos {
+        for def in manifest_concepts(repo).await {
+            let candidate = ConceptSummary {
+                name: def.name,
+                description: def.description,
+            };
+            match by_key.entry(candidate.name.to_lowercase()) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(candidate);
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    if (candidate.name.as_str(), candidate.description.as_str())
+                        < (o.get().name.as_str(), o.get().description.as_str())
+                    {
+                        o.insert(candidate);
+                    }
+                }
+            }
+        }
+    }
+    let mut concepts: Vec<ConceptSummary> = by_key.into_values().collect();
+    concepts.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.description.cmp(&b.description))
+    });
+
+    Ok(Json(WorkspaceConceptListResponse {
+        workspace_id: id,
+        concepts,
+    }))
 }
 
 /// Request body for structural prediction.
@@ -1929,12 +2179,13 @@ pub async fn predict_graph(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
-    // Per-user/repo sliding-window rate limit: 10 req/60 s.
+    // Per-user/repo sliding-window rate limit: 10 req/60 s, keyed on the
+    // auth-context user_id (same principal rule as the LLM endpoints).
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -2026,7 +2277,7 @@ pub async fn predict_graph(
         crate::llm_helpers::resolve_llm_model(&state, &workspace_id, "graph-predict").await;
     let result = factory
         .for_model(&model)
-        .predict_json(&system_prompt, &user_prompt)
+        .predict_json(&system_prompt, &user_prompt, None)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -2334,6 +2585,181 @@ mod tests {
         assert_eq!(nodes[0].id.as_str(), nid.as_str());
     }
 
+    #[tokio::test]
+    async fn repo_graph_at_returns_point_in_time_graph() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a repo so require_repo passes.
+        let create_body = serde_json::json!({
+            "name": "timeline-at-repo",
+            "workspace_id": "ws-timeline",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        // Seed the graph store: `early` (first seen 100, active), `late`
+        // (first seen 900), `gone` (first seen 100, soft-deleted at 300).
+        let mut early = _new_node(&repo_id, "EarlyNode", NodeType::Type);
+        early.first_seen_at = 100;
+        early.last_seen_at = 2000;
+        let mut late = _new_node(&repo_id, "LateNode", NodeType::Type);
+        late.first_seen_at = 900;
+        late.last_seen_at = 2000;
+        let mut gone = _new_node(&repo_id, "GoneNode", NodeType::Type);
+        gone.first_seen_at = 100;
+        gone.last_seen_at = 300;
+        gone.deleted_at = Some(300);
+        for node in [early, late, gone] {
+            state.graph_store.create_node(node).await.unwrap();
+        }
+
+        let get = |query: String| {
+            let app = app.clone();
+            let repo = repo_id.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/v1/repos/{repo}/graph{query}"))
+                        .header("Authorization", auth())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        // No `at`: the current graph excludes the soft-deleted node.
+        let resp = get("".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "LateNode"]);
+
+        // Epoch-seconds `at=200`: late did not exist yet; gone existed
+        // (deleted later) and MUST be reconstructed.
+        let resp = get("?at=200".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "GoneNode"]);
+
+        // `at=500`: gone was deleted at 300 — absent again.
+        let resp = get("?at=500".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode"]);
+
+        // RFC 3339 `at`: 1970-01-01T00:03:20Z == epoch 200.
+        let resp = get("?at=1970-01-01T00%3A03%3A20Z".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let names: Vec<&str> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["EarlyNode", "GoneNode"]);
+
+        // Unparseable `at` → 400, not silently ignored.
+        let resp = get("?at=not-a-timestamp".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_mem_list_nodes_at_and_edges_at_contract() {
+        // test_state wires MemGraphStore — this pins the in-code guard to the
+        // same existed-at contract the SQLite adapter enforces in SQL
+        // (check-mem-port-contracts: one adapter's test suite cannot cover
+        // the other's implementation).
+        let state = test_state();
+        let repo = "repo-mem-at";
+
+        let mut n1 = _new_node(repo, "N1", NodeType::Type);
+        n1.first_seen_at = 100;
+        n1.last_seen_at = 900;
+        let mut n2 = _new_node(repo, "N2", NodeType::Type);
+        n2.first_seen_at = 100;
+        n2.last_seen_at = 250;
+        n2.deleted_at = Some(250);
+        state.graph_store.create_node(n1.clone()).await.unwrap();
+        state.graph_store.create_node(n2.clone()).await.unwrap();
+
+        let edge = GraphEdge {
+            id: Id::new("e1"),
+            repo_id: Id::new(repo),
+            source_id: n1.id.clone(),
+            target_id: n2.id.clone(),
+            edge_type: EdgeType::DependsOn,
+            metadata: None,
+            first_seen_at: 100,
+            last_seen_at: 250,
+            deleted_at: Some(250),
+        };
+        state.graph_store.create_edge(edge.clone()).await.unwrap();
+
+        let at_150 = state
+            .graph_store
+            .list_nodes_at(&Id::new(repo), 150)
+            .await
+            .unwrap();
+        assert_eq!(at_150.len(), 2, "n2 existed at 150 (deleted at 250)");
+
+        let at_500 = state
+            .graph_store
+            .list_nodes_at(&Id::new(repo), 500)
+            .await
+            .unwrap();
+        assert_eq!(at_500.len(), 1);
+        assert_eq!(at_500[0].name, "N1");
+
+        let edges_150 = state
+            .graph_store
+            .list_edges_at(&Id::new(repo), 150)
+            .await
+            .unwrap();
+        assert_eq!(edges_150.len(), 1, "edge existed at 150");
+        let edges_500 = state
+            .graph_store
+            .list_edges_at(&Id::new(repo), 500)
+            .await
+            .unwrap();
+        assert!(edges_500.is_empty(), "edge was deleted at 250");
+    }
+
     // ── LLM endpoint tests ───────────────────────────────────────────────────
 
     fn app_no_llm() -> Router {
@@ -2628,6 +3054,172 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn briefing_ask_llm_connection_failure_sends_error_event() {
+        // ui-layout.md §2: an LLM connection failure is an SSE `error` event,
+        // not an HTTP 500 — and never a `complete` event.
+        let mut s = (*test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::failing(
+                "connection refused by mock",
+            )),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let app = crate::api::api_router().with_state(Arc::new(s));
+
+        let ws_body = serde_json::json!({"name": "llm-connfail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "Tell me more"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "error" {
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if kind == "complete" {
+                    complete_count += 1;
+                }
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a connection failure must never masquerade as a complete event"
+        );
+        assert!(
+            error_msgs[0].contains("connection refused by mock"),
+            "error event must carry the failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_llm_mid_stream_failure_sends_error_event() {
+        // A connection that drops mid-generation: partial chunks arrive, then
+        // the stream errors. The truncated response must surface as
+        // `event: error` — never a `complete` event built from the partial
+        // text. Regression for the old `filter_map(|r| r.ok())` that silently
+        // dropped the stream error and completed on the truncated text.
+        let mut s = (*test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::stream_error_after(
+                vec!["The workspace ".into(), "has three ".into()],
+                "dropped mid-generation by mock",
+            )),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let app = crate::api::api_router().with_state(Arc::new(s));
+
+        let ws_body = serde_json::json!({"name": "llm-midfail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "Tell me more"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "error" {
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if kind == "complete" {
+                    complete_count += 1;
+                }
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a truncated (mid-stream failed) response must never be completed"
+        );
+        assert!(
+            error_msgs[0].contains("dropped mid-generation by mock"),
+            "error event must carry the mid-stream failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
     /// Prompt-capturing LLM factory for the grounding test: records the
     /// system prompt of each stream_complete call and streams it back so the
     /// caller can assert on the exact prompt text the production code built.
@@ -2654,6 +3246,7 @@ mod tests {
             &self,
             _system_prompt: &str,
             _user_prompt: &str,
+            _max_tokens: Option<u32>,
         ) -> anyhow::Result<serde_json::Value> {
             Ok(serde_json::json!([]))
         }
@@ -2954,6 +3547,9 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1000,
             updated_at: 1000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&foreign_repo).await.unwrap();
 
@@ -3088,6 +3684,9 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1000,
             updated_at: 1000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo).await.unwrap();
         ("ws-briefing".to_string(), "repo-1".to_string())
@@ -3106,6 +3705,7 @@ mod tests {
                 id: "link-1".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3152,6 +3752,7 @@ mod tests {
                 id: "link-same".to_string(),
                 source_path: "system/auth.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/users.md".to_string(),
                 target_repo_id: Some("repo-1".to_string()),
@@ -3187,6 +3788,7 @@ mod tests {
                 id: "link-stale".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3228,6 +3830,7 @@ mod tests {
                 id: "link-old-stale".to_string(),
                 source_path: "system/billing.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/old-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3442,6 +4045,7 @@ mod tests {
                 id: "link-old".to_string(),
                 source_path: "system/old-dep.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "old-spec.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -3775,6 +4379,183 @@ specs:
         drop(tmp2);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_graph_concepts_returns_manifest_concepts() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (_tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        // The manifest defines exactly one concept — the browser listing
+        // must surface its name and description verbatim.
+        let concepts = json["concepts"].as_array().unwrap();
+        assert_eq!(
+            concepts.len(),
+            1,
+            "exactly the manifest concept: {concepts:?}"
+        );
+        assert_eq!(concepts[0]["name"].as_str().unwrap(), "Authentication");
+        assert_eq!(
+            concepts[0]["description"].as_str().unwrap(),
+            "Token validation, RBAC, ABAC, JWT handling"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_graph_concepts_repo_without_manifest_returns_empty_list() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        // Repo path /repos/billing-service has no git repo — no manifest.
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // A repo without a manifest defines no predefined concepts — an
+        // empty listing is the valid answer (contrast the single-concept
+        // projection endpoint, which 404s on the missing manifest).
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["concepts"].as_array().unwrap().len(),
+            0,
+            "no manifest → no predefined concepts"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_workspace_graph_concepts_unions_and_dedupes() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // repo-1 defines Authentication.
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        // repo-2 (same workspace) defines Authentication again (duplicate,
+        // case-different name — must dedupe to one entry) plus a distinct
+        // concept.
+        let two_concept_manifest = r#"
+version: 1
+specs:
+  - path: system/other.md
+    title: Other
+    owner: user:test
+concepts:
+  - name: authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*"]
+  - name: Billing
+    description: "Invoicing and payments"
+    include:
+      - types: ["*Invoice*"]
+"#;
+        let (tmp2, repo2_path) = init_manifest_repo(two_concept_manifest);
+        let repo2 = gyre_domain::Repository::new(
+            Id::new("repo-2"),
+            Id::new("ws-briefing"),
+            "other-service",
+            repo2_path,
+            1000,
+        );
+        state.repos.create(&repo2).await.unwrap();
+
+        // repo-3 has no manifest — contributes nothing.
+        let repo3 = gyre_domain::Repository::new(
+            Id::new("repo-3"),
+            Id::new("ws-briefing"),
+            "manifest-less",
+            "/repos/manifest-less",
+            1000,
+        );
+        state.repos.create(&repo3).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/graph/concepts"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        let mut names: Vec<&str> = json["concepts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        // Case-insensitive dedupe: Authentication appears once (both
+        // repos define it with the same description — repo iteration order
+        // in the mem adapter is arbitrary, so the winner must not matter),
+        // Billing once, nothing from repo-3.
+        assert_eq!(
+            names,
+            vec!["Authentication", "Billing"],
+            "union with case-insensitive dedupe: {names:?}"
+        );
+        let auth = json["concepts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"].as_str().unwrap() == "Authentication")
+            .unwrap();
+        assert_eq!(
+            auth["description"].as_str().unwrap(),
+            "Token validation, RBAC, ABAC, JWT handling"
+        );
+        drop(tmp);
+        drop(tmp2);
+    }
+
     // ── Graph narrative generation (realized-model.md §6) ───────────────
 
     /// Seed repo-1 graph: `billing::search` module containing `VectorIndex`
@@ -3961,6 +4742,9 @@ specs:
             status: gyre_domain::RepoStatus::Active,
             created_at: 1000,
             updated_at: 1000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo2).await.unwrap();
 
@@ -4015,6 +4799,7 @@ specs:
                 id: "link-r1".to_string(),
                 source_path: "system/payment-retry.md".to_string(),
                 source_repo_id: Some("repo-1".to_string()),
+                source_sha: "sha-link-r1".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/idempotent-api.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -4029,6 +4814,7 @@ specs:
                 id: "link-r2".to_string(),
                 source_path: "system/auth.md".to_string(),
                 source_repo_id: Some("repo-2".to_string()),
+                source_sha: "sha-link-r2".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "system/sso.md".to_string(),
                 target_repo_id: Some("external-repo".to_string()),
@@ -4103,6 +4889,9 @@ specs:
             status: gyre_domain::RepoStatus::Active,
             created_at: 1000,
             updated_at: 1000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo2).await.unwrap();
         let mut a2 = gyre_domain::Agent::new(Id::new("agent-r2"), "worker-2", 2000);

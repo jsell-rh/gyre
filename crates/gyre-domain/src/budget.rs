@@ -1,7 +1,7 @@
 use gyre_common::Id;
 
 /// Budget configuration for a workspace, tenant, or repo level.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BudgetConfig {
     pub max_tokens_per_day: Option<u64>,
     pub max_cost_per_day: Option<f64>,
@@ -18,6 +18,12 @@ pub struct BudgetUsage {
     pub cost_today: f64,
     pub active_agents: u32,
     pub period_start: u64,
+    /// Agent wall-clock compute time charged to this entity, in whole
+    /// minutes (spawn → complete/kill; agent-runtime.md §4 What's Tracked).
+    /// Tracking-only: `BudgetConfig` has no compute-minute limit field —
+    /// the value is the consumption record surfaced by the budget API.
+    #[serde(default)]
+    pub compute_minutes: u64,
 }
 
 /// Per-call LLM budget audit record. Appended for every LLM invocation —
@@ -39,5 +45,10 @@ pub struct BudgetCallRecord {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub model: String,
+    /// Git SHA of the prompt template version used for this call
+    /// (ui-layout.md §2: "prompt template version (git SHA) recorded in
+    /// cost entries"). None when the template came from a DB override or
+    /// the hardcoded default — those have no git provenance.
+    pub prompt_template_sha: Option<String>,
     pub timestamp: u64,
 }

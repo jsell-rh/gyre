@@ -57,6 +57,24 @@ pub async fn admin_health(
     }))
 }
 
+// ── Orphaned Workspaces (user-management.md §Ownership Transfer & Reclamation) ─
+
+/// GET /api/v1/admin/orphaned-workspaces — workspaces with no active Owner
+/// for at least the configured period (`GYRE_ORPHANED_WORKSPACE_DAYS`,
+/// default 30 days). This is the admin dashboard "orphaned" flag.
+pub async fn admin_orphaned_workspaces(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let threshold_days = crate::workspace_ownership::orphaned_threshold_days();
+    let orphaned = crate::workspace_ownership::orphaned_workspaces_with(&state, threshold_days)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(serde_json::json!({
+        "threshold_days": threshold_days,
+        "workspaces": orphaned,
+    })))
+}
+
 // ── Background Jobs ───────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -356,6 +374,7 @@ pub async fn admin_kill_agent(
         let ctx = crate::container_audit::AuditCtx {
             audit: state.audit.as_ref(),
             broadcast_tx: &state.audit_broadcast_tx,
+            search: state.search.as_ref(),
         };
         crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, "force-killed by admin")
             .await;
@@ -387,6 +406,15 @@ pub async fn admin_kill_agent(
         killed_pid,
     )
     .await;
+
+    // The kill ended the run — release the workspace's active-agent budget
+    // slot and charge the wall-clock compute minutes (spawn → kill,
+    // agent-runtime.md §4 What's Tracked). `agent.status` still holds the
+    // pre-transition status: only an Active agent held a slot.
+    if agent.status == AgentStatus::Active {
+        crate::api::budget::decrement_active_agents(&state, &agent.workspace_id.to_string()).await;
+    }
+    crate::api::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -429,6 +457,9 @@ pub async fn admin_reassign_agent(
         .unwrap_or_else(|| auth.agent_id.clone());
     for mut task in tasks {
         task.assigned_to = Some(target.id.clone());
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        task.generation = task.generation.saturating_add(1);
         task.updated_at = now;
         state.tasks.update(&task).await?;
 

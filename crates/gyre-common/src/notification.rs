@@ -118,6 +118,10 @@ pub enum NotificationType {
     /// Priority 1 — post-merge revert re-validation failed on the reverted
     /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
     MergeQueueEscalation,
+    /// Priority 1 — a worker spawn failed on the workspace's compute target
+    /// after all retries; the task is Blocked and needs operator attention
+    /// (agent-runtime.md §1 Phase 7 "Spawn failure").
+    ComputeTargetUnavailable,
     /// Priority 2 — an admin requested to impersonate this user; the body
     /// carries the approval code the user must submit to consent
     /// (identity-security.md §Impersonation).
@@ -131,6 +135,10 @@ pub enum NotificationType {
     /// approval was reset to Pending (platform-model.md §2 Repo-Defined
     /// Personas). Sent to the persona owner.
     PersonaChangePendingApproval,
+    /// Priority 2 — a workspace has no active Owner and the tenant admin
+    /// must reassign ownership (user-management.md §Ownership Transfer &
+    /// Reclamation). Sent to every TenantAdmin of the workspace's tenant.
+    WorkspaceOwnerless,
 }
 
 impl NotificationType {
@@ -174,10 +182,12 @@ impl NotificationType {
             Self::AtomicGroupFailure => "AtomicGroupFailure",
             Self::SpecConflict => "SpecConflict",
             Self::MergeQueueEscalation => "MergeQueueEscalation",
+            Self::ComputeTargetUnavailable => "ComputeTargetUnavailable",
             Self::ImpersonationRequest => "ImpersonationRequest",
             Self::ImpersonationAlert => "ImpersonationAlert",
             Self::SecretExpiring => "SecretExpiring",
             Self::PersonaChangePendingApproval => "PersonaChangePendingApproval",
+            Self::WorkspaceOwnerless => "WorkspaceOwnerless",
         }
     }
 
@@ -226,10 +236,12 @@ impl NotificationType {
             "AtomicGroupFailure" => Some(Self::AtomicGroupFailure),
             "SpecConflict" => Some(Self::SpecConflict),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
+            "ComputeTargetUnavailable" => Some(Self::ComputeTargetUnavailable),
             "ImpersonationRequest" => Some(Self::ImpersonationRequest),
             "ImpersonationAlert" => Some(Self::ImpersonationAlert),
             "SecretExpiring" => Some(Self::SecretExpiring),
             "PersonaChangePendingApproval" => Some(Self::PersonaChangePendingApproval),
+            "WorkspaceOwnerless" => Some(Self::WorkspaceOwnerless),
             _ => None,
         }
     }
@@ -287,10 +299,12 @@ impl NotificationType {
             Self::AtomicGroupFailure => 3,
             Self::SpecConflict => 2,
             Self::MergeQueueEscalation => 1,
+            Self::ComputeTargetUnavailable => 1,
             Self::ImpersonationRequest => 2,
             Self::ImpersonationAlert => 1,
             Self::SecretExpiring => 7,
             Self::PersonaChangePendingApproval => 2,
+            Self::WorkspaceOwnerless => 2,
         }
     }
 }

@@ -7,6 +7,7 @@
   import TimelineScrubber from '../components/TimelineScrubber.svelte';
   import Breadcrumb from '../components/Breadcrumb.svelte';
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
+  import RiskMapOverlay from '../components/RiskMapOverlay.svelte';
   import ObservableBanner from '../components/ObservableBanner.svelte';
   import {
     buildAdjacency,
@@ -49,6 +50,15 @@
     trailSegments,
   } from './flow-particles.js';
   import { WEBGL_PARTICLE_THRESHOLD, drawParticles2D, ParticleLayer } from './particle-layer.js';
+  // Filter-panel classification (task-178): tree-group containers are
+  // synthetic nodes whose ids never appear in the parent-computed
+  // hiddenNodeIds set, so the draw loop classifies them directly — the
+  // synthetic package/module groups ARE the boundary boxes the default
+  // zoom shows (system-explorer.md §1 "default zoom shows boundaries").
+  import { nodeCategory } from './filter-categories.js';
+  // Risk Map overlay (system-explorer.md §7, task-181): heat map metric
+  // scale + anomaly detection on the /graph/risks data.
+  import { buildRiskHeatMap, detectRiskAnomalies } from './risk-map.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -88,11 +98,62 @@
     onTimelineScrub = (_idx) => {},  // Callback when scrubber changes
     onTimelineMarkerClick = (_delta) => {}, // Callback when key moment clicked
     timelineDeltaStats = null, // { added, removed, modified, byType }
+    timelineReconciliationEvents = [], // workspace reconciliation_completed messages (key moments)
     // HSI §3 Layer 1 gate status — MR gate evaluation records for the current
     // repo: [{ mrId, spec_ref, gates: [{status}] }]. Loaded best-effort by the
     // parent (ExplorerView); only rendered in the Evaluative lens.
     gateRecords = [],
+    // Risk metrics per node id from GET /repos/:id/graph/risks (task-178:
+    // Evaluative lens overlays risk data — churn × complexity heat).
+    riskByNode = {},
+    // Full RiskMetricsResponse entries from GET /repos/:id/graph/risks
+    // (task-181 Risk Map): churn_rate, fan_in, fan_out, complexity,
+    // spec_covered per node — drives the per-metric heat map and anomaly
+    // callouts (system-explorer.md §7).
+    riskEntries = [],
+    // Node ids hidden by the in-view filter panel (filter-categories.js
+    // hiddenNodeIds) — category checkboxes toggle node visibility on the
+    // canvas. Concept selection fades instead (system-explorer.md §4,
+    // task-182) — see the conceptNodeIds prop.
+    hiddenNodeIds = null,
+    // The same panel state BEFORE reduction to node ids: unchecked category
+    // ids and selected concepts. Tree-group containers are synthetic (ids
+    // like '__tree__src.api' are built during layout), so the id set cannot
+    // express them — the draw loop classifies the group's own node
+    // (package/module → Boundaries) and matches its name against the
+    // selected concepts to decide whether the container box is filtered.
+    hiddenCategories = null,
+    filterConcepts = null,
+    // Concept view emphasis set (system-explorer.md §4, task-182): node
+    // ids belonging to the active concept — the manifest concept's
+    // projection unioned with any discovered-concept matches. Concept
+    // nodes keep full opacity and gain a highlighted border; everything
+    // else fades to background (CONCEPT_FADE_ALPHA) instead of being
+    // removed. null when no concept is active.
+    conceptNodeIds = null,
+    // Ad-hoc concept creation (system-explorer.md §4): called with the
+    // multi-selected node ids when the user picks "Create concept" —
+    // the shell (ExplorerView) opens the naming dialog and saves the
+    // grouping as an explorer view.
+    onCreateConcept = null,
   } = $props();
+
+  // Filter-panel state for tree-group containers (see hiddenCategories
+  // above): derived once so every draw-frame read is cheap.
+  let hiddenFilterCategories = $derived(new Set(hiddenCategories ?? []));
+  let activeFilterConcepts = $derived(Array.isArray(filterConcepts) ? filterConcepts : []);
+
+  // ── Concept views (system-explorer.md §4, task-182) ───────────────
+  // Non-concept nodes fade to this opacity — the spec's "everything else
+  // fades to background" (0.1–0.2), never removal.
+  const CONCEPT_FADE_ALPHA = 0.15;
+  // Purple — the concept-creation accent (multi-select, ad-hoc grouping).
+  // Deliberately distinct from every legend edge color (calls #60a5fa,
+  // implements #34d399, …) so the concept emphasis is unambiguous.
+  const CONCEPT_EDGE_COLOR = '#a78bfa';
+  let conceptFilterIds = $derived(
+    conceptNodeIds instanceof Set && conceptNodeIds.size > 0 ? conceptNodeIds : null
+  );
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
   // When a view query uses "$clicked" as scope.node, we store the template
@@ -458,8 +519,15 @@
       if (hasTraces && !TRACE_METRICS.has(evaluativeMetric)) {
         evaluativeMetric = 'span_duration';
       }
+      // No trace data but risk metrics are available (GET /repos/:id/graph/risks,
+      // task-178): default the heat to the risk overlay instead of a dead metric.
+      if (!hasTraces && riskEntryCount > 0 && evaluativeMetric !== 'risk') {
+        evaluativeMetric = 'risk';
+      }
     }
   });
+  // Risk entries present in the riskByNode prop (task-178 Evaluative lens).
+  let riskEntryCount = $derived(Object.keys(riskByNode ?? {}).length);
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
 
@@ -500,6 +568,18 @@
     void activeAgentNodeIds.size;
     void recentChanges.size;
     void nodeGateStatus.size;
+    // In-view filter panel (task-178): category/concept visibility changes
+    // and Evaluative-lens risk data arrival must redraw without waiting for
+    // the next user interaction. Tracked by identity, not size — swapping
+    // one unchecked category for another keeps the hidden set's size.
+    void hiddenNodeIds;
+    void hiddenFilterCategories;
+    void activeFilterConcepts;
+    void Object.keys(riskByNode ?? {}).length;
+    // Risk Map (task-181): heat layer rebuilds when the metric selection or
+    // the underlying risk entries change — redraw without waiting for the
+    // next user interaction.
+    void riskHeatMap;
     const t = setTimeout(() => scheduleRedraw(), 0);
     return () => clearTimeout(t);
   });
@@ -584,156 +664,12 @@
   });
 
   // Anomaly detection state — visible in both structural and evaluative lenses
-  // (spec: Risk Map is an overlay on the architecture canvas, not evaluative-only)
+  // (spec: Risk Map is an overlay on the architecture canvas, not evaluative-only).
+  // The patterns live in risk-map.js (detectRiskAnomalies) so they are
+  // unit-testable independently of the render loop (task-181).
   let anomalies = $derived.by(() => {
     if (lens !== 'structural' && lens !== 'evaluative') return [];
-    const results = [];
-    const nodeById = new Map();
-    for (const n of nodes) nodeById.set(n.id, n);
-
-    // Pre-compute trait implementation counts
-    const traitImplCounts = new Map(); // traitId → { total, tested }
-    for (const e of edges) {
-      const src = edgeSrc(e);
-      const tgt = edgeTgt(e);
-      const et = edgeType(e);
-      if (et === 'implements') {
-        const tgtNode = nodeById.get(tgt);
-        if (tgtNode && (tgtNode.node_type === 'interface' || tgtNode.node_type === 'trait')) {
-          if (!traitImplCounts.has(tgt)) traitImplCounts.set(tgt, { total: 0, tested: 0 });
-          const entry = traitImplCounts.get(tgt);
-          entry.total++;
-          const srcNode = nodeById.get(src);
-          if (srcNode?.test_coverage > 0 || srcNode?.test_node) entry.tested++;
-        }
-      }
-    }
-
-    // Compute distribution-relative thresholds (percentile-based, not hardcoded)
-    const complexities = nodes.filter(n => n.complexity != null && !n.deleted_at).map(n => n.complexity);
-    const coverages = nodes.filter(n => n.test_coverage != null && !n.deleted_at).map(n => n.test_coverage);
-    const callCounts = [];
-    for (const n of nodes) {
-      if (!n.deleted_at && n.node_type !== 'tree-group') callCounts.push(incomingCallCounts.get(n.id) ?? 0);
-    }
-    function p90(arr) {
-      if (arr.length === 0) return Infinity;
-      const sorted = [...arr].sort((a, b) => a - b);
-      const idx = Math.min(Math.floor(sorted.length * 0.9), sorted.length - 1);
-      return sorted[idx];
-    }
-    function p10(arr) {
-      if (arr.length === 0) return 0;
-      const sorted = [...arr].sort((a, b) => a - b);
-      const idx = Math.min(Math.floor(sorted.length * 0.1), sorted.length - 1);
-      return sorted[idx];
-    }
-    const complexityThreshold = Math.max(10, p90(complexities));
-    const coverageThreshold = Math.min(0.5, p10(coverages));
-    const callThreshold = Math.max(3, p90(callCounts));
-
-    for (const n of nodes) {
-      if (n.node_type === 'tree-group' || n.deleted_at) continue;
-      const calls = incomingCallCounts.get(n.id) ?? 0;
-
-      // Pattern 1: High complexity + low test coverage (distribution-relative)
-      if ((n.complexity ?? 0) > complexityThreshold && (n.test_coverage ?? 0) < coverageThreshold) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `High complexity (${n.complexity}, p90=${complexityThreshold}) but low test coverage (${Math.round((n.test_coverage ?? 0) * 100)}%)`,
-          severity: 'high',
-        });
-      }
-      // Pattern 2: Heavily depended on with no spec (distribution-relative)
-      if (calls > callThreshold && !n.spec_path) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `Heavily depended on (${calls} callers, p90=${callThreshold}) with no spec`,
-          severity: 'medium',
-        });
-      }
-      // Pattern 3: Trait has N implementations but only M tested
-      if (n.node_type === 'interface' || n.node_type === 'trait') {
-        const entry = traitImplCounts.get(n.id);
-        if (entry && entry.total > 1 && entry.tested < entry.total) {
-          results.push({
-            nodeId: n.id,
-            nodeName: n.name ?? n.qualified_name ?? '?',
-            message: `${entry.total} implementations but only ${entry.tested} tested`,
-            severity: 'medium',
-          });
-        }
-      }
-      // Pattern 4: Type/interface created by agent but has no governing spec
-      if ((n.node_type === 'type' || n.node_type === 'interface') && !n.spec_path && n.last_modified_by) {
-        const hasGovEdge = governedByIndex.has(n.id);
-        if (!hasGovEdge) {
-          results.push({
-            nodeId: n.id,
-            nodeName: n.name ?? n.qualified_name ?? '?',
-            message: `Agent-created ${n.node_type} has no governing spec`,
-            severity: 'medium',
-          });
-        }
-      }
-      // Pattern 5: Orphan function — no callers (possible dead code)
-      if (n.node_type === 'function' && !n.test_node && calls === 0) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: 'No callers \u2014 possible dead code',
-          severity: 'low',
-        });
-      }
-    }
-    // Pattern 6: Co-change detection — modules that change together but have no shared spec.
-    // Two heuristics: (a) same commit SHA, (b) modified within the same time window (1 hour).
-    // This catches co-changes in separate commits within the same PR.
-    const coChangeGroups = new Map(); // key → [node]
-    for (const n of nodes) {
-      if (n.deleted_at || n.node_type === 'tree-group') continue;
-      // Group by SHA (exact same commit)
-      if (n.last_modified_sha) {
-        const key = `sha:${n.last_modified_sha}`;
-        if (!coChangeGroups.has(key)) coChangeGroups.set(key, []);
-        coChangeGroups.get(key).push(n);
-      }
-      // Group by time window (same hour, to catch separate commits in same PR)
-      if (n.last_modified_at) {
-        const hourBucket = Math.floor(n.last_modified_at / 3600);
-        const key = `time:${hourBucket}`;
-        if (!coChangeGroups.has(key)) coChangeGroups.set(key, []);
-        coChangeGroups.get(key).push(n);
-      }
-    }
-    // Deduplicate: track which node pairs we've already reported
-    const reportedPairs = new Set();
-    // Find groups of 3+ nodes from different modules that share a change pattern but no shared spec
-    for (const [, group] of coChangeGroups) {
-      if (group.length < 3) continue;
-      const modules = new Set(group.map(n => n.file_path?.split('/').slice(0, -1).join('/') ?? ''));
-      if (modules.size < 2) continue; // Same module, not interesting
-      const specs = new Set(group.filter(n => n.spec_path).map(n => n.spec_path));
-      if (specs.size > 0) continue; // Have shared spec governance
-      // Dedup by first 2 node IDs
-      const pairKey = group.slice(0, 2).map(n => n.id).sort().join(',');
-      if (reportedPairs.has(pairKey)) continue;
-      reportedPairs.add(pairKey);
-      const names = group.slice(0, 3).map(n => n.name ?? '?').join(', ');
-      results.push({
-        nodeId: group[0].id,
-        nodeName: names,
-        message: `${group.length} nodes across ${modules.size} modules change together but have no shared spec`,
-        severity: 'medium',
-      });
-    }
-    // Sort by severity (high first) — show all anomalies, not an arbitrary cap.
-    // The panel scrolls so users can explore the full risk landscape.
-    const order = { high: 0, medium: 1, low: 2 };
-    results.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
-    return results;
+    return detectRiskAnomalies({ nodes, edges, riskEntries });
   });
   // Index anomalies by nodeId for O(1) canvas-spatial rendering
   let anomalyByNodeId = $derived.by(() => {
@@ -935,6 +871,17 @@
     return { metric: evaluativeMetric, palette: 'blue-red' };
   });
 
+  // ── Risk Map overlay (system-explorer.md §7, task-181) ─────────────────
+  // Heat map layer for the selected risk metric (churn / coupling /
+  // complexity / spec coverage / test coverage). Pure metric → color
+  // mapping lives in risk-map.js; the canvas only swaps node fills —
+  // positions and layout are untouched.
+  let riskMapMetric = $state('churn');
+  let riskHeatMap = $derived.by(() => {
+    if (lens !== 'evaluative' || evaluativeMetric !== 'risk') return null;
+    return buildRiskHeatMap(riskEntries, nodes, riskMapMetric);
+  });
+
   // Pre-compute evaluative heat max values
   let evalHeatMaxValues = $derived.by(() => {
     if (!evaluativeHeatConfig) return new Map();
@@ -949,12 +896,16 @@
     return m;
   });
 
-  // Centralized metric value accessor for evaluative lens (trace-based metrics only)
+  // Centralized metric value accessor for evaluative lens (trace metrics +
+  // the risk overlay from GET /repos/:id/graph/risks).
   function getNodeMetricValue(metric, node) {
     if (!node) return 0;
-    // Evaluative lens only supports behavioral/trace metrics per spec.
-    // Structural metrics (complexity, churn, incoming_calls, test_coverage)
-    // belong in the structural lens heat map.
+    // Risk overlay (task-178): risk score per node from the server's
+    // /graph/risks endpoint — churn × complexity. Structural metrics
+    // (complexity, churn alone) belong in the structural lens heat map.
+    if (metric === 'risk') {
+      return riskByNode?.[node.id] ?? 0;
+    }
     if (metric === 'span_duration') {
       const stats = nodeSpanStats.get(node.id);
       return stats ? stats.meanDuration : 0;
@@ -973,6 +924,15 @@
   function evaluativeNodeColor(nodeId, node) {
     if (!evaluativeHeatConfig || !node) return null;
     const metric = evaluativeHeatConfig.metric;
+    // Risk Map heat (task-181): color by the selected risk metric on the
+    // blue → yellow → red scale. Zero is a valid value here (stable /
+    // covered → cool blue), unlike the trace metrics above where 0 means
+    // no data — nodes without data for the metric get no heat fill.
+    // Falls back to the task-178 aggregate (churn × complexity) when only
+    // the reduced riskByNode prop is available.
+    if (metric === 'risk' && riskHeatMap && riskHeatMap.byNodeId.size > 0) {
+      return riskHeatMap.byNodeId.get(nodeId)?.color ?? null;
+    }
     const value = getNodeMetricValue(metric, node);
     if (value === 0) return null;
     const maxVal = evalHeatMaxValues.get(metric) ?? 1;
@@ -2347,31 +2307,41 @@
       return matched.size > 0 ? matched : null;
     }
 
-    // Concept scope: start from seed nodes, expand along edges
+    // Concept scope: start from seed nodes, expand along edges.
+    // seed_match 'substring' (the ViewSpec data.concept mechanism,
+    // ui-layout.md §4): every node whose name/qualified_name contains the
+    // seed (case-insensitive) is a seed. Default 'exact': the seed names
+    // one node by name/qualified_name/id (ad-hoc groupings, grammar
+    // examples).
     if (scope.type === 'concept') {
       const seeds = scope.seed_nodes ?? [];
+      const substring = String(scope.seed_match ?? 'exact') === 'substring';
       const expandEdges = new Set((scope.expand_edges ?? ['calls']).map(e => e.toLowerCase()));
       const maxDepth = scope.expand_depth ?? 2;
       const dir = scope.expand_direction ?? 'both';
       const dm = new Map();
 
       for (const seedName of seeds) {
-        const seedNode = nodes.find(n =>
-          n.name === seedName || n.qualified_name === seedName || n.id === seedName
-        );
-        if (!seedNode || dm.has(seedNode.id)) continue;
-        dm.set(seedNode.id, 0);
-        const q = [{ id: seedNode.id, depth: 0 }];
-        while (q.length > 0) {
-          const { id, depth } = q.shift();
-          if (depth >= maxDepth) continue;
-          for (const nb of (adjacency.get(id) ?? [])) {
-            if (dm.has(nb.targetId)) continue;
-            if (!expandEdges.has(nb.edgeType)) continue;
-            if (dir === 'outgoing' && nb.reverse) continue;
-            if (dir === 'incoming' && !nb.reverse) continue;
-            dm.set(nb.targetId, depth + 1);
-            q.push({ id: nb.targetId, depth: depth + 1 });
+        const seedNodes = substring
+          ? nodes.filter(n =>
+              String(n.name ?? '').toLowerCase().includes(seedName.toLowerCase()) ||
+              String(n.qualified_name ?? '').toLowerCase().includes(seedName.toLowerCase()))
+          : [nodes.find(n => n.name === seedName || n.qualified_name === seedName || n.id === seedName)].filter(Boolean);
+        for (const seedNode of seedNodes) {
+          if (dm.has(seedNode.id)) continue;
+          dm.set(seedNode.id, 0);
+          const q = [{ id: seedNode.id, depth: 0 }];
+          while (q.length > 0) {
+            const { id, depth } = q.shift();
+            if (depth >= maxDepth) continue;
+            for (const nb of (adjacency.get(id) ?? [])) {
+              if (dm.has(nb.targetId)) continue;
+              if (!expandEdges.has(nb.edgeType)) continue;
+              if (dir === 'outgoing' && nb.reverse) continue;
+              if (dir === 'incoming' && !nb.reverse) continue;
+              dm.set(nb.targetId, depth + 1);
+              q.push({ id: nb.targetId, depth: depth + 1 });
+            }
           }
         }
       }
@@ -2437,16 +2407,26 @@
     return m;
   });
 
-  // Does a tree-group contain any matched nodes?
-  function treeGroupHasMatch(ln) {
-    if (!queryMatchedIds) return true;
-    if (queryMatchedIds.has(ln.id)) return true;
+  // Does a tree-group contain any matched nodes? Children are matched via
+  // parentTreeGroup IDENTITY OF ID, not object reference: layoutNodes is a
+  // $state array, so the draw loop's `ln` and the raw parentTreeGroup
+  // references are different Svelte proxies of the same node — reference
+  // equality silently never matches (the original query-matching recursion
+  // was dead code for the same reason).
+  function treeGroupHasAny(ln, ids) {
+    if (!ids) return true;
+    if (ids.has(ln.id)) return true;
     // Check children
+    const lnId = ln.id;
     for (const cln of layoutNodes) {
-      if (cln.parentTreeGroup === ln && queryMatchedIds.has(cln.id)) return true;
-      if (cln.parentTreeGroup === ln && cln.kind === 'tree-group' && treeGroupHasMatch(cln)) return true;
+      if (cln.parentTreeGroup?.id === lnId && ids.has(cln.id)) return true;
+      if (cln.parentTreeGroup?.id === lnId && cln.kind === 'tree-group' && treeGroupHasAny(cln, ids)) return true;
     }
     return false;
+  }
+
+  function treeGroupHasMatch(ln) {
+    return treeGroupHasAny(ln, queryMatchedIds);
   }
 
   function queryNodeOpacity(ln) {
@@ -2702,6 +2682,21 @@
   let lastCanvasW = 0;
   let lastCanvasH = 0;
 
+  // Is a tree-group container filtered out by the in-view filter panel?
+  // Containers follow the panel through their OWN node: synthetic groups
+  // carry node_type package/module (→ Boundaries), and real nodes drawn as
+  // containers carry their real node_type. Concept selection no longer
+  // hides containers — concept views fade non-concept elements to
+  // background instead of removing them (system-explorer.md §4), so the
+  // concept branch lives in the draw loop's fade math, not here.
+  function treeGroupFilterHidden(ln) {
+    if (!ln.node) return false;
+    if (hiddenFilterCategories.size > 0 && hiddenFilterCategories.has(nodeCategory(ln.node))) {
+      return true;
+    }
+    return false;
+  }
+
   function drawFrame() {
     const canvas = canvasEl;
     if (!canvas) return;
@@ -2814,6 +2809,24 @@
       if (ss > 0 && ss < 10) return;
       if (!isTreeGroup && op < 0.01) return;
 
+      // In-view filter panel (ui-navigation.md §3): category checkboxes
+      // toggle node visibility — hidden nodes are skipped entirely.
+      // Concept selection fades instead (see the concept fade below), so
+      // it no longer feeds this branch. Tree-group containers are filtered
+      // through their own node (the synthetic package/module groups are
+      // the boundary boxes the default zoom shows): a filtered group skips
+      // its box but keeps drawing children, so zoomed-in content of other
+      // categories stays visible when only the container's category is
+      // unchecked.
+      if (hiddenNodeIds?.size > 0 || hiddenFilterCategories.size > 0) {
+        if (!isTreeGroup) {
+          const filterNid = ln.node?.id ?? ln.id;
+          if (hiddenNodeIds?.has(filterNid)) return;
+        } else if (treeGroupFilterHidden(ln)) {
+          op = 0;
+        }
+      }
+
       // Semantic zoom: deliberate information hierarchy per zoom level
       // The spec's core abstraction: "default zoom shows boundaries and interfaces"
       // with "types, functions visible on drill-down."
@@ -2826,8 +2839,12 @@
       if (!isTreeGroup && ln.node) {
         const nt = ln.node.node_type ?? '';
         const isQueryMatched = activeQuery && queryMatchedIds?.has(ln.node.id);
+        // Concept nodes stay visible regardless of zoom — the concept view
+        // "shows only elements related to the selected concept" even when
+        // the semantic-zoom hierarchy would normally hide the node type.
+        const isConceptNode = conceptFilterIds?.has(ln.node.id) ?? false;
         // Always show query-matched nodes regardless of zoom
-        if (!isQueryMatched) {
+        if (!isQueryMatched && !isConceptNode) {
           if (cam.zoom < 0.3 && !['package', 'module'].includes(nt)) return;
           if (cam.zoom < 0.6 && ['function', 'method', 'endpoint', 'field', 'constant', 'table', 'component', 'class', 'enum_variant'].includes(nt)) return;
           if (cam.zoom < 1.0 && ['function', 'method', 'field', 'constant', 'enum_variant'].includes(nt)) return;
@@ -2838,6 +2855,18 @@
       // Draw this node if it has any opacity
       if (op > 0.01) {
         let drawOp = op * filterOpacity(ln);
+
+        // Concept view fade (system-explorer.md §4): concept elements keep
+        // full opacity; everything else fades to background — NOT removed.
+        // Tree-group containers stay emphasized when they contain concept
+        // nodes (their own node id may itself be a concept member).
+        if (conceptFilterIds) {
+          const inConcept = isTreeGroup
+            ? treeGroupHasAny(ln, conceptFilterIds)
+            : (ln.node?.id ? conceptFilterIds.has(ln.node.id) : conceptFilterIds.has(ln.id));
+
+          if (!inConcept) drawOp *= CONCEPT_FADE_ALPHA;
+        }
 
         if (activeQuery && drawOp > 0.01) {
           const qOp = queryNodeOpacity(ln);
@@ -3419,6 +3448,18 @@
       ctx.lineWidth = ln.id === selectedNodeId ? 2.5 : 1.5;
       ctx.stroke();
 
+      // Concept view emphasis (system-explorer.md §4): containers holding
+      // concept nodes carry the highlighted concept border — the overview-
+      // zoom counterpart of the leaf emphasis border.
+      if (conceptFilterIds && treeGroupHasAny(ln, conceptFilterIds)) {
+        ctx.save();
+        ctx.strokeStyle = CONCEPT_EDGE_COLOR;
+        ctx.lineWidth = 2.5;
+        roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // Label
       const fontSize = Math.max(8, Math.min(22, Math.min(sw, sh) * 0.22));
       ctx.fillStyle = '#e2e8f0';
@@ -3533,6 +3574,18 @@
       roundRect(ctx, s.x - sw / 2 - 2, s.y - sh / 2 - 2, sw + 4, sh + 4, r + 1);
       ctx.stroke();
       ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // ── Concept view emphasis (system-explorer.md §4) ────────────────
+    // Concept nodes render at full opacity with a highlighted border —
+    // the visual counterpart of the fade applied to everything else.
+    if (conceptFilterIds?.has(ln.id)) {
+      ctx.save();
+      ctx.strokeStyle = CONCEPT_EDGE_COLOR;
+      ctx.lineWidth = 2.5;
+      roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -4043,6 +4096,8 @@
 
       const srcId = edgeSrc(e);
       const tgtId = edgeTgt(e);
+      // In-view filter panel: edges touching a hidden node are hidden too.
+      if (hiddenNodeIds?.size > 0 && (hiddenNodeIds.has(srcId) || hiddenNodeIds.has(tgtId))) continue;
       const sln = layoutNodeMap.get(srcId);
       const tln = layoutNodeMap.get(tgtId);
       if (!sln || !tln) continue;
@@ -4130,6 +4185,19 @@
           lineWidth = 2.5;
         } else {
           edgeAlpha = alpha * 0.15;
+        }
+      }
+
+      // Concept view emphasis (system-explorer.md §4): edges between
+      // concept nodes are highlighted; edges touching faded nodes dim
+      // with them — relationships within the concept stay readable.
+      if (conceptFilterIds) {
+        if (conceptFilterIds.has(srcId) && conceptFilterIds.has(tgtId)) {
+          color = CONCEPT_EDGE_COLOR;
+          edgeAlpha = Math.max(edgeAlpha, 0.8);
+          lineWidth = Math.max(lineWidth, 2);
+        } else {
+          edgeAlpha *= 0.15;
         }
       }
 
@@ -4244,6 +4312,16 @@
       bundles.get(key).count++;
     }
 
+    // Groups containing concept nodes (concept view emphasis — see the
+    // bundle loop below).
+    let conceptGroups = null;
+    if (conceptFilterIds) {
+      conceptGroups = new Set();
+      for (const [nid, gid] of nodeToGroup) {
+        if (conceptFilterIds.has(nid)) conceptGroups.add(gid);
+      }
+    }
+
     for (const [, bundle] of bundles) {
       const sln = layoutNodeMap.get(bundle.sg);
       const tln = layoutNodeMap.get(bundle.tg);
@@ -4258,10 +4336,24 @@
       if (ss.y < -50 && ts.y < -50) continue;
       if (ss.y > H + 50 && ts.y > H + 50) continue;
 
-      const thickness = Math.max(1, Math.min(5, Math.log2(bundle.count + 1)));
-      const alpha = Math.min(0.6, 0.2 + bundle.count / 100);
+      let thickness = Math.max(1, Math.min(5, Math.log2(bundle.count + 1)));
+      let alpha = Math.min(0.6, 0.2 + bundle.count / 100);
+      let color = '#64748b';
 
-      drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, '#64748b', alpha, thickness);
+      // Concept view fade (system-explorer.md §4): bundles between groups
+      // that contain concept nodes are highlighted; the rest dim to
+      // background with their endpoints.
+      if (conceptGroups) {
+        if (conceptGroups.has(bundle.sg) && conceptGroups.has(bundle.tg)) {
+          color = CONCEPT_EDGE_COLOR;
+          alpha = Math.max(alpha, 0.7);
+          thickness += 1;
+        } else {
+          alpha *= 0.15;
+        }
+      }
+
+      drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, color, alpha, thickness);
 
       // Label bundle count
       if (thickness > 1.5) {
@@ -4351,6 +4443,9 @@
 
     for (const ln of layoutNodes) {
       if (ln.treeDepth > 1) continue;
+      // In-view filter panel: containers hidden on the main canvas stay
+      // hidden on the minimap (same treeGroupFilterHidden rule).
+      if (ln.kind === 'tree-group' && treeGroupFilterHidden(ln)) continue;
       const depth = ln.treeDepth || 0;
       const colors = treeGroupColor(depth, 0);
       ctx.globalAlpha = ln.kind === 'tree-group' ? 0.5 : 0.2;
@@ -5234,6 +5329,34 @@
     };
   }
 
+  /** Resolve a set of selected layout ids (leaves and/or tree-groups) to
+   *  the real graph node ids they cover. A synthetic tree-group selection
+   *  (its summary box is what the click hits at overview zoom) covers every
+   *  graph node inside it — the ad-hoc concept groups nodes, not layout
+   *  artifacts, so the shell receives node ids that exist in the graph. */
+  function selectionNodeIds(ids) {
+    const out = new Set();
+    const addLayoutNode = (ln) => {
+      if (!ln) return;
+      if (ln.kind === 'leaf') {
+        if (ln.node?.id) out.add(ln.node.id);
+        return;
+      }
+      // Tree-group: its own real node id (real container nodes drawn as
+      // groups), the synthetic path group's direct graph nodes, and every
+      // descendant group/leaf.
+      if (ln.node?.id && !String(ln.node.id).startsWith('__tree__')) out.add(ln.node.id);
+      for (const gn of ln.treeNode?.graphNodes ?? []) out.add(gn.id);
+      for (const child of childrenIndex.get(ln.id) ?? []) addLayoutNode(child);
+    };
+    for (const id of ids) {
+      const ln = layoutNodeMap.get(id);
+      if (ln) addLayoutNode(ln);
+      else out.add(id); // already a raw node id
+    }
+    return [...out];
+  }
+
   function contextMenuAction(action) {
     if (!contextMenu) return;
     const node = contextMenu.node;
@@ -5243,6 +5366,18 @@
     if (action === 'clear_trace') {
       // Exit trace mode (right-click affordance — explorer-canvas.md §6 "Exit trace mode")
       onInteractiveQuery(null);
+    } else if (action === 'create_concept') {
+      // Ad-hoc concept creation (system-explorer.md §4): group the
+      // multi-selected nodes (plus the right-clicked node when it isn't
+      // already among them) into a named concept — the shell opens the
+      // naming dialog and saves the grouping as an explorer view.
+      const ids = new Set(multiSelectedIds);
+      if (node?.id) ids.add(node.id);
+      if (ids.size >= 2 && onCreateConcept) {
+        onCreateConcept(selectionNodeIds(ids));
+        multiSelectedIds = new Set();
+        scheduleRedraw();
+      }
     } else if (action === 'trace') {
       startTraceFromNode(node);
     } else if (action === 'blast') {
@@ -5677,7 +5812,7 @@
 
   // Trigger redraws on reactive state changes (NOT hoveredNodeId — that triggers scheduleRedraw directly)
   $effect(() => {
-    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays, queryResult];
+    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays, queryResult, conceptFilterIds];
     scheduleRedraw();
   });
 
@@ -5924,17 +6059,25 @@
     <div class="concept-creation-bar" role="status">
       <span class="concept-count">{multiSelectedIds.size} nodes selected</span>
       <button class="concept-create-btn" type="button" onclick={() => {
-        const seedNodes = [...multiSelectedIds].map(id => {
-          const n = nodes.find(nd => nd.id === id);
-          return n?.qualified_name ?? n?.name ?? id;
-        });
-        const conceptQuery = {
-          scope: { type: 'concept', seed_nodes: seedNodes, expand_edges: ['calls', 'implements', 'contains'], expand_depth: 1 },
-          emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.12 },
-          zoom: 'fit',
-          annotation: { title: `Concept: ${seedNodes.length} seed nodes`, description: `{{count}} related nodes across {{group_count}} modules` },
-        };
-        onInteractiveQuery(conceptQuery);
+        if (onCreateConcept) {
+          // Ad-hoc concept creation (system-explorer.md §4): the shell
+          // opens the naming dialog and saves the grouping as an explorer
+          // view. The legacy interactive query below stays as the
+          // standalone-canvas fallback (no shell callback wired).
+          onCreateConcept(selectionNodeIds(multiSelectedIds));
+        } else {
+          const seedNodes = [...multiSelectedIds].map(id => {
+            const n = nodes.find(nd => nd.id === id);
+            return n?.qualified_name ?? n?.name ?? id;
+          });
+          const conceptQuery = {
+            scope: { type: 'concept', seed_nodes: seedNodes, expand_edges: ['calls', 'implements', 'contains'], expand_depth: 1 },
+            emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.12 },
+            zoom: 'fit',
+            annotation: { title: `Concept: ${seedNodes.length} seed nodes`, description: `{{count}} related nodes across {{group_count}} modules` },
+          };
+          onInteractiveQuery(conceptQuery);
+        }
         multiSelectedIds = new Set();
       }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
@@ -6027,12 +6170,53 @@
     </div>
   {/if}
 
-  <!-- Toolbar — lens toggle + filter presets (explorer-implementation.md §25 Phase 1) -->
+  <!-- Toolbar — lens checkbox group + filter presets (explorer-implementation.md §25 Phase 1;
+       ui-navigation.md §3: "Checkbox group (not a dropdown — checkboxes allow multi-select
+       for composition). Structural (always on) + Evaluative (toggle) + Observable (toggle, future).") -->
   <div class="treemap-toolbar">
-    <div class="lens-group" role="group" aria-label="Lens toggle">
-      <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
-      <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" aria-disabled="true" title="Observable lens is disabled — requires production telemetry integration" onclick={() => { observableBannerVisible = true; }}>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></button>
+    <div class="lens-group" role="group" aria-label="Lens selector" data-testid="lens-checkbox-group">
+      <!-- Structural is always the base layer — checked and locked. -->
+      <label class="lens-check" data-testid="lens-checkbox-structural" title="Structural lens — boundaries and dependencies (always on)">
+        <input type="checkbox" checked disabled aria-disabled="true" />
+        <span>Structural</span>
+      </label>
+      <!-- Evaluative is an additive overlay on the structural base. -->
+      <label class="lens-check" data-testid="lens-checkbox-evaluative" title="Overlay test results, gate outcomes, spec coverage, and risk metrics on the structural topology">
+        <input
+          type="checkbox"
+          checked={lens === 'evaluative'}
+          onchange={(e) => {
+            const next = e.currentTarget.checked ? 'evaluative' : 'structural';
+            lens = next;
+            onLensChange(next);
+          }}
+        />
+        <span>Evaluative</span>
+      </label>
+      <!-- Observable is a future toggle — grayed out until production telemetry
+           integration exists (system-explorer.md §1 "Observable (future)"). Clicking
+           it surfaces the notice banner instead of activating. The disabled input
+           is the visual checkbox; the wrapper carries the interaction (a disabled
+           input cannot receive events) as a keyboard-operable role=checkbox. -->
+      <div
+        class="lens-check lens-check-observable"
+        data-testid="lens-checkbox-observable"
+        role="checkbox"
+        aria-checked="false"
+        aria-disabled="true"
+        tabindex="0"
+        title="Observable lens is disabled — requires production telemetry integration"
+        onclick={() => { observableBannerVisible = true; }}
+        onkeydown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            observableBannerVisible = true;
+          }
+        }}
+      >
+        <input type="checkbox" disabled aria-disabled="true" />
+        <span>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></span>
+      </div>
     </div>
 
     <div class="filter-preset-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>
@@ -6052,7 +6236,21 @@
       <EvaluativeOverlay
         {evaluativeMetric}
         {traceData}
+        hasRiskData={riskEntryCount > 0}
         onMetricChange={(key) => { evaluativeMetric = key; userExplicitlySelectedMetric = true; onLensChange('evaluative'); }}
+      />
+      <div class="tb-sep"></div>
+    {/if}
+
+    <!-- Risk Map overlay controls (system-explorer.md §7, task-181): appear
+         when the Evaluative lens runs the Risk metric — metric selector +
+         color scale legend. Toggling the lens (or the metric) off removes
+         the overlay entirely; nodes return to structural coloring. -->
+    {#if lens === 'evaluative' && evaluativeMetric === 'risk' && riskEntries.length > 0}
+      <RiskMapOverlay
+        metric={riskMapMetric}
+        heat={riskHeatMap}
+        onMetricChange={(key) => { riskMapMetric = key; scheduleRedraw(); }}
       />
       <div class="tb-sep"></div>
     {/if}
@@ -6134,6 +6332,7 @@
         {playbackRequest}
         {highlightedSpanId}
         {focusRequest}
+        visibleNodeIds={queryMatchedIds}
         onNodeDetail={onFlowNodeDetail}
         onScopeDrill={onScopeDrill}
       />
@@ -6339,6 +6538,15 @@
             </button>
           {/if}
           <div class="ctx-sep"></div>
+          <!-- Ad-hoc concept creation (system-explorer.md §4): visible only
+               while nodes are multi-selected (Shift+Click). Groups the
+               selection into a named concept saved as an explorer view. -->
+          {#if multiSelectedIds.size >= 2}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('create_concept')} data-testid="ctx-create-concept">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+              Create concept ({multiSelectedIds.size} selected)
+            </button>
+          {/if}
           <!-- Secondary actions in collapsible "More..." -->
           <button class="ctx-more-toggle" onclick={() => { ctxMoreOpen = !ctxMoreOpen; }} aria-expanded={ctxMoreOpen}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
@@ -6594,6 +6802,7 @@
       active={timelineActive}
       scrubIndex={timelineScrubIndex}
       {nodes}
+      reconciliationEvents={timelineReconciliationEvents}
       onToggle={onTimelineToggle}
       onScrub={onTimelineScrub}
       onMarkerClick={onTimelineMarkerClick}
@@ -6620,7 +6829,13 @@
           class="anomaly-item anomaly-{anomaly.severity}"
           onclick={() => {
             const n = nodes.find(nd => nd.id === anomaly.nodeId);
-            if (n) { selectedNodeId = n.id; onNodeDetail(n); }
+            if (n) {
+              // Navigate on canvas (spec §7: callouts link to the relevant
+              // nodes): pan/zoom the camera onto the offending node, select
+              // it, and surface its detail panel.
+              zoomToNode(n.id);
+              onNodeDetail(n);
+            }
           }}
           type="button"
         >
@@ -6648,6 +6863,25 @@
   }
 
   .filter-group, .lens-group { display: flex; gap: 2px; }
+  /* Lens checkbox group (ui-navigation.md §3: checkbox group, not a dropdown) */
+  .lens-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #94a3b8;
+    cursor: pointer;
+    user-select: none;
+  }
+  .lens-check:hover { background: rgba(51, 65, 85, 0.5); color: #e2e8f0; }
+  .lens-check input { accent-color: #3b82f6; margin: 0; cursor: pointer; }
+  .lens-check input:disabled { cursor: not-allowed; }
+  .lens-check:has(input:checked) { background: #1e293b; color: #e2e8f0; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); }
+  .lens-check-observable { opacity: 0.45; font-style: italic; cursor: not-allowed; }
+  .lens-check-observable:hover { background: transparent; color: #94a3b8; opacity: 0.6; }
 
   .tb-btn {
     padding: 5px 14px; border: none; border-radius: 7px; font-size: 13px; font-weight: 500;
@@ -6659,9 +6893,6 @@
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
-  .tb-btn-observable { opacity: 0.35; font-style: italic; cursor: not-allowed; }
-  .tb-btn-observable:hover { opacity: 0.5; }
-  .tb-btn-observable::after { content: '🔒'; font-size: 8px; margin-left: 4px; vertical-align: middle; text-decoration: none; display: inline-block; }
   .observable-coming-soon { font-size: 9px; opacity: 0.7; font-style: italic; }
   /* Styles for eval-metric, observable-banner, trace-playback moved to extracted components */
 

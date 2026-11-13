@@ -29,6 +29,9 @@ vi.mock('../lib/api.js', () => ({
     setRepoSpecPolicy: vi.fn().mockResolvedValue({}),
     archiveRepo: vi.fn().mockResolvedValue({}),
     deleteRepo: vi.fn().mockResolvedValue({}),
+    updateRepoGate: vi.fn().mockResolvedValue({}),
+    mergeRequests: vi.fn().mockResolvedValue([]),
+    mrGates: vi.fn().mockResolvedValue([]),
     secretsList: vi.fn().mockResolvedValue([]),
     secretCreate: vi.fn().mockResolvedValue({}),
     secretDelete: vi.fn().mockResolvedValue(null),
@@ -214,6 +217,109 @@ describe('RepoSettings', () => {
       await new Promise(r => setTimeout(r, 0));
       expect(container.querySelector('[data-testid="repo-gates-tab"]')).toBeTruthy();
     });
+    it('shows a per-gate enabled/disabled toggle', async () => {
+      api.repoGates.mockResolvedValue([
+        { id: 'g1', name: 'unit-tests', gate_type: 'test_command', command: 'cargo test', required: true, position: 1 },
+      ]);
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openGatesTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      const toggle = container.querySelector('[data-testid="gate-toggle"]');
+      expect(toggle).toBeTruthy();
+      expect(toggle.querySelector('input[type="checkbox"]').checked).toBe(true);
+    });
+
+    it('toggling a gate calls api.updateRepoGate with required: false', async () => {
+      api.repoGates.mockResolvedValue([
+        { id: 'g1', name: 'unit-tests', gate_type: 'test_command', command: 'cargo test', required: true, position: 1 },
+      ]);
+      api.updateRepoGate.mockResolvedValue({ id: 'g1', name: 'unit-tests', gate_type: 'test_command', command: 'cargo test', required: false, position: 1 });
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openGatesTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      await fireEvent.click(container.querySelector('[data-testid="gate-toggle"] input[type="checkbox"]'));
+      expect(api.updateRepoGate).toHaveBeenCalledWith('repo-1', 'g1', { required: false });
+    });
+
+    it('clicking Configure opens the per-gate config form with command field', async () => {
+      api.repoGates.mockResolvedValue([
+        { id: 'g1', name: 'unit-tests', gate_type: 'test_command', command: 'cargo test', required: true, position: 1 },
+      ]);
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openGatesTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      await fireEvent.click(container.querySelector('[data-testid="edit-gate-btn"]'));
+      const form = container.querySelector('[data-testid="gate-edit-form"]');
+      expect(form).toBeTruthy();
+      expect(container.querySelector('[data-testid="gate-edit-command-input"]')).toBeTruthy();
+      // Agent-review gates show persona instead of command.
+      expect(container.querySelector('[data-testid="gate-edit-persona-input"]')).toBeFalsy();
+    });
+
+    it('saving the config form calls api.updateRepoGate with edited name and command', async () => {
+      api.repoGates.mockResolvedValue([
+        { id: 'g1', name: 'unit-tests', gate_type: 'test_command', command: 'cargo test', required: true, position: 1 },
+      ]);
+      api.updateRepoGate.mockResolvedValue({ id: 'g1', name: 'all-tests', gate_type: 'test_command', command: 'cargo test --all', required: true, position: 1 });
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openGatesTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      await fireEvent.click(container.querySelector('[data-testid="edit-gate-btn"]'));
+      await fireEvent.input(container.querySelector('[data-testid="gate-edit-name-input"]'), { target: { value: 'all-tests' } });
+      await fireEvent.input(container.querySelector('[data-testid="gate-edit-command-input"]'), { target: { value: 'cargo test --all' } });
+      await fireEvent.click(container.querySelector('[data-testid="gate-edit-save-btn"]'));
+      expect(api.updateRepoGate).toHaveBeenCalledWith('repo-1', 'g1', expect.objectContaining({ name: 'all-tests', command: 'cargo test --all' }));
+    });
+
+    it('agent_review gates edit persona instead of command', async () => {
+      api.repoGates.mockResolvedValue([
+        { id: 'g2', name: 'spec-review', gate_type: 'agent_review', persona: 'specs/reviewer.md', required: true, position: 1 },
+      ]);
+      api.updateRepoGate.mockResolvedValue({ id: 'g2', name: 'spec-review', gate_type: 'agent_review', persona: 'specs/reviewer.md', required: true, position: 1 });
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openGatesTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      await fireEvent.click(container.querySelector('[data-testid="edit-gate-btn"]'));
+      expect(container.querySelector('[data-testid="gate-edit-persona-input"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="gate-edit-command-input"]')).toBeFalsy();
+      await fireEvent.input(container.querySelector('[data-testid="gate-edit-persona-input"]'), { target: { value: 'specs/reviewer.md' } });
+      await fireEvent.click(container.querySelector('[data-testid="gate-edit-save-btn"]'));
+      expect(api.updateRepoGate).toHaveBeenCalledWith('repo-1', 'g2', expect.objectContaining({ persona: 'specs/reviewer.md' }));
+    });
+
+    it('dragging a gate onto another persists new positions via api.updateRepoGate', async () => {
+      api.repoGates.mockResolvedValue([
+        { id: 'g1', name: 'lint', gate_type: 'lint_command', command: 'cargo clippy', required: true, position: 1 },
+        { id: 'g2', name: 'test', gate_type: 'test_command', command: 'cargo test', required: true, position: 2 },
+        { id: 'g3', name: 'review', gate_type: 'agent_review', persona: 'r.md', required: true, position: 3 },
+      ]);
+      api.updateRepoGate.mockImplementation((_repoId, gateId, data) =>
+        Promise.resolve({ id: gateId, gate_type: 'agent_review', required: true, position: data.position ?? 1 })
+      );
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openGatesTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      const cards = container.querySelectorAll('[data-testid="gate-card"]');
+      expect(cards.length).toBe(3);
+      // Drag g3 (review, position 3) onto g1 (lint, position 1): g3 moves to slot 2.
+      const dt = {
+        setData: vi.fn(),
+        setDragImage: vi.fn(),
+        effectAllowed: 'move',
+        dropEffect: 'move',
+        types: ['text/plain'],
+        getData: vi.fn(() => 'g3'),
+      };
+      await fireEvent.dragStart(cards[2], { dataTransfer: dt });
+      await fireEvent.dragOver(cards[0], { dataTransfer: dt });
+      await fireEvent.drop(cards[0], { dataTransfer: dt });
+      await new Promise(r => setTimeout(r, 0));
+      // New order: lint(1), review(2), test(3) — review and test get new positions.
+      expect(api.updateRepoGate).toHaveBeenCalledWith('repo-1', 'g3', { position: 2 });
+      expect(api.updateRepoGate).toHaveBeenCalledWith('repo-1', 'g2', { position: 3 });
+      expect(api.updateRepoGate).not.toHaveBeenCalledWith('repo-1', 'g1', { position: 1 });
+    });
+
   });
 
   describe('Policies tab', () => {
@@ -236,8 +342,10 @@ describe('RepoSettings', () => {
     it('renders policy toggles when policy data exists', async () => {
       api.repoSpecPolicy.mockResolvedValue({
         require_spec_ref: true,
-        require_approval: false,
-        stale_spec_warning: true,
+        require_approved_spec: false,
+        warn_stale_spec: true,
+        require_current_spec: false,
+        require_signed_approval: false,
       });
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openPoliciesTab(container);
@@ -247,6 +355,41 @@ describe('RepoSettings', () => {
       expect(container.querySelector('[data-testid="toggle-require-spec-ref"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="toggle-require-approval"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="toggle-stale-warning"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="toggle-require-current-spec"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="toggle-require-signed-approval"]')).toBeTruthy();
+    });
+
+    it('binds toggles to the API policy field names', async () => {
+      // Regression: the toggles used to bind `require_approval` /
+      // `stale_spec_warning`, which the API never returns — the toggles
+      // silently did nothing. They must bind the real field names so a
+      // saved policy round-trips.
+      api.repoSpecPolicy.mockResolvedValue({
+        require_spec_ref: true,
+        require_approved_spec: true,
+        warn_stale_spec: false,
+        require_current_spec: true,
+        require_signed_approval: true,
+      });
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openPoliciesTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      expect(container.querySelector('[data-testid="toggle-require-spec-ref"]').checked).toBe(true);
+      expect(container.querySelector('[data-testid="toggle-require-approval"]').checked).toBe(true);
+      expect(container.querySelector('[data-testid="toggle-stale-warning"]').checked).toBe(false);
+      expect(container.querySelector('[data-testid="toggle-require-current-spec"]').checked).toBe(true);
+      expect(container.querySelector('[data-testid="toggle-require-signed-approval"]').checked).toBe(true);
+
+      // Saving sends the full policy object back, keyed by the API field names.
+      await fireEvent.click(container.querySelector('[data-testid="save-spec-policy-btn"]'));
+      await new Promise(r => setTimeout(r, 0));
+      expect(api.setRepoSpecPolicy).toHaveBeenCalledWith('repo-1', expect.objectContaining({
+        require_spec_ref: true,
+        require_approved_spec: true,
+        warn_stale_spec: false,
+        require_current_spec: true,
+        require_signed_approval: true,
+      }));
     });
   });
 

@@ -42,6 +42,7 @@ reqwest = { workspace = true }
 url = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = "0.10"
+sha1 = "0.10"
 hex = { workspace = true }
 subtle = { workspace = true }
 ring = { workspace = true }
@@ -51,7 +52,7 @@ pem = "3.0"
 base64 = "0.22"
 zstd = { workspace = true }
 tempfile = "3"
-time = "0.3"
+time = { version = "0.3", features = ["parsing"] }
 # OTLP gRPC trace receiver (HSI §3a): tonic gRPC server + generated OTLP proto types.
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 opentelemetry-proto = { version = "0.27", default-features = false, features = ["gen-tonic", "trace"] }
@@ -59,6 +60,10 @@ tokio-stream = { version = "0.1", features = ["net"] }
 parking_lot = "0.12"
 
 [dev-dependencies]
+# tokio test-only utilities (#[tokio::test(start_paused = true)] in
+# signal_chain.rs) — dev-scoped so production builds never compile
+# tokio's test-util code (task-118 review finding).
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = "0.24"
 http = "1"
 tower = { workspace = true, features = ["util"] }
