@@ -582,7 +582,7 @@ async fn notify_stale_pin(
         );
         notif.source.entity_type = "spec".to_string();
         notif.source.entity_id = binding.spec_id.clone();
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(
                 user = %member.user_id,
                 "stale pin detection: failed to create notification: {e}"

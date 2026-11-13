@@ -800,7 +800,7 @@ async fn deliver_approval_code(
     notif.source.entity_type = "impersonation".to_string();
     notif.source.entity_id = req.request_id.clone();
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation request notification");
     }
     push_notification_to_user(state, &target.id, &notif).await;
@@ -849,7 +849,7 @@ async fn notify_impersonation_alert(
     notif.source.entity_type = "impersonation".to_string();
     notif.source.entity_id = session.session_id.clone();
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation alert notification");
     }
     push_notification_to_user(state, &target_id, &notif).await;

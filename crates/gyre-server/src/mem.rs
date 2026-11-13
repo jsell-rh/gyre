@@ -3007,6 +3007,7 @@ impl NotificationRepository for MemNotificationRepository {
         min_priority: Option<u8>,
         max_priority: Option<u8>,
         notification_type: Option<&str>,
+        repo_id: Option<&Id>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
@@ -3019,6 +3020,7 @@ impl NotificationRepository for MemNotificationRepository {
                     && min_priority.is_none_or(|min| n.priority_rank >= min)
                     && max_priority.is_none_or(|max| n.priority_rank <= max)
                     && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
+                    && repo_id.is_none_or(|r| n.source.repo_id.as_ref() == Some(r))
             })
             .cloned()
             .collect();
@@ -3113,6 +3115,41 @@ impl NotificationRepository for MemNotificationRepository {
                     && n.dismissed_at.is_none()
             })
             .count() as u64)
+    }
+
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|n| {
+                n.user_id == *user_id
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && !n.read
+                    && n.resolved_at.is_none()
+                    && n.dismissed_at.is_none()
+            })
+            .count() as u64)
+    }
+
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut updated = 0u64;
+        for n in self.store.lock().await.iter_mut() {
+            if n.user_id == *user_id
+                && !n.read
+                && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+            {
+                n.read = true;
+                n.read_at = Some(now);
+                updated += 1;
+            }
+        }
+        Ok(updated)
     }
 
     async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>> {
@@ -4982,6 +5019,7 @@ fn test_state_inner(
         audit,
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
+        notification_broadcast_tx: broadcast::channel(64).0,
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
         dependencies: Arc::new(MemDependencyRepository::default()),
         breaking_changes: Arc::new(MemBreakingChangeRepository::default()),

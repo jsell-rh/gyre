@@ -176,6 +176,7 @@ async fn notify_tenant_admins(state: &Arc<AppState>, ws: &Workspace, since: u64)
                 None,
                 None,
                 Some(NotificationType::WorkspaceOwnerless.as_str()),
+                None,
                 20,
                 0,
             )
@@ -209,7 +210,7 @@ async fn notify_tenant_admins(state: &Arc<AppState>, ws: &Workspace, since: u64)
         // `Notification::new` already set `source` to the workspace entity
         // (entity_type "workspace", entity_id = ws.id) — no extra ref needed.
 
-        match state.notifications.create(&notif).await {
+        match state.create_notification(&notif).await {
             Ok(()) => {
                 created += 1;
                 info!(
@@ -459,6 +460,7 @@ mod tests {
                 None,
                 None,
                 Some(NotificationType::WorkspaceOwnerless.as_str()),
+                None,
                 50,
                 0,
             )
