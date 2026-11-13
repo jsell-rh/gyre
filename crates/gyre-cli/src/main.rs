@@ -507,6 +507,8 @@ enum SpecCommands {
 enum DepsCommands {
     /// Show dependencies and dependents
     Show {
+        /// Repository name (default: this repo, inferred from the git remote)
+        repo: Option<String>,
         /// Show workspace-wide dependency graph
         #[arg(long)]
         workspace: bool,
@@ -1411,7 +1413,11 @@ async fn main() -> Result<()> {
             let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
 
             match command {
-                DepsCommands::Show { workspace, tenant } => {
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                } => {
                     if tenant {
                         // Tenant-wide graph
                         let graph = api.get_dependency_graph().await?;
@@ -1434,16 +1440,32 @@ async fn main() -> Result<()> {
                         let graph = api.get_dependency_graph().await?;
                         print_dependency_graph_filtered(&graph, &ws_repo_ids);
                     } else {
-                        // This repo's dependencies and dependents
-                        let (ws_slug, repo_name) =
+                        // This repo's (or the named repo's) dependencies and
+                        // dependents. The workspace is inferred from the git
+                        // remote; the repo defaults to the remote's repo but can
+                        // be named positionally (dependency-graph.md §CLI
+                        // `gyre deps show [repo]`).
+                        let (ws_slug, remote_repo) =
                             infer_repo_from_git_remote().ok_or_else(|| {
                                 anyhow::anyhow!(
-                                    "could not infer repository from git remote. \
+                                    "could not infer workspace from git remote. \
                                      Run from a gyre-cloned repository."
                                 )
                             })?;
+                        let repo_name = repo.unwrap_or(remote_repo);
                         let ws_id = api.resolve_workspace_slug(&ws_slug).await?;
                         let repo_id = api.resolve_repo_name(&ws_id, &repo_name).await?;
+
+                        // Repo name lookup for readable tables (fall back to ID).
+                        let ws_repos = api.list_workspace_repos(&ws_id).await?;
+                        let name_by_id: std::collections::HashMap<String, String> = ws_repos
+                            .iter()
+                            .filter_map(|r| {
+                                r["id"].as_str().map(|id| {
+                                    (id.to_string(), r["name"].as_str().unwrap_or(id).to_string())
+                                })
+                            })
+                            .collect();
 
                         let deps = api.list_dependencies(&repo_id).await?;
                         let dependents = api.list_dependents(&repo_id).await?;
@@ -1454,19 +1476,28 @@ async fn main() -> Result<()> {
                             println!("No outgoing dependencies.");
                         } else {
                             println!(
-                                "{:<36} {:<12} {:<10} {:<12} TARGET",
-                                "ID", "TYPE", "STATUS", "METHOD"
+                                "{:<24} {:<10} {:<12} {:<12} {:>5} {:<10} {:<10}",
+                                "TARGET", "TYPE", "PINNED", "CURRENT", "DRIFT", "STATUS", "METHOD"
                             );
-                            println!("{}", "-".repeat(90));
+                            println!("{}", "-".repeat(95));
                             for d in &deps {
-                                let id = d["id"].as_str().unwrap_or("");
+                                let target_id = d["target_repo_id"].as_str().unwrap_or("");
+                                let target = name_by_id
+                                    .get(target_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(target_id);
                                 let dtype = d["dependency_type"].as_str().unwrap_or("");
+                                let pinned = d["version_pinned"].as_str().unwrap_or("-");
+                                let current = d["target_version_current"].as_str().unwrap_or("-");
+                                let drift = d["version_drift"]
+                                    .as_u64()
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "-".to_string());
                                 let status = d["status"].as_str().unwrap_or("");
                                 let method = d["detection_method"].as_str().unwrap_or("");
-                                let target = d["target_repo_id"].as_str().unwrap_or("");
                                 println!(
-                                    "{:<36} {:<12} {:<10} {:<12} {}",
-                                    id, dtype, status, method, target
+                                    "{:<24} {:<10} {:<12} {:<12} {:>5} {:<10} {:<10}",
+                                    target, dtype, pinned, current, drift, status, method
                                 );
                             }
                         }
@@ -1477,19 +1508,28 @@ async fn main() -> Result<()> {
                         } else {
                             println!("Dependents (repos that depend on {repo_name}):");
                             println!(
-                                "{:<36} {:<12} {:<10} {:<12} SOURCE",
-                                "ID", "TYPE", "STATUS", "METHOD"
+                                "{:<24} {:<10} {:<12} {:<12} {:>5} {:<10} {:<10}",
+                                "SOURCE", "TYPE", "PINNED", "CURRENT", "DRIFT", "STATUS", "METHOD"
                             );
-                            println!("{}", "-".repeat(90));
+                            println!("{}", "-".repeat(95));
                             for d in &dependents {
-                                let id = d["id"].as_str().unwrap_or("");
+                                let source_id = d["source_repo_id"].as_str().unwrap_or("");
+                                let source = name_by_id
+                                    .get(source_id)
+                                    .map(String::as_str)
+                                    .unwrap_or(source_id);
                                 let dtype = d["dependency_type"].as_str().unwrap_or("");
+                                let pinned = d["version_pinned"].as_str().unwrap_or("-");
+                                let current = d["target_version_current"].as_str().unwrap_or("-");
+                                let drift = d["version_drift"]
+                                    .as_u64()
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "-".to_string());
                                 let status = d["status"].as_str().unwrap_or("");
                                 let method = d["detection_method"].as_str().unwrap_or("");
-                                let source = d["source_repo_id"].as_str().unwrap_or("");
                                 println!(
-                                    "{:<36} {:<12} {:<10} {:<12} {}",
-                                    id, dtype, status, method, source
+                                    "{:<24} {:<10} {:<12} {:<12} {:>5} {:<10} {:<10}",
+                                    source, dtype, pinned, current, drift, status, method
                                 );
                             }
                         }
@@ -4724,9 +4764,15 @@ mod tests {
         let args = Cli::try_parse_from(["gyre", "deps", "show"]);
         assert!(args.is_ok());
         if let Commands::Deps {
-            command: DepsCommands::Show { workspace, tenant },
+            command:
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                },
         } = args.unwrap().command
         {
+            assert_eq!(repo.as_deref(), None);
             assert!(!workspace);
             assert!(!tenant);
         } else {
@@ -4739,9 +4785,15 @@ mod tests {
         let args = Cli::try_parse_from(["gyre", "deps", "show", "--workspace"]);
         assert!(args.is_ok());
         if let Commands::Deps {
-            command: DepsCommands::Show { workspace, tenant },
+            command:
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                },
         } = args.unwrap().command
         {
+            assert_eq!(repo.as_deref(), None);
             assert!(workspace);
             assert!(!tenant);
         } else {
@@ -4754,13 +4806,40 @@ mod tests {
         let args = Cli::try_parse_from(["gyre", "deps", "show", "--tenant"]);
         assert!(args.is_ok());
         if let Commands::Deps {
-            command: DepsCommands::Show { workspace, tenant },
+            command:
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                },
         } = args.unwrap().command
         {
+            assert_eq!(repo.as_deref(), None);
             assert!(!workspace);
             assert!(tenant);
         } else {
             panic!("Expected Deps Show with --tenant");
+        }
+    }
+
+    #[test]
+    fn cli_deps_show_named_repo_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "show", "repo-b"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command:
+                DepsCommands::Show {
+                    repo,
+                    workspace,
+                    tenant,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(repo.as_deref(), Some("repo-b"));
+            assert!(!workspace);
+            assert!(!tenant);
+        } else {
+            panic!("Expected Deps Show with positional repo");
         }
     }
 
