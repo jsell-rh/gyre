@@ -123,12 +123,11 @@ function renderHealth() {
   const s = snapshot || {};
   const online = s.online;
   const value = s.slots ?? 0;
-  const gate = s.health || {};
   nodes.health.hidden = false;
   nodes.health.replaceChildren(
     e("span", {}, e("span", { class: `dot ${online ? "ok" : "down"}` }), online ? " controller online" : " controller offline"),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.running ?? 0} running / ${gate.effective_slots ?? value} admitted / ${value} desired` }),
+    e("span", { text: `${s.running ?? 0} running / ${value} desired` }),
     e("span", { class: "sep", text: "|" }),
     e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} current · ${s.counts?.assessing ?? 0} assessing · ${s.counts?.['needs-triage'] ?? 0} need triage · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
