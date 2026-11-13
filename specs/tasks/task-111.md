@@ -70,16 +70,16 @@ Users can:
 
 ## Acceptance Criteria
 
-- [x] `UserSession` domain entity in gyre-domain
-- [x] `SessionRepository` port trait and SQLite implementation
-- [x] DB migration creates `user_sessions` table
-- [x] Sessions created on auth, `last_active_at` updated (throttled)
-- [x] GET endpoint lists current user's active sessions
-- [x] DELETE endpoint revokes individual session
-- [x] POST revoke-all revokes all sessions for user
-- [x] Revoked sessions rejected in auth middleware
-- [x] Routes registered with ABAC mappings
-- [ ] `cargo test --all` passes (deferred to the independent verifier; see below)
+- [ ] `UserSession` domain entity in gyre-domain
+- [ ] `SessionRepository` port trait and SQLite implementation
+- [ ] DB migration creates `user_sessions` table
+- [ ] Sessions created on auth, `last_active_at` updated (throttled)
+- [ ] GET endpoint lists current user's active sessions
+- [ ] DELETE endpoint revokes individual session
+- [ ] POST revoke-all revokes all sessions for user
+- [ ] Revoked sessions rejected in auth middleware
+- [ ] Routes registered with ABAC mappings
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -87,33 +87,34 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management is implemented end-to-end against `user-management.md` §Session Management. The implementation is this branch's prior reviewed work (commit list above); this round (`ed6a9adc`) repaired the durable verification finding on the newly assigned base.
+Session management is implemented end-to-end against `user-management.md` §Session Management by this branch's reviewed history (commits above; head of that work: `ed6a9adc`). No production code changed this round — the round only repaired the task-document contract (finding `7f47cc82`): the assigned task text is restored verbatim (acceptance-criteria checkboxes left as assigned) and all progress notes live under this heading.
 
-### Implementation (branch history)
+### Implementation
 
-- **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields (id, user_id, token_hash, ip_address, user_agent, created_at, last_active_at, expires_at, revoked); only the SHA-256 of the API key is stored (`hash_api_key`), never plaintext. `is_active(now)` = not revoked and not expired.
-- **Port:** `SessionRepository` in `gyre-ports/src/user_profile.rs` — create (duplicate-id fails), list_for_user, find_by_id, find_by_token_hash, find_by_credential_and_device, touch (slides TTL), revoke (owner-scoped), revoke_all_for_user, delete_expired_before (never deletes revoked rows — they are the durable sign-out record). Enforced by SQLite, PostgreSQL, and mem adapters on shared migration `2026-10-08-000063_user_sessions`.
-- **Auth integration (`auth.rs`):** on successful API-key auth, the session for (credential, IP, User-Agent) is found or minted; `last_active_at` + sliding `expires_at` are refreshed at most once per 60s; a revoked session for the device rejects auth with 401; `credential_revoked` rejects the key when every session for it is revoked ("sign out everywhere", including never-seen devices) — enforced on both the HTTP extractor and the WS/TTY `authenticate_token` paths. IP comes from `ConnectInfo` socket peer only (no forwarded-header trust, CWE-348).
-- **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with Admin-role **and tenant-containment** per-handler checks (ABAC-exempt routes); target-user existence 404s.
+- **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields; only the SHA-256 of the session token is stored (`hash_api_key`), never plaintext; `is_active(now)` = not revoked and not expired.
+- **Port:** `SessionRepository` in `gyre-ports/src/user_profile.rs` — create (duplicate-id fails), list_for_user, find_by_id, find_by_token_hash, find_by_credential_and_device, touch (slides TTL, throttled), revoke (owner-scoped), revoke_all_for_user, delete_expired_before (never deletes revoked rows — the durable sign-out record). Implemented by SQLite, PostgreSQL, and mem adapters on shared migration `2026-10-08-000063_user_sessions`.
+- **Auth integration (`auth.rs`):** on successful API-key auth, the session for (credential, IP, User-Agent) is found or minted; `last_active_at` + sliding `expires_at` refreshed at most once per 60s; a revoked session for the device rejects auth with 401; `credential_revoked` rejects the key when every session for it is revoked ("sign out everywhere") — enforced on both the HTTP extractor and the WS/TTY `authenticate_token` paths. IP comes from `ConnectInfo` socket peer only (no forwarded-header trust, CWE-348).
+- **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with Admin-role **and tenant-containment** per-handler checks; target-user existence 404s.
 - **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
 
-### Verification repair (this round: `ed6a9adc`)
+### Prior verification repairs absorbed into the branch
 
-Durable finding `08f72f21` (`bash /tmp/stage/checks.sh`, exit 1) was `gyre-server` **lib test** compilation failing with 4 errors (E0061/E0277 at `gate_executor.rs:4421/4427/5068/5074`): the assigned base `6f5a631c` (task-195, manifest-driven gate selection) added two fixtures that construct MRs with the old 6-arg `MergeRequest::new`, while this branch's domain (commit `74749334`, scope-fabrication repair) requires `workspace_id` as a positional constructor argument. Repair: pass `ws.id` / `repo.workspace_id` positionally in both fixtures and drop the post-hoc assignment. For the `mr-mg-4` fixture this also replaces the old constructor's fabricated `Id::new("default")` with the repo's real workspace — the only non-fabricated value under the 7-arg contract, and required by the scope-literal-defaults invariant. Same failure class as the prior round's `merge_processor.rs`/`reconciliation.rs` adaptation (`6a8d4a7c`).
+- `74749334`: verification-finding repairs; fixed merge-request scope fabrications (7-arg `MergeRequest::new` with real workspace ids).
+- `6f20bcb2`: tenant containment on TenantAdmin session endpoints.
+- `a4e0eaf8`/`0564d4e5`: migration renumbering past base duplicates.
+- `ed6a9adc` (latest): durable finding `08f72f21` — `gyre-server` lib test compilation failed (E0061/E0277 at `gate_executor.rs:4421/4427/5068/5074`) because the assigned base `6f5a631c` (task-195, manifest-driven gate selection) added fixtures constructing MRs with the old 6-arg `MergeRequest::new`; repaired to the 7-arg form with real workspace ids. The finding's Svelte/a11y/CSS log tail is pre-existing web-build noise (the vite build itself succeeded).
 
-The finding's Svelte/a11y/CSS-warning log tail is pre-existing web-build noise (the vite build itself succeeded); no web source was changed this round.
+### Test evidence (at head; logs under `/tmp/stage/review-evidence/`)
 
-### Test evidence (at head `ed6a9adc`; logs under `/tmp/stage/review-evidence/`)
+In-sandbox (offline — no crates.io access from this stage, so Rust compilation is deferred to the verifier):
 
-In-sandbox (offline — no crates.io access from this stage, so Rust compilation is deferred):
+- `rustfmt --edition 2021 --check crates/gyre-server/src/gate_executor.rs` — clean.
+- All 20 mechanical gate scripts listed in AGENTS.md re-run PASS at head, including exemption freezes (`mechanical-gates.log`); `check-task-commit-attribution.sh` PASSes once this round's frontmatter is committed.
+- Structural verification of the ed6a9adc fixture repair: both `gate_executor.rs` sites construct `MergeRequest::new` with 7 positional args and real workspace ids (`ws.id` / `repo.workspace_id`).
 
-- `rustfmt --edition 2021 --check crates/gyre-server/src/gate_executor.rs` — clean (project edition; the 19 mechanical gate scripts listed in AGENTS.md all PASS, re-run at head, including exemption freezes; see `mechanical-gates.log`).
-- All other `MergeRequest::new` call sites in the repo verified 7-arg by inspection (`gate_executor.rs` remaining sites, `tests/task134_review_probe.rs`, adapters — the verifier log already showed adapters/cli compiling clean).
-- `bash scripts/check-task-commit-attribution.sh` — PASS once this round's commit was recorded (see below).
+Required in the independent verifier (no network / no cargo registry in this sandbox; server test compilation exceeds the in-sandbox budget):
 
-Required in the independent verifier (this sandbox has no network and no restored build cache; server test compilation exceeds the in-sandbox budget anyway):
-
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` — the exact failing target of finding `08f72f21`; must now compile clean.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — full suite (previous round: 1724 passed; includes the 22 session-management tests in `auth.rs` and `api/users.rs` and the manifest-gate tests adapted here).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` — the exact failing target of finding `08f72f21`; must compile clean.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — full suite (previous round: 1724 passed; includes the session-management tests in `auth.rs` and `api/users.rs` and the manifest-gate tests adapted by `ed6a9adc`).
 - `SKIP_WEB_BUILD=1 cargo test --all` — repo-wide acceptance criterion.
 - `bash /tmp/stage/checks.sh` — the previously failing verification command.
