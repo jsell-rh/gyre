@@ -20,6 +20,11 @@ pub trait NotificationRepository: Send + Sync {
 
     /// List notifications for a user. Optionally filtered by workspace and priority range.
     /// When `workspace_id` is None, returns notifications across all workspaces (tenant Inbox).
+    /// `exclude_types` names canonical `NotificationType` strings whose notifications MUST NOT
+    /// be returned — this carries the HSI §12 disabled notification preferences. The exclusion
+    /// is applied by the query, before `limit`/`offset`, so a page never comes back short
+    /// because rows were dropped after fetching. Pass `&[]` on surfaces that must see every
+    /// notification regardless of the recipient's toggles (background de-duplication jobs).
     #[allow(clippy::too_many_arguments)] // filter + pagination parameters; pre-existing signature
     async fn list_for_user(
         &self,
@@ -28,6 +33,7 @@ pub trait NotificationRepository: Send + Sync {
         min_priority: Option<u8>,
         max_priority: Option<u8>,
         notification_type: Option<&str>,
+        exclude_types: &[&str],
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>>;
@@ -59,7 +65,15 @@ pub trait NotificationRepository: Send + Sync {
 
     /// Count active (not resolved, not dismissed) notifications.
     /// When `workspace_id` is None, counts across all workspaces (badge count).
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64>;
+    /// `exclude_types` follows the semantics of
+    /// [`NotificationRepository::list_for_user`]: the badge MUST NOT count a notification the
+    /// inbox itself would hide.
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> Result<u64>;
 
     /// List most recent notifications across all users (for activity feed).
     /// Ordered by created_at descending.

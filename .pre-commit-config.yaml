@@ -331,6 +331,13 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: notification-toggle-coverage
+        name: notification toggle coverage lint
+        description: Fail if a NotificationType variant has no profile toggle or no locale label (HSI §12)
+        entry: scripts/check-notification-toggle-coverage.sh
+        language: script
+        pass_filenames: false
+
       - id: unnamed-tuple-carriers
         name: unnamed tuple carrier lint
         description: Detect unnamed tuples with 4+ elements that should be named structs
