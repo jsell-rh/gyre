@@ -1,9 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   parseDeltaJson,
   extractRemovedNodesFromDeltas,
   computeTimelineDeltaStats,
   computeTimelineGhostOverlays,
+  resolveScrubTimestamp,
+  createTimelineHistoryFetcher,
 } from '../lib/timeline-utils.js';
 
 // -- Test data fixtures -------------------------------------------------------
@@ -23,9 +25,13 @@ const CURRENT_EDGES = [
 
 // Historical filtered graph (nodes with first_seen_at <= cutoff=1000)
 // Contains n1, n2 (first_seen_at=500). Does NOT contain n3 (1500) or n4 (2500).
+// n5 (OldTrait) is the shape the SERVER ?at= reconstruction returns: a node
+// soft-deleted after the scrub time is resurrected with its real id (the
+// client-side filter cannot contain it — it is absent from the current graph).
 const HISTORICAL_NODES = [
   { id: 'n1', name: 'Foo', node_type: 'type', qualified_name: 'crate::Foo', first_seen_at: 500, last_modified_sha: 'sha1' },
   { id: 'n2', name: 'Bar', node_type: 'type', qualified_name: 'crate::Bar', first_seen_at: 500, last_modified_sha: 'sha2_old' },
+  { id: 'n5', name: 'OldTrait', node_type: 'trait', qualified_name: 'crate::OldTrait', first_seen_at: 500, last_modified_sha: 'sha5' },
 ];
 
 const HISTORICAL_EDGES = [
@@ -271,8 +277,42 @@ describe('computeTimelineGhostOverlays', () => {
     expect(removeGhosts.length).toBe(1);
     expect(removeGhosts[0].name).toBe('OldTrait');
     expect(removeGhosts[0].type).toBe('trait');
-    expect(removeGhosts[0].id).toBe('removed:crate::OldTrait');
+    expect(removeGhosts[0].id).toBe('n5');
     expect(removeGhosts[0].confidence).toBe('confirmed');
+  });
+
+  it('keys the backward ghost by the historical node\'s real id (F1 regression: canvas layout resolution)', () => {
+    // ExplorerCanvas resolves remove ghosts through layoutNodeMap.get(ghost.id),
+    // keyed by REAL graph node id, and it draws the scrubbed-time graph — so the
+    // ghost is only rendered when its id is the historical node's id. The old
+    // synthetic `removed:<qualified_name>` key never matched a layout node and
+    // the red-dotted strikethrough was dead for every timeline ghost.
+    const overlays = computeTimelineGhostOverlays({
+      graph, timelineFilteredGraph, timeline: TIMELINE, scrubIndex: 1,
+    });
+    const removeGhost = overlays.find(o => o.action === 'remove');
+    expect(removeGhost).toBeTruthy();
+    expect(removeGhost.id).toBe('n5');
+    expect(removeGhost.id).not.toMatch(/^removed:/);
+    // The id must resolve to a node in the historical graph the canvas draws.
+    expect(HISTORICAL_NODES.some(n => n.id === removeGhost.id)).toBe(true);
+  });
+
+  it('falls back to the synthetic id when the removed node is absent from the historical graph', () => {
+    // Client-side fallback filter (server ?at= fetch not landed yet): the
+    // removed node cannot be in the filtered graph because the filter is
+    // derived from the current graph. The ghost keeps the synthetic id — it
+    // still counts toward the delta summary / "− Removed" chip.
+    const fallbackGraph = {
+      nodes: HISTORICAL_NODES.filter(n => n.qualified_name !== 'crate::OldTrait'),
+      edges: HISTORICAL_EDGES,
+    };
+    const overlays = computeTimelineGhostOverlays({
+      graph, timelineFilteredGraph: fallbackGraph, timeline: TIMELINE, scrubIndex: 1,
+    });
+    const removeGhost = overlays.find(o => o.action === 'remove');
+    expect(removeGhost).toBeTruthy();
+    expect(removeGhost.id).toBe('removed:crate::OldTrait');
   });
 
   it('produces modified ghost overlays for nodes changed since scrubber time', () => {
@@ -326,5 +366,161 @@ describe('computeTimelineGhostOverlays', () => {
       expect(o).toHaveProperty('reason');
       expect(['add', 'change', 'remove']).toContain(o.action);
     }
+  });
+});
+
+// ── resolveScrubTimestamp ─────────────────────────────────────────────────
+
+describe('resolveScrubTimestamp', () => {
+  it('returns the delta timestamp for a valid index', () => {
+    expect(resolveScrubTimestamp(TIMELINE, 1)).toBe(1000);
+    expect(resolveScrubTimestamp(TIMELINE, 3)).toBe(2500);
+  });
+
+  it('returns null for present position or out-of-range index', () => {
+    expect(resolveScrubTimestamp(TIMELINE, -1)).toBeNull();
+    expect(resolveScrubTimestamp(TIMELINE, TIMELINE.length)).toBeNull();
+    expect(resolveScrubTimestamp([], 0)).toBeNull();
+    expect(resolveScrubTimestamp(null, 2)).toBeNull();
+  });
+
+  it('parses string timestamps (RFC 3339)', () => {
+    const ts = [{ timestamp: '2024-04-01T00:00:00Z' }];
+    const expected = Math.floor(Date.parse('2024-04-01T00:00:00Z') / 1000);
+    expect(resolveScrubTimestamp(ts, 0)).toBe(expected);
+  });
+
+  it('returns null for a delta with no usable timestamp', () => {
+    expect(resolveScrubTimestamp([{ timestamp: null }], 0)).toBeNull();
+    expect(resolveScrubTimestamp([{}], 0)).toBeNull();
+  });
+});
+
+// ── createTimelineHistoryFetcher (debounced ?at= fetch) ────────────────────
+
+describe('createTimelineHistoryFetcher', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('debounces rapid scrub positions into one fetch for the latest position', async () => {
+    const fetchAt = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
+    const fetcher = createTimelineHistoryFetcher(fetchAt, 200);
+
+    const p1 = fetcher.request(500);
+    const p2 = fetcher.request(1000);
+    const p3 = fetcher.request(1500);
+
+    // No fetch before the 200ms window closes
+    expect(fetchAt).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(199);
+    expect(fetchAt).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchAt).toHaveBeenCalledTimes(1);
+    expect(fetchAt).toHaveBeenCalledWith(1500);
+
+    const results = await Promise.all([p1, p2, p3]);
+    // Superseded positions resolve null (keep the client-side fallback);
+    // only the latest position gets the fetched graph.
+    expect(results[0]).toBeNull();
+    expect(results[1]).toBeNull();
+    expect(results[2]).toEqual({ nodes: [], edges: [] });
+  });
+
+  it('resolves the fetched graph for a single position', async () => {
+    const graph = { nodes: [{ id: 'n1' }], edges: [] };
+    const fetchAt = vi.fn().mockResolvedValue(graph);
+    const fetcher = createTimelineHistoryFetcher(fetchAt, 200);
+
+    const p = fetcher.request(1000);
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(p).resolves.toBe(graph);
+  });
+
+  it('rejects when the fetch fails so the caller keeps its fallback', async () => {
+    const fetchAt = vi.fn().mockRejectedValue(new Error('network'));
+    const fetcher = createTimelineHistoryFetcher(fetchAt, 200);
+
+    const p = fetcher.request(1000);
+    // Attach immediately so the rejection is never unhandled.
+    const settled = p.then(
+      () => { throw new Error('expected rejection'); },
+      (e) => e,
+    );
+    await vi.advanceTimersByTimeAsync(200);
+    const err = await settled;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toBe('network');
+  });
+
+  it('cancel releases waiters without fetching', async () => {
+    const fetchAt = vi.fn();
+    const fetcher = createTimelineHistoryFetcher(fetchAt, 200);
+
+    const p = fetcher.request(1000);
+    fetcher.cancel();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(fetchAt).not.toHaveBeenCalled();
+    await expect(p).resolves.toBeNull();
+  });
+
+  it('does not settle a newer position with an older in-flight fetch (race regression)', async () => {
+    // Review finding: a scrub while a fetch for an older position is still
+    // in flight used to resolve the NEW position's waiter with the OLD
+    // fetch's graph (waiters were matched against latestAt, not against
+    // the fetch's target). The canvas then rendered the wrong point in
+    // time (wrong ghosts, wrong delta counts) for as long as the user
+    // stayed at that position.
+    const graph500 = { nodes: [{ id: 'g500' }], edges: [] };
+    const graph1000 = { nodes: [{ id: 'g1000' }], edges: [] };
+    let land500;
+    const fetchAt = vi.fn((at) => {
+      if (at === 500) return new Promise((r) => { land500 = r; });
+      return Promise.resolve(graph1000);
+    });
+    const fetcher = createTimelineHistoryFetcher(fetchAt, 200);
+
+    const p500 = fetcher.request(500);
+    await vi.advanceTimersByTimeAsync(200); // debounce closes; fetch(500) in flight
+    expect(fetchAt).toHaveBeenCalledTimes(1);
+
+    // Scrub again while the fetch for 500 is still in flight.
+    const p1000 = fetcher.request(1000);
+
+    // The OLD fetch lands while the newer position is still debouncing.
+    land500(graph500);
+    await vi.advanceTimersByTimeAsync(0); // flush the old fetch's settlement
+
+    // The newer debounce window closes; its own fetch runs.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetchAt).toHaveBeenCalledTimes(2);
+    expect(fetchAt).toHaveBeenNthCalledWith(2, 1000);
+
+    await expect(p500).resolves.toBe(graph500);
+    // With the race, p1000 resolved with the 500-graph the moment land500()
+    // fired; it must instead carry its own position's graph.
+    await expect(p1000).resolves.toBe(graph1000);
+  });
+
+  it('issues a new fetch after the window when the position changes later', async () => {
+    const fetchAt = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
+    const fetcher = createTimelineHistoryFetcher(fetchAt, 200);
+
+    const first = fetcher.request(1000);
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(first).resolves.toEqual({ nodes: [], edges: [] });
+
+    const second = fetcher.request(2000);
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(second).resolves.toEqual({ nodes: [], edges: [] });
+
+    expect(fetchAt).toHaveBeenCalledTimes(2);
+    expect(fetchAt).toHaveBeenNthCalledWith(1, 1000);
+    expect(fetchAt).toHaveBeenNthCalledWith(2, 2000);
   });
 });

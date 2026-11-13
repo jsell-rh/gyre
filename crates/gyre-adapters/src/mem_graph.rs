@@ -82,6 +82,20 @@ impl GraphPort for MemGraphStore {
             .collect())
     }
 
+    async fn list_nodes_at(&self, repo_id: &Id, at: u64) -> Result<Vec<GraphNode>> {
+        let nodes = self.nodes.read();
+        // Same existed-at contract as the SQLite adapter: first seen at or
+        // before `at`, and not deleted at or before `at`. Soft-deleted nodes
+        // whose deletion is after `at` are included (they existed then).
+        Ok(nodes
+            .iter()
+            .filter(|n| &n.repo_id == repo_id)
+            .filter(|n| n.first_seen_at <= at)
+            .filter(|n| n.deleted_at.is_none_or(|d| d > at))
+            .cloned()
+            .collect())
+    }
+
     async fn create_edge(&self, edge: GraphEdge) -> Result<GraphEdge> {
         let mut edges = self.edges.write();
         // Upsert on id, matching the SQLite adapter's ON CONFLICT(`id`)
@@ -112,6 +126,17 @@ impl GraphPort for MemGraphStore {
             .filter(|e| &e.repo_id == repo_id)
             .filter(|e| e.deleted_at.is_none())
             .filter(|e| edge_type.as_ref().is_none_or(|et| &e.edge_type == et))
+            .cloned()
+            .collect())
+    }
+
+    async fn list_edges_at(&self, repo_id: &Id, at: u64) -> Result<Vec<GraphEdge>> {
+        let edges = self.edges.read();
+        Ok(edges
+            .iter()
+            .filter(|e| &e.repo_id == repo_id)
+            .filter(|e| e.first_seen_at <= at)
+            .filter(|e| e.deleted_at.is_none_or(|d| d > at))
             .cloned()
             .collect())
     }
