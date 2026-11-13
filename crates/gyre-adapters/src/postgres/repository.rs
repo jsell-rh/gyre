@@ -116,6 +116,11 @@ impl RepoRepository for PgStorage {
     async fn create(&self, repo: &Repository) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let r = repo.clone();
+        // Scope the row to this handle's tenant, exactly like every query
+        // method below (find_by_id/list filter by `self.tenant_id`). A
+        // literal here would file the row under a tenant whose handles
+        // never see it — and leak it to the "default"-scoped handle.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let status_str = r.status.to_string();
@@ -129,7 +134,7 @@ impl RepoRepository for PgStorage {
                 mirror_url: r.mirror_url.as_deref(),
                 mirror_interval_secs: r.mirror_interval_secs.map(|v| v as i64),
                 last_mirror_sync: r.last_mirror_sync.map(|v| v as i64),
-                tenant_id: "default",
+                tenant_id: tenant.as_str(),
                 workspace_id: r.workspace_id.as_str(),
                 description: r.description.as_deref(),
                 status: &status_str,

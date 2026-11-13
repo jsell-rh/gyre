@@ -101,7 +101,7 @@ impl Task {
             pr_link: None,
             spec_path: None,
             spec_ref: None,
-            workspace_id: Id::new("default"),
+            workspace_id: Id::new("default"), // scope-literal:ok — task-099 F1 legacy debt (base carries this site exempted; real fix = require the workspace at Task::new construction)
             repo_id: Id::new(""),
             cancelled_at: None,
             cancelled_reason: None,
