@@ -1162,6 +1162,10 @@ func (m Model) View() string {
 		lines = append(lines, m.scrollIndicator(start, min(len(body), start+count), len(body)))
 		lines = append(lines, "", m.style("j/k scroll   enter logs   r retry  C cancel   h back   ? help   q detach", "8", false))
 	} else {
+		if m.state.Admission != "" {
+			lines = append(lines, m.wrapped(m.state.Admission, w, "3")...)
+			lines = append(lines, "")
+		}
 		if m.state.Monitoring {
 			lines = append(lines, "Existing workers are finishing. Scheduling resumes automatically.", "")
 		} else if connection == "Connection lost" {

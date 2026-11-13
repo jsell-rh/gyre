@@ -194,6 +194,7 @@ class Store:
                         if (not compute or not self.db.execute(
                             "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
                         and not self.runtime_held(row)
+                        and (not compute or self.admission_available(stage,capacity,work=row))
                         and self.integration_available(dict(row))
                         and valid_priority(row)
                         and (eligible is None or eligible(dict(row)))), None)
@@ -204,9 +205,11 @@ class Store:
             claimed = dict(self.db.execute('SELECT * FROM work WHERE id=?', (row['id'],)).fetchone())
             claimed['input'] = json.loads(claimed['input'])
             if compute:
+                from .compute import profile
+                budget=profile(self,claimed['task'],claimed['stage'])
                 name = self.admission_name(claimed['id'], claimed['token'])
                 self.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
-                                (name, claimed['id'], claimed['token'], 'admission', 'intent', '{}', now))
+                                (name, claimed['id'], claimed['token'], 'admission', 'intent', json.dumps({'compute':budget}), now))
                 self.event('admitted', {'resource': name, 'stage': stage}, claimed['task'], claimed['id'])
             from .priority import info
             self.event('claimed', {'stage': stage, 'token': claimed['token'], 'owner': owner,
@@ -238,11 +241,16 @@ class Store:
         capacity=self.setting('slots',8) if capacity is None else capacity
         return min(self.setting('verification_slots',1),max(0,capacity-1))
 
-    def admission_available(self, stage, capacity=None):
+    def admission_available(self, stage, capacity=None, work=None):
         if stage not in ('triage','assess','implement','review','verify'):
             return True
+        if self.setting('admission_paused',False):
+            return False
         capacity=self.setting('slots',8) if capacity is None else capacity
         if self.compute_used() >= capacity:
+            return False
+        from .capacity import decision
+        if not decision(self,work)['allowed']:
             return False
         if stage == 'verify':
             return True
@@ -354,7 +362,7 @@ class Store:
 
     def reserve(self, name, ident, token, kind, limit, data=None):
         with self.transaction():
-            self._current(ident, token)
+            claim=dict(self._current(ident, token))
             admission = self.admission_name(ident, token)
             admitted = kind == 'sandbox' and bool(self.db.execute(
                 "SELECT 1 FROM resources WHERE name=? AND kind='admission' AND state='intent'", (admission,)).fetchone())
@@ -365,6 +373,18 @@ class Store:
                 if admitted:
                     self.db.execute("UPDATE resources SET state='absent',updated=? WHERE name=?", (time.time(), admission))
             old = self.db.execute('SELECT * FROM resources WHERE name=?', (name,)).fetchone()
+            if old and (old['work'] != ident or old['token'] > token):
+                raise StaleClaim('resource belongs to another claim')
+            if kind=='sandbox':
+                from .compute import assigned_profile
+                from .capacity import decision
+                budget=assigned_profile(self,claim)
+                # Re-adoption retains an existing allocation's size. New
+                # reservations replace their admission rather than counting it twice.
+                if not old or old['state']=='absent':
+                    if not decision(self,claim,budget,replace=(admission,name),name=name)['allowed']:
+                        return False
+                data={**(data or {}),'compute':budget}
             if old:
                 if old['work'] != ident or old['token'] > token:
                     raise StaleClaim('resource belongs to another claim')

@@ -11,6 +11,8 @@ def snapshot(store):
     from .requirements import pending
     from .priority import task_priority, classes, PriorityError
     from .execution import gateway
+    from .capacity import summary
+    capacity=summary(store)
     records = store.tasks()
     work = [dict(row) for row in store.db.execute('SELECT * FROM work ORDER BY created DESC')]
     tasks, attempts, counts = [], [], {}
@@ -94,7 +96,9 @@ def snapshot(store):
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
             'resources': {'used': store.compute_used(), 'deletion_pending': dict(resources).get('deleting', 0),
                           'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
-            'health': {'condition': 'Paused' if store.setting('admission_paused', False) else store.setting('admission_condition', 'Reconciling'),
+            'health': {'condition': 'Paused' if store.setting('admission_paused', False) else capacity['condition'] if not capacity['allowed'] else store.setting('admission_condition', 'Reconciling'),
+                       'capacity':capacity,
+                       'stress_guard':store.setting('stress_watch_alert'),
                        'gateway_auth':gateway.auth_status(store.directory,store.setting('gateway','gyre-gyre')),
                        'inference':{key:value for key,value in store.setting('inference_health',{}).items() if key in ('condition','expires','failures')},
                        'effective_slots': 0 if store.setting('admission_paused', False) else store.setting('slots', 8)},
