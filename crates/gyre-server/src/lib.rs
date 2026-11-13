@@ -31,7 +31,6 @@ pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_policy;
 pub mod merge_processor;
-pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
 pub mod mirror_sync;
@@ -230,7 +229,7 @@ pub struct AppState {
     /// Unified broadcast channel for WebSocket message delivery (replaces broadcast_tx + event_tx).
     pub message_broadcast_tx: broadcast::Sender<Message>,
     /// Generic key-value JSON store for server-internal HashMap stores (M29.5B).
-    /// Persists: agent_messages, agent_tokens, agent_cards, compute_targets,
+    /// Persists: agent_tokens, agent_cards, compute_targets,
     /// agent_stacks, repo_stack_policies, workload_attestations, workspace_repos,
     /// abac_policies — all keyed by (namespace, key).
     pub kv_store: Arc<dyn KvJsonStore>,
@@ -278,6 +277,11 @@ pub struct AppState {
     pub siem_store: SiemStore,
     /// Broadcast channel for live audit event SSE stream.
     pub audit_broadcast_tx: broadcast::Sender<String>,
+    /// Broadcast channel for live notification SSE stream
+    /// (user-management.md §API > Notifications: `/notifications/stream`).
+    /// Carries serialized `Notification` JSON; per-stream filtering by
+    /// user/tenant/workspace happens in the SSE handler.
+    pub notification_broadcast_tx: broadcast::Sender<String>,
     /// WireGuard network peer registry.
     pub network_peers: Arc<dyn NetworkPeerRepository>,
     /// Cross-repo dependency graph (M22.4).
@@ -581,6 +585,23 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
+    /// Persist a notification and broadcast it to live SSE stream subscribers
+    /// (user-management.md §API > Notifications: real-time stream).
+    ///
+    /// Single fan-out point for notification creation: every production
+    /// emitter goes through here (or through the
+    /// [`BroadcastingNotificationRepo`](crate::notifications::BroadcastingNotificationRepo)
+    /// this delegates to, which background paths without an `&AppState` use)
+    /// so a connected `/notifications/stream` client sees every notification
+    /// the moment it is stored. Broadcast is fire-and-forget (no subscribers,
+    /// or a lagged one, must never fail the persist).
+    pub async fn create_notification(
+        &self,
+        notification: &gyre_common::Notification,
+    ) -> anyhow::Result<()> {
+        self.broadcasting_notifications().create(notification).await
+    }
+
     /// Resolve the tenant scope for a server-originated message about a
     /// workspace: the workspace record's tenant. Skips the emission and
     /// logs when the workspace cannot be resolved (same contract as
@@ -1093,6 +1114,7 @@ pub fn build_state(
 ) -> Arc<AppState> {
     let (message_broadcast_tx, _) = broadcast::channel(256);
     let (audit_broadcast_tx, _) = broadcast::channel(1024);
+    let (notification_broadcast_tx, _) = broadcast::channel(1024);
     let telemetry_buffer = Arc::new(TelemetryBuffer::new(
         std::env::var("GYRE_TELEMETRY_BUFFER_SIZE")
             .ok()
@@ -1295,6 +1317,7 @@ pub fn build_state(
         audit,
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
+        notification_broadcast_tx,
         network_peers: store!(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
@@ -1732,7 +1755,7 @@ pub async fn emit_reconciliation_completed(
             &tenant_id,
             now,
         );
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(
                 "emit_reconciliation_completed: failed to create MetaSpecDrift notification for {}: {e}",
                 member.user_id

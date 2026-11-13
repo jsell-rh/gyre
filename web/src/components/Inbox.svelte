@@ -1,7 +1,7 @@
 <script>
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { api } from '../lib/api.js';
+  import { api, selfReviewerId } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
@@ -492,7 +492,7 @@
     try {
       await api.submitReview(body.mr_id, {
         decision: 'approved',
-        reviewer_agent_id: 'human',
+        reviewer_agent_id: await selfReviewerId(),
         body: `Gate override from Inbox: ${body.gate_name ?? 'gate'} failure accepted by human`,
       });
       await api.mrStatus(body.mr_id, 'approved');

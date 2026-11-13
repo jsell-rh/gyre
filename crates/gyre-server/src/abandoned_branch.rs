@@ -172,7 +172,7 @@ async fn evaluate_workspace(
             notif.source.entity_id = mr_id_str.clone();
             notif.source.repo_id = Some(mr.repository_id.clone());
 
-            if let Err(e) = state.notifications.create(&notif).await {
+            if let Err(e) = state.create_notification(&notif).await {
                 warn!(
                     workspace = %ws.slug,
                     user = %member.user_id,
@@ -302,6 +302,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                None,
                 10,
                 0,
             )
@@ -353,6 +354,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                None,
                 10,
                 0,
             )
@@ -374,6 +376,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                None,
                 10,
                 0,
             )
@@ -394,6 +397,7 @@ mod tests {
                 Some(&Id::new("ws2")),
                 Some(9),
                 Some(9),
+                None,
                 None,
                 10,
                 0,
@@ -442,6 +446,7 @@ mod tests {
                 Some(&Id::new("ws3")),
                 Some(9),
                 Some(9),
+                None,
                 None,
                 10,
                 0,
@@ -492,6 +497,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                None,
                 10,
                 0,
             )
@@ -539,6 +545,7 @@ mod tests {
                 Some(&Id::new("ws5")),
                 Some(9),
                 Some(9),
+                None,
                 None,
                 10,
                 0,
@@ -588,6 +595,7 @@ mod tests {
                 Some(&Id::new("ws6")),
                 Some(9),
                 Some(9),
+                None,
                 None,
                 10,
                 0,
@@ -664,6 +672,7 @@ mod tests {
                 Some(&Id::new("ws7")),
                 Some(9),
                 Some(9),
+                None,
                 None,
                 10,
                 0,
@@ -742,6 +751,7 @@ mod tests {
                 Some(&Id::new("ws8")),
                 Some(9),
                 Some(9),
+                None,
                 None,
                 100,
                 0,

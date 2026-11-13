@@ -817,6 +817,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -835,6 +836,7 @@ mod tests {
             state.notifications.as_ref(),
             &Id::new("user-viewer"),
             Some(&ws_id),
+            None,
             None,
             None,
             None,

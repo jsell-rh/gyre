@@ -656,8 +656,11 @@ pub async fn create_mirror_repo(
             {
                 if output.status.success() {
                     let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    // §API > Notifications: broadcasting wrapper so import
+                    // notifications reach live stream subscribers.
+                    let divergence_notifications = state_for_extract.broadcasting_notifications();
                     let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                        notification_repo: state_for_extract.notifications.as_ref(),
+                        notification_repo: &divergence_notifications,
                         membership_repo: state_for_extract.workspace_memberships.as_ref(),
                     });
                     crate::graph_extraction::extract_and_store_graph(
@@ -752,8 +755,11 @@ pub async fn sync_mirror(
                     tenant_id: tenant_id.to_string(),
                 }
             });
+            // §API > Notifications: broadcasting wrapper so mirror-push
+            // notifications reach live stream subscribers.
+            let divergence_notifications = state.broadcasting_notifications();
             let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                notification_repo: state.notifications.as_ref(),
+                notification_repo: &divergence_notifications,
                 membership_repo: state.workspace_memberships.as_ref(),
             });
             crate::graph_extraction::extract_and_store_graph(

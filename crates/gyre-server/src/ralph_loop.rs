@@ -698,6 +698,9 @@ pub(crate) async fn relaunch_agent_session(
             // picks it whenever it exists on disk.
             jj_workspace_path: work_dir.clone(),
             plain_worktree_path: work_dir,
+            // Re-spawn carries no request persona; the agent's recorded
+            // persona (agent_personas KV) is unchanged by re-spawning.
+            persona_name: None,
             persona,
             // Workers only: this path requires a worktree (asserted above),
             // and interrogation agents have none.
@@ -1076,7 +1079,7 @@ mod tests {
         // Priority-1 notification for the workspace admin.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-user"), None, None, None, None, 100, 0)
+            .list_for_user(&Id::new("admin-user"), None, None, None, None, None, 100, 0)
             .await
             .unwrap();
         assert!(
