@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066"]
+commits: ["6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
 ---
 
 ## Spec Excerpt
@@ -123,58 +123,52 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 HSI §12 profile gaps (notification filtering, judgment ledger, auth
 provider info) are implemented in production code across the commits
-listed in the frontmatter. This round repairs the dirty merge against
-current main (cd58a166, task-202 search indexing) — merge commit
-eb8f6e97.
+listed in the frontmatter. This round repairs the failing CI at PR #806
+head 0f64f828 (run 43453956243: Test and Clippy both red).
 
-### This round: rebase repair against main cd58a166
+### This round: CI repair — one root cause for both red checks
 
-Main's task-202 search-sync wiring hoisted repository construction
-into `let` bindings wrapped in `search_sync`/`search_scope` decorators,
-conlicting textually with task-209's shared mem stores
-(`mem_audit`/`mem_spec_approvals`/`mem_spec_ledger` + `store_shared!`)
-in `lib.rs` and `mem.rs`, and with the gate-override audit write in the
-MR review submission handler. Resolutions (all three in merge commit
-eb8f6e97):
+`pull_request` CI checks out the PR merge ref (task-209 head merged
+into then-main d9c419a0, task-191 budget enforcement actions). Main's
+task-191 budget test helper `budget_notifications`
+(crates/gyre-server/src/api/budget.rs) called
+`NotificationRepository::list_for_user` with the pre-task-209 7-arg
+signature, while the branch port requires `exclude_types (&[&str])` as
+argument 6. The merge ref therefore did not compile (E0061):
 
-- `api/merge_requests.rs`: kept both sides in sequence — the task-209
-  gate-override audit write (one `gate_override` AuditEvent per failed
-  gate on human approval) runs before task-202's review search-index
-  call on the same submitted review.
-- `lib.rs` / `mem.rs`: kept both the task-209 shared stores and the
-task-202 search-wrapped `let` bindings, with one semantic merge: the
-`audit` binding is `search_sync::wrap_audit(store_shared!(...,
-mem_audit), search)` — the decorator wraps the shared mem store
-instead of constructing its own, so audit writes stay indexed AND the
-pure-mem judgment ledger (`MemJudgmentLedgerRepository::with_sources`)
-still aggregates the same store `state.audit` writes through.
-  `wrap_audit::record` delegates to `inner`, so both concerns hold.
+- Test job: cargo build inside nextest exits 101 before any test runs.
+- Clippy job: nonzero clippy returncode fails check-clippy-diff.py
+  (at 0f64f828 the changed-Rust-lines set vs HEAD^1 was empty, so only
+  a compiler error could fail it).
 
-Verified on the repaired tree (evidence under
-/tmp/stage/review-evidence/rebase-repair-eb8f6e97.log):
+Fix commit 6add26e2 passes `&[]` — a see-everything surface per the
+port doc — matching every other background/test call site. Merge
+commit 74961896 first brought current main f764bc00 (task-187,
+superset of d9c419a0) into the branch; the same arity conflict existed
+against it and is covered by the same fix.
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` →
-  exit 0 (type-checks every test body, including the merged wiring)
-- `cargo test -p gyre-adapters --lib` → 519 passed, 0 failed
-  (includes the 12 `sqlite::user_profile` judgment-ledger /
-  notification-filter tests)
-- `cargo test -p gyre-domain --all-targets` → 515 passed
-- `python3 scripts/check-clippy-diff.py cd58a166` → changed lines
-  clean (59 Rust files)
-- `bash scripts/check-arch.sh` → pass;
-  `bash scripts/check-notification-toggle-coverage.sh` → pass
-  (41 variants, 41 toggles)
-- `scripts/check-tenant-filter.sh` fails with an awk syntax error
-  identically on pure main cd58a166 (mawk 1.3.4 lacks `\s` regex
-  support) — pre-existing environmental, not a code defect; recorded
-  for remote verification.
+### Verification on the repaired head (evidence: /tmp/stage/review-evidence/)
 
-`web/src` is byte-identical to the verified head f1680d3 (main touched
-no frontend sources); `web/dist` is regenerated by final integration.
+- `SKIP_WEB_BUILD=1 cargo check --all-targets --workspace` → exit 0
+- `python3 scripts/check-clippy-diff.py f764bc00` → changed lines
+  clean (43 Rust files); `check-rustfmt-diff.py f764bc00` → clean
+- `cargo test -p gyre-adapters -p gyre-domain -p gyre-common -p
+  gyre-ports -p gyre-cli` → all pass (adapters 520, cli 151,
+  common 124, domain 515)
+- `cd web && npm ci && npm test` → 113 files, 2308 passed, 41 skipped
+- CI-enforced lints all pass: arch, ABAC route registry, migration
+  versions, byte-slice truncation, dead MessageKind, notification
+  toggle coverage, sandbox sweep artifacts, hierarchy
+- Non-server crates also pass at the exact failing head 0f64f828,
+  and main is green at f764bc00 — the compile break was the only
+  failure mode in run 43453956243
 
-Server tests the independent verifier must execute (server test
-compilation deferred per the 4 GiB budget): `SKIP_WEB_BUILD=1 cargo
-test --all` and `cd web && npm ci && npm test`.
+Server tests the independent verifier must execute (gyre-server test
+compilation is refused by this sandbox's 4 GiB build wrapper; jj
+release assets are network-blocked so recorded-fixture tests skip
+locally): `SKIP_WEB_BUILD=1 cargo nextest run --all` with
+`GYRE_JJ_TESTS_MUST_RUN=1` and jj v0.39.0 installed, plus
+`cd web && npm ci && npm run build`, and the exact-head GitHub checks.
 
 ### Implementation (intact on this branch)
 
@@ -183,25 +177,20 @@ test --all` and `cd web && npm ci && npm test`.
   `user_notification_preferences` and pass them as `exclude_types` to
   `list_for_user`, applied by the SQL adapter and the mem adapter.
   Canonical type names are stored (alias normalization), and every
-  canonical `NotificationType` has a UI toggle (review F1/F2 rounds:
-  `ComputeTargetUnavailable`, `WorkspaceOwnerless`).
+  canonical `NotificationType` has a UI toggle.
 - Judgment ledger: `JudgmentType` has `GateOverride` (`as_str()` =
   `"gate"`); `list_for_user` (SQLite + Postgres parity) aggregates
-  spec approvals/rejections (attributed via the approval-ledger
-  writer key), `audit_events` (`gate_override`, `trust_change`, and
-  meta-spec publish rows, with zstd detail decompression), and
-  `meta_spec_versions` joined to `meta_specs`; workspace filter drops
-  unattributed entries rather than stamping; reverse-chronological
-  with limit/offset after union+sort. HSI §12 was amended to name the
-  concrete source tables and the `approval|rejection|gate|trust|
-  meta-spec` type values.
+  spec approvals/rejections, `audit_events` (`gate_override`,
+  `trust_change`, meta-spec publish rows, with zstd detail
+  decompression), and `meta_spec_versions` joined to `meta_specs`;
+  workspace filter drops unattributed entries rather than stamping;
+  reverse-chronological with limit/offset after union+sort. HSI §12
+  names the concrete source tables and the
+  `approval|rejection|gate|trust|meta-spec` type values.
 - Write paths: trust transitions via `PUT /workspaces/:id` write a
-  `trust_change` audit event (from/to/workspace); human (OIDC JWT,
-  not agent-token) approval review on a failed-gate MR writes one
-  `gate_override` audit event per failed gate (mr_id/gate_type/from/
-  to); meta-spec publish writes a `meta_spec_publish` audit event with
-  publisher attribution.
-- Auth provider info: `GET /users/me` returns read-only
-  `oidc_issuer` and `last_login_at` recorded from login events.
-- Endpoint: `GET /api/v1/users/me/judgments?workspace_id=&type=&since=
-  &limit=&offset=` with per-handler user-scoped auth.
+  `trust_change` audit event (from/to/workspace); human approval
+  review on a failed-gate MR writes a `gate_override` audit event
+  (mr_id/gate_type/from/to); meta-spec publish writes an attribution
+  audit event.
+- Auth provider info: `GET /users/me` returns read-only `oidc_issuer`
+  and `last_login_at`.
