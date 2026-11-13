@@ -871,6 +871,7 @@ mod tests {
                 Some(9),
                 Some(9),
                 None,
+                None,
                 1000,
                 0,
             )
