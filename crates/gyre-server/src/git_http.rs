@@ -1242,6 +1242,17 @@ pub async fn git_receive_pack(
                 Some(&state_clone.tasks),
             )
             .await;
+            // search.md §Index Updates: "Spec pushed -> index updated (content
+            // extracted from git blob)". Runs after the ledger sync so
+            // approval_status/owner facets reflect this push.
+            crate::search_indexer::index_repo_specs(
+                &state_clone,
+                &repo_id_clone,
+                &repo_workspace_id_str,
+                &repo_path_clone,
+                &update.new_sha,
+            )
+            .await;
             // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
             detect_dependencies_on_push(
                 &state_clone,
@@ -1318,6 +1329,26 @@ pub async fn git_receive_pack(
                 }),
             )
             .await;
+        }
+
+        // search.md §Index Updates: code search (file content) is indexed
+        // asynchronously on push via the background job registry — eventually
+        // consistent, never inline in the push path. The job walks the default
+        // branch, so only default-branch pushes need to trigger it.
+        if ref_updates
+            .iter()
+            .any(|u| u.refname == format!("refs/heads/{default_branch_clone}"))
+        {
+            let st = Arc::clone(&state_clone);
+            tokio::spawn(async move {
+                if let Err(e) = st
+                    .job_registry
+                    .trigger("search_code_index", Arc::clone(&st))
+                    .await
+                {
+                    tracing::warn!("search-index: code index job failed: {e}");
+                }
+            });
         }
     });
 
@@ -1577,6 +1608,18 @@ async fn record_pushed_commits(
             } else {
                 total_recorded += 1;
             }
+            // search.md §Index Updates: "Commit pushed -> commit messages
+            // indexed" — message and author are read from the git object store.
+            crate::search_indexer::index_pushed_commit(
+                state,
+                &repo.id.to_string(),
+                &repo.workspace_id.to_string(),
+                repo_path,
+                sha,
+                &update.refname,
+                agent_id,
+            )
+            .await;
         }
     }
     total_recorded
