@@ -521,6 +521,7 @@ diesel::table! {
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,
         created_at -> BigInt,
+        position -> Integer,
     }
 }
 
@@ -700,6 +701,7 @@ diesel::table! {
         output_tokens -> BigInt,
         cost_usd -> Double,
         model -> Text,
+        prompt_template_sha -> Nullable<Text>,
         timestamp -> BigInt,
     }
 }

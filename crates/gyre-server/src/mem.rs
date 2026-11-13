@@ -4,6 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::spec_approval::ApprovalTransitionError;
+use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
@@ -12,15 +13,14 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
-use gyre_domain::{BudgetCallRecord, BudgetUsage};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
-    BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
-    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
-    PersonaRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantMetaSpecSetRepository, TenantRepository,
-    UserRepository, UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
+    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
+    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, TenantMetaSpecSetRepository, TenantRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2935,14 +2935,21 @@ impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
         Ok(self.gates.lock().await.get(id).cloned())
     }
     async fn list_by_repo_id(&self, repo_id: &str) -> Result<Vec<gyre_domain::QualityGate>> {
-        Ok(self
+        let mut gates: Vec<gyre_domain::QualityGate> = self
             .gates
             .lock()
             .await
             .values()
             .filter(|g| g.repo_id.to_string() == repo_id)
             .cloned()
-            .collect())
+            .collect();
+        // Same ordering contract as the SQL adapters: (position, created_at).
+        gates.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then(a.created_at.cmp(&b.created_at))
+        });
+        Ok(gates)
     }
     async fn delete(&self, id: &str) -> Result<()> {
         self.gates.lock().await.remove(id);
@@ -3064,19 +3071,21 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
 // ── MemBudgetCallRepository ───────────────────────────────────────────────────
 
 /// In-memory BudgetCallRepository for tests and development.
-/// Mirrors the SQLite/Postgres adapters: insert-only with duplicate-id
-/// rejection, workspace-scoped reads newest-first.
 #[derive(Default)]
 pub struct MemBudgetCallRepository {
-    store: Arc<Mutex<Vec<BudgetCallRecord>>>,
+    store: Mutex<Vec<gyre_domain::BudgetCallRecord>>,
 }
 
 #[async_trait]
-impl BudgetCallRepository for MemBudgetCallRepository {
-    async fn save(&self, record: &BudgetCallRecord) -> Result<()> {
+impl gyre_ports::BudgetCallRepository for MemBudgetCallRepository {
+    async fn save(&self, record: &gyre_domain::BudgetCallRecord) -> Result<()> {
         let mut store = self.store.lock().await;
-        if store.iter().any(|r| r.id.as_str() == record.id.as_str()) {
-            anyhow::bail!("budget call record {} already exists", record.id.as_str());
+        // Port contract: "Insert-only; the record id is unique." The SQL
+        // adapters enforce this via the PRIMARY KEY; the mem adapter guards
+        // in code (check-mem-port-contracts.sh) so both backends reject a
+        // duplicate id identically.
+        if store.iter().any(|r| r.id == record.id) {
+            anyhow::bail!("budget call record {} already exists", record.id);
         }
         store.push(record.clone());
         Ok(())
@@ -3087,17 +3096,21 @@ impl BudgetCallRepository for MemBudgetCallRepository {
         workspace_id: &str,
         since: u64,
         limit: i64,
-    ) -> Result<Vec<BudgetCallRecord>> {
-        let store = self.store.lock().await;
-        let mut records: Vec<BudgetCallRecord> = store
+    ) -> Result<Vec<gyre_domain::BudgetCallRecord>> {
+        let mut records: Vec<gyre_domain::BudgetCallRecord> = self
+            .store
+            .lock()
+            .await
             .iter()
             .filter(|r| r.workspace_id.as_str() == workspace_id && r.timestamp >= since)
             .cloned()
             .collect();
-        records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
-        if limit >= 0 {
-            records.truncate(limit as usize);
-        }
+        records.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then(b.id.as_str().cmp(a.id.as_str()))
+        });
+        records.truncate(limit.max(0) as usize);
         Ok(records)
     }
 }
@@ -5776,6 +5789,45 @@ impl gyre_ports::commit_signature_repo::CommitSignatureRepository for MemCommitS
     }
 }
 
+#[cfg(test)]
+mod budget_call_tests {
+    use super::*;
+    use gyre_ports::BudgetCallRepository;
+
+    fn record(id: &str) -> gyre_domain::BudgetCallRecord {
+        gyre_domain::BudgetCallRecord {
+            id: Id::new(id),
+            tenant_id: Id::new("tenant-1"),
+            workspace_id: Id::new("ws-1"),
+            repo_id: None,
+            agent_id: None,
+            task_id: None,
+            usage_type: "llm_query".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+            cost_usd: 0.001,
+            model: "test-model".to_string(),
+            prompt_template_sha: None,
+            timestamp: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn save_rejects_duplicate_id() {
+        // Port contract: "Insert-only; the record id is unique." The SQL
+        // adapters enforce this via the PRIMARY KEY; the mem adapter must
+        // reject a duplicate identically or SQLite-only suites would pass
+        // while the in-memory backend silently accepts rewrites.
+        let repo = MemBudgetCallRepository::default();
+        repo.save(&record("dup-1")).await.unwrap();
+        let err = repo.save(&record("dup-1")).await.unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        // Distinct ids still append.
+        repo.save(&record("dup-2")).await.unwrap();
+        let listed = repo.list_by_workspace("ws-1", 0, 10).await.unwrap();
+        assert_eq!(listed.len(), 2);
+    }
+}
 #[cfg(test)]
 mod secret_contract_tests {
     //! F1 (task-097): the mem adapter must enforce the SecretRepository port's

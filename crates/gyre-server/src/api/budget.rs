@@ -507,6 +507,9 @@ pub struct LlmCallUsage {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub model: String,
+    /// Git SHA of the prompt template that produced the call, for audit
+    /// (ui-layout.md §2: "git SHA recorded in cost entries").
+    pub prompt_template_sha: Option<String>,
 }
 
 /// Append one per-call budget audit record and increment the workspace +
@@ -534,6 +537,7 @@ pub async fn record_llm_call_usage(state: &AppState, usage: &LlmCallUsage) {
         output_tokens: usage.output_tokens,
         cost_usd: usage.cost_usd,
         model: usage.model.clone(),
+        prompt_template_sha: usage.prompt_template_sha.clone(),
         timestamp: now_secs(),
     };
     if let Err(e) = state.budget_calls.save(&record).await {
@@ -1097,6 +1101,7 @@ mod tests {
                 output_tokens: 300,
                 cost_usd: 0.05,
                 model: "test-model".to_string(),
+                prompt_template_sha: Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()),
             },
         )
         .await;
@@ -1132,6 +1137,12 @@ mod tests {
         assert!((r.cost_usd - 0.05).abs() < 1e-9);
         assert_eq!(r.tenant_id.as_str(), "tenant-1");
         assert!(r.agent_id.is_none() && r.task_id.is_none() && r.repo_id.is_none());
+        // Prompt-template provenance persisted on the audit record
+        // (ui-layout.md §2 "git SHA recorded in cost entries").
+        assert_eq!(
+            r.prompt_template_sha.as_deref(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        );
     }
 
     #[tokio::test]
@@ -1167,6 +1178,7 @@ mod tests {
                 output_tokens: 100,
                 cost_usd: 0.0,
                 model: "test-model".to_string(),
+                prompt_template_sha: None,
             },
         )
         .await;
@@ -1189,6 +1201,7 @@ mod tests {
                 output_tokens: 200,
                 cost_usd: 0.0,
                 model: "test-model".to_string(),
+                prompt_template_sha: None,
             },
         )
         .await;
@@ -1265,6 +1278,7 @@ mod tests {
             output_tokens: 0,
             cost_usd: 0.0,
             model: "test-model".to_string(),
+            prompt_template_sha: None,
         };
 
         async fn all(state: &crate::AppState) -> Vec<gyre_common::Notification> {

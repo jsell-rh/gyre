@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,23 @@ fn spec_path_slug(spec_path: &str) -> String {
         .bytes()
         .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     format!("{}-{:04x}", slug, hash & 0xffff)
+}
+
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+/// Mirrors the private helper in `graph.rs`.
+fn sse_error_stream(
+    message: String,
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 /// A single line in an LCS-based text diff between two spec versions.
@@ -326,13 +343,14 @@ pub async fn assist_spec(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id.
     {
         let workspace_id = repo.workspace_id.to_string();
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &workspace_id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -412,38 +430,78 @@ pub async fn assist_spec(
         }
     };
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&repo.workspace_id, "specs-assist")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
-
-    let system_prompt = template_content
-        .replace("{{spec_path}}", &req.spec_path)
-        .replace("{{spec_content}}", &spec_content)
-        .replace("{{graph_context}}", &graph_context)
-        .replace("{{instruction}}", &req.instruction)
-        // Backward compat: old templates may use {{draft_content}}
-        .replace(
-            "{{draft_content}}",
-            req.draft_content.as_deref().unwrap_or(&spec_content),
-        );
+    // Prompt template (ui-layout.md §2): DB override → this repo's git tree
+    // (specs/prompts/specs-assist.md on the default branch) → hardcoded
+    // fallback. `sha` carries git provenance for the cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &repo.workspace_id,
+        Some(&repo.id),
+        "specs-assist",
+        crate::llm_defaults::PROMPT_SPECS_ASSIST,
+    )
+    .await;
+    // Meta-spec-set binding (ui-layout.md §2: templates are "Bound to the
+    // workspace's meta-spec-set"): the workspace's pinned personas,
+    // principles, standards, and process specs are injected as
+    // `{{meta_spec_context}}`.
+    let meta_spec_context =
+        crate::llm_helpers::workspace_meta_spec_context(&state, &repo.workspace_id, Some(&repo.id))
+            .await;
+    // Spec content and graph context travel in the system template as
+    // grounding variables; the instruction is the user prompt only
+    // (injection containment — blank its template placeholder).
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("spec_path", req.spec_path.as_str()),
+            ("spec_content", spec_content.as_str()),
+            ("graph_context", graph_context.as_str()),
+            ("meta_spec_context", meta_spec_context.as_str()),
+            ("instruction", ""),
+        ],
+    );
     let user_prompt = format!("Instruction: {}", req.instruction);
 
     // Resolve model and call streaming LLM.
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &repo.workspace_id, "specs-assist").await;
-    let llm_stream = factory
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let llm_stream = match factory
         .for_model(&model)
         .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(repo_id = %repo_id, model = %model, error = ?e, "LLM stream_complete failed in assist_spec");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(llm_stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
 
     // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158,
     // platform-model.md §Budget Tracking). The LlmPort does not return actual
@@ -466,8 +524,10 @@ pub async fn assist_spec(
         tracing::warn!("Failed to record specs/assist cost entry: {e}");
     }
 
-    // Per-call budget record + workspace/tenant counter increment
-    // (platform-model.md §Budget Tracking).
+    // Per-call `llm_query` budget record + workspace/tenant counter
+    // increment (platform-model.md §Budget Tracking), with the
+    // prompt-template git SHA for audit (ui-layout.md §2). Tenant scope
+    // comes from the repo's workspace; skip and log if unresolvable.
     let ws_for_budget = state
         .workspaces
         .find_by_id(&repo.workspace_id)
@@ -488,6 +548,7 @@ pub async fn assist_spec(
                 output_tokens: (base_estimate - estimated_input as f64) as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
+                prompt_template_sha: template.sha.clone(),
             },
         )
         .await;
@@ -537,7 +598,7 @@ pub async fn assist_meta_spec(
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &workspace_id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -591,33 +652,67 @@ pub async fn assist_meta_spec(
             )
         })?;
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&ws_id, "meta-specs-assist")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_META_SPECS_ASSIST.to_string());
-
-    let system_prompt = template_content
-        .replace("{{meta_spec_kind}}", &meta_kind)
-        .replace("{{meta_spec_name}}", &meta_name)
-        .replace("{{meta_spec_content}}", &spec_content)
-        .replace("{{instruction}}", &req.instruction);
+    // Prompt template (ui-layout.md §2): DB workspace/tenant override →
+    // workspace git tree (specs/prompts/meta-specs-assist.md) → hardcoded
+    // fallback — the same resolution chain as the repo-scoped assist, with
+    // `sha` carrying git provenance for the budget cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &ws_id,
+        None,
+        "meta-specs-assist",
+        crate::llm_defaults::PROMPT_META_SPECS_ASSIST,
+    )
+    .await;
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("meta_spec_kind", meta_kind.as_str()),
+            ("meta_spec_name", meta_name.as_str()),
+            ("meta_spec_content", spec_content.as_str()),
+            ("instruction", req.instruction.as_str()),
+        ],
+    );
     let user_prompt = format!("Instruction: {}", req.instruction);
 
     // Resolve model and call streaming LLM.
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &ws_id, "meta-specs-assist").await;
-    let llm_stream = factory
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2), and mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (same contract as the repo-scoped assist).
+    let llm_stream = match factory
         .for_model(&model)
         .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(workspace_id = %workspace_id, model = %model, error = ?e, "LLM stream_complete failed in assist_meta_spec");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(llm_stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
 
     // Budget tracking: charge the workspace for LLM usage (same estimate as
     // the repo-scoped assist — ~4 chars per token plus response overhead and
@@ -651,6 +746,7 @@ pub async fn assist_meta_spec(
             output_tokens: (base_estimate - estimated_input as f64) as u64,
             cost_usd: 0.0,
             model: model.clone(),
+            prompt_template_sha: template.sha.clone(),
         },
     )
     .await;
@@ -742,9 +838,14 @@ fn assist_sse_events(full_text: &str) -> Vec<Result<Event, std::convert::Infalli
 }
 
 /// Wrap pre-built assist SSE events in a keep-alive SSE response.
+///
+/// Returns the same concrete iterator-backed stream type as
+/// `sse_error_stream`: both handlers funnel every return path (error and
+/// success) through one `impl Trait` return slot, so the two helpers must
+/// agree on the underlying stream type or the opaque types fail to unify.
 fn assist_sse_response(
     events: Vec<Result<Event, std::convert::Infallible>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+) -> Sse<stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
     let s = stream::iter(events);
     Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
@@ -1117,6 +1218,48 @@ pub async fn save_spec(
         .into_response())
 }
 
+/// Validate that `prompt_path` is a safe relative file path strictly inside
+/// `specs/prompts/`.
+///
+/// The MR-review bypass in `save_prompt` (direct default-branch commit, no
+/// MR, no approval notification) is justified ONLY by spec-lifecycle's
+/// `ignored_paths` entry for `specs/prompts/`. An unvalidated caller-supplied
+/// path would extend that bypass to every tracked file (specs, scripts, CI
+/// config), so the handler must reject anything outside that directory.
+fn validate_prompt_path(path: &str) -> Result<(), ApiError> {
+    use std::path::{Component, Path};
+
+    let invalid = || {
+        ApiError::BadRequest(format!(
+            "prompt_path must be a relative file path under specs/prompts/, got {path:?}"
+        ))
+    };
+
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return Err(invalid());
+    }
+    let mut segs: Vec<&str> = Vec::new();
+    for comp in p.components() {
+        match comp {
+            // Only plain segments are accepted: this rejects `..` traversal,
+            // root, and prefix (e.g. `C:\`) components in a single branch.
+            // A leading `.` also arrives as CurDir and is rejected; `.` in the
+            // middle is normalized away by `components()` and is harmless.
+            Component::Normal(seg) => segs.push(seg.to_str().ok_or_else(invalid)?),
+            _ => return Err(invalid()),
+        }
+    }
+    // Strictly inside `specs/prompts/` — at least one file component beyond
+    // the directory pair itself, and the first two segments must match it.
+    // Backslash-separated or otherwise odd inputs collapse to a single
+    // component on Unix and fail this check.
+    if segs.len() < 3 || segs[0] != "specs" || segs[1] != "prompts" {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 /// POST /api/v1/repos/:id/prompts/save
 ///
 /// Direct commit of a prompt template to the default branch — no MR, no
@@ -1132,6 +1275,10 @@ pub async fn save_prompt(
     Path(repo_id): Path<String>,
     Json(req): Json<PromptSaveRequest>,
 ) -> Result<(StatusCode, Json<PromptSaveResponse>), ApiError> {
+    // Constrain the review-gate bypass to specs/prompts/ before anything
+    // touches git — see `validate_prompt_path`.
+    validate_prompt_path(&req.prompt_path)?;
+
     let repo_id_typed = Id::new(&repo_id);
     let repo = state
         .repos
@@ -1713,6 +1860,101 @@ mod tests {
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    #[tokio::test]
+    async fn save_prompt_rejects_paths_outside_specs_prompts() {
+        let app = app();
+        let repo_id = create_repo(&app, "prompt-path-guard", "ws-1").await;
+
+        // Every path outside specs/prompts/ must be rejected with 400 — the
+        // direct-to-default-branch review bypass only covers specs/prompts/.
+        let bad_paths = [
+            // Tracked files the bypass must never reach.
+            "specs/system/vision.md",
+            "scripts/check-arch.sh",
+            ".github/workflows/ci.yml",
+            // Traversal, absolute, and home-relative forms.
+            "../../etc/passwd",
+            "specs/prompts/../../../etc/passwd",
+            "/etc/passwd",
+            "~/specs/prompts/x.md",
+            // Inside-adjacent but wrong directory / directory itself / empty.
+            "specs/prompt/x.md",
+            "specs/prompts",
+            "specs/prompts/",
+            "",
+        ];
+        for path in bad_paths {
+            let save_body = serde_json::json!({
+                "prompt_path": path,
+                "content": "# evil",
+                "message": "overwrite something sensitive",
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "prompt_path {path:?} must be rejected with 400"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn save_prompt_rejects_traversal_but_allows_normalized_subdirs() {
+        let app = app();
+        let repo_id = create_repo(&app, "prompt-path-guard-2", "ws-1").await;
+
+        // A traversal form of a legitimately-shaped path is still rejected:
+        // '..' components never reach write_file.
+        let save_body = serde_json::json!({
+            "prompt_path": "specs/prompts/../prompts/x.md",
+            "content": "# x",
+            "message": "traversal probe",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Nested subdirectories inside specs/prompts/ remain allowed.
+        let save_body = serde_json::json!({
+            "prompt_path": "specs/prompts/briefing/ask.md",
+            "content": "# ask",
+            "message": "add nested template",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
     #[test]
     fn spec_path_slug_no_collision() {
         let s1 = spec_path_slug("specs/system/payment-retry.md");
@@ -1741,10 +1983,15 @@ mod tests {
 
     /// Create a test app with a mock LLM that returns a fixed response string.
     fn app_with_llm_response(response: &str) -> Router {
+        app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::new(response)))
+    }
+
+    /// Create a test app with an arbitrary `MockLlmAdapter` — including the
+    /// error-injection constructors `failing()` and `stream_error_after()`,
+    /// which have no LLM-connection failure otherwise testable here.
+    fn app_with_llm_adapter(inner: Arc<gyre_adapters::MockLlmAdapter>) -> Router {
         let mut s = (*crate::mem::test_state()).clone();
-        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
-            inner: Arc::new(gyre_adapters::MockLlmAdapter::new(response)),
-        }));
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory { inner }));
         crate::api::api_router().with_state(Arc::new(s))
     }
 
@@ -1987,6 +2234,109 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("missing required"));
+    }
+
+    #[tokio::test]
+    async fn assist_spec_llm_connection_failure_sends_error_event() {
+        // ui-layout.md §2: an LLM connection failure is an SSE `error` event,
+        // not an HTTP 500 — and never a `complete` event. Regression for the
+        // silent-drop bug: the old code errored the whole request instead of
+        // streaming `event: error`.
+        let app = app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::failing(
+            "connection refused by mock",
+        )));
+        let repo_id = create_repo(&app, "assist-connfail-repo", "ws-assist-connfail").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(error_events.len(), 1, "should have one error event");
+        assert_eq!(
+            complete_events.len(),
+            0,
+            "a connection failure must never masquerade as a complete event"
+        );
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        let msg = error_data["error"].as_str().unwrap();
+        assert!(
+            msg.contains("connection refused by mock"),
+            "error event must carry the failure cause, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assist_spec_llm_mid_stream_failure_sends_error_event() {
+        // A connection that drops mid-generation: partial chunks arrive, then
+        // the stream errors. The truncated response must surface as
+        // `event: error` — never a `complete` event built from the partial
+        // text. Regression for the old `filter_map(|r| r.ok())` that silently
+        // dropped the stream error and completed on the truncated text.
+        let app =
+            app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::stream_error_after(
+                vec!["Good ".into(), "enough ".into(), "to look ".into()],
+                "dropped mid-generation by mock",
+            )));
+        let repo_id = create_repo(&app, "assist-midfail-repo", "ws-assist-midfail").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(error_events.len(), 1, "should have one error event");
+        assert_eq!(
+            complete_events.len(),
+            0,
+            "a truncated (mid-stream failed) response must never be completed"
+        );
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        let msg = error_data["error"].as_str().unwrap();
+        assert!(
+            msg.contains("dropped mid-generation by mock"),
+            "error event must carry the mid-stream failure cause, got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -2893,6 +3243,7 @@ specs:
             &self,
             _system_prompt: &str,
             _user_prompt: &str,
+            _max_tokens: Option<u32>,
         ) -> anyhow::Result<serde_json::Value> {
             serde_json::from_str(&self.response).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))
         }
