@@ -2061,30 +2061,85 @@ pub async fn predict_graph(
         }
     }
 
+    let workspace_id = repo.workspace_id.clone();
+    let repo_id = Id::new(&id);
+
+    // Build user prompt based on whether spec context is provided. The
+    // spec-edit framing note rides the system prompt (same slot it used
+    // before the core was extracted) so the model sees it as instruction,
+    // not as part of the user's question.
+    let (user_prompt, system_note) = if let (Some(spec_path), Some(draft)) =
+        (&req.spec_path, &req.draft_content)
+    {
+        (
+                format!(
+                    "Predict what would change in the codebase if this spec is implemented:\n\nSpec: {spec_path}\n\nContent:\n{draft}"
+                ),
+                Some(
+                    "\n\nThe user is editing a spec and wants to understand the structural impact.",
+                ),
+            )
+    } else if let Some(spec_path) = &req.spec_path {
+        (
+            format!("Predict structural improvements related to spec: {spec_path}"),
+            None,
+        )
+    } else {
+        (
+            format!("Predict structural improvements for repo {id}."),
+            None,
+        )
+    };
+
+    let predictions =
+        run_structural_prediction(&state, &workspace_id, &repo_id, &user_prompt, system_note)
+            .await?;
+
+    Ok(Json(PredictResponse {
+        repo_id: id,
+        predictions,
+    }))
+}
+
+/// Shared structural-prediction core (system-explorer.md §3 fast tier and
+/// §8 Conversational Exploration): runs one LLM prediction over a repo's
+/// live knowledge graph. Used by `POST /repos/:id/graph/predict` (spec
+/// draft impact → ghost overlays) and by the workspace explorer ask
+/// endpoint ("what would happen if…" follow-up questions) so both surfaces
+/// run the same prediction machinery against the same grounding — never
+/// two divergent copies.
+///
+/// `instruction` is the user-side prompt describing the change to predict.
+/// `system_note` is appended to the substituted system prompt for
+/// caller-specific framing (the spec-edit caller marks the edit context).
+pub(crate) async fn run_structural_prediction(
+    state: &AppState,
+    workspace_id: &Id,
+    repo_id: &Id,
+    instruction: &str,
+    system_note: Option<&str>,
+) -> Result<Vec<serde_json::Value>, ApiError> {
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
 
-    let workspace_id = repo.workspace_id.clone();
-
     // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
+    let mut system_prompt = state
         .prompt_templates
-        .get_effective(&workspace_id, "graph-predict")
+        .get_effective(workspace_id, "graph-predict")
         .await
         .map_err(ApiError::Internal)?
         .map(|t| t.content)
         .unwrap_or_else(|| crate::llm_defaults::PROMPT_GRAPH_PREDICT.to_string());
 
     // Load graph nodes and edges for context.
-    let repo_id = Id::new(&id);
     let nodes = state
         .graph_store
-        .list_nodes(&repo_id, None)
+        .list_nodes(repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
     let edges = state
         .graph_store
-        .list_edges(&repo_id, None)
+        .list_edges(repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -2121,43 +2176,27 @@ pub async fn predict_graph(
     let nodes_json = serde_json::to_string(&nodes_summary).unwrap_or_else(|_| "[]".to_string());
     let edges_json = serde_json::to_string(&edge_summary).unwrap_or_else(|_| "[]".to_string());
 
-    let mut system_prompt = template_content
+    system_prompt = system_prompt
         .replace("{{nodes}}", &nodes_json)
         .replace("{{edges}}", &edges_json);
-
-    // Build user prompt based on whether spec context is provided
-    let user_prompt = if let (Some(spec_path), Some(draft)) = (&req.spec_path, &req.draft_content) {
-        system_prompt.push_str(
-            "\n\nThe user is editing a spec and wants to understand the structural impact.",
-        );
-        format!(
-            "Predict what would change in the codebase if this spec is implemented:\n\nSpec: {spec_path}\n\nContent:\n{draft}"
-        )
-    } else if let Some(spec_path) = &req.spec_path {
-        format!("Predict structural improvements related to spec: {spec_path}")
-    } else {
-        format!("Predict structural improvements for repo {id}.")
-    };
+    if let Some(note) = system_note {
+        system_prompt.push_str(note);
+    }
 
     // Resolve model and call LLM for structured JSON output.
     let (model, _) =
-        crate::llm_helpers::resolve_llm_model(&state, &workspace_id, "graph-predict").await;
+        crate::llm_helpers::resolve_llm_model(state, workspace_id, "graph-predict").await;
     let result = factory
         .for_model(&model)
-        .predict_json(&system_prompt, &user_prompt, None)
+        .predict_json(&system_prompt, instruction, None)
         .await
         .map_err(ApiError::Internal)?;
 
-    let predictions = if let Some(arr) = result.as_array() {
+    Ok(if let Some(arr) = result.as_array() {
         arr.clone()
     } else {
         vec![result]
-    };
-
-    Ok(Json(PredictResponse {
-        repo_id: id,
-        predictions,
-    }))
+    })
 }
 
 // ── View query dry-run ───────────────────────────────────────────────────────
