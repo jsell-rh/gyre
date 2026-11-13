@@ -15,6 +15,7 @@ coverage_sections:
   - "abac-policy-engine.md §Dry-Run Evaluation"
 commits:
   - "0dcb1017"
+  - "81ccc284"
 ---
 
 ## Spec Excerpt
