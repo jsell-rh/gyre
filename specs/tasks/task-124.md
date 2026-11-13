@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["3350817099f10cc5fde2e505f9cb4ad8bb5d129e", "38b3134feeaa28be0e443e2e29344980ea6db552", "60c86252706b2392866b1dddd66634ab4cb123d6", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "60c86252706b2392866b1dddd66634ab4cb123d6", "38b3134feeaa28be0e443e2e29344980ea6db552", "3350817099f10cc5fde2e505f9cb4ad8bb5d129e"]
 ---
 
 ## Spec Excerpt
@@ -26,7 +26,7 @@ From `user-management.md` §API > User Management:
 | `DELETE /api/v1/users/me/sessions/{id}` | DELETE | Revoke a session |
 | `POST /api/v1/users/me/sessions/revoke-all` | POST | Revoke all sessions |
 
-From `user-management.md` §API > Workspace Membership:
+From §API > Workspace Membership:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
@@ -68,13 +68,13 @@ From `user-management.md` §API > Workspace Membership:
 
 ## Acceptance Criteria
 
-- [x] `GET /api/v1/users/{username}` returns public profile within tenant
-- [x] `GET /api/v1/users` lists users (TenantAdmin only, paginated)
-- [x] `PUT /api/v1/users/{id}/deactivate` deactivates user with cascade (TenantAdmin only)
-- [x] Workspace invitation list, accept, and revoke endpoints functional
-- [x] Role change endpoint supports ownership transfer validation
-- [x] All routes registered in `api/mod.rs` with ABAC route mappings
-- [ ] `cargo test --all` passes — deferred to the independent verifier per the sandbox memory budget (see below)
+- [ ] `GET /api/v1/users/{username}` returns public profile within tenant
+- [ ] `GET /api/v1/users` lists users (TenantAdmin only, paginated)
+- [ ] `PUT /api/v1/users/{id}/deactivate` deactivates user with cascade (TenantAdmin only)
+- [ ] Workspace invitation list, accept, and revoke endpoints functional
+- [ ] Role change endpoint supports ownership transfer validation
+- [ ] All routes registered in `api/mod.rs` with ABAC route mappings
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -133,11 +133,14 @@ global role can be an invitee). Pending invitations are unaccepted
 membership rows — the lifecycle is real storage state, not a parallel
 table.
 
-### This round (contract restoration + re-verification)
+### This round (contract restoration, checkpoint cebe3a499)
 
-The executor restored the assigned task document (contract repair
-0a1ec38f); this round preserves the existing production fix and
-re-verifies it against the current checkout:
+The executor again restored the assigned task document (contract
+repair d8383a00); this round preserves the existing production fix
+unchanged (no source changes were needed) and re-verifies it on the
+current checkout. The assigned contract body is kept byte-identical;
+progress status, the `commits:` frontmatter list, and these notes are
+the only task-document changes.
 
 - Review finding 3cd87005 (stale 7-argument
   `NotificationRepository::list_for_user` call in the test
@@ -147,19 +150,25 @@ re-verifies it against the current checkout:
   passes `None` for the new `repo_id: Option<&Id>` parameter. `None` is
   semantically correct, not just type-correct — the assertion checks
   for a `WorkspaceOwnerless` notification, which has no repo scope, so
-  an unfiltered (all-repos) listing is what it needs.
-- Fresh probe on HEAD `f1778e09`:
-  `/tmp/stage/bin/cargo check -p gyre-server --tests` exits 0
-  (~8m55s; log at
-  `/tmp/stage/review-evidence/cargo-check-gyre-server-tests-round2.log`).
-  A tree-wide grep over `crates/gyre-server/src`,
-  `crates/gyre-adapters/src`, and `crates/gyre-domain/src` confirms no
-  other stale `list_for_user` call sites.
-- Running the test binary itself is deferred to the verifier per the
-  sandbox memory budget (commands below).
+  an unfiltered (all-repos) listing is what it needs. A tree-wide grep
+  over `crates/gyre-server/src` confirms no other stale
+  `list_for_user` call sites (the `spec_patrol.rs` callers already pass
+  the 8-argument form).
+- Fresh probes on the tree of HEAD `7fd39fb7` (identical source to
+  this round's commit; only this task document differs):
+  - `/tmp/stage/bin/cargo check -p gyre-server --tests` exits 0
+    (~8m54s; log retained at
+    `review-evidence/cargo-check-gyre-server-tests-round3.log`).
+  - `scripts/check-migration-versions.sh`,
+    `scripts/check-abac-route-registry.sh`, and `scripts/check-arch.sh`
+    all exit 0 (logs retained under `review-evidence/`).
+- Running the server test binary itself is deferred to the verifier
+  per the sandbox memory budget (commands below).
 
 ### Prior rounds (context)
 
+- Contract restoration round 0a1ec38f: same preservation pattern; the
+  shipped notes were rewritten rather than appended.
 - Rebase repair (merge of `6f5a631c`): the only code conflict was the
   `use users::{...}` import list in `api/mod.rs` (task-124 handlers vs
   task-125 notification handlers), resolved as the union; coverage
@@ -175,8 +184,9 @@ Large gyre-server test compilation is deferred to the independent
 verifier per the sandbox budget:
 
 - `cargo test --all` — the assignment's definition-of-done gate; the
-  compile error repaired in the previous round (E0061 in
-  `deactivate_user_cascades_to_auth_and_ownership`) was the blocker.
+  compile error repaired earlier (E0061 in
+  `deactivate_user_cascades_to_auth_and_ownership`) was the blocker
+  and `cargo check -p gyre-server --tests` now passes.
 - `cargo test -p gyre-server api::users::tests` — includes
   `deactivate_user_cascades_to_auth_and_ownership` (the repaired call
   site), `workspace_invitation_lifecycle`,
