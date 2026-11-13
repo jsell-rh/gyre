@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: []
+commits: ["0f41df8b0ee5a9cbf7b51ec21f4847db58317943", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
 ---
 
 ## Spec Excerpt
@@ -118,3 +118,83 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
+
+## Shipped
+
+HSI §12 profile gaps (notification filtering, judgment ledger, auth
+provider info) are implemented in production code across the commits
+listed in the frontmatter. This round resolves the rebase against
+current main f7f5c59f (task-125), which conflicted with the branch's
+notification-repository changes in 28 files.
+
+### This round: rebase repair against main f7f5c59f (task-125)
+
+Current main moved to `f7f5c59f` (task-125 teams + notifications spec-path
+API). Both sides extended `NotificationRepository::list_for_user` with a
+new parameter — task-209's `exclude_types` (HSI §12 inbox preference
+filter) and task-125's `repo_id` (repo filter) — producing 28 conflicted
+files. Merge commit 0f41df8b keeps BOTH parameters: the port, the SQLite,
+Postgres, and mem adapters, and the SSE `BroadcastingNotificationRepo`
+decorator all implement the 9-arg signature; `count_unresolved` keeps
+`exclude_types`. Every notification call site (inbox, badge, MCP inbox,
+background dedup surfaces, test helpers) passes both new arguments
+(`None`/`&[]` where the surface filters nothing). One silent auto-merge
+break was caught by a scripted arity audit and fixed by hand: main's
+decorator impl lacked `exclude_types` in `list_for_user` and
+`count_unresolved`. Main's task-125 routes (`/api/v1/notifications*`,
+teams API, merge policy, SSE stream) and task-209's judgment ledger,
+write paths, and auth provider info all survive intact.
+
+### Verification
+
+This sandbox has no network egress (crates.io/npm registries sinkholed,
+no cached dependency registry, no node_modules), so cargo check/test,
+clippy, and npm test could not run locally this round; they are recorded
+as required verifier probes in /tmp/stage/review-evidence/ (evidence:
+merge-f7f5c59f-resolution.md, shell-checks-and-transport.log). What was
+verified locally at the merge head:
+
+- No conflict markers remain; rustfmt --check clean over all 43
+  merge-touched Rust files (full-parse syntax validation).
+- Scripted arity audit: every notification `list_for_user` call site has
+  exactly 9 args; all four trait impls implement the full port method
+  set with the merged signatures; no duplicate items introduced.
+- Task-209 surfaces grep-verified intact (GateOverride ledger
+  aggregation, trust_change/gate_override/meta_spec_publish writes,
+  oidc_issuer/last_login_at, inbox preference exclusion).
+- 17 shell-only CI gates PASS (arch, ABAC route registry, migration
+  versions, notification toggle coverage, mem port contracts, etc.).
+- Prior rounds' compile/test evidence (cargo check + non-server crate
+  tests + web suite green) predates this merge; the merged signature
+  must be re-verified remotely.
+
+Server/verification the independent verifier must execute:
+`SKIP_WEB_BUILD=1 cargo check --all-targets --workspace`,
+`SKIP_WEB_BUILD=1 cargo nextest run --all` (with
+`GYRE_JJ_TESTS_MUST_RUN=1`, jj v0.39.0), clippy/rustfmt diff gates vs
+`f7f5c59f`, `cd web && npm ci && npm test`, and exact-head GitHub checks.
+
+### Implementation (intact on this branch)
+
+- Notification filtering: inbox queries (`get_my_notifications`/
+  `_count`) compute the user's disabled types from
+  `user_notification_preferences` and pass them as `exclude_types` to
+  `list_for_user`, applied by the SQL adapter and the mem adapter.
+  Canonical type names are stored (alias normalization), and every
+  canonical `NotificationType` has a UI toggle.
+- Judgment ledger: `JudgmentType` has `GateOverride` (`as_str()` =
+  `"gate"`); `list_for_user` (SQLite + Postgres parity) aggregates
+  spec approvals/rejections, `audit_events` (`gate_override`,
+  `trust_change`, meta-spec publish rows, with zstd detail
+  decompression), and `meta_spec_versions` joined to `meta_specs`;
+  workspace filter drops unattributed entries rather than stamping;
+  reverse-chronological with limit/offset after union+sort. HSI §12
+  names the concrete source tables and the
+  `approval|rejection|gate|trust|meta-spec` type values.
+- Write paths: trust transitions via `PUT /workspaces/:id` write a
+  `trust_change` audit event (from/to/workspace); human approval
+  review on a failed-gate MR writes a `gate_override` audit event
+  (mr_id/gate_type/from/to); meta-spec publish writes an attribution
+  audit event.
+- Auth provider info: `GET /users/me` returns read-only `oidc_issuer`
+  and `last_login_at`.
