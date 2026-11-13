@@ -216,22 +216,38 @@ pub fn mr_document(mr: &MergeRequest) -> SearchDocument {
     }
 }
 
-/// Agent: indexed fields name/persona/status, facets workspace, repo, status.
+/// Agent: indexed fields name/persona/status, facets workspace, repo,
+/// status. The specced `persona` indexed field is the agent's attached
+/// persona id (Agent.persona_id) — it is folded into the body so a
+/// full-text query for the persona returns the agent (search.md's table
+/// distinguishes Indexed Fields (searchable) from Facets (filterable);
+/// both body and facet carry it).
 pub fn agent_document(agent: &Agent) -> SearchDocument {
+    let persona = agent
+        .persona_id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    let mut body = format!(
+        "agent {} status {}",
+        agent.name,
+        agent_status_str(&agent.status)
+    );
+    if !persona.is_empty() {
+        body.push_str("\npersona ");
+        body.push_str(&persona);
+    }
     SearchDocument {
         entity_type: "agent".to_string(),
         entity_id: agent.id.to_string(),
         title: agent.name.clone(),
-        body: format!(
-            "agent {} status {}",
-            agent.name,
-            agent_status_str(&agent.status)
-        ),
+        body,
         workspace_id: Some(agent.workspace_id.to_string()),
         repo_id: agent.repo_id.as_ref().map(|id| id.to_string()),
         tenant_id: None,
         facets: facets(vec![
             ("status", agent_status_str(&agent.status).to_string()),
+            ("persona", persona),
             ("workspace", agent.workspace_id.to_string()),
             (
                 "repo",
@@ -270,21 +286,29 @@ pub fn persona_document(persona: &Persona) -> SearchDocument {
 }
 
 /// Review: indexed fields body/decision/reviewer, facets workspace, repo, MR.
+/// The decision and reviewer are Indexed Fields (searchable), so they are
+/// folded into the body, not just carried as filter facets.
 pub fn review_document(review: &Review, mr: &MergeRequest) -> SearchDocument {
+    let decision = review_decision_str(&review.decision);
+    let reviewer = review.reviewer_agent_id.clone();
+    let mut body = review.body.clone().unwrap_or_default();
+    body.push_str("\ndecision ");
+    body.push_str(decision);
+    if !reviewer.is_empty() {
+        body.push_str("\nreviewer ");
+        body.push_str(&reviewer);
+    }
     SearchDocument {
         entity_type: "review".to_string(),
         entity_id: review.id.to_string(),
         title: format!("Review of {}", mr.title),
-        body: review.body.clone().unwrap_or_default(),
+        body,
         workspace_id: Some(mr.workspace_id.to_string()),
         repo_id: Some(mr.repository_id.to_string()),
         tenant_id: None,
         facets: facets(vec![
-            (
-                "decision",
-                review_decision_str(&review.decision).to_string(),
-            ),
-            ("reviewer", review.reviewer_agent_id.clone()),
+            ("decision", decision.to_string()),
+            ("reviewer", reviewer),
             ("mr", mr.id.to_string()),
             ("workspace", mr.workspace_id.to_string()),
             ("repo", mr.repository_id.to_string()),
@@ -307,6 +331,14 @@ pub fn activity_event_document(event: &AnalyticsEvent) -> SearchDocument {
         event.event_name.clone()
     } else {
         format!("{}\n{}", event.event_name, description)
+    };
+    // agent_id is an Indexed Field for activity events (searchable), not
+    // just a filter facet — fold it into the body.
+    let agent_id = event.agent_id.clone().unwrap_or_default();
+    let body = if agent_id.is_empty() {
+        body
+    } else {
+        format!("{body}\nagent {agent_id}")
     };
     let workspace = event
         .properties
@@ -338,7 +370,7 @@ pub fn activity_event_document(event: &AnalyticsEvent) -> SearchDocument {
         tenant_id: None,
         facets: facets(vec![
             ("event_type", event.event_name.clone()),
-            ("agent_id", event.agent_id.clone().unwrap_or_default()),
+            ("agent_id", agent_id),
             ("workspace", workspace),
             ("repo", repo),
             ("date", iso_date(event.timestamp)),
@@ -361,6 +393,19 @@ pub fn audit_event_document(event: &AuditEvent) -> SearchDocument {
     } else {
         format!("{path}\n{detail}")
     };
+    // agent_id is searchable text for audit events too (the review finding:
+    // facet-only values are neither searchable nor client-filterable via
+    // GET /api/v1/search, which has no facet filter params).
+    let agent_id = event
+        .agent_id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    let body = if agent_id.is_empty() {
+        body
+    } else {
+        format!("{body}\nagent {agent_id}")
+    };
     SearchDocument {
         entity_type: "audit_event".to_string(),
         entity_id: event.id.to_string(),
@@ -371,14 +416,7 @@ pub fn audit_event_document(event: &AuditEvent) -> SearchDocument {
         tenant_id: None,
         facets: facets(vec![
             ("event_type", event.event_type.as_str()),
-            (
-                "agent_id",
-                event
-                    .agent_id
-                    .as_ref()
-                    .map(|id| id.to_string())
-                    .unwrap_or_default(),
-            ),
+            ("agent_id", agent_id),
             ("path", path),
             (
                 "workspace",
@@ -415,6 +453,18 @@ pub fn commit_document(
     repo_id: &str,
 ) -> SearchDocument {
     let title = message.lines().next().unwrap_or_default().to_string();
+    // Indexed Fields are searchable text, not just filter facets (MR-author
+    // pattern): the author and branch are folded into the body so a
+    // full-text query for either matches the commit.
+    let mut body = message.to_string();
+    if !author.is_empty() {
+        body.push_str("\nauthor ");
+        body.push_str(author);
+    }
+    if !branch.is_empty() {
+        body.push_str("\nbranch ");
+        body.push_str(branch);
+    }
     SearchDocument {
         entity_type: "commit".to_string(),
         entity_id: sha.to_string(),
@@ -423,7 +473,7 @@ pub fn commit_document(
         } else {
             title
         },
-        body: message.to_string(),
+        body,
         workspace_id: if workspace_id.is_empty() {
             None
         } else {
@@ -477,6 +527,12 @@ pub fn spec_document(
     if !linked_mrs.is_empty() {
         body.push_str("\nlinked MRs: ");
         body.push_str(&linked_mrs.join(", "));
+    }
+    // The owner is an Indexed Field (searchable), not just a filter facet —
+    // fold it into the body so `?q=<owner>` matches the spec.
+    if !owner.is_empty() {
+        body.push_str("\nowner ");
+        body.push_str(owner);
     }
     SearchDocument {
         entity_type: "spec".to_string(),
@@ -1074,14 +1130,19 @@ mod tests {
             ReviewDecision::Approved,
             now,
         );
-        // Review body with a term findable via the MR join.
+        // Review body with a term findable via the MR join. The body must NOT
+        // contain the decision or reviewer values — the decision/reviewer
+        // assertions below prove those Indexed Fields are searchable on
+        // their own (review finding: facet-only values are unmatchable).
         let mut review = review;
-        review.body = Some("narwhalreview approve".to_string());
+        review.body = Some("narwhalreview commentary".to_string());
         state.reviews.submit_review(&review).await.unwrap();
 
-        // Agent.
+        // Agent — with a persona attached, so the specced `persona` indexed
+        // field is exercised (review finding: it was never indexed).
         let mut agent = Agent::new(Id::new("agent-1"), "agent-capybara", now);
         agent.workspace_id = Id::new("ws-1");
+        agent.persona_id = Some(Id::new("persona-1"));
         state.agents.create(&agent).await.unwrap();
 
         // Persona.
@@ -1201,6 +1262,12 @@ mod tests {
             "spec must be findable by linked MR id"
         );
         assert_eq!(spec_by_mr_link[0].entity_id, "system/search.md");
+        // The owner is an Indexed Field (searchable) — the spec content and
+        // links contain neither "user" nor "test", so this only matches if
+        // the owner is folded into the body (review finding).
+        let spec_by_owner = search(&state, "user:test", Some("spec")).await;
+        assert_eq!(spec_by_owner.len(), 1, "spec must be findable by owner");
+        assert_eq!(spec_by_owner[0].entity_id, "system/search.md");
 
         let commits = search(&state, COMMIT_TERM, Some("commit")).await;
         assert_eq!(commits.len(), 1, "commit must be findable by message");
@@ -1209,6 +1276,23 @@ mod tests {
             commits[0].facets.get("branch").map(String::as_str),
             Some("main")
         );
+        // Author and branch are Indexed Fields (searchable), not just filter
+        // facets — the commit message contains neither, so these queries only
+        // match if they are folded into the body (review finding).
+        let commits_by_author = search(&state, "Testcommitter", Some("commit")).await;
+        assert_eq!(
+            commits_by_author.len(),
+            1,
+            "commit must be findable by author"
+        );
+        assert_eq!(commits_by_author[0].entity_id, head_sha);
+        let commits_by_branch = search(&state, "main", Some("commit")).await;
+        assert_eq!(
+            commits_by_branch.len(),
+            1,
+            "commit must be findable by branch"
+        );
+        assert_eq!(commits_by_branch[0].entity_id, head_sha);
 
         let tasks = search(&state, TASK_TERM, Some("task")).await;
         assert_eq!(tasks.len(), 1);
@@ -1229,10 +1313,44 @@ mod tests {
             reviews[0].facets.get("decision").map(String::as_str),
             Some("approved")
         );
+        // Decision and reviewer are Indexed Fields (searchable), not just
+        // filter facets — the seeded body deliberately contains neither
+        // value, so these queries only match if they are folded into the
+        // document body (review finding).
+        let reviews_by_decision = search(&state, "approved", Some("review")).await;
+        assert_eq!(
+            reviews_by_decision.len(),
+            1,
+            "review must be findable by decision"
+        );
+        assert_eq!(reviews_by_decision[0].entity_id, "review-1");
+        let reviews_by_reviewer = search(&state, "agent-reviewer-9", Some("review")).await;
+        assert_eq!(
+            reviews_by_reviewer.len(),
+            1,
+            "review must be findable by reviewer"
+        );
+        assert_eq!(reviews_by_reviewer[0].entity_id, "review-1");
 
         let agents = search(&state, "capybara", Some("agent")).await;
         assert_eq!(agents.len(), 1, "agent must be findable by name");
         assert_eq!(agents[0].entity_id, "agent-1");
+        // The specced `persona` indexed field: an agent with a persona is
+        // findable by that persona id (review finding: it was never indexed).
+        let agents_by_persona = search(&state, "persona-1", Some("agent")).await;
+        assert_eq!(
+            agents_by_persona.len(),
+            1,
+            "agent must be findable by its attached persona"
+        );
+        assert_eq!(agents_by_persona[0].entity_id, "agent-1");
+        assert_eq!(
+            agents_by_persona[0]
+                .facets
+                .get("persona")
+                .map(String::as_str),
+            Some("persona-1")
+        );
 
         let personas = search(&state, "ibexprompt", Some("persona")).await;
         assert_eq!(
@@ -1253,6 +1371,16 @@ mod tests {
             "activity event must be findable by description"
         );
         assert_eq!(activity_results[0].entity_id, "ev-1");
+        // agent_id is an Indexed Field for activity events (searchable) —
+        // the description contains neither "agent" nor "1", so this only
+        // matches if agent_id is folded into the body (review finding).
+        let activity_by_agent = search(&state, "agent-1", Some("activity_event")).await;
+        assert_eq!(
+            activity_by_agent.len(),
+            1,
+            "activity event must be findable by agent_id"
+        );
+        assert_eq!(activity_by_agent[0].entity_id, "ev-1");
 
         let audits = search(&state, "echidnaaudit", Some("audit_event")).await;
         assert_eq!(audits.len(), 1, "audit event must be findable by path");
@@ -1261,6 +1389,17 @@ mod tests {
             audits[0].facets.get("event_type").map(String::as_str),
             Some("process_exec")
         );
+        // agent_id is searchable for audit events too (review finding:
+        // facet-only values are unmatchable — GET /api/v1/search has no
+        // facet filter params). The path/detail contain neither "agent"
+        // nor "1".
+        let audits_by_agent = search(&state, "agent-1", Some("audit_event")).await;
+        assert_eq!(
+            audits_by_agent.len(),
+            1,
+            "audit event must be findable by agent_id"
+        );
+        assert_eq!(audits_by_agent[0].entity_id, "aud-1");
 
         let files = search(&state, FILE_TERM, Some("file")).await;
         assert_eq!(files.len(), 1, "file must be findable by content");
