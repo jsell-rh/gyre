@@ -8,7 +8,7 @@ coverage_sections:
   - "search.md §Simple Search"
   - "search.md §Quoted Phrases"
   - "search.md §Faceted Filtering"
-commits: ["c8f14874cd1c648c4f407c575373262e7dbdf170", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "5ace1b3aca5c5fd2e2b7864c186e7f0e1aa17fbd", "2c3eff66174a6d34c4bc6a8d72c11a69ca224ecb", "1bb3c01bce54dda1ac5146c59aab3ce9c2a9c7e2", "2acdab522376a73621f2672d397ac87fab323357"]
+commits: ["2acdab522376a73621f2672d397ac87fab323357", "1bb3c01bce54dda1ac5146c59aab3ce9c2a9c7e2", "2c3eff66174a6d34c4bc6a8d72c11a69ca224ecb", "5ace1b3aca5c5fd2e2b7864c186e7f0e1aa17fbd", "fc0c24e8b3e55bd043906436edf2e484129f5e30", "40d1c1cde066effba5e42e1ccb6ca4800fe6c59f", "c8f14874cd1c648c4f407c575373262e7dbdf170"]
 ---
 
 ## Spec Excerpt
