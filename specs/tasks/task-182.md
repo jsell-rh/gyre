@@ -5,7 +5,7 @@ depends_on: [task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: ["39ba4fb6968847e2eb226cc5ae6e9e38394f7834", "362807160d14e186ac329eb185fab33754efc6f7", "188b9f9482edeeb0550990fc15761137eef9dc76", "a44ad8886416bd9de4defed02be1ad35cf8eb11e", "ce2418944b06143e1e0d4ea11e3abfd5c10e3bf7"]
+commits: ["a44ad8886416bd9de4defed02be1ad35cf8eb11e", "188b9f9482edeeb0550990fc15761137eef9dc76", "362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
 ---
 
 ## Spec Excerpt
