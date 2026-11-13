@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -97,101 +97,3 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
-## Shipped
-
-**Rebase repair (review F1): task-110 merged onto the assigned main head
-f764bc00** (merge commit `46f49834`, recorded in `commits:` above). The
-candidate lineage sat on merge-base 33cd786c while main advanced 1433+
-commits; the merge resolves the six content conflicts as unions —
-task-110's invitation modules, exports, routes, and doc rows alongside
-main's budget-enforcement, repo-access, team, and ownership-transfer
-additions — and repairs the structural blocker:
-
-- **Migration renumbering:** the task's Diesel migrations collided with
-  main's taken versions (only one migration runs per version,
-  alphabetically first). `invitations` 20261010000058 →
-  `2026-11-13-000063` (main's `budget_enforcement_action` owns
-  20261010000058), `invitation_pending_unique` 20261108000061 →
-  `2026-11-13-000064` (main's `spec_links` owns 20261108000061),
-  `user_tenant_scope` 20261108000060 → `2026-11-13-000065` (kept
-  contiguous with the task's sequence; ordering preserved — the unique
-  index migration still sorts after the table migration it indexes).
-  Each up/down.sql carries a renumber note; fresh databases now get the
-  `tenant_invitations`/`workspace_invitations` tables and both
-  pending-scope partial unique indexes.
-- **Test updates for the renumbered versions:** the migration-partition
-  tests now target the new version strings —
-  `migration_000064_dedupes_raced_pending_invitations_before_index`
-  (renamed from 000061) and
-  `migration_000058_backfills_unique_url_safe_usernames` (excludes
-  20261113000065 instead of 20261108000060).
-- **web/dist** resolved to the assignment base's assets (regeneration is
-  owned by the executor/remote integration, not this assignment).
-- **Coverage matrix** (`specs/coverage/system/user-management.md`)
-  recomputed against the merged table: 9/36 (11 n/a, 0 not-started,
-  16 task-assigned, 9 implemented) — task-110's rows 5/6/7/25 stay
-  implemented on top of main's task-122/task-123 rows.
-
-### Verification (this round, at merge commit 46f49834)
-
-- `cargo check --all --all-targets` — exit 0 (covers gyre-server lib +
-  tests type checking; the full server test build exceeds this
-  sandbox's 4 GiB budget and is left to the independent verifier).
-- `cargo test -p gyre-domain invitation` — 4 passed, 0 failed.
-- `cargo test -p gyre-adapters invitation` — 5 passed, 0 failed,
-  including `migration_000064_dedupes_raced_pending_invitations_before_index`
-  against real SQLite at the renumbered version;
-  `migration_000058_backfills_unique_url_safe_usernames` and
-  `no_duplicate_migration_version_prefixes` — passed.
-- All AGENTS.md invariant scripts exit 0 on the merged tree
-  (check-arch, check-abac-route-registry, check-abac-exempt-handlers,
-  check-mcp-write-tools, check-migration-versions,
-  check-migration-sql-portability, check-dead-message-kinds,
-  check-byte-slice-truncation, check-relative-path-defaults,
-  check-fail-open-ref-resolution, check-task-commit-attribution,
-  check-mem-port-contracts, check-fabricated-scope-defaults,
-  check-lossy-secret-conversion, check-scope-literal-defaults,
-  check-inert-enforcement, check-forged-scope-fields,
-  check-forwarded-header-trust, check-in-memory-state-stores,
-  check-unbounded-external-http).
-- The wider `scripts/check-*.sh` set was run on both the merged tree
-  and a pristine `f764bc00` worktree and the logs diffed: identical
-  pass/fail sets (55/35; the 35 fail on the pristine base —
-  environment awk dialect, usage error, and pre-existing advisory
-  findings). The one new file named by
-  check-silent-result-discard (`api/invitations.rs:1291`) is the same
-  fire-and-forget notification-create pattern the base itself uses in
-  `api/specs.rs`, `container_audit.rs`, and `ralph_loop.rs`; no check
-  flips from pass to fail due to this merge. Evidence retained under
-  `/tmp/stage/review-evidence/`.
-
-### Tests for the independent verifier
-
-- `cargo test -p gyre-server --lib api::invitations` (26 tests, incl.
-  `invite_notification_carries_accept_path`).
-- `cargo test --all` (full workspace).
-
-### Shipped behavior (carried from prior rounds, unchanged by the merge)
-
-- **Domain & storage:** `TenantInvitation`/`WorkspaceInvitation`/
-  `InvitationStatus`/`InvitationPolicy` entities
-  (`gyre-domain/src/invitation.rs`), port traits
-  (`gyre-ports/src/invitation.rs`), SQLite + Postgres migrations and
-  adapters, mem adapters. Tokens are CSPRNG-generated and stored only
-  as SHA-256 hashes; the raw token appears solely in the invite
-  response.
-- **Tenant invitations:** the five specced endpoints — single invite,
-  bulk invite, list with status filter, revoke, magic-link
-  accept/decline — with TenantAdmin-only authorization, per-tenant
-  `InvitationPolicy` expiry/max-pending caps, and SSO-account linking
-  on accept when the email already has an account.
-- **Workspace invitations:** invite → pending → accept/decline/expire
-  lifecycle with membership creation on accept, inviter-side listing,
-  invitee-facing `GET /api/v1/users/me/invitations`, and per-workspace
-  `max_pending_invitations` enforcement; the invitee notification is
-  typed `InvitationReceived` (round-14 repair).
-- **Expiry:** background sweeper marks `Pending` invitations past
-  `expires_at` as `Expired` for both invitation kinds.
-- **Routes & ABAC:** all routes registered in `api/mod.rs` with ABAC
-  resolver mappings in `abac_middleware.rs`; no exemption-file entries.
