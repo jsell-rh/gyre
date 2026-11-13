@@ -4,11 +4,11 @@ spec_ref: "user-management.md §API > Teams"
 depends_on:
   - task-122
   - task-123
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Teams"
   - "user-management.md §Notifications"
-commits: []
+commits: ["bc0d0eac"]
 ---
 
 ## Spec Excerpt
@@ -73,16 +73,111 @@ From §API > Notifications:
 
 ## Acceptance Criteria
 
-- [ ] Team membership add/remove endpoints functional
-- [ ] `GET /api/v1/notifications` with pagination and filtering
-- [ ] `GET /api/v1/notifications/unread-count` returns count
-- [ ] `PUT /api/v1/notifications/{id}/read` marks notification as read
-- [ ] `POST /api/v1/notifications/mark-all-read` marks all as read
-- [ ] Notification preferences CRUD endpoints functional
-- [ ] `GET /api/v1/notifications/stream` delivers real-time SSE notifications
-- [ ] All routes registered in `api/mod.rs`
-- [ ] `cargo test --all` passes
+- [x] Team membership add/remove endpoints functional (audited: shipped by task-122 — POST/DELETE `.../teams/:team_id/members[/:user_id]` with Owner/Admin/TenantAdmin gating, workspace-membership requirement, duplicate 409, cross-workspace 404; tested by task-122's suite)
+- [x] `GET /api/v1/notifications` with pagination and filtering
+- [x] `GET /api/v1/notifications/unread-count` returns count
+- [x] `PUT /api/v1/notifications/{id}/read` marks notification as read
+- [x] `POST /api/v1/notifications/mark-all-read` marks all as read
+- [x] Notification preferences CRUD endpoints functional (spec path)
+- [x] `GET /api/v1/notifications/stream` delivers real-time SSE notifications
+- [x] All routes registered in `api/mod.rs` (+ ABAC resolver entries; all mechanical route/auth gates pass)
+- [ ] `cargo test --all` passes — deferred to the independent verifier (gyre-server test codegen is blocked by the 4 GiB build wrapper in the implement stage; required commands recorded below and in /tmp/stage/review-evidence/probes.md)
 
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §API > Teams and §API > Notifications. Existing team endpoints: `gyre-server/src/api/users.rs` (create_team, list_teams). Route registration: `gyre-server/src/api/mod.rs` — grep for `/teams/` and `/notifications`. Existing notification endpoints: grep for `get_my_notifications\|get_notification_count\|notification_preferences` in users.rs. SSE implementation pattern: grep for `Sse\|axum::response::sse` in the codebase for existing SSE examples. Notification preferences: `gyre-adapters/src/sqlite/user_profile.rs` may have existing preference storage.
+
+## Shipped
+
+Commit `bc0d0eac` (feat(task-125)).
+
+### Teams (§API > Teams) — audit only, no code needed
+
+All five specced team endpoints already shipped with task-122 and were re-audited
+against the spec table: `GET/POST /workspaces/:id/teams`,
+`PUT/DELETE /workspaces/:id/teams/:team_id`,
+`POST /workspaces/:id/teams/:team_id/members`,
+`DELETE /workspaces/:id/teams/:team_id/members/:user_id` — authenticating,
+tenant-scoped, gated on Owner/Admin/TenantAdmin, lead validated against real
+workspace membership, 409 on slug collision, cross-workspace team id → 404,
+members limited to workspace members (teams never expand access). Covered by
+task-122's test suite (team_crud_slug_lead_and_membership_flow, team_routes_
+are_workspace_scoped, team_management_requires_owner_admin_or_tenant_admin, …).
+
+### Notifications (§API > Notifications) — new spec-path surface
+
+- `GET /api/v1/notifications` — caller-scoped listing, limit/offset pagination,
+  filters: `?type=` (serde alias keeps `notification_type` for legacy clients),
+  `?priority=` (Low/Medium/High/Urgent, case-insensitive; widens to its HSI §8
+  rank band via new `NotificationPriority::rank_band`/`from_level_str` in
+  gyre-common; unknown level → 400), `?workspace_id=`, `?repo_id=` (new filter
+  pushed down through `NotificationRepository::list_for_user` into SQLite,
+  PostgreSQL, and mem — real SQL/storage filtering, not handler post-filtering),
+  plus the pre-existing `?min_priority=&max_priority=` rank filters. Legacy
+  `/users/me/notifications` handler shares the same implementation.
+- `GET /api/v1/notifications/unread-count` — new `count_unread` port method
+  (SQLite/PG/mem): active (unresolved, undismissed) AND unread rows; optional
+  `?workspace_id=`. Distinct semantics from the legacy unresolved-count badge
+  endpoint, which is unchanged.
+- `PUT /api/v1/notifications/{id}/read` — spec method registered on the existing
+  per-handler-auth mark-read handler (POST kept for pre-existing callers).
+- `POST /api/v1/notifications/mark-all-read` — new `mark_all_read` port method
+  (SQLite/PG/mem): stamps `read_at` on every unread row owned by the caller,
+  optional `?workspace_id=` narrows the sweep; returns `{marked: n}`. After the
+  sweep `unread-count` is deterministically zero.
+- `GET/PUT /api/v1/notifications/preferences` — spec path bound to the existing
+  HSI §12 preference handlers (same per-user scoping).
+- `GET /api/v1/notifications/stream` — real-time SSE. `AppState::
+  create_notification` is now the single fan-out point: persist via the
+  repository, then broadcast the serialized notification. All ~30 production
+  emitters (notifications.rs helpers, git_http, signal_chain, constraint_check,
+  spec_patrol, reconciliation, impersonation, specs_assist, secret_rotation,
+  mcp, abandoned_branch, workspace_ownership, prompt_assembly, trust_suggestion,
+  spec_link_staleness, lib.rs) route through it. The stream handler subscribes
+  to the broadcast channel and filters every event against the caller — user
+  id AND `auth.tenant_id` match, optional `?workspace_id=` — before the wire,
+  with a 30 s poll heartbeat and axum keep-alive (same pattern as
+  `/api/v1/audit/stream`). Broadcast is fire-and-forget so a lagged or absent
+  subscriber can never fail a persist.
+
+All new routes are registered in `api/mod.rs` and carry
+`RouteResourceMapping::exempt` entries in `abac_middleware.rs` (same
+per-handler-auth model as every existing notification route); no exemption-file
+entries were added. `docs/api-reference.md` documents the new endpoints.
+
+### Test evidence
+
+In-sandbox (build wrapper blocks gyre-server test codegen, so server tests are
+recorded for the verifier — see /tmp/stage/review-evidence/probes.md):
+
+- `cargo test -p gyre-common notification` — 9 passed, incl. new
+  `rank_band_is_inverse_of_from_rank_and_level_str_parses` (band/rank inverse,
+  contiguous partition of 1–10, case-insensitive level parsing).
+- `cargo test -p gyre-adapters notification` — 9 passed against real SQLite,
+  incl. new `count_unread_and_mark_all_read_scope_semantics` (read/dismissed/
+  other-user/other-workspace exclusions; scoped and unscoped sweeps;
+  count → 0) and `list_for_user_filters_by_repo`.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — clean (all
+  mechanical `list_for_user` call-site updates for the repo_id parameter type
+  check, including every test module).
+- All mechanical repo gates pass: arch, ABAC route registry (no growth), ABAC
+  exempt-handler per-handler auth (79 handlers), mem port contracts, dead
+  message kinds, in-memory state stores, unbounded HTTP, inert enforcement,
+  MCP write gates, byte-slice, relative-path, fail-open refs, fabricated
+  scopes, lossy secrets, forwarded headers, forged scope fields, migration
+  versions/portability; `cargo fmt --check` clean.
+
+New server tests (run by the verifier):
+`spec_path_notifications_list_with_filters`,
+`spec_path_unread_count_and_mark_all_read`, `put_read_is_the_spec_method`,
+`spec_path_preferences_roundtrip`, and
+`notification_stream_delivers_own_notifications_only` (SSE delivery +
+cross-user/cross-tenant filtering before the wire).
+
+Required verifier commands:
+
+```
+SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::users
+SKIP_WEB_BUILD=1 cargo test -p gyre-server --all
+SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --all-targets
+```
