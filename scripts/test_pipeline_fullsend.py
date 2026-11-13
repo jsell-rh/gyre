@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -81,6 +82,41 @@ class FullsendContracts(FullsendFixture):
         self.assertEqual(harness['sandbox_timeout_seconds'], 600)
         self.assertEqual(harness['timeout_minutes'], 240)
         self.assertTrue((shim / 'openshell').is_file())
+
+    def test_assignment_clone_excludes_old_attempts_and_publishes_from_copied_checkout(self):
+        source=self.root/'source'
+        self.call('git','checkout','-qb','pipeline/unrelated',cwd=source)
+        (source/'unrelated.bin').write_bytes(b'unrelated historical attempt\n'*10000)
+        self.call('git','add','unrelated.bin',cwd=source)
+        self.call('git','commit','-qm','unrelated attempt',cwd=source)
+        unrelated=self.call('git','rev-parse','HEAD:unrelated.bin',cwd=source).strip()
+        self.call('git','push','-q','origin','pipeline/unrelated',cwd=source)
+        self.call('git','checkout','-qb','pipeline/candidate',self.base,cwd=source)
+        (source/'code.py').write_text('def add(a, b):\n    return a + b\n')
+        self.call('git','commit','-qam','assigned candidate',cwd=source)
+        candidate=self.call('git','rev-parse','HEAD',cwd=source).strip()
+        self.call('git','push','-q','origin','pipeline/candidate',cwd=source)
+        self.call('git','config','uploadpack.allowFilter','true',cwd=self.repo)
+        # file:// exercises real pack negotiation rather than Git's local
+        # hardlink optimization, which ignores partial-clone filters.
+        self.store.set_setting('repo_url',self.repo.as_uri())
+        self.execution.claim['input']['candidate']=candidate
+        _,repo,_=self.prepare()
+        self.assertEqual(self.call('git','rev-parse','HEAD',cwd=repo).strip(),candidate)
+        self.assertEqual(self.call('git','config','remote.origin.partialclonefilter',cwd=repo).strip(),'blob:none')
+        refs=self.call('git','for-each-ref','--format=%(refname)','refs/remotes',cwd=repo)
+        self.assertNotIn('pipeline/unrelated',refs)
+        self.assertNotIn('pipeline/candidate',refs)
+        self.assertFalse((repo/'.git/shallow').exists())
+        objects=self.call('git','cat-file','--batch-all-objects','--batch-check=%(objectname)',cwd=repo)
+        self.assertNotIn(unrelated,objects)
+        self.assertFalse((repo/'.git/objects/info/alternates').exists())
+        copied=self.root/'copied-to-sandbox';shutil.copytree(repo,copied)
+        shutil.rmtree(repo)
+        self.call('git','merge-base','--is-ancestor',self.base,candidate,cwd=copied)
+        self.assertIn('a + b',(copied/'code.py').read_text())
+        self.call('git','push','-q','origin','HEAD:refs/heads/pipeline/publication-proof',cwd=copied)
+        self.assertEqual(self.call('git','rev-parse','refs/heads/pipeline/publication-proof',cwd=self.repo).strip(),candidate)
 
     def test_assessment_is_registered_with_fullsend_and_has_a_read_only_guard(self):
         self.store.finish(self.work,self.claim['token'],{})
