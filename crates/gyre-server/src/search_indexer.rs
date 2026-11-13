@@ -1145,6 +1145,7 @@ mod tests {
         let mut mr = MergeRequest::new(
             Id::new("mr-1"),
             Id::new("repo-1"),
+            Id::new("ws-1"),
             "Search reindex",
             "feat/search",
             "main",

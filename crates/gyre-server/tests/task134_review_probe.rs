@@ -30,6 +30,7 @@ async fn scoped_review_token_reviewer_identity_is_bound() {
     let mr = gyre_domain::MergeRequest::new(
         mr_id.clone(),
         gyre_common::Id::new("repo-probe"),
+        gyre_common::Id::new("ws-probe"),
         "t",
         "feature",
         "main",
@@ -285,6 +286,7 @@ async fn validation_scoped_token_cannot_submit_review() {
     let mr = gyre_domain::MergeRequest::new(
         mr_id.clone(),
         gyre_common::Id::new("repo-probe"),
+        gyre_common::Id::new("ws-probe"),
         "t",
         "feature",
         "main",
@@ -358,6 +360,7 @@ async fn validation_scoped_token_can_read_mr_context() {
     let mr = gyre_domain::MergeRequest::new(
         mr_id.clone(),
         gyre_common::Id::new("repo-probe"),
+        gyre_common::Id::new("ws-probe"),
         "t",
         "feature",
         "main",
@@ -426,6 +429,7 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
     let mr = gyre_domain::MergeRequest::new(
         mr_id.clone(),
         gyre_common::Id::new("repo-probe"),
+        gyre_common::Id::new("ws-probe"),
         "t",
         "feature",
         "main",
@@ -577,12 +581,12 @@ async fn scoped_gate_tokens_can_fetch_pinned_mr_spec() {
     let mut mr = gyre_domain::MergeRequest::new(
         mr_id.clone(),
         repo_id.clone(),
+        ws_id.clone(),
         "Spec probe MR",
         "feat/spec-probe",
         "main",
         1,
     );
-    mr.workspace_id = ws_id;
     // Production shape: ledger path + pinned blob sha.
     mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
     state.merge_requests.create(&mr).await.unwrap();

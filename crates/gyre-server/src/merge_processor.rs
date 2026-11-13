@@ -9345,12 +9345,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-unsigned-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Unsigned spec approval MR",
             "feat/unsigned",
             "main",
             2000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("author-agent-1"));
         mr.spec_ref = Some(format!("system/signed.md@{sha}"));
         state.merge_requests.create(&mr).await.unwrap();
@@ -9419,12 +9419,12 @@ mod tests {
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-signed-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Signed spec approval MR",
             "feat/signed",
             "main",
             2001,
         );
-        mr2.workspace_id = Id::new("ws-1");
         mr2.spec_ref = Some(format!("system/signed.md@{sha2}"));
         state.merge_requests.create(&mr2).await.unwrap();
         let entry2 = MergeQueueEntry::new(Id::new("entry-signed-spec"), mr2.id.clone(), 50, 2001);
@@ -9528,12 +9528,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-warn-stale"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Stale spec (warn) MR",
             "feat/warn",
             "main",
             3000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
         state.merge_requests.create(&mr).await.unwrap();
         let entry = MergeQueueEntry::new(Id::new("entry-warn-stale"), mr.id.clone(), 50, 3000);

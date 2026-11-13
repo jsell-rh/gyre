@@ -1562,6 +1562,7 @@ mod tests {
         let mr = gyre_domain::MergeRequest::new(
             mr_id.clone(),
             repo_id.clone(),
+            Id::new("ws-test"),
             "Add feature",
             "feature-branch",
             "main",
@@ -1692,6 +1693,7 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             mr_id.clone(),
             repo_id.clone(),
+            Id::new("ws-test"),
             "Add feature",
             "feature-branch",
             "main",
@@ -1810,6 +1812,7 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             mr_id.clone(),
             repo_id.clone(),
+            Id::new("ws-test"),
             "Add feature",
             "feature-branch",
             "main",

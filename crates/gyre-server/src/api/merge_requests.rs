@@ -2776,12 +2776,12 @@ mod tests {
         let mut mr = MergeRequest::new(
             gyre_common::Id::new("mr-pinned-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "Pinned spec MR",
             "feat/pinned",
             "main",
             1000,
         );
-        mr.workspace_id = gyre_common::Id::new("ws-1");
         mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2813,12 +2813,12 @@ mod tests {
         let mut mr_no_spec = MergeRequest::new(
             gyre_common::Id::new("mr-no-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "No spec MR",
             "feat/nospec",
             "main",
             1001,
         );
-        mr_no_spec.workspace_id = gyre_common::Id::new("ws-1");
         state.merge_requests.create(&mr_no_spec).await.unwrap();
         let resp = app
             .clone()
@@ -2836,12 +2836,12 @@ mod tests {
         let mut mr_ghost = MergeRequest::new(
             gyre_common::Id::new("mr-ghost-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "Ghost spec MR",
             "feat/ghost",
             "main",
             1002,
         );
-        mr_ghost.workspace_id = gyre_common::Id::new("ws-1");
         mr_ghost.spec_ref = Some(format!("system/identity.md@{}", "e".repeat(40)));
         state.merge_requests.create(&mr_ghost).await.unwrap();
         let resp = app
