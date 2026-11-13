@@ -208,6 +208,18 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 let _ = agent.transition_status(AgentStatus::Stopped);
                 let _ = state.agents.update(&agent).await;
 
+                // analytics.md §Auto-Emitted Events: agent.failed fires when
+                // an agent "fails or is killed". Pause is a terminal stop —
+                // Stopped has no exit transitions — so the run ends here on
+                // heartbeat loss, exactly like the sibling Abort arm (task-146
+                // review F2).
+                crate::api::analytics::record_agent_failed(
+                    state,
+                    &agent,
+                    "heartbeat timeout (pause)",
+                )
+                .await;
+
                 // Platform Model §7 (task-100 review round-3 F1): Pause is a
                 // terminal stop — Stopped has no exit transitions — so the
                 // agent's run ends here and its task-scoped ephemeral
@@ -495,6 +507,70 @@ mod tests {
         assert_eq!(sev.properties["task_id"], "task-stale-1");
         assert_eq!(sev.properties["old_status"], "InProgress");
         assert_eq!(sev.properties["new_status"], "Blocked");
+    }
+
+    /// analytics.md §Auto-Emitted Events: an agent stopped by heartbeat
+    /// timeout with pause behavior is equally "fails or is killed" — Pause
+    /// is a terminal stop (Stopped has no exit transitions), so the run
+    /// ends there and agent.failed must record with the spec-required
+    /// task_id/reason properties (task-146 review F2). Fails on the old
+    /// behavior where the Pause arm recorded no analytics event.
+    #[tokio::test]
+    async fn pause_records_agent_failed_analytics_event() {
+        let state = test_state();
+
+        let ws = gyre_domain::Workspace::new(Id::new("ws-2"), Id::new("t1"), "Ws", "ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = gyre_domain::Agent::new(Id::new("stale-agent-2"), "paused", 1_000);
+        agent.disconnected_behavior = DisconnectedBehavior::Pause;
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // In-flight task assigned to the agent — the event must carry it.
+        let mut task = gyre_domain::Task::new(Id::new("task-stale-2"), "Stale pause task", 1_000);
+        task.transition_status(gyre_domain::TaskStatus::InProgress)
+            .ok();
+        state.tasks.create(&task).await.unwrap();
+        let mut with_task = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        with_task.current_task_id = Some(Id::new("task-stale-2"));
+        state.agents.update(&with_task).await.unwrap();
+
+        // Age past the heartbeat timeout, no heartbeat ever recorded.
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let stopped = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(stopped.status, AgentStatus::Stopped);
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "stale pause must record the agent.failed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "agent.failed");
+        assert_eq!(ev.agent_id.as_deref(), Some("stale-agent-2"));
+        assert_eq!(ev.properties["task_id"], "task-stale-2");
+        assert_eq!(ev.properties["reason"], "heartbeat timeout (pause)");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+        assert_eq!(
+            ev.workspace_id.as_deref(),
+            Some("ws-2"),
+            "event must be scoped to the workspace for filtered queries"
+        );
     }
 
     fn now_secs() -> u64 {

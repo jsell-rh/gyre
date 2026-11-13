@@ -1467,6 +1467,13 @@ pub async fn budget_stop_agent(state: &AppState, agent: &gyre_domain::Agent, rea
     crate::agent_audit::emit_killed(state, &stopped, reason, "budget-enforcement", killed_pid)
         .await;
 
+    // analytics.md §Auto-Emitted Events: agent.failed fires when an agent
+    // "fails or is killed" — the budget-enforcement kill is a kill, the
+    // same as the admin kill route and the stale-detector abort. Emitted
+    // after the Stopped transition persists, with the concrete budget
+    // stop reason (task-146 review F1).
+    crate::api::analytics::record_agent_failed(state, &stopped, reason).await;
+
     // Charge wall-clock compute minutes and release the budget slot.
     record_compute_minutes_for_agent(state, &stopped).await;
     decrement_active_agents(state, &stopped.workspace_id.to_string()).await;
@@ -2813,6 +2820,86 @@ mod tests {
                 .iter()
                 .any(|t| t.parent_task_id.as_ref() == Some(&task_id)),
             "HardKill must create the reassignment task"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_kill_records_agent_failed_analytics_event() {
+        // analytics.md §Auto-Emitted Events: agent.failed fires when an
+        // agent "fails or is killed" — the budget-enforcement kill is a
+        // kill, same as the admin kill route. HardKill runs inline (no
+        // grace timer), so the analytics emission is observable
+        // deterministically. Fails on the old behavior where
+        // budget_stop_agent recorded no analytics event (task-146 review F1).
+        let (state, ws_id, agent_id, task_id) = enforcement_fixture("ws-enf-failed").await;
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key(ws_id.as_str()),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    enforcement_action: Some(gyre_domain::BudgetEnforcementAction::HardKill),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::workspace_key(ws_id.as_str()),
+                "workspace",
+                ws_id.as_str(),
+                0,
+                1000,
+                0.0,
+            )
+            .await
+            .unwrap();
+        super::enforce_workspace_budget(
+            &state,
+            ws_id.as_str(),
+            None,
+            None,
+            60,
+            super::BudgetEnforcementCause::UsageReport,
+        )
+        .await;
+
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            gyre_domain::AgentStatus::Stopped,
+            "HardKill must terminate the agent"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "budget kill must record the agent.failed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "agent.failed");
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id.to_string());
+        assert_eq!(
+            ev.properties["reason"], "budget exhausted (hard_kill)",
+            "reason must be the concrete budget stop reason"
+        );
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+        assert_eq!(
+            ev.workspace_id.as_deref(),
+            Some(ws_id.as_str()),
+            "event must be scoped to the workspace for filtered queries"
         );
     }
 
