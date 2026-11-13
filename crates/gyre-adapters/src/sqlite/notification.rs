@@ -866,6 +866,7 @@ mod tests {
             None,
             None,
             Some(&repo_a),
+            &[],
             50,
             0,
         )
@@ -883,6 +884,7 @@ mod tests {
             None,
             None,
             Some(&repo_b),
+            &[],
             50,
             0,
         )
@@ -894,10 +896,20 @@ mod tests {
             "a repo with no notifications filters everything out"
         );
 
-        let all =
-            NotificationRepository::list_for_user(&s, &user1, None, None, None, None, None, 50, 0)
-                .await
-                .unwrap();
+        let all = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            50,
+            0,
+        )
+        .await
+        .unwrap();
         assert_eq!(all.len(), 2, "no repo filter returns both");
     }
 
