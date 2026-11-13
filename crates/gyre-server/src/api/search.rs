@@ -197,13 +197,14 @@ pub async fn facets_handler(
     Ok(Json(FacetsResponse { facets }))
 }
 
-/// POST /api/v1/search/reindex — force full reindex (Admin only).
+/// POST /api/v1/admin/search/reindex — force full reindex (Admin only).
+/// Rebuilds the entire index from the domain repositories (specs, tasks, MRs,
+/// reviews, commits, agents, personas, activity events, audit events, files)
+/// and returns the true number of documents indexed.
 pub async fn reindex_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let count = state
-        .search
-        .reindex_all()
+    let count = crate::search_indexer::reindex_all(&state)
         .await
         .map_err(ApiError::Internal)?;
     Ok((
