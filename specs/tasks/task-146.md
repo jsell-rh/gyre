@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: ["a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06", "5c5fdb428a0696e3f2ce2c498e2ca7117839a2ce"]
 ---
 
 ## Spec Excerpt
@@ -125,26 +125,30 @@ pub struct AnalyticsEvent {
   resolved persona slug and compute target at the worker spawn,
   orchestrator spawn, and ralph-loop re-spawn sites.
 
-### Rebase reconciliation with main (task-119 budget cascade)
+### Rebase reconciliation with main
 
-- Merged main `23d7361` (budget enforcement cascade) into this branch
-  (commit `b57cfc60`). Resolved two conflicts:
-  - `api/budget.rs` `check_spawn_budget`: kept main's effective
-    workspace-config structure (tighter of workspace config and tenant
-    ceiling, single up-front config/usage fetch) and retained the
-    `budget.warning` analytics emissions on all three metric arms
-    (agents/tokens/cost) against the effective limits.
-  - `api/admin.rs` admin kill: kept both the `agent.failed` analytics
-    event and main's active-agent budget slot release plus wall-clock
-    compute-minutes charge.
-- Verified post-merge: `cargo check -p gyre-server --tests` clean;
-  `cargo test -p gyre-domain --lib analytics` passes (schema pinned);
-  all mechanical guards pass (arch, ABAC route registry, exempt
-  handlers, MCP write tools, migration versions/portability, byte-slice,
-  relative paths, fail-open refs, fabricated/lossy/scope-literal,
-  inert enforcement, forwarded headers, in-memory stores, forged scope
-  fields, unbounded HTTP, dead message kinds, mem port contracts);
-  commit-attribution script passes with the restored commits list.
+- task-119 budget cascade (commit `b57cfc60`): kept main's effective
+  workspace-config structure in `check_spawn_budget` with the
+  `budget.warning` emissions on all three metric arms; kept both the
+  `agent.failed` event and main's budget slot release / compute-minutes
+  charge in the admin kill path.
+- task-139 signed-approval spec policies (commit `5c5fdb42`): resolved
+  `merge_processor.rs` conflicts so both features survive —
+  `require_signed_approval` / `require_approved_spec` / stale-spec
+  violations now fail the queue entry through `fail_queue_entry`, which
+  keeps the terminal status change and the spec-required
+  `merge_queue.processed` analytics event tied together, then
+  `report_spec_policy_violation` notifies the MR author (GateFailure
+  workspace event + inbox notification) and `record_stale_spec_advisory`
+  records the warn-only MR comment, exactly as task-139 specced.
+
+### Test evidence (this round)
+
+- `cargo check -p gyre-server` clean at the merge commit (exit 0).
+- `cargo test -p gyre-domain analytics`: 3 passed (spec schema pin
+  included).
+- `cargo test -p gyre-adapters analytics`: 13 passed (query filters,
+  count, daily aggregation, limit, since, purge).
 
 ### Verifier test plan (gyre-server, run post-model)
 
@@ -154,7 +158,8 @@ pub struct AnalyticsEvent {
 - Per-event tests: `task_status_transition_emits_analytics_event`,
   `update_task_records_status_changed_analytics_event`,
   `merging_mr_emits_analytics_event_with_gate_count`,
-  `closing_mr_emits_analytics_event`, `reject_spec_records_mr_closed_analytics_events`,
+  `closing_mr_emits_analytics_event`,
+  `reject_spec_records_mr_closed_analytics_events`,
   `spawn_emits_agent_spawned_analytics_event`,
   `orchestrator_spawn_emits_agent_spawned_analytics_event`,
   `spawn_analytics_persona_reports_bound_persona`,
@@ -173,4 +178,9 @@ pub struct AnalyticsEvent {
   `empty_query_emits_no_analytics_event`,
   `gate_failure_during_selection_records_queue_processed_failed`,
   `cancel_records_queue_processed_skipped` (merge_queue.processed).
+- Merge-resolution guards (task-139 × task-146 interaction):
+  `spec_policy_block_records_queue_processed_failed`,
+  `require_current_spec_blocks_stale_spec_ref`,
+  `require_signed_approval_blocks_unsigned_spec_approval`,
+  `queue_merge_records_mr_merged_analytics_event`.
 - `cargo test -p gyre-domain --lib analytics` — spec schema pin.
