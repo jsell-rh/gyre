@@ -29,6 +29,7 @@ pub mod llm_rate_limit;
 pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
+pub mod merge_policy;
 pub mod merge_processor;
 pub mod metrics;
 pub mod middleware;
