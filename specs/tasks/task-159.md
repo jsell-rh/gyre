@@ -2,10 +2,10 @@
 title: "Wire meta-spec drift warnings into merge gates"
 spec_ref: "meta-spec-reconciliation.md §9"
 depends_on: [task-156]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["1066686c900276a5d94673ed23577c9700dc62a8", "ef9680cd63c187c1b0912590e12dec3fa8b1a6fd", "733f1bd6aa2cd179c662c5a057764acb1f972065", "04df217adba0528df3e0a54538c793bb9b0ec0e6", "e0a97a8a6f011f8e60817782d75431763c7419e6", "51528a6c51b11f2714bf026c34bc9886d4a93d1d", "2d15f77c41a8073cb3fa0047347eba92910802a8", "631e821555325960b44efb361a527ef8f52fe59b", "bd83468915b374048847de7dc7d4551aaa95f857", "11a702b89c608d1b843aa098922a729c5a97b2b1", "8a99bd8087b9ae152f08153f2f4e71afddc9b2fc", "abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -63,86 +63,3 @@ From `meta-spec-reconciliation.md` §9 — Merge Gate Behavior:
 - Read `crates/gyre-server/src/constraint_check.rs` for existing constraint evaluation (meta_spec_set_sha constraint exists but may not be wired into gates)
 - The meta_spec_set_sha is already captured in attestations — the check is comparing it against the workspace's current set SHA
 - Follow the existing gate result pattern for adding the drift warning
-
-## Shipped
-
-### §9 drift evaluation and merge-gate wiring
-
-`crates/gyre-server/src/reconciliation.rs`: `mr_meta_spec_drift(state, mr)`
-resolves the MR's provenance attestation (source-branch head commit first,
-then the author agent's current task, walking derived nodes to the chain's
-root `SignedInput`) and compares the recorded `meta_spec_set_sha` against
-the workspace's current set SHA (`compute_meta_spec_set_sha` — tenant
-defaults merged with workspace overrides). No drift is reported when the
-workspace has no bound set, the MR has no attestation, or the attestation
-records an empty SHA — all skip the check gracefully.
-`format_meta_spec_drift_warning` produces the exact §9 text
-`[WARN] meta-spec-drift: code produced under meta-spec set {old}, current
-is {new}. Reconciliation may be needed.`; `parse_meta_spec_drift_warning`
-round-trips it for the queue graph.
-
-`crates/gyre-server/src/merge_processor.rs`: drift + merge-policy
-evaluation runs during candidate selection in `process_next`
-(`selection_meta_spec_drift_hold`, expanded to whole atomic groups).
-Default (warn only): a gate result with id `meta-spec-drift`,
-`GateStatus::Passed` and the §9 warning output is recorded on the MR
-(idempotent across retry cycles) and the merge proceeds. Strict policy
-(`require_current_meta_spec_set: true`): the entry is requeued carrying
-the drift reason and the processor continues to the next candidate in
-the same cycle, so a strictly-blocked drifted MR at the head of the
-shared queue cannot starve later entries — in its own workspace or in
-others.
-
-### Workspace merge policy + API
-
-`crates/gyre-server/src/merge_policy.rs` +
-`crates/gyre-server/src/api/workspaces.rs`: `WorkspaceMergePolicy {
-require_current_meta_spec_set }` persisted through the port-backed KV
-store, default false. Exposed via `GET/PUT
-/api/v1/workspaces/:id/merge-policy` (ABAC-registered in
-`abac_middleware.rs`, Admin-only PUT). A corrupt stored policy surfaces
-as an error on direct lookup and degrades to the spec default (warn only)
-inside the merge processor.
-
-### UI
-
-`crates/gyre-server/src/api/merge_deps.rs` parses the recorded drift gate
-result into a `meta_spec_drift` node field;
-`web/src/components/MergeQueueGraph.svelte` renders the ⚠ badge with
-tooltip "Meta-spec drift: produced under v{old}, current is v{new}".
-
-### Repair history
-
-The published PR repeatedly conflicted with advancing main; each round
-merged current main into the branch (latest: 2688cfc2 ← 349a32ac
-task-037) preserving the task-159 implementation — all six task-159
-source files (`reconciliation.rs`, `merge_processor.rs`,
-`merge_policy.rs`, `api/workspaces.rs`, `api/merge_deps.rs`,
-`MergeQueueGraph.svelte`) byte-identical to the approved head, main's
-task-037 view-query sources taken whole, and the generated
-`web/dist/index.html` resolved to the assignment base (dist assets are
-restored/republished by the executor and final integration). The
-`commits:` frontmatter records the attributed product commits plus the
-repair merge commits for review scoping. This round (contract repair
-427d0fc7) restored the assigned task document without touching any
-source file; head b38aebd5 is unchanged.
-
-### Test evidence
-
-On head b38aebd5 this round (evidence under /tmp/stage/review-evidence/:
-task-159-cargo-check.txt, task-159-cargo-check-tests.txt,
-task-159-mergequeuegraph-vitest.txt, task-159-arch.txt,
-task-159-abac-registry.txt): `cargo check -p gyre-server` passes
-(7m 59s) and `cargo check -p gyre-server --tests` passes (3m 29s),
-both via the build wrapper; `npx vitest run
-src/__tests__/MergeQueueGraph.test.js` — 29/29 pass (drift badge +
-tooltip); `scripts/check-arch.sh` — pass;
-`scripts/check-abac-route-registry.sh` — pass. `cargo test -p
-gyre-server` is owned by the independent verifier (server test
-compilation exceeds the sandbox budget): the verifier should run
-`cargo test -p gyre-server` (drift merge-gate tests in
-`merge_processor.rs`: match, mismatch, strict-policy hard block,
-no-attestation skip, cross-workspace starvation; drift evaluation tests
-in `reconciliation.rs`: matching SHA, mismatched SHA, no-attestation
-skip, no-workspace-set skip, empty-SHA skip, warning parse round-trip)
-plus `cd web && npx vitest run`.
