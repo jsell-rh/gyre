@@ -131,6 +131,8 @@ diesel::table! {
         reviewer_agent_id -> Text,
         decision -> Text,
         body -> Nullable<Text>,
+        reviewer_persona -> Nullable<Text>,
+        gate_id -> Nullable<Text>,
         created_at -> BigInt,
     }
 }
@@ -511,8 +513,8 @@ diesel::table! {
         required -> Integer,
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,
-        created_at -> BigInt,
         position -> Integer,
+        created_at -> BigInt,
     }
 }
 
