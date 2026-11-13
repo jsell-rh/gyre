@@ -10,6 +10,7 @@ from unittest.mock import patch
 from pipeline.store import Store
 from pipeline.runtime import observe
 from pipeline.cockpit import snapshot
+from pipeline.capacity import build_observation
 
 
 class CapacityTests(unittest.TestCase):
@@ -19,6 +20,9 @@ class CapacityTests(unittest.TestCase):
         self.store.set_setting('slots',1)
         self.store.set_setting('runtime_kube_context','gyre-context')
         self.store.set_setting('runtime_namespace','gyre-namespace')
+        self.quota_limits=[{'kind':'LimitRange','spec':{'limits':[{'type':'Container',
+            'default':{'cpu':'500m','memory':'1Gi'},'defaultRequest':{'cpu':'250m','memory':'512Mi'}}]}}]
+        self.store.set_setting('namespace_capacity',build_observation(self.store,[],[],self.quota_limits))
         self.store.put_task('old','g','spec',{})
         self.work=self.store.enqueue('implement','old','g',{})
         claim=self.store.claim('implement','first',capacity=1)
@@ -33,7 +37,8 @@ class CapacityTests(unittest.TestCase):
     def observe(self,pods=None,sandboxes=None):
         def kube(args,**kwargs):
             self.assertIn('gyre-context',args);self.assertIn('gyre-namespace',args)
-            values=sandboxes if 'sandboxes.agents.x-k8s.io' in args else pods
+            values=(self.quota_limits if 'resourcequotas,limitranges' in args else
+                    sandboxes if 'sandboxes.agents.x-k8s.io' in args else pods)
             return SimpleNamespace(stdout=json.dumps({'items':values or []}))
         with patch('pipeline.runtime.subprocess.run',side_effect=kube) as calls:
             observe(self.store,force=True)
