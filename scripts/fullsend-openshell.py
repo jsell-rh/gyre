@@ -189,6 +189,12 @@ def main():
         import time
         if time.time()-gateway.auth_status(store.directory,bound_gateway).get('refreshed_at',0)>120:
             refresh()
+        from pipeline.bootstrap_transport import staging, run
+        if staging(args):
+            result = run([config['real_openshell'], '-g', bound_gateway, *args], env, execution,
+                         timeout=min(int(option(args,'--timeout') or 120),120))
+            store.close()
+            return result
         # Fullsend's deadline must kill the actual streaming CLI, not a
         # Python parent whose orphan keeps its stdout pipe open forever.
         store.close()

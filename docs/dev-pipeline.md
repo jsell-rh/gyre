@@ -51,11 +51,18 @@ namespace envelope and strand the verification queue.
 
 The opt-in **Stress experiment guard** watches new experiment activity. Overlapping
 compute claims, or failures across three tasks in ten minutes (provisioning,
+exhausted bootstrap connection retries,
 lost leases, ledger locking, or OOM at the 6 GiB ceiling), pause new admissions
 and record a dashboard alert. Existing workers, cleanup, CI observation, source
 and the desired slot count are retained. Historical failures and ordinary
 candidate defects do not stop the experiment. Re-enabling the guard starts a
 new observation cohort after a structural fix; resume admission separately.
+
+Fullsend's upload staging commands retry the SDK's precise initial gateway
+connection failure up to three times in the same sandbox, within a two-minute
+deadline. Remote command failures, partial output, generic transport errors,
+and arbitrary commands are not replayed. The retry child's lifetime is bound
+to the wrapper, including when Fullsend kills it on deadline.
 
 Build commands share one sandbox lock, with one Cargo job and one test thread.
 Agent and verifier environments use the same settings: no incremental Rust

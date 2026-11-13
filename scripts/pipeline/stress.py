@@ -17,7 +17,7 @@ def observe(store,now=None):
         GROUP BY w.task HAVING count(*)>1""",(now,)).fetchall()
     if overlaps:reason='Overlapping live compute claims for the same task';tasks=[r['task'] for r in overlaps]
     groups={'provisioning':set(),'leases':set(),'memory_ceiling':set(),'ledger':set()}
-    for row in store.db.execute("SELECT * FROM events WHERE at>=? AND kind IN ('retry_scheduled','lease_expired','compute_oom') ORDER BY id",(cutoff,)):
+    for row in store.db.execute("SELECT * FROM events WHERE at>=? AND kind IN ('retry_scheduled','lease_expired','compute_oom','bootstrap_connect_exhausted') ORDER BY id",(cutoff,)):
         d=json.loads(row['detail'])
         if row['kind']=='compute_oom':
             if d.get('observed_gib',0)>=6:groups['memory_ceiling'].add(row['task'])
@@ -25,6 +25,7 @@ def observe(store,now=None):
         if row['work']:
             claim=store.db.execute("SELECT at FROM events WHERE work=? AND kind='claimed' AND at<=? ORDER BY id DESC LIMIT 1",(row['work'],row['at'])).fetchone()
             if not claim or claim['at']<start:continue
+        if row['kind']=='bootstrap_connect_exhausted':groups['provisioning'].add(row['task']);continue
         if row['kind']=='lease_expired':groups['leases'].add(row['task']);continue
         failure=d.get('reason') or {}
         if failure.get('category')=='sandbox_provisioning':groups['provisioning'].add(row['task'])

@@ -50,3 +50,11 @@ class StressGuardTests(unittest.TestCase):
             self.s.event('compute_oom',{'observed_gib':6},f'task-{i}')
             if i<2:self.assertIsNone(observe(self.s))
         self.assertIn('6 GiB',observe(self.s)['reason'])
+
+    def test_three_exhausted_bootstrap_connections_pause_new_admissions(self):
+        for i in range(3):
+            c=self.s.claim('implement','worker',task=f'task-{i}',concurrency=100,capacity=100)
+            self.s.event('bootstrap_connect_exhausted',{'attempts':3},c['task'],c['id'])
+            if i<2:self.assertIsNone(observe(self.s))
+        self.assertIn('provisioning',observe(self.s)['reason'])
+        self.assertEqual(self.s.setting('slots'),100)
