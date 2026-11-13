@@ -6,7 +6,7 @@ progress: complete
 coverage_sections:
   - "dependency-graph.md §CLI"
   - "dependency-graph.md §UI"
-commits: ["cfdd16ce3174f045099419e864c4b9740205c8ff", "f06e04b7db064c2e302d0dd8e7461433bf723d1e", "73928811cafb9f46adc65689ac75291ae815022b"]
+commits: ["cfdd16ce3174f045099419e864c4b9740205c8ff", "f06e04b7db064c2e302d0dd8e7461433bf723d1e", "73928811cafb9f46adc65689ac75291ae815022b", "9a685d5fc81346e1e579106cb5fcb7e97d8cafbc"]
 ---
 
 ## Spec Excerpt
