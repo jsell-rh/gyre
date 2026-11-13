@@ -1,12 +1,15 @@
 <script>
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import ConcurrentEditBanner from './ConcurrentEditBanner.svelte';
+  import SpecChatInput from './SpecChatInput.svelte';
   import SpecConflictDialog from './SpecConflictDialog.svelte';
   import SpecDiffView from './SpecDiffView.svelte';
+  import SpecSuggestion from './SpecSuggestion.svelte';
   import { api } from './api.js';
   import { toastError, toastSuccess, toastInfo } from './toast.svelte.js';
   import { t } from 'svelte-i18n';
   import { lineDiff, diffSummary } from './lineDiff.js';
+  import { applyDiffOps, streamAssist, suggestionText } from './specAssist.js';
 
   /**
    * EditorSplit — full-width editor + architecture preview split layout
