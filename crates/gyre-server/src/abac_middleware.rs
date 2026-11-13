@@ -526,6 +526,7 @@ impl ResourceResolver {
                     "meta_spec",
                     None,
                 ),
+                RouteResourceMapping::api("/api/v1/workspaces/:id/merge-policy", "workspace", None),
                 RouteResourceMapping::api("/api/v1/tenants/:id/meta-specs/set", "meta_spec", None),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/meta-specs/rollout-policy",
