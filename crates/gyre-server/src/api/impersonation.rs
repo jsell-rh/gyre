@@ -926,9 +926,9 @@ mod tests {
                     .uri("/api/v1/users/target-1/deactivate")
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(
-                        Body::from(serde_json::json!({"reason": "offboarded"}).to_string()),
-                    )
+                    .body(Body::from(
+                        serde_json::json!({"reason": "offboarded"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -983,14 +983,8 @@ mod tests {
         // A second TenantAdmin deactivates the impersonator (the
         // self-deactivation guard means the impersonator cannot do it
         // themselves).
-        let admin2_key = seed_user(
-            &state,
-            "admin-2",
-            "Admin Two",
-            vec![UserRole::Admin],
-            false,
-        )
-        .await;
+        let admin2_key =
+            seed_user(&state, "admin-2", "Admin Two", vec![UserRole::Admin], false).await;
         let resp = app(&state)
             .oneshot(
                 Request::builder()
@@ -998,9 +992,9 @@ mod tests {
                     .uri("/api/v1/users/admin-1/deactivate")
                     .header("Authorization", format!("Bearer {admin2_key}"))
                     .header("Content-Type", "application/json")
-                    .body(
-                        Body::from(serde_json::json!({"reason": "rogue"}).to_string()),
-                    )
+                    .body(Body::from(
+                        serde_json::json!({"reason": "rogue"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
