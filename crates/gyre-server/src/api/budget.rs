@@ -804,6 +804,7 @@ mod tests {
                 output_tokens: output,
                 cost_usd: cost,
                 model: "test-model".to_string(),
+                prompt_template_sha: None,
                 timestamp: 1,
             };
         // u-dev's agent: 2 calls, 300 tokens total, 0.03.
