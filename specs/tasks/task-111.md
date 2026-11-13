@@ -70,16 +70,16 @@ Users can:
 
 ## Acceptance Criteria
 
-- [x] `UserSession` domain entity in gyre-domain
-- [x] `SessionRepository` port trait and SQLite implementation
-- [x] DB migration creates `user_sessions` table
-- [x] Sessions created on auth, `last_active_at` updated (throttled)
-- [x] GET endpoint lists current user's active sessions
-- [x] DELETE endpoint revokes individual session
-- [x] POST revoke-all revokes all sessions for user
-- [x] Revoked sessions rejected in auth middleware
-- [x] Routes registered with ABAC mappings
-- [x] `cargo test --all` passes
+- [ ] `UserSession` domain entity in gyre-domain
+- [ ] `SessionRepository` port trait and SQLite implementation
+- [ ] DB migration creates `user_sessions` table
+- [ ] Sessions created on auth, `last_active_at` updated (throttled)
+- [ ] GET endpoint lists current user's active sessions
+- [ ] DELETE endpoint revokes individual session
+- [ ] POST revoke-all revokes all sessions for user
+- [ ] Revoked sessions rejected in auth middleware
+- [ ] Routes registered with ABAC mappings
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
