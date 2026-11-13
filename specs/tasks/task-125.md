@@ -4,11 +4,11 @@ spec_ref: "user-management.md §API > Teams"
 depends_on:
   - task-122
   - task-123
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Teams"
   - "user-management.md §Notifications"
-commits: ["2a8cf5f6b49c7419ef1906bff20e5c97292fa03a", "83594b91dbe13ee305036e13b3f3663237c96875", "e4af712a72e9e8618f126f691df3e060bed26da6", "bc0d0eac099f133695f07aeb09b3ccb22d72afac"]
+commits: ["2a8cf5f6b49c7419ef1906bff20e5c97292fa03a", "83594b91dbe13ee305036e13b3f3663237c96875", "e4af712a72e9e8618f126f691df3e060bed26da6", "bc0d0eac099f133695f07aeb09b3ccb22d72afac", "02b4afa6f7e79cfe67b2e921509926c0d6a9bf31"]
 ---
 
 ## Spec Excerpt
@@ -91,10 +91,10 @@ Read `specs/system/user-management.md` §API > Teams and §API > Notifications. 
 
 Production work: commit `bc0d0eac` (feat(task-125), original implementation),
 repair commit `e4af712a` (verification-finding repair), review-repair
-commit `83594b91` (attempt acba40e3 — the two review findings below), and
-format-only repair commit `2a8cf5f6` (rustfmt changed-line violations from
-verification attempt 74a4da02 — see below). The
-assigned task body above is left byte-identical to the assigned contract,
+commit `83594b91` (attempt acba40e3 — SSE fan-out closure, below),
+format-only repair commit `2a8cf5f6` (rustfmt changed-line violations), and
+CI-repair commit `02b4afa6` (Clippy E0061 from the task-191 merge, below).
+The assigned task body above is left byte-identical to the assigned contract,
 including the unchecked acceptance criteria — checking those boxes is a
 normative change reserved for the independent reviewer.
 
@@ -161,29 +161,33 @@ team_management_requires_owner_admin_or_tenant_admin, …).
   broadcast receiver — it fails at the broadcast assertion if a feeder ever
   passes a bare repo again.
 
-### Format-only repair `2a8cf5f6` (verification attempt 74a4da02)
+### CI repair `02b4afa6` — Clippy E0061 from the task-191 merge
 
-The independent verification run (`bash /tmp/stage/checks.sh`) exited 1 with
-exactly one failure class: rustfmt changed-line violations in
-`api/repos.rs:661-662`, `graph_extraction.rs:2548-2550`, and
-`notifications.rs:633,641`. Every other gate in that run passed (clippy
-changed lines clean, arch/hierarchy lints, all mechanical check scripts,
-web build). `2a8cf5f6` applies `cargo fmt` output to exactly those lines —
-no behavior change; the reformatted `graph_extraction.rs` lines are inside
-the broadcast regression test and keep identical assertions.
+CI run 43458944185 (PR head `bb2d4744`, later re-merged with main `d9c419a0`
+as `03922cc3`) failed the Clippy gate with a single error: `api/budget.rs:2332`
+called `NotificationRepository::list_for_user` with task-191's pre-task-125
+7-argument signature, while this branch's port takes 8 (task-125 added the
+`repo_id` filter). The merge kept main's budget.rs test helper verbatim, so
+every gyre-server test target failed to compile. `02b4afa6` supplies the
+missing `None` `repo_id` argument — one line, no behavior change. Reproduced
+locally via the exact CI command (`cargo clippy --all-targets --all-features
+-- -W clippy::all` plus the changed-line gate of
+`scripts/check-clippy-diff.py`): before the fix — exit 101, 1 error at
+budget.rs:2332; after — exit 0, zero errors and zero changed-line warnings
+(842 pre-existing warnings, all outside changed lines). Evidence retained in
+`/tmp/stage/review-evidence/clippy-head.{json,stderr,exit}` and
+`clippy-fixed.{json,stderr,exit}`.
 
 ### Test evidence
 
-In-sandbox (build wrapper): `cargo check -p gyre-server` and
-`cargo check -p gyre-server --tests` clean; `cargo clippy -p gyre-server
---lib` shows no new warnings (129 before and after; only line-number shifts);
-check-arch, check-mem-port-contracts, check-task-commit-attribution,
-check-assertionless-tests, check-conditional-test-guards,
-check-identical-baselines, check-in-memory-state-stores, and
-check-inert-enforcement all pass. gyre-server test compilation is blocked by
-the 4 GiB build wrapper and belongs to the independent verifier — required
-probes (also recorded in /tmp/stage/review-evidence/task-125-repair-evidence.md):
+In-sandbox (build wrapper): `cargo clippy --all-targets --all-features`
+(workspace, CI-equivalent invocation) exits 0 with no errors and no
+changed-line warnings; `cargo check` of all targets is implied by that run;
+`cargo fmt --check` on the changed file clean. gyre-server test execution is
+blocked by the 4 GiB build wrapper and belongs to the independent verifier —
+required probes (evidence retained in /tmp/stage/review-evidence/):
 
+    cargo test -p gyre-server --lib api::budget
     cargo test -p gyre-server --lib push_check_notifications_broadcast_to_stream_subscribers
     cargo test -p gyre-server --lib push_check_creates_priority9_notifications_for_failed_assertions
     cargo test -p gyre-server --lib notification_stream_delivers_own_notifications_only
