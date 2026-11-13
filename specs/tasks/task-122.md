@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Team Management"
-commits: ["3056a7edd757b9d36b4e7c0e485951bc715755fd", "a2b86d834da6710c12e34301c96434d2bd4a414f", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "bbd72bc37ffd0bd4b286171ad73d236fca06c64b"]
+commits: ["3056a7edd757b9d36b4e7c0e485951bc715755fd", "a2b86d834da6710c12e34301c96434d2bd4a414f", "abaee5ea1e3f5e945f236f58b0b64609f2c5727b", "bbd72bc37ffd0bd4b286171ad73d236fca06c64b", "9d520866b"]
 ---
 
 ## Spec Excerpt
@@ -87,37 +87,30 @@ Read `specs/system/user-management.md` §Team Management. Existing team endpoint
 
 ### API (gyre-server/src/api/users.rs)
 
-- Team CRUD + membership endpoints authenticate, scope to the caller's tenant (`load_workspace_scoped`), gate on Owner/Admin/TenantAdmin, and verify the path's workspace owns the team (cross-workspace team id → 404). `lead` is validated against workspace membership (400), slug collisions → 409. New `POST .../teams/:team_id/members` (duplicate → 409, returns `added_at`) and `DELETE .../members/:user_id` (idempotent 204); routes registered with ABAC resolver entries.
+- Team CRUD + membership endpoints authenticate, scope to the caller's tenant (`load_workspace_scoped`), gate on Owner/Admin/TenantAdmin, and verify the path's workspace owns the team (cross-workspace team id → 404). `lead` is validated against workspace membership (400), slug collisions → 409. `POST .../teams/:team_id/members` (duplicate → 409, returns `added_at`) and `DELETE .../members/:user_id` (idempotent 204); routes registered with ABAC resolver entries.
 
 ### Integration points (user-management.md §Team Management)
 
 - **Notification routing (`team:slug`)**: `resolve_team_members` (notifications.rs) resolves `team:{slug}` references to real member ids via `find_by_slug` + `list_members`; unresolvable references log and skip — never fabricate recipients. Wired into the `SpecApprovalRequested` emitter (specs_assist save flow).
-- **Spec ownership (`team:slug` approvers)**: `resolve_new_approval_status` (api/specs.rs) expands `team:{slug}` entries in a manifest's `human_approvers` into the approver-id forms members' approvals record, before the pure §9 resolver runs.
+- **Spec ownership (`team:slug` approvers)**: `resolve_new_approval_status` (api/specs.rs) expands `team:{slug}` entries in a manifest's `human_approvers` into the approver-id forms members' approvals record, before the pure §9 resolver runs. An unresolvable reference (or memberless team) is kept verbatim — no approval ever records a `team:...` approver id, so the resolver can never match it (fail-closed, stays Pending).
 - **Budget reporting by team**: `GET /api/v1/workspaces/:id/budget/by-team` aggregates real `BudgetCallRecord` audit rows through team membership; unattributable records are reported under `unattributed`, not dropped.
 - **Default reviewers** is NOT implemented: no spec models a repo→team ownership association (the `Repository` entity has no team field), so there is nothing to auto-assign against. Noted here rather than faked; needs a modeled repo-team ownership link first.
 
-### Verification repair (this round, commit `3056a7edd`)
+### Merge repair (this round, commit `9d520866b`)
 
-The prior verification round (`cargo test --all`, candidate `fea1a77e9`) failed three gyre-server tests — the first full-suite execution of this task's server tests (sandbox build budget had deferred them). Root causes and fixes:
-
-- `api::specs::tests::team_slug_human_approvers_resolve_through_membership_e2e` — `expand_team_approvers` dropped an unresolvable `team:nonexistent` reference, leaving an **empty** `human_approvers` list, which the §9 resolver treats as "any human may approve" — a fail-open (lead's approval → Approved). Fix: an unresolvable reference (or a team with no members) is kept verbatim in the approver list; no approval records a `team:...` approver id, so the resolver can never match it — the spec stays Pending, fail-closed.
-- `api::specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers` — the test's repo record pointed at a path `NoopGitOps` never initialized on disk (git spawn → NotFound), and `git commit-tree` lacked an author identity in the test environment. Fix (test helper `commit_to_bare_repo_head`): `git init --bare` the recorded path when missing and pass explicit author/committer identity to `commit-tree`. Also fixed a real routing bug this exposed: the save flow matched manifest entries against the raw client-facing `specs/...` path, while manifest paths are stored relative to `specs/` — team routing never matched. The handler now normalizes (same strip the conflict check uses), so `team:slug` manifest approvers receive the approval card.
-- `api::users::tests::team_crud_slug_lead_and_membership_flow` — duplicate team membership let the adapter's duplicate guard bubble up as 500. Fix: `add_team_member` pre-checks `list_members` and returns 409 (mirroring `reject_duplicate_slug`); the adapter guard remains as the race backstop.
+Merging main's task-171 into this branch (merge `b8bf2110a`) added `prompt_template_sha` to `gyre_domain::BudgetCallRecord`; the by-team budget test's record initializer was resolved without the new field and the server test target failed to compile (verification round `2681105b5`, E0063 at budget.rs:790, exit 1). Fixed by initializing `prompt_template_sha: None` — the by-team aggregation is keyed on membership, not template provenance. No other task-122 surface was affected by the merge (diff vs candidate `fdbb8d36` touches only `specs_assist.rs` from task-171's unrelated prompt-template work, plus the domain budget/ports fields).
 
 ### Test evidence
 
 Executed in this sandbox (stage build wrapper; gyre-server test execution exceeds the 4 GiB budget and is deferred to the verifier):
 
-- `cargo check -p gyre-server --all-targets` — clean (includes all test targets).
-- `cargo clippy -p gyre-server --all-targets` + changed-line analysis vs base `f98b17925` — 0 warnings/errors on changed lines.
-- Mechanical gates pass: check-arch, check-abac-route-registry, check-abac-exempt-handlers, check-mcp-write-tools, check-migration-versions, check-migration-sql-portability, check-mem-port-contracts, check-byte-slice-truncation, check-relative-path-defaults, check-fail-open-ref-resolution, check-fabricated-scope-defaults, check-lossy-secret-conversion, check-scope-literal-defaults, check-inert-enforcement, check-forged-scope-fields, check-forwarded-header-trust, check-in-memory-state-stores, check-unbounded-external-http, check-dead-message-kinds, check-task-commit-attribution, check-rustfmt-diff (base `f98b17925`).
-- Prior rounds (recorded history): `cargo test -p gyre-domain` 478 passed; `cargo test -p gyre-adapters` 475 passed, 6 ignored (team repository + migration 000062 backfill tests green).
+- `cargo check -p gyre-server --all-targets` — clean after the fix (was E0063 before it).
+- `cargo test -p gyre-domain` — 478 passed, 8 doctests passed.
+- `cargo test -p gyre-adapters team` — 6 passed (team repository + migration 000062 backfill); `cargo test -p gyre-adapters budget` — 3 passed.
+- Prior rounds (recorded history): full `cargo test -p gyre-adapters` 475 passed, 6 ignored.
 
 Verifier must execute (gyre-server, blocked in this sandbox by the build wrapper):
 
-- `cargo test -p gyre-server --lib api::users::tests::team` — API flow (slug derivation, lead validation, membership add/remove with `added_at`, duplicate membership 409, duplicate slug 409, invalid slug 400, non-member lead/member 400, workspace scoping 404, Developer 403).
-- `cargo test -p gyre-server --lib api::specs::tests::team_slug_human_approvers_resolve_through_membership_e2e` — member approves, non-member stays Pending, unresolvable team fails closed.
-- `cargo test -p gyre-server --lib api::specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers` — Viewer team member receives `SpecApprovalRequested` via `team:platform` routing.
-- `cargo test -p gyre-server --lib api::budget::tests::budget_by_team_aggregates_usage_through_membership`
-- `cargo test -p gyre-server --lib mem::team_contract_tests`
-- Full `cargo test --all` (CI).
+- `cargo test -p gyre-server budget_by_team` — the by-team aggregation test repaired this round.
+- `cargo test -p gyre-server team` — team CRUD/membership/spec-ownership/notification-routing suites (`api::users::tests::team_crud_slug_lead_and_membership_flow`, `api::specs::tests::team_slug_human_approvers_resolve_through_membership_e2e`, `api::specs_assist::tests::save_spec_notifies_team_members_from_manifest_approvers`).
+- `cargo test --all` (final gate).
