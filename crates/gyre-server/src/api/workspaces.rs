@@ -1023,9 +1023,8 @@ mod tests {
 
         let policies_after = state.policies.list().await.unwrap();
         assert!(
-            !policies_after
-                .iter()
-                .any(|p| p.name.starts_with("trust:") && p.scope_id.as_deref() == Some("ws-fail-1")),
+            !policies_after.iter().any(|p| p.name.starts_with("trust:")
+                && p.scope_id.as_ref().map(|i| i.as_str()) == Some("ws-fail-1")),
             "failed transition must not partially apply trust: policies"
         );
     }
@@ -1513,9 +1512,8 @@ mod tests {
         );
         let policies = state.policies.list().await.unwrap();
         assert!(
-            !policies
-                .iter()
-                .any(|p| p.name.starts_with("trust:") && p.scope_id.as_deref() == Some(&ws_id)),
+            !policies.iter().any(|p| p.name.starts_with("trust:")
+                && p.scope_id.as_ref().map(|id| id.as_str()) == Some(ws_id.as_str())),
             "rejected trust_level must not seed trust: policies"
         );
     }
