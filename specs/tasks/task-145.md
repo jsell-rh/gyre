@@ -3,7 +3,7 @@ title: "Implement spec enforcement validation tests for attack/drift prevention"
 spec_ref: "agent-gates.md §Part 2 What This Prevents"
 depends_on:
   - task-139
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-gates.md §What This Prevents"
 commits: ["f4b7f15195215cd8695e682404343ea4f1db325a"]
