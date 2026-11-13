@@ -1087,6 +1087,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(explorer_views::generate_explorer_view),
         )
         .route(
+            "/api/v1/workspaces/:id/explorer-views/ask",
+            post(explorer_views::ask_explorer),
+        )
+        .route(
             "/api/v1/workspaces/:id/explorer-views/:view_id",
             get(explorer_views::get_explorer_view)
                 .put(explorer_views::update_explorer_view)
