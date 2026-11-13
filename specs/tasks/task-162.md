@@ -54,20 +54,21 @@ Read `specs/system/message-bus.md` §"Relationship to Notifications" and §"Impl
 
 ## Shipped
 
-### Round 7 — contract restore on merged head
+### Round 8 — contract restore, attribution gate re-run
 
 The executor restored the assigned task contract (frontmatter/checkboxes
 reset) while the production fix stayed on the branch. This round
-re-verified head `6d2c682f`:
-`git diff --name-only 80dbfe00..6d2c682f` shows only
+re-verified head `3c345bf9`:
+`git diff --name-only 6d2c682f..3c345bf9` shows only
 `specs/tasks/task-162.md` — the task-162 server source is byte-identical
-to the round-6 verified merged head (production fix merged with assigned
-base `48b3d47e`). On this head, `SKIP_WEB_BUILD=1 cargo check -p
-gyre-server --tests` passes (exit 0, 7m15s). Server test execution is
-deferred to the independent verifier (4 GiB budget rule): run
-`cargo test -p gyre-server message_dispatcher`, then the full
-`cargo test --all` acceptance gate. Evidence:
-`/tmp/stage/review-evidence/task-162-round7.txt`.
+to the round-7 verified head (production fix merged with assigned base
+`48b3d47e`), so the round-7 `cargo check` result applies unchanged;
+`main.rs` wiring (`spawn_message_consumer`, `spawn_message_expiry`) and
+`scripts/check-task-commit-attribution.sh` (exit 0) re-verified fresh at
+this head. Server test execution is deferred to the independent verifier
+(4 GiB budget rule): run `cargo test -p gyre-server message_dispatcher`,
+then the full `cargo test --all` acceptance gate. Evidence:
+`/tmp/stage/review-evidence/task-162-round8.txt`.
 
 ### Dispatcher (§Relationship to Notifications)
 
