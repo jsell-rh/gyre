@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["38b3134feeaa28be0e443e2e29344980ea6db552", "60c86252706b2392866b1dddd66634ab4cb123d6", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "60c86252706b2392866b1dddd66634ab4cb123d6", "38b3134feeaa28be0e443e2e29344980ea6db552", "3350817099f10cc5fde2e505f9cb4ad8bb5d129e"]
 ---
 
 ## Spec Excerpt
@@ -68,13 +68,13 @@ From §API > Workspace Membership:
 
 ## Acceptance Criteria
 
-- [ ] `GET /api/v1/users/{username}` returns public profile within tenant
-- [ ] `GET /api/v1/users` lists users (TenantAdmin only, paginated)
-- [ ] `PUT /api/v1/users/{id}/deactivate` deactivates user with cascade (TenantAdmin only)
-- [ ] Workspace invitation list, accept, and revoke endpoints functional
-- [ ] Role change endpoint supports ownership transfer validation
-- [ ] All routes registered in `api/mod.rs` with ABAC route mappings
-- [ ] `cargo test --all` passes
+- [x] `GET /api/v1/users/{username}` returns public profile within tenant
+- [x] `GET /api/v1/users` lists users (TenantAdmin only, paginated)
+- [x] `PUT /api/v1/users/{id}/deactivate` deactivates user with cascade (TenantAdmin only)
+- [x] Workspace invitation list, accept, and revoke endpoints functional
+- [x] Role change endpoint supports ownership transfer validation
+- [x] All routes registered in `api/mod.rs` with ABAC route mappings
+- [ ] `cargo test --all` passes — deferred to the independent verifier per the sandbox memory budget (see below)
 
 ## Agent Instructions
 
@@ -85,8 +85,8 @@ Read `specs/system/user-management.md` §API > User Management and §API > Works
 ### User management endpoints (§API > User Management)
 
 Five of the eight spec endpoints are implemented in production code;
-the three session endpoints are owned by task-111 (not-started), so
-the §User Management coverage row stays task-assigned over them:
+the three session endpoints are owned by task-111, so the
+§User Management coverage row stays task-assigned over them:
 
 - **`GET /api/v1/users/{username}`** — tenant-public profile
   (`{id, username, display_name, avatar_url, timezone, created_at,
@@ -133,45 +133,40 @@ global role can be an invitee). Pending invitations are unaccepted
 membership rows — the lifecycle is real storage state, not a parallel
 table.
 
-### This round (rebase repair)
+### This round (review repair, 33508170)
 
-The published PR conflicted with current main (task-125's teams and
-notifications endpoints). Resolved the merge of `f7f5c59f` into this
-branch, preserving the retained task-124 implementation:
+Review finding 3cd87005: after the rebase onto main, `cargo check -p
+gyre-server --tests` failed with error[E0061] — the test
+`deactivate_user_cascades_to_auth_and_ownership` still called
+`NotificationRepository::list_for_user` with main's pre-task-125
+7-argument signature, while `crates/gyre-ports/src/notification.rs` now
+takes 8 (new `repo_id: Option<&Id>` between `notification_type` and
+`limit`), so `cargo test --all` could not compile on the candidate.
 
-- `crates/gyre-server/src/api/mod.rs` — the only code conflict was the
-  `use users::{...}` import list (task-124's user/invitation handlers
-  vs. task-125's notification handlers); resolved as the union, matching
-  the auto-merged `users.rs`, which defines all 35 handlers from both
-  sides. Route registrations and ABAC resolver entries from both sides
-  merged cleanly (no duplicates).
-- `specs/coverage/system/user-management.md` — merged both audit
-  narratives (task-124 rows 26/27 notes + task-125 rows 28/29 notes)
-  and corrected the header to the mechanical recount of the merged
-  rows: 8/36 (11 n/a, 0 not-started, 17 task-assigned, 8 implemented).
-  Regenerated `specs/coverage/SUMMARY.md` via
-  `scripts/update-coverage-summary.sh`, which also corrected two rows
-  (meta-spec-reconciliation, platform-model) that were stale on the
-  branch relative to its own coverage files.
+Fix (commit 33508170, single line): pass `None` for `repo_id` at that
+call site. `None` is semantically correct, not just type-correct — the
+test asserts the acting TenantAdmin received a `WorkspaceOwnerless`
+notification, which has no repo scope, so an unfiltered (all-repos)
+listing is what the assertion needs. A tree-wide grep confirmed it was
+the only stale 7-argument notification call; every other
+`list_for_user` call site already passed 8 arguments.
 
-Evidence (this round): `cargo check -p gyre-server` passes on the
-resolved tree (7m12s); `cargo test -p gyre-common` 125 passed;
-`cargo test -p gyre-adapters --lib notification` 9 passed (real SQLite
-storage — count_unread/mark_all_read/repo filter from task-125);
-`cargo test -p gyre-adapters --lib user` 21 passed (task-124
-deactivation round-trip, username immutability/uniqueness); rustfmt
-clean on the resolved mod.rs; the mechanical invariant scripts all
-pass (abac-route-registry, abac-exempt-handlers, arch, mcp-write-tools,
-dead-message-kinds, migration-versions, mem-port-contracts, and the
-scope/forgery/timeout/fail-open families).
+Evidence: `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` exits 0
+on the fixed tree (7m23s; log retained at
+`/tmp/stage/review-evidence/cargo-check-gyre-server-tests-after-fix.log`).
+Running the test binary itself is deferred to the verifier per the
+sandbox memory budget (commands below).
 
-Prior repair (38b3134f): the full-suite failure
-`api::users::tests::workspace_invitation_lifecycle` (2 vs 1 pending
-invitations) was a test-fixture bug — `seed_workspace_with_owner`
-built the Owner membership via `WorkspaceMembership::new` (pending)
-instead of the production `create_workspace` semantics (creator's
-Owner membership accepted immediately); the fixture now stamps
-`membership.accept(now)` before create.
+### Prior rounds (context)
+
+- Rebase repair (merge of `6f5a631c`): the only code conflict was the
+  `use users::{...}` import list in `api/mod.rs` (task-124 handlers vs
+  task-125 notification handlers), resolved as the union; coverage
+  narratives merged and mechanically recounted.
+- 38b3134f: fixed a test-fixture bug — `seed_workspace_with_owner`
+  built the Owner membership as pending instead of the production
+  `create_workspace` semantics (accepted immediately), which had broken
+  `workspace_invitation_lifecycle`.
 
 ### Server tests the verifier must execute
 
@@ -179,22 +174,21 @@ Large gyre-server test compilation is deferred to the independent
 verifier per the sandbox budget:
 
 - `cargo test --all` — the assignment's definition-of-done gate; the
-  previously failing `workspace_invitation_lifecycle` is the fix
-  target.
+  compile error repaired this round (E0061 in
+  `deactivate_user_cascades_to_auth_and_ownership`) was the blocker.
 - `cargo test -p gyre-server api::users::tests` — includes
-  `workspace_invitation_lifecycle`,
+  `deactivate_user_cascades_to_auth_and_ownership` (the repaired call
+  site), `workspace_invitation_lifecycle`,
   `get_user_by_username_is_tenant_scoped`,
   `list_users_is_tenant_admin_only_scoped_and_paginated`,
-  `deactivate_user_cascades_to_auth_and_ownership`,
   `ownership_transfer_unblocks_old_owner_removal_and_is_audited`,
   `last_owner_cannot_be_removed_or_downgraded`,
   `member_management_requires_owner_admin_or_tenant_admin`,
-  `invite_member_rejects_duplicate_membership`.
+  `invite_member_rejects_duplicate_membership`, plus the task-125
+  notification handlers that share `users.rs` after the rebase
+  (`list_my_notifications`, `get_unread_count`,
+  `mark_all_read_notifications`, `notification_stream`).
 - `cargo test -p gyre-server api::impersonation::tests` — includes
   `deactivating_target_revokes_impersonation_token`,
   `deactivating_impersonator_revokes_impersonation_token`,
   `resolver_rejects_deactivated_accounts_even_with_unended_session`.
-- `cargo test -p gyre-server api::users::tests` also covers the
-  task-125 notification handlers that now share `users.rs` after the
-  rebase (`list_my_notifications`, `get_unread_count`,
-  `mark_all_read_notifications`, `notification_stream`).
