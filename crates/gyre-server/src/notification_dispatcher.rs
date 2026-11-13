@@ -79,22 +79,35 @@ fn sign_payload(secret: &str, body: &str) -> String {
     hex::encode(tag.as_ref())
 }
 
+/// Resolve the user's effective channel configuration (single source of
+/// truth: `user_channel_prefs`). When the user has no dedicated row —
+/// e.g. preferences stored via `PUT /users/me` before the dedicated table
+/// existed — fall back to the `NotificationChannels` embedded in the user's
+/// stored `users.preferences` so no API-visible config is silently ignored
+/// (single effective config; review bf1e11be F1).
+pub async fn resolve_channels(state: &AppState, user_id: &Id) -> NotificationChannels {
+    match state.user_channel_prefs.find(user_id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => match state.users.find_by_id(user_id).await {
+            Ok(Some(user)) => user.preferences.notification_channels,
+            _ => NotificationChannels::default(),
+        },
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                error = %e,
+                "dispatcher: failed to load channel preferences; in-app only"
+            );
+            NotificationChannels::default()
+        }
+    }
+}
+
 /// Routes a persisted in-app notification to the recipient's configured
 /// channels (§Delivery Channels). Best-effort per channel: a channel failure
 /// is logged, never propagated — in-app delivery already succeeded.
 pub async fn dispatch_to_channels(state: &AppState, notif: &Notification) {
-    let channels = match state.user_channel_prefs.find(&notif.user_id).await {
-        Ok(Some(c)) => c,
-        Ok(None) => NotificationChannels::default(),
-        Err(e) => {
-            tracing::warn!(
-                user_id = %notif.user_id,
-                error = %e,
-                "dispatcher: failed to load channel preferences; in-app only"
-            );
-            return;
-        }
-    };
+    let channels = resolve_channels(state, &notif.user_id).await;
     dispatch_with(state, notif, &channels, &ReqwestSender::default()).await;
 }
 
@@ -1012,6 +1025,41 @@ mod tests {
             1,
             "disabled email channel must not queue anything"
         );
+    }
+
+    /// Single effective config (review bf1e11be F1): when the user has no
+    /// dedicated `user_channel_prefs` row — e.g. preferences stored via
+    /// `PUT /users/me` before the dedicated table existed — the dispatcher
+    /// must fall back to the channels embedded in the user's stored
+    /// `users.preferences`, not silently default them away.
+    #[tokio::test]
+    async fn dispatch_falls_back_to_stored_user_preferences() {
+        let state = test_state();
+        let user_id = Id::new("legacy-prefs-user");
+        let mut user =
+            gyre_domain::User::new(user_id.clone(), "ext-legacy", "legacy-prefs-user", 1_000);
+        user.preferences.notification_channels = NotificationChannels {
+            in_app: true,
+            email: EmailConfig {
+                enabled: true,
+                digest: gyre_domain::DigestFrequency::Immediate,
+                min_priority: NotificationPriority::Low,
+            },
+            webhook: None,
+            slack: None,
+        };
+        state.users.create(&user).await.unwrap();
+        // No user_channel_prefs row: the fallback path must find the config.
+        let notif = sample_notif("legacy-prefs-user", NotificationType::GateFailure);
+        dispatch_to_channels(&state, &notif).await;
+
+        let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
+        assert_eq!(
+            outbox.len(),
+            1,
+            "channels stored only in users.preferences must still deliver"
+        );
+        assert!(outbox[0].0.starts_with("legacy-prefs-user:"));
     }
 
     // ─── Escalation routing (§Notification Routing for Agent Escalations) ────
