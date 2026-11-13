@@ -4,11 +4,11 @@ spec_ref: "user-management.md §API > User Management"
 depends_on:
   - task-120
   - task-121
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["60c86252706b2392866b1dddd66634ab4cb123d6", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -79,88 +79,3 @@ From §API > Workspace Membership:
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §API > User Management and §API > Workspace Membership. Existing user API: `gyre-server/src/api/users.rs`. Route registration: `gyre-server/src/api/mod.rs` — grep for `/users/` to see existing routes. ABAC route mappings: `gyre-server/src/abac_middleware.rs`. Session management: check if task-111 already covers session endpoints. Workspace member endpoints: grep for `invite_member\|list_members\|update_member_role\|remove_member` in the api/ directory.
-
-## Shipped
-
-### User management endpoints (§API > User Management)
-
-Five of eight spec endpoints are implemented in production code; the
-three session endpoints are owned by task-111 (still not-started), so
-the §User Management coverage row stays task-assigned over them:
-
-- **`GET /api/v1/users/{username}`** — tenant-public profile
-  (`{id, username, display_name, avatar_url, timezone, created_at,
-  memberships:[{workspace_id, role, ...}]}`). Cross-tenant usernames
-  are indistinguishable from nonexistent ones (404) — the endpoint
-  cannot probe foreign handles.
-- **`GET /api/v1/users`** — TenantAdmin-only (per-handler role check,
-  Developer → 403), tenant-scoped, paginated (`limit`/`offset`, total
-  count in the response).
-- **`PUT /api/v1/users/{id}/deactivate`** — TenantAdmin-only soft
-  deactivation with a real cascade: migration
-  `2026-11-13-000063_user_deactivated_at` adds `users.deactivated_at`;
-  the auth extractor, WebSocket, and SSO paths reject deactivated
-  accounts; deactivating a workspace Owner fires the ownerless-workspace
-  flow with an inline TenantAdmin notification; impersonation sessions
-  and tokens are revoked when either side is deactivated; self-
-  deactivation and cross-tenant targets are rejected; audit-logged with
-  reason.
-- `GET/PUT /users/me` were pre-existing (task-120) and return/accept
-  all spec'd profile fields including preferences.
-
-### Workspace membership endpoints (§API > Workspace Membership)
-
-All seven spec endpoints are live (coverage row 27 implemented):
-
-- **`POST /api/v1/workspaces/{id}/invite`** — spec-named alias of the
-  member invite: creates a PENDING membership + `InvitationReceived`
-  notification (Owner/Admin/TenantAdmin only).
-- **`GET /api/v1/workspaces/{id}/invitations`** — pending-only list.
-- **`POST /api/v1/workspaces/{id}/invite/accept`** — invitee-only
-  per-handler auth (membership looked up by caller+workspace); stamps
-  `accepted_at`; 404 when not invited, 409 when already accepted.
-- **`DELETE /api/v1/workspaces/{id}/invitations/{invitation_id}`** —
-  revokes pending only (accepted → 409 pointing at member removal) and
-  deletes the membership row.
-- `GET .../members`, `PUT .../members/{user_id}(/role)`, and
-  `DELETE .../members/{user_id}` were pre-existing and carry the
-  last-Owner guard plus audited ownership transfer
-  (`ownership_transfer_unblocks_old_owner_removal_and_is_audited`).
-
-All routes are registered in `api/mod.rs` with ABAC resolver entries
-(`invite/accept` is resolver-exempt with per-handler auth since any
-global role can be an invitee). Pending invitations are unaccepted
-membership rows — the lifecycle is real storage state, not a parallel
-table.
-
-### This round (repair)
-
-The prior candidate (3df7f325) failed verification on exactly one
-finding: rustfmt changed-lines in `api/impersonation.rs`. This round:
-
-- Applied rustfmt to `api/impersonation.rs`; `rustfmt --check` is now
-  clean on every Rust file changed vs the assignment base.
-- Corrected the coverage row 26 migration citation (000062 → 000063,
-  the post-rebase number).
-- Verified the merged tree (base d9c419a0 / task-191 + this branch)
-  compiles: `cargo check -p gyre-server` passes; the merge touches no
-  task-124 file.
-
-### Server tests the verifier must execute
-
-Large gyre-server test compilation is deferred to the independent
-verifier per the sandbox budget. Focused commands:
-
-- `cargo test -p gyre-server api::users::tests` — includes
-  `get_user_by_username_is_tenant_scoped`,
-  `list_users_is_tenant_admin_only_scoped_and_paginated`,
-  `deactivate_user_cascades_to_auth_and_ownership`,
-  `workspace_invitation_lifecycle`,
-  `ownership_transfer_unblocks_old_owner_removal_and_is_audited`,
-  `last_owner_cannot_be_removed_or_downgraded`,
-  `member_management_requires_owner_admin_or_tenant_admin`,
-  `invite_member_rejects_duplicate_membership`.
-- `cargo test -p gyre-server api::impersonation::tests` — includes
-  `deactivating_target_revokes_impersonation_token`,
-  `deactivating_impersonator_revokes_impersonation_token`,
-  `resolver_rejects_deactivated_accounts_even_with_unended_session`.
