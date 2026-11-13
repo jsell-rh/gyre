@@ -2,10 +2,10 @@
 title: "Spec Links — Persistent Forge-Maintained Spec Graph"
 spec_ref: "spec-links.md §Forge-Maintained Spec Graph"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: []
+commits: ["bdbccb488378c3d8f9cf0a45ed1dd5e677273fae", "1bb43f454debee5744aff2b6e7840d414c34dd61", "3b67c20479efbc5620624d320265fadabf0ed15d", "6ab2e89cc4e723bf5d66d9df61465708a1b5d2f0", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746", "2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "733ba1701cb9e725531e75fd8aaae6811ba5b96e", "caa0f93b81f70112ec4d802c8839fa423c32a7fa", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "7df5bef336b3b8258f97b2fca25d5bd34f5ed1ac", "bd5e586da4538de816b0fb70f0981021ef25a5a8", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
 ---
 
 ## Spec Excerpt
@@ -90,3 +90,90 @@ Model the persistence on the existing `SpecLedgerRepository` pattern (`crates/gy
 - The restart-durability test is the section-closing evidence. It must genuinely fail on `main` (empty-init) and pass after your change — a self-confirming or mirrored-logic test does not close this section.
 - Skip project-wide formatters/linters and the full suite until the end; then run `cargo test --all` and `scripts/check-arch.sh` once.
 - Commit with conventional commits; author `Project Manager` is NOT the implementer — use your own agent identity.
+
+## Shipped
+
+The forge-maintained spec-link graph (spec-links.md §Forge-Maintained Spec
+Graph) is a persistent SQL table; the in-memory `SpecLinksStore` is retained
+as a write-through hot cache, so the graph survives restarts instead of
+silently degrading to empty for staleness checks, approval/merge gates,
+graph queries, and the accountability patrol.
+
+### Production behavior
+
+- Migration `2026-11-08-000061_spec_links` creates the `spec_links` table
+  with the spec's 13-column schema (`source_sha TEXT NOT NULL`; `target_sha`
+  NOT NULL stores `''` for the `Option::None` unresolved-link case, mapped
+  and documented in both SQL adapters), plus indexes on `source_repo_id`,
+  `source_path`, and `target_path`; registered in `schema.rs`. The derived
+  Diesel version (`20261108000061`) is distinct from base's
+  `2026-11-12-000061_repo_access_overrides` (`20261112000061`), so both
+  migrations run — `check-migration-versions.sh` passes.
+- `SpecLinkEntry` (in `gyre-domain::spec_links`, re-exported by
+  `gyre-server::spec_registry`) carries `source_sha: String`, populated in
+  `sync_spec_ledger` from the source spec's real blob SHA at HEAD (reused
+  from the manifest SHA map, never a placeholder).
+- New port `gyre_ports::SpecLinkRepository` (`list_all`,
+  `replace_for_source`, `save` upsert-by-id, `delete_by_source_repo`) with
+  SQLite + Postgres adapters
+  (`crates/gyre-adapters/src/{sqlite,postgres}/spec_links.rs`) and the Mem
+  adapter in `gyre-server/src/mem.rs`, wired into `AppState.spec_link_repo`
+  via the `store!` macro.
+- Every link mutation writes through to the table: `sync_spec_ledger` issues
+  one `replace_for_source` per manifest spec (including empty link sets, so
+  removed links are deleted, not resurrected on boot); staleness transitions
+  and cross-workspace re-resolution in `spec_link_staleness.rs` call `save`;
+  repo deletion (`api/repos.rs`) calls `delete_by_source_repo`.
+- Boot: `load_spec_links_into_store` (lib.rs, called from `build_state` and
+  the mem constructor) populates the hot cache from `list_all`; read failure
+  is logged at error level rather than masquerading as an empty graph.
+- Link row ids are scoped by declaring repo (`spec_link_id`), so two repos
+  carrying the same spec path never collide in the durable table.
+
+### Test evidence
+
+- Restart-durability (the bug this task kills):
+  `restart_rebuilds_spec_link_graph_from_persisted_table` and
+  `staleness_query_parity_after_restart` in `spec_registry.rs` — push a real
+  manifest through `sync_spec_ledger` against a real SQLite file, then build
+  a brand-new store from the same repo and assert the graph is identical and
+  the staleness verdict survives without any re-push. These fail against the
+  pre-task empty-init behavior.
+- Cross-repo scoping and removal: `sync_replaces_links_scoped_to_source_repo`
+  and `sync_clears_durable_rows_when_links_removed_from_manifest`.
+- Adapter round-trips: `sqlite::spec_links` tests cover every
+  `SpecLinkType` variant, all `Option` columns in `Some`/`None` forms,
+  reopen-durability, replace scoping, and repo-scoped delete;
+  `mem.rs` `spec_link_contract_tests` mirror the contract for the Mem
+  adapter. The Postgres adapter follows the identical row-mapping as
+  SQLite; the repo has no PG test infrastructure, so PG is
+  compile-verified — same convention as every other PG adapter.
+- `migrations_create_tables` extended with `spec_links`.
+
+### Rebase-repair round (this round, merge commit 08290998)
+
+Rebased the candidate onto base f98b17925 (task-194 manifest-driven spec
+lifecycle). The single content conflict in `spec_registry.rs` was the
+domain re-export line: resolved as the union — candidate's
+`gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType}` re-export
+alongside base's new `TaskPriority` re-export; both are used in the merged
+file. No other conflicts; base's task-194 `sync_spec_ledger` lifecycle
+changes and the candidate's `replace_for_source` write-through coexist
+(one `replace_for_source` per manifest spec, lines ~769–785).
+
+Post-rebase probes (via the build wrapper, artifacts under
+`/tmp/stage/review-evidence/`):
+
+- `cargo check -p gyre-server -p gyre-adapters -p gyre-ports -p gyre-domain`
+  PASS; `cargo check -p gyre-server --tests` PASS.
+- `cargo test -p gyre-adapters spec_links` 4/4 PASS;
+  `cargo test -p gyre-adapters migrations` 4/4 PASS (exit 0, logged).
+- Mechanical gates PASS: check-arch, check-migration-versions,
+  check-migration-sql-portability, check-in-memory-state-stores,
+  check-mem-port-contracts, check-unnamed-tuple-carriers,
+  check-task-commit-attribution.
+
+The build wrapper defers gyre-server test binaries to the independent
+verifier (hard 4 GiB budget); the verifier should run `cargo test --all`,
+plus the focused `spec_registry` (restart-durability pair),
+`spec_link_staleness`, and `mem::spec_link_contract_tests` targets.
