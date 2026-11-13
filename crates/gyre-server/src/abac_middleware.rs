@@ -536,6 +536,34 @@ impl ResourceResolver {
                     "workspace_member",
                     None,
                 ),
+                // Spec-named invite path (user-management.md §API > Workspace
+                // Membership: `POST /workspaces/{id}/invite`) — same
+                // resource/action as POST /members; Owner/Admin/TenantAdmin
+                // enforced in-handler.
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invite",
+                    "workspace_member",
+                    None,
+                ),
+                // Pending-invitation listing — Owner/Admin/TenantAdmin
+                // enforced in-handler.
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invitations",
+                    "workspace_member",
+                    None,
+                ),
+                // Invitation acceptance is per-handler authorized (the
+                // acceptor must be the invited user themselves, regardless
+                // of global role) — ABAC-exempt like the /users/me routes.
+                RouteResourceMapping::exempt("/api/v1/workspaces/:id/invite/accept"),
+                // Revoking a pending invitation — DELETE resolves to the
+                // "delete" action (same as member removal);
+                // Owner/Admin/TenantAdmin enforced in-handler.
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invitations/:invitation_id",
+                    "workspace_member",
+                    None,
+                ),
                 // PUT (role change incl. ownership transfer) evaluates as the
                 // "transfer_ownership" action (user-management.md §Ownership
                 // Transfer & Reclamation); DELETE keeps "delete".
@@ -650,9 +678,16 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/policies/effective", "policy", None),
                 RouteResourceMapping::api("/api/v1/policies/:id", "policy", None),
                 // ── Users / Profile ────────────────────────────────────────
-                // POST /users (create) is admin-only, enforced in-handler.
+                // POST /users (create) is admin-only and GET /users (list)
+                // is TenantAdmin-only, both enforced in-handler.
                 RouteResourceMapping::api("/api/v1/users", "user", None),
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
+                // Tenant-public profile by username (user-management.md
+                // §API > User Management); tenant containment in-handler.
+                RouteResourceMapping::api("/api/v1/users/:username", "user", None),
+                // Deactivation is TenantAdmin-only, enforced in-handler
+                // (same split as POST /users).
+                RouteResourceMapping::api("/api/v1/users/:id/deactivate", "user", None),
                 // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/dismiss"),

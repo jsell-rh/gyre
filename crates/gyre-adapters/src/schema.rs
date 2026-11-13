@@ -200,6 +200,8 @@ diesel::table! {
         last_login_at -> Nullable<BigInt>,
         tenant_id -> Nullable<Text>,
         global_role -> Text,
+        // TASK-124: soft deactivation stamp (NULL = active).
+        deactivated_at -> Nullable<BigInt>,
     }
 }
 

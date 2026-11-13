@@ -84,9 +84,9 @@ pub struct OrphanedWorkspace {
 }
 
 /// Whether the workspace currently has an active Owner: an Owner membership
-/// whose member's user record still exists (a deactivated/removed user's
-/// lingering membership is not an active Owner — that is exactly the
-/// ownerless transition this module detects).
+/// whose member's user record still exists AND is not deactivated (a
+/// deactivated/removed user's lingering membership is not an active Owner —
+/// that is exactly the ownerless transition this module detects).
 pub async fn has_active_owner(state: &Arc<AppState>, workspace_id: &Id) -> anyhow::Result<bool> {
     let members = state
         .workspace_memberships
@@ -96,9 +96,11 @@ pub async fn has_active_owner(state: &Arc<AppState>, workspace_id: &Id) -> anyho
         if m.role != WorkspaceRole::Owner {
             continue;
         }
-        // The user must still exist (not deactivated/removed).
-        if let Ok(Some(_)) = state.users.find_by_id(&m.user_id).await {
-            return Ok(true);
+        // The user must still exist and be active (not deactivated/removed).
+        if let Ok(Some(u)) = state.users.find_by_id(&m.user_id).await {
+            if !u.is_deactivated() {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
