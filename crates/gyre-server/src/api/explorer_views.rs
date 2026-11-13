@@ -110,6 +110,61 @@ pub struct GenerateViewRequest {
     pub previous_spec: Option<serde_json::Value>,
 }
 
+/// One prior conversation turn sent back by the client
+/// (system-explorer.md §8 follow-up context). The server is stateless —
+/// the client owns the conversation, like briefing-ask (HSI §1325).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AskHistoryEntry {
+    /// "user" or "assistant".
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Deserialize)]
+pub struct AskExplorerRequest {
+    pub question: String,
+    pub repo_id: Option<String>,
+    /// Prior conversation turns (follow-up context, §8). Capped at 20 —
+    /// the server rejects more, the client drops older turns.
+    #[serde(default)]
+    pub history: Option<Vec<AskHistoryEntry>>,
+}
+
+/// A validated entity reference extracted from an LLM answer
+/// (system-explorer.md §8 grounding: every claim references a concrete
+/// artifact). Only refs the server resolved against the real graph are
+/// returned — the UI renders these as clickable links.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRef {
+    /// "node" | "spec" | "commit" | "agent".
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub id: String,
+    /// Resolved display label (node name, spec path, short SHA, agent id).
+    pub label: String,
+}
+
+/// Structural prediction triggered by a "what would happen if…" question
+/// (§8 follow-up capabilities): the same prediction machinery as
+/// `POST /repos/:id/graph/predict`, run over the resolved repo scope.
+#[derive(Serialize)]
+pub struct AskPrediction {
+    pub repo_id: String,
+    pub predictions: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+pub struct AskExplorerResponse {
+    /// Answer text with `[entity:<kind>:<id>]` tokens (all validated).
+    pub answer: String,
+    /// Validated entity references in order of first appearance.
+    pub entity_refs: Vec<EntityRef>,
+    /// View spec for "show me X" questions (grammar-validated), else null.
+    pub view_spec: Option<serde_json::Value>,
+    /// Structural prediction for "what would happen if…" questions, else null.
+    pub prediction: Option<AskPrediction>,
+}
+
 // ── Built-in view seeding (uses SavedViewRepository) ─────────────────────────
 
 /// Seed system default views for a workspace if they haven't been seeded.
@@ -750,6 +805,617 @@ pub async fn generate_explorer_view(
     ))
 }
 
+// ── POST /api/v1/workspaces/:id/explorer-views/ask ──────────────────────
+
+/// Grounding caps for the ask prompt (system-explorer.md §8 "knowledge
+/// graph context"): the context carries real provenance — nodes with their
+/// spec linkage and commit/agent attribution, edges, and timeline deltas —
+/// but bounded so a large graph cannot blow the prompt budget. Nodes are
+/// prioritized by recency of last modification.
+const ASK_MAX_REPOS: usize = 10;
+const ASK_MAX_NODES: usize = 400;
+const ASK_MAX_EDGES: usize = 300;
+const ASK_MAX_DELTAS: usize = 20;
+const ASK_MAX_QUESTION_LEN: usize = 4000;
+const ASK_MAX_HISTORY: usize = 20;
+
+/// Resolvable-artifact index built from the same graph data that grounds
+/// the prompt — the authority `validate_entity_refs` checks citations
+/// against. A ref the LLM cites that is NOT in this index does not exist
+/// from the workspace's perspective and must not render as a link.
+#[derive(Default)]
+struct GraphGrounding {
+    /// node id → node name (for labels).
+    node_names: std::collections::HashMap<String, String>,
+    /// Spec paths linked to nodes or referenced by timeline deltas.
+    spec_paths: std::collections::HashSet<String>,
+    /// Commit SHAs seen in node provenance or timeline deltas.
+    commit_shas: std::collections::HashSet<String>,
+    /// Agent ids seen in node provenance or timeline deltas.
+    agent_ids: std::collections::HashSet<String>,
+}
+
+/// Build the knowledge-graph grounding context (§8: "provenance records,
+/// spec linkage, architectural timeline") and its validation index from
+/// the workspace's live graph storage. Repo-scoped when `repo_filter` is
+/// given (the repo was already scope-validated by the caller).
+async fn build_ask_grounding(
+    state: &AppState,
+    workspace_id: &Id,
+    repo_filter: Option<&Id>,
+) -> (String, GraphGrounding) {
+    let repos: Vec<gyre_domain::Repository> = match repo_filter {
+        Some(rid) => state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect(),
+        None => state
+            .repos
+            .list_by_workspace(workspace_id)
+            .await
+            .unwrap_or_default(),
+    };
+
+    let mut grounding = GraphGrounding::default();
+    let mut node_lines: Vec<serde_json::Value> = Vec::new();
+    let mut edge_lines: Vec<serde_json::Value> = Vec::new();
+    let mut delta_lines: Vec<(u64, serde_json::Value)> = Vec::new();
+
+    for repo in repos.iter().take(ASK_MAX_REPOS) {
+        let nodes = state
+            .graph_store
+            .list_nodes(&repo.id, None)
+            .await
+            .unwrap_or_default();
+        let mut active: Vec<&gyre_common::graph::GraphNode> =
+            nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
+        // Most recently modified first — the freshest provenance is the
+        // most likely subject of a question.
+        active.sort_by_key(|n| std::cmp::Reverse(n.last_modified_at));
+
+        let name_by_id: std::collections::HashMap<String, String> = active
+            .iter()
+            .map(|n| (n.id.to_string(), n.name.clone()))
+            .collect();
+
+        let node_budget = ASK_MAX_NODES.saturating_sub(node_lines.len());
+        for n in active.into_iter().take(node_budget) {
+            let id = n.id.to_string();
+            if let Some(sp) = &n.spec_path {
+                grounding.spec_paths.insert(sp.clone());
+            }
+            grounding.commit_shas.insert(n.created_sha.clone());
+            grounding.commit_shas.insert(n.last_modified_sha.clone());
+            if let Some(agent) = &n.last_modified_by {
+                grounding.agent_ids.insert(agent.to_string());
+            }
+            grounding.node_names.insert(id.clone(), n.name.clone());
+            node_lines.push(serde_json::json!({
+                "id": id,
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "type": format!("{:?}", n.node_type),
+                "spec_path": n.spec_path,
+                "created_sha": n.created_sha,
+                "created_at": n.created_at,
+                "last_modified_sha": n.last_modified_sha,
+                "last_modified_by": n.last_modified_by.as_ref().map(|a| a.to_string()),
+                "last_modified_at": n.last_modified_at,
+            }));
+        }
+
+        let edges = state
+            .graph_store
+            .list_edges(&repo.id, None)
+            .await
+            .unwrap_or_default();
+        let edge_budget = ASK_MAX_EDGES.saturating_sub(edge_lines.len());
+        for e in edges
+            .iter()
+            .filter(|e| e.deleted_at.is_none())
+            .take(edge_budget)
+        {
+            let src = name_by_id
+                .get(&e.source_id.to_string())
+                .cloned()
+                .unwrap_or_else(|| "?".to_string());
+            let tgt = name_by_id
+                .get(&e.target_id.to_string())
+                .cloned()
+                .unwrap_or_else(|| "?".to_string());
+            edge_lines.push(serde_json::json!({
+                "source": src,
+                "target": tgt,
+                "type": format!("{:?}", e.edge_type).to_lowercase(),
+            }));
+        }
+
+        let deltas = state
+            .graph_store
+            .list_deltas(&repo.id, None, None)
+            .await
+            .unwrap_or_default();
+        for d in deltas {
+            grounding.commit_shas.insert(d.commit_sha.clone());
+            if let Some(agent) = &d.agent_id {
+                grounding.agent_ids.insert(agent.to_string());
+            }
+            if let Some(spec) = &d.spec_ref {
+                grounding.spec_paths.insert(spec.clone());
+            }
+            // Structural summary of the delta: names of added/removed nodes
+            // (capped), parsed from the stored delta JSON.
+            let added: Vec<String> = serde_json::from_str::<serde_json::Value>(&d.delta_json)
+                .ok()
+                .and_then(|v| {
+                    v.get("nodes_added").and_then(|a| a.as_array()).map(|a| {
+                        a.iter()
+                            .filter_map(|n| {
+                                n.get("name").and_then(|x| x.as_str()).map(str::to_string)
+                            })
+                            .take(6)
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+            delta_lines.push((
+                d.timestamp,
+                serde_json::json!({
+                    "commit_sha": d.commit_sha,
+                    "timestamp": d.timestamp,
+                    "spec_ref": d.spec_ref,
+                    "agent_id": d.agent_id.map(|a| a.to_string()),
+                    "nodes_added": added,
+                }),
+            ));
+        }
+    }
+
+    // Most recent timeline events first, capped.
+    delta_lines.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+    let delta_values: Vec<serde_json::Value> = delta_lines
+        .into_iter()
+        .take(ASK_MAX_DELTAS)
+        .map(|(_, v)| v)
+        .collect();
+
+    let mut context = String::new();
+    context.push_str("Nodes (id, name, qualified_name, type, spec_path, provenance — created/modified commits and agents):\n");
+    for line in &node_lines {
+        let _ = serde_json::to_string(line).map(|l| {
+            context.push_str(&l);
+            context.push('\n');
+        });
+    }
+    context.push_str("\nEdges (source name → target name, type):\n");
+    for line in &edge_lines {
+        let _ = serde_json::to_string(line).map(|l| {
+            context.push_str(&l);
+            context.push('\n');
+        });
+    }
+    context.push_str("\nArchitectural timeline (most recent structural changes):\n");
+    for line in &delta_values {
+        let _ = serde_json::to_string(line).map(|l| {
+            context.push_str(&l);
+            context.push('\n');
+        });
+    }
+    if node_lines.is_empty() {
+        context.push_str("(no graph nodes indexed for this scope)\n");
+    }
+
+    (context, grounding)
+}
+
+/// Short SHA label for a commit citation. Char-based (never byte slices at
+/// fixed indexes — a SHA is ASCII, but the rule is mechanical).
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// Validate the `[entity:<kind>:<id>]` tokens in an LLM answer against the
+/// grounding index, returning the cleaned answer plus the validated refs
+/// in order of first appearance.
+///
+/// Grounding requirement (§8): every claim must reference a concrete
+/// artifact. A token whose id does not resolve against the real graph is a
+/// hallucinated citation — it is reduced to its bare id text (readable
+/// prose, no link) and excluded from `entity_refs`, so the UI can never
+/// render a clickable reference to an artifact that does not exist.
+/// A token of an unknown kind is not citation grammar this validator
+/// governs — it is preserved literally (the frontend only links the four
+/// known kinds, so it renders as plain text and can never become an
+/// ungrounded clickable reference).
+/// Validated tokens stay in the text verbatim; the frontend parses the
+/// same token syntax to render them as links.
+fn validate_entity_refs(answer: &str, grounding: &GraphGrounding) -> (String, Vec<EntityRef>) {
+    let mut cleaned = String::with_capacity(answer.len());
+    let mut refs: Vec<EntityRef> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut rest = answer;
+    const PREFIX: &str = "[entity:";
+    while let Some(start) = rest.find(PREFIX) {
+        cleaned.push_str(&rest[..start]);
+        let after_prefix = &rest[start + PREFIX.len()..];
+        match (after_prefix.find(':'), after_prefix.find(']')) {
+            (Some(colon), Some(close)) if colon < close => {
+                let kind = &after_prefix[..colon];
+                let id = &after_prefix[colon + 1..close];
+                let resolved = match kind {
+                    "node" => grounding.node_names.get(id).map(|name| EntityRef {
+                        kind: "node".to_string(),
+                        id: id.to_string(),
+                        label: name.clone(),
+                    }),
+                    "spec" => grounding.spec_paths.get(id).map(|_| EntityRef {
+                        kind: "spec".to_string(),
+                        id: id.to_string(),
+                        label: id.to_string(),
+                    }),
+                    "commit" => grounding.commit_shas.get(id).map(|_| EntityRef {
+                        kind: "commit".to_string(),
+                        id: id.to_string(),
+                        label: short_sha(id),
+                    }),
+                    "agent" => grounding.agent_ids.get(id).map(|_| EntityRef {
+                        kind: "agent".to_string(),
+                        id: id.to_string(),
+                        label: id.to_string(),
+                    }),
+                    // Unknown kind: keep the literal token text. The
+                    // frontend regex only links node|spec|commit|agent, so
+                    // this renders as plain prose — never an ungrounded
+                    // clickable reference. (Reducing to the bare id here
+                    // would silently mangle non-citation text.)
+                    _ => {
+                        cleaned.push_str(&rest[start..start + PREFIX.len() + close + 1]);
+                        rest = &after_prefix[close + 1..];
+                        continue;
+                    }
+                };
+                match resolved {
+                    Some(r) => {
+                        // Keep the token verbatim — the frontend renders it
+                        // as a clickable link using the ref metadata.
+                        cleaned.push_str(&rest[start..start + PREFIX.len() + close + 1]);
+                        if seen.insert((r.kind.clone(), r.id.clone())) {
+                            refs.push(r);
+                        }
+                    }
+                    None => {
+                        // Unresolvable citation: bare id as plain text.
+                        cleaned.push_str(id);
+                    }
+                }
+                rest = &after_prefix[close + 1..];
+            }
+            _ => {
+                // Malformed token (no closing bracket / no kind colon) —
+                // keep the literal text and continue scanning after it.
+                cleaned.push_str(PREFIX);
+                rest = after_prefix;
+            }
+        }
+    }
+    cleaned.push_str(rest);
+    (cleaned, refs)
+}
+
+/// Resolve the repo a conversational prediction should run against: the
+/// request's repo scope when given, else the workspace's single repo.
+/// `None` when the workspace has zero or several repos and no explicit
+/// scope — a prediction without a grounding repo is skipped (the text
+/// answer still carries the analysis).
+async fn resolve_prediction_repo(
+    state: &AppState,
+    workspace_id: &Id,
+    repo_filter: Option<&Id>,
+) -> Result<Option<Id>, ApiError> {
+    if let Some(rid) = repo_filter {
+        return Ok(Some(rid.clone()));
+    }
+    let repos = state
+        .repos
+        .list_by_workspace(workspace_id)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(if repos.len() == 1 {
+        Some(repos[0].id.clone())
+    } else {
+        None
+    })
+}
+
+/// Conversational exploration (system-explorer.md §8): natural-language
+/// Q&A grounded in the knowledge graph. The LLM synthesizes an answer
+/// from real provenance (nodes with spec linkage + commit/agent
+/// attribution, edges, timeline deltas); the server validates every
+/// `[entity:<kind>:<id>]` citation against the same graph before the
+/// client sees it. Responses can carry canvas actions: a view spec for
+/// "show me X" questions and a structural prediction for "what would
+/// happen if…" questions.
+pub async fn ask_explorer(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+    caller: AuthenticatedAgent,
+    Json(req): Json<AskExplorerRequest>,
+) -> Result<Json<AskExplorerResponse>, ApiError> {
+    check_workspace_membership(&state, &workspace_id, &caller).await?;
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id — same limiter and
+    // principal rule as the generate endpoint.
+    {
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = check_rate_limit(
+            &mut limiter,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
+            &workspace_id,
+            LLM_RATE_LIMIT,
+            LLM_WINDOW_SECS,
+        ) {
+            return Err(ApiError::RateLimited(retry_after));
+        }
+    }
+
+    // ── Request validation (before any LLM budget is spent) ───────────
+    let question = req.question.trim();
+    if question.is_empty() {
+        return Err(ApiError::BadRequest(
+            "question must not be empty".to_string(),
+        ));
+    }
+    if question.len() > ASK_MAX_QUESTION_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "question exceeds {ASK_MAX_QUESTION_LEN} character limit"
+        )));
+    }
+    let history = req.history.unwrap_or_default();
+    // §8 follow-up context / HSI §1325 rule: history is capped at 20
+    // entries — the server REJECTS more (the client drops older turns).
+    if history.len() > ASK_MAX_HISTORY {
+        return Err(ApiError::InvalidInput(
+            "history must contain at most 20 entries".to_string(),
+        ));
+    }
+    for entry in &history {
+        if entry.role != "user" && entry.role != "assistant" {
+            return Err(ApiError::BadRequest(
+                "history entries must have role \"user\" or \"assistant\"".to_string(),
+            ));
+        }
+        if entry.content.trim().is_empty() {
+            return Err(ApiError::BadRequest(
+                "history entries must not be empty".to_string(),
+            ));
+        }
+        if entry.content.len() > ASK_MAX_QUESTION_LEN {
+            return Err(ApiError::BadRequest(
+                "history entry exceeds character limit".to_string(),
+            ));
+        }
+    }
+
+    // Require LLM to be configured.
+    let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
+
+    let ws_id = Id::new(&workspace_id);
+    let ws = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {} not found", workspace_id)))?;
+
+    let repo_filter: Option<Id> = req.repo_id.as_ref().map(Id::new);
+    if repo_filter.is_some() {
+        // A repo_id from another workspace must not leak its graph into
+        // this prompt — validate the caller-supplied repo scope against
+        // the workspace the caller is authorized for.
+        validate_repo_scope(&state, &ws_id, req.repo_id.as_deref()).await?;
+    }
+
+    // ── Grounding (§8: provenance, spec linkage, timeline) ────────────
+    let (node_type_summary, node_count) =
+        crate::llm_helpers::workspace_graph_summary_parts(&state, &ws_id, repo_filter.as_ref())
+            .await;
+    let (graph_context, grounding) =
+        build_ask_grounding(&state, &ws_id, repo_filter.as_ref()).await;
+
+    // Prompt template (ui-layout.md §2 Prompt storage): DB override →
+    // specs/prompts/explorer-ask.md in the repo git tree → hardcoded
+    // fallback. `template.sha` carries git provenance for the cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &ws_id,
+        repo_filter.as_ref(),
+        "explorer-ask",
+        crate::llm_defaults::PROMPT_EXPLORER_ASK,
+    )
+    .await;
+
+    // The user's question and the conversation history travel as the user
+    // prompt only — never into the system template (prompt-injection
+    // containment). The committed template's `{{question}}` placeholder is
+    // explicitly blanked so no literal placeholder text leaks.
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("workspace_name", ws.name.as_str()),
+            ("node_type_summary", node_type_summary.as_str()),
+            ("node_count", &node_count.to_string()),
+            ("graph_context", graph_context.as_str()),
+            ("view_spec_grammar", crate::llm_helpers::VIEW_SPEC_GRAMMAR),
+            ("question", ""),
+        ],
+    );
+    let mut user_prompt = String::new();
+    if !history.is_empty() {
+        user_prompt.push_str("Conversation so far (the user's follow-up builds on it):\n");
+        for entry in &history {
+            user_prompt.push_str(&entry.role);
+            user_prompt.push_str(": ");
+            user_prompt.push_str(entry.content.trim());
+            user_prompt.push('\n');
+        }
+        user_prompt.push('\n');
+    }
+    user_prompt.push_str("Question: ");
+    user_prompt.push_str(question);
+
+    // Model + per-endpoint max output tokens (ui-layout.md §2).
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(&state, &ws_id, "explorer-ask").await;
+    let result = match factory
+        .for_model(&model)
+        .predict_json(&system_prompt, &user_prompt, max_tokens)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(model = %model, workspace_id = %workspace_id, error = ?e, "LLM predict_json failed in ask_explorer");
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "LLM request failed: {e}"
+            )));
+        }
+    };
+
+    // Budget charging: `llm_query` cost entries (same estimation and 3x
+    // reasoning multiplier as the generate endpoint — structured Q&A with
+    // graph context is multi-step reasoning).
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
+    let cost_entry = CostEntry::new(
+        new_id(),
+        Id::new(caller.agent_id.clone()),
+        None,
+        "llm_query",
+        base_estimate,
+        "tokens",
+        now_secs(),
+    );
+    let _ = state.costs.record(&cost_entry).await;
+    super::budget::record_llm_call_usage(
+        &state,
+        &super::budget::LlmCallUsage {
+            tenant_id: ws.tenant_id.clone(),
+            workspace_id: ws.id.clone(),
+            repo_id: repo_filter.clone(),
+            agent_id: None,
+            task_id: None,
+            usage_type: "llm_query".to_string(),
+            input_tokens: estimated_input as u64,
+            output_tokens: (base_estimate - estimated_input as f64) as u64,
+            cost_usd: 0.0,
+            model: model.clone(),
+            prompt_template_sha: template.sha.clone(),
+        },
+    )
+    .await;
+
+    // ── Answer extraction ─────────────────────────────────────────────
+    // An LLM output without an `answer` (or `explanation`) string is the
+    // same failure class as the generate endpoint's invalid spec: report
+    // it in-band, never forward raw model output to the chat.
+    let answer = result
+        .get("answer")
+        .and_then(|v| v.as_str())
+        .or_else(|| result.get("explanation").and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .filter(|a| !a.trim().is_empty())
+        .unwrap_or_else(|| {
+            tracing::warn!(workspace_id = %workspace_id, "LLM ask response missing answer field");
+            "The assistant could not produce a grounded answer — try rephrasing the question."
+                .to_string()
+        });
+
+    // Grounding enforcement: validate every citation against the graph the
+    // prompt was built from.
+    let (mut answer, entity_refs) = validate_entity_refs(&answer, &grounding);
+
+    // ── View spec ("show me X" canvas action) ─────────────────────────
+    // Same validation chain as the generate endpoint: grammar, repo
+    // ownership, flow-trace backing. An invalid spec is dropped (null),
+    // never forwarded to the canvas.
+    let mut view_spec: Option<serde_json::Value> = None;
+    if result.get("view_spec").is_some_and(|v| v.is_object()) {
+        let mut spec = result["view_spec"].clone();
+        if parse_and_validate(&spec).is_err()
+            || validate_repo_ownership(&state, &workspace_id, &spec)
+                .await
+                .is_err()
+        {
+            tracing::warn!(workspace_id = %workspace_id, "LLM ask view_spec failed validation — dropping");
+        } else {
+            // Same enforcement as the generate endpoint: an unbacked flow
+            // view is rewritten to a graph layout, and the human is told
+            // why (the note rides the answer text — this endpoint has no
+            // separate explanation field).
+            if enforce_flow_trace_backing(&state, &workspace_id, &mut spec).await {
+                answer = format!(
+                    "{answer} No trace data is available for this concept — showing the structural graph instead."
+                );
+            }
+            view_spec = Some(spec);
+        }
+    }
+
+    // ── Structural prediction ("what would happen if…") ──────────────
+    // Runs the same prediction core as POST /repos/:id/graph/predict
+    // over the resolved repo scope; best-effort — a prediction failure
+    // degrades to the text answer, it does not fail the request.
+    let mut prediction: Option<AskPrediction> = None;
+    if result
+        .get("predict")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        match resolve_prediction_repo(&state, &ws_id, repo_filter.as_ref()).await? {
+            Some(repo_id) => {
+                let instruction = format!(
+                    "Predict the structural impact of this hypothetical change:\n\n{question}"
+                );
+                match super::graph::run_structural_prediction(
+                    &state,
+                    &ws_id,
+                    &repo_id,
+                    &instruction,
+                    None,
+                )
+                .await
+                {
+                    Ok(predictions) => {
+                        prediction = Some(AskPrediction {
+                            repo_id: repo_id.to_string(),
+                            predictions,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(workspace_id = %workspace_id, error = ?e, "conversational structural prediction failed");
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    "conversational prediction requested but no single repo scope resolvable"
+                );
+            }
+        }
+    }
+
+    Ok(Json(AskExplorerResponse {
+        answer,
+        entity_refs,
+        view_spec,
+        prediction,
+    }))
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Check that the caller is the view creator or an Admin.
@@ -1017,7 +1683,8 @@ async fn validate_repo_ownership(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_generate_user_prompt, generated_view_explanation, recent_mrs_with_traces, MrWithTrace,
+        build_generate_user_prompt, generated_view_explanation, recent_mrs_with_traces, short_sha,
+        validate_entity_refs, GraphGrounding, MrWithTrace,
     };
     use axum::{body::Body, http::Request};
     use http::StatusCode;
@@ -2493,5 +3160,446 @@ mod tests {
         // Another workspace's MRs are not visible.
         let other = recent_mrs_with_traces(&state, "ws-other", 10).await;
         assert!(other.is_empty());
+    }
+
+    // ── Conversational exploration (system-explorer.md §8) ─────────────
+
+    use gyre_common::graph::{ArchitecturalDelta, GraphNode, NodeType, SpecConfidence, Visibility};
+    use gyre_common::Id;
+
+    /// Seed one graph node with full provenance (spec linkage, creation
+    /// commit, last-modify commit + agent) into `repo`.
+    async fn seed_ask_node(
+        state: &Arc<crate::AppState>,
+        repo_id: &str,
+        id: &str,
+        name: &str,
+    ) -> String {
+        let node = GraphNode {
+            id: Id::new(id),
+            repo_id: Id::new(repo_id),
+            node_type: NodeType::Type,
+            name: name.to_string(),
+            qualified_name: format!("app::{name}"),
+            file_path: format!("src/{name}.rs"),
+            line_start: 1,
+            line_end: 20,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: Some(format!("specs/system/{name}.md")),
+            spec_paths: vec![],
+            spec_confidence: SpecConfidence::High,
+            last_modified_sha: "def456def456def456def456def456def456def45".to_string(),
+            last_modified_by: Some(Id::new("agent-worker-12")),
+            last_modified_at: 200,
+            created_sha: "abc123abc123abc123abc123abc123abc123abc1".to_string(),
+            created_at: 100,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: 100,
+            last_seen_at: 200,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        };
+        state.graph_store.create_node(node).await.unwrap();
+        id.to_string()
+    }
+
+    /// App + state with a workspace ("ws-ask"), one repo, one provenance-
+    /// rich node, one timeline delta, and a mock LLM returning `response`.
+    /// The workspace has exactly ONE repo so the conversational prediction
+    /// repo resolution has a deterministic scope.
+    async fn app_with_ask_graph(
+        response: serde_json::Value,
+    ) -> (axum::Router, Arc<crate::AppState>, String) {
+        let state = crate::mem::test_state();
+        let ws_id = "ws-ask".to_string();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new(&ws_id),
+                Id::new("default"),
+                "ask-ws",
+                "ask-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                Id::new("repo-ask"),
+                Id::new(&ws_id),
+                "ask-repo",
+                "/tmp/ask-repo",
+                0,
+            ))
+            .await
+            .unwrap();
+        seed_ask_node(&state, "repo-ask", "node-svc", "SearchService").await;
+        state
+            .graph_store
+            .record_delta(ArchitecturalDelta {
+                id: Id::new("delta-1"),
+                repo_id: Id::new("repo-ask"),
+                commit_sha: "fedcba fedcba".replace(' ', ""),
+                timestamp: 300,
+                agent_id: Some(Id::new("agent-worker-7")),
+                spec_ref: Some("specs/system/realized-model.md".to_string()),
+                delta_json: serde_json::json!({
+                    "nodes_added": [{"name": "SearchService", "node_type": "type"}]
+                })
+                .to_string(),
+            })
+            .await
+            .unwrap();
+
+        let mock = Arc::new(gyre_adapters::MockLlmAdapter::json_response(response));
+        let mut s = (*state).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: mock.clone(),
+        }));
+        let app = crate::build_router(Arc::new(s));
+        (app, state, ws_id)
+    }
+
+    async fn post_ask(
+        app: axum::Router,
+        ws_id: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/ask"))
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn ask_explorer_validates_entity_refs_against_the_graph() {
+        // §8 grounding: only citations that resolve to real artifacts come
+        // back as entity_refs; a hallucinated id is stripped to plain text.
+        let llm = serde_json::json!({
+            "answer": "SearchService [entity:node:node-svc] implements the port, created in \
+                       [entity:commit:abc123abc123abc123abc123abc123abc123abc1] by \
+                       [entity:agent:agent-worker-12], governed by \
+                       [entity:spec:specs/system/SearchService.md]. It does NOT include \
+                       [entity:node:ghost-node].",
+            "view_spec": null,
+            "predict": false
+        });
+        let (app, _state, ws_id) = app_with_ask_graph(llm).await;
+
+        let (status, body) = post_ask(
+            app,
+            &ws_id,
+            r#"{"question":"Why does SearchService exist?"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Valid tokens survive verbatim (the frontend parses the same syntax).
+        let answer = body["answer"].as_str().unwrap();
+        assert!(answer.contains("[entity:node:node-svc]"));
+        assert!(answer.contains("[entity:commit:abc123abc123abc123abc123abc123abc123abc1]"));
+        assert!(answer.contains("[entity:agent:agent-worker-12]"));
+        assert!(answer.contains("[entity:spec:specs/system/SearchService.md]"));
+        // The hallucinated citation is stripped — bare id text, no token.
+        assert!(
+            !answer.contains("[entity:node:ghost-node]"),
+            "hallucinated ref must be stripped: {answer}"
+        );
+        assert!(answer.contains("ghost-node"));
+
+        let refs = body["entity_refs"].as_array().unwrap();
+        assert_eq!(refs.len(), 4, "exactly the resolvable refs: {refs:?}");
+        let by_kind: std::collections::HashMap<&str, &serde_json::Value> = refs
+            .iter()
+            .map(|r| (r["type"].as_str().unwrap(), r))
+            .collect();
+        assert_eq!(by_kind["node"]["id"], "node-svc");
+        assert_eq!(by_kind["node"]["label"], "SearchService");
+        assert_eq!(by_kind["spec"]["id"], "specs/system/SearchService.md");
+        assert_eq!(by_kind["commit"]["label"], "abc123a");
+        assert_eq!(by_kind["agent"]["id"], "agent-worker-12");
+        // No canvas actions in this answer.
+        assert!(body["view_spec"].is_null());
+        assert!(body["prediction"].is_null());
+    }
+
+    #[tokio::test]
+    async fn ask_explorer_passes_valid_view_spec_and_drops_invalid() {
+        // "Show me X" answers carry a view spec; it must pass the same
+        // grammar + ownership validation as the generate endpoint.
+        let valid = serde_json::json!({
+            "name": "Cache implementors",
+            "description": "Types implementing CachePort",
+            "data": {"node_types": ["Type"], "edge_types": [], "depth": 1},
+            "layout": "list"
+        });
+        let (app, _state, ws_id) = app_with_ask_graph(serde_json::json!({
+            "answer": "Here are the implementors.",
+            "view_spec": valid,
+            "predict": false
+        }))
+        .await;
+        let (status, body) = post_ask(
+            app,
+            &ws_id,
+            r#"{"question":"Show me services that implement CachePort"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["view_spec"]["name"], "Cache implementors");
+        assert_eq!(body["view_spec"]["layout"], "list");
+
+        // Invalid spec → null, answer still delivered.
+        let (app, _state, ws_id) = app_with_ask_graph(serde_json::json!({
+            "answer": "Here are the implementors.",
+            "view_spec": {"nonsense": true},
+            "predict": false
+        }))
+        .await;
+        let (status, body) = post_ask(app, &ws_id, r#"{"question":"Show me everything"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["view_spec"].is_null(), "invalid spec must be dropped");
+        assert_eq!(body["answer"], "Here are the implementors.");
+    }
+
+    #[tokio::test]
+    async fn ask_explorer_predict_triggers_structural_prediction() {
+        // "What would happen if…" → the same prediction core as
+        // POST /repos/:id/graph/predict runs over the single-repo scope.
+        let (app, _state, ws_id) = app_with_ask_graph(serde_json::json!({
+            "answer": "Removing the port would break SearchService.",
+            "view_spec": null,
+            "predict": true
+        }))
+        .await;
+        let (status, body) = post_ask(
+            app,
+            &ws_id,
+            r#"{"question":"What would happen if I removed CachePort?"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let prediction = body.get("prediction").expect("prediction present");
+        assert_eq!(prediction["repo_id"], "repo-ask");
+        assert!(
+            !prediction["predictions"].as_array().unwrap().is_empty(),
+            "prediction payload carries predictions"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_explorer_grounded_prompt_reaches_llm() {
+        // The knowledge-graph context (provenance, spec linkage, timeline)
+        // actually reaches the LLM, fully substituted.
+        let mock = Arc::new(gyre_adapters::MockLlmAdapter::json_response(
+            serde_json::json!({"answer": "ok", "view_spec": null, "predict": false}),
+        ));
+        let state = crate::mem::test_state();
+        let ws_id = "ws-ask-prompt".to_string();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new(&ws_id),
+                Id::new("default"),
+                "ask-prompt-ws",
+                "ask-prompt-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                Id::new("repo-ask-prompt"),
+                Id::new(&ws_id),
+                "ask-prompt-repo",
+                "/tmp/ask-prompt-repo",
+                0,
+            ))
+            .await
+            .unwrap();
+        seed_ask_node(&state, "repo-ask-prompt", "node-p", "PaymentService").await;
+        let mut s = (*state).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: mock.clone(),
+        }));
+        let app = crate::build_router(Arc::new(s));
+
+        let (status, _body) =
+            post_ask(app, &ws_id, r#"{"question":"What is PaymentService?"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let captured = mock.captured_system_prompts.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let prompt = &captured[0];
+        assert!(
+            prompt.contains("PaymentService"),
+            "node name grounds the prompt"
+        );
+        assert!(
+            prompt.contains("specs/system/PaymentService.md"),
+            "spec linkage grounds the prompt"
+        );
+        assert!(
+            prompt.contains("agent-worker-12"),
+            "agent provenance grounds the prompt"
+        );
+        assert!(
+            prompt.contains("[entity:node:"),
+            "citation syntax is instructed"
+        );
+        assert!(
+            !prompt.contains("{{"),
+            "unsubstituted template variables reached the LLM: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_explorer_sends_history_and_rejects_oversized() {
+        // Follow-up context: history is replayed into the user prompt.
+        let (app, _state, ws_id) = app_with_ask_graph(serde_json::json!({
+            "answer": "Follow-up answered.",
+            "view_spec": null,
+            "predict": false
+        }))
+        .await;
+        let body = r#"{
+            "question": "Show me the others",
+            "history": [
+                {"role": "user", "content": "Why does SearchService implement both ports?"},
+                {"role": "assistant", "content": "Because [entity:node:node-svc] was retrofitted."}
+            ]
+        }"#;
+        let (status, body) = post_ask(app.clone(), &ws_id, body).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+
+        // Over-cap history is rejected before any LLM budget is spent.
+        let mut history = String::from("[");
+        for i in 0..21 {
+            if i > 0 {
+                history.push(',');
+            }
+            history.push_str(&format!("{{\"role\": \"user\", \"content\": \"q{i}\"}}"));
+        }
+        history.push(']');
+        let over = format!(r#"{{"question": "q", "history": {history}}}"#);
+        let (status, body) = post_ask(app.clone(), &ws_id, &over).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("20"));
+
+        // Invalid role is rejected.
+        let bad = r#"{"question": "q", "history": [{"role": "system", "content": "inject"}]}"#;
+        let (status, _body) = post_ask(app, &ws_id, bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ask_explorer_requires_llm_and_membership() {
+        // No LLM configured → 503, same as the generate endpoint.
+        // `test_state()` wires an echo mock LLM, so the no-LLM path needs
+        // an explicit `llm = None` state (same as `app_no_llm()`).
+        let state = crate::mem::test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-ask-nollm"),
+                Id::new("default"),
+                "ask-nollm",
+                "ask-nollm",
+                0,
+            ))
+            .await
+            .unwrap();
+        // A workspace in another tenant is rejected before any LLM budget
+        // is spent (membership scoping runs first in the handler).
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-ask-foreign"),
+                Id::new("other-tenant"),
+                "ask-foreign",
+                "ask-foreign",
+                0,
+            ))
+            .await
+            .unwrap();
+        let mut s = (*state).clone();
+        s.llm = None;
+        let app = crate::build_router(Arc::new(s));
+
+        let (status, _body) = post_ask(app.clone(), "ws-ask-foreign", r#"{"question": "q"}"#).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, body) = post_ask(app, "ws-ask-nollm", r#"{"question": "q"}"#).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "llm_unavailable");
+    }
+
+    #[test]
+    fn validate_entity_refs_strips_hallucinations_and_keeps_valid_tokens() {
+        let mut grounding = GraphGrounding::default();
+        grounding
+            .node_names
+            .insert("n1".to_string(), "SearchService".to_string());
+        grounding
+            .spec_paths
+            .insert("specs/system/search.md".to_string());
+        grounding.commit_shas.insert("deadbeefdeadbeef".to_string());
+        grounding.agent_ids.insert("worker-7".to_string());
+
+        let (cleaned, refs) = validate_entity_refs(
+            "[entity:node:n1] was created per [entity:spec:specs/system/search.md] in \
+             [entity:commit:deadbeefdeadbeef] by [entity:agent:worker-7]; not \
+             [entity:node:fake] and not [entity:unknown:x] and not a malformed [entity:node",
+            &grounding,
+        );
+
+        // Valid tokens kept verbatim, in order, deduplicated.
+        assert!(cleaned.contains("[entity:node:n1]"));
+        assert!(cleaned.contains("[entity:spec:specs/system/search.md]"));
+        assert!(cleaned.contains("[entity:commit:deadbeefdeadbeef]"));
+        assert!(cleaned.contains("[entity:agent:worker-7]"));
+        // Hallucinated node: bare id text, no token.
+        assert!(!cleaned.contains("[entity:node:fake]"));
+        assert!(cleaned.contains("fake"));
+        // Unknown kind and unterminated token: literal text preserved.
+        assert!(cleaned.contains("[entity:unknown:x]"));
+        assert!(cleaned.contains("[entity:node"));
+
+        let kinds: Vec<&str> = refs.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["node", "spec", "commit", "agent"]);
+        assert_eq!(refs[0].label, "SearchService");
+        assert_eq!(refs[2].label, "deadbee");
+    }
+
+    #[test]
+    fn short_sha_never_panics_on_short_or_unicode_input() {
+        assert_eq!(short_sha("deadbeefdeadbeef"), "deadbee");
+        assert_eq!(short_sha("abc"), "abc");
+        assert_eq!(short_sha(""), "");
+        // Multi-byte chars must not panic (fixed byte slicing would).
+        // First 7 *chars*, not bytes: char-based take, so "déadbee".
+        assert_eq!(short_sha("déadbeef"), "déadbee");
     }
 }
