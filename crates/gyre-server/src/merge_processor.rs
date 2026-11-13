@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use gyre_common::Id;
 use gyre_domain::{
@@ -3750,9 +3750,40 @@ async fn evaluate_merge_abac(
             p.id.as_str() != crate::abac_middleware::DEFAULT_DENY_POLICY_ID
         })
         .collect();
-    Ok(crate::policy_engine::evaluate(
-        policies, &ctx, "merge", "mr",
-    ))
+    let result = crate::policy_engine::evaluate(policies, &ctx, "merge", "mr");
+
+    // §Audit Integration (task-129 review round 5): EVERY evaluation path
+    // persists its PolicyDecision. The middleware request path and
+    // evaluate_attestation_abac already record; this supervised-trust-hold
+    // evaluation records too, so merge-time trust decisions are queryable
+    // via GET /api/v1/policies/decisions like every other path. An explicit
+    // Deny match (the hold) logs at warn, everything else at debug — the
+    // same log-level contract as the middleware.
+    let decision = crate::policy_engine::build_decision(
+        &result,
+        "merge-processor",
+        "system",
+        "merge",
+        "mr",
+        mr.id.as_str(),
+    );
+    let _ = state.policies.record_decision(&decision).await;
+    if result.effect == gyre_domain::policy::PolicyEffect::Deny && result.matched_policy.is_some() {
+        warn!(
+            mr_id = %mr.id,
+            workspace_id = %mr.workspace_id,
+            matched_policy = ?result.matched_policy,
+            "supervised trust gate: explicit Deny policy held the merge"
+        );
+    } else {
+        debug!(
+            mr_id = %mr.id,
+            decision = ?result.effect,
+            "supervised trust gate evaluation recorded to the policy decision audit"
+        );
+    }
+
+    Ok(result)
 }
 
 /// TASK-077 / HSI §2 (F5): the supervised-trust hold predicate shared by the
@@ -6778,6 +6809,104 @@ mod tests {
             // tenant_id resolved from workspace → "tenant-specific-id" → matches.
             assert_eq!(result.effect, PolicyEffect::Allow);
             assert_eq!(result.matched_policy, Some("allow-tenant".to_string()),);
+        }
+
+        /// task-129 §Audit Integration (review round 5): the
+        /// supervised-trust-hold evaluation (evaluate_merge_abac) persists its
+        /// PolicyDecision to the audit trail. Previously the only merge-path
+        /// recording was inside evaluate_attestation_abac, so trust-hold
+        /// decisions were invisible to GET /api/v1/policies/decisions.
+        #[tokio::test]
+        async fn evaluate_merge_abac_records_decision_to_audit_trail() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-trust-audit"),
+                Id::new("tenant-trust-audit"),
+                "ws-trust-audit",
+                "ws-trust-audit",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-trust-audit"),
+                Id::new("ws-trust-audit"),
+                "trust-audit-repo",
+                "/tmp/trust-audit-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            let mut mr = MergeRequest::new(
+                Id::new("mr-trust-audit"),
+                repo.id.clone(),
+                "trust audit MR",
+                "feat/trust-audit",
+                "main",
+                1000,
+            );
+            mr.workspace_id = Id::new("ws-trust-audit");
+
+            // Seed an explicit Allow for the merge-processor service identity
+            // so the recorded decision carries a real matched policy — an
+            // empty-store run would record the engine default deny with no
+            // matched_policy, which would not distinguish a faithful record
+            // from a stub that persists a hardcoded decision.
+            let allow = Policy {
+                id: Id::new("allow-merge-processor"),
+                name: "allow-merge-processor".to_string(),
+                description: "Allow the merge processor service identity".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 200,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.type".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("system".to_string()),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["mr".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("test"),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&allow).await.unwrap();
+
+            let result = evaluate_merge_abac(&state, &mr, &repo).await.unwrap();
+            assert_eq!(result.effect, PolicyEffect::Allow);
+            assert_eq!(
+                result.matched_policy,
+                Some("allow-merge-processor".to_string())
+            );
+
+            // The decision must be persisted and queryable via the audit
+            // store — the exact surface GET /api/v1/policies/decisions reads.
+            let decisions = state
+                .policies
+                .list_decisions(Some("merge-processor"), Some("mr"), 10)
+                .await
+                .unwrap();
+            assert_eq!(
+                decisions.len(),
+                1,
+                "every evaluation path must record its decision"
+            );
+            let d = &decisions[0];
+            assert_eq!(d.subject_id, "merge-processor");
+            assert_eq!(d.subject_type, "system");
+            assert_eq!(d.action, "merge");
+            assert_eq!(d.resource_type, "mr");
+            assert_eq!(d.resource_id, mr.id.as_str());
+            assert_eq!(d.decision, PolicyEffect::Allow);
+            assert_eq!(
+                d.matched_policy.as_ref().map(|p| p.as_str()),
+                Some("allow-merge-processor")
+            );
         }
     }
 
