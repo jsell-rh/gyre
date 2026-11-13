@@ -3,7 +3,7 @@ title: "Implement spec enforcement validation tests for attack/drift prevention"
 spec_ref: "agent-gates.md §Part 2 What This Prevents"
 depends_on:
   - task-139
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §What This Prevents"
 commits: ["f4b7f15195215cd8695e682404343ea4f1db325a"]
@@ -127,27 +127,57 @@ Merge-queue cycles run through `merge_processor::run_once` (the same
 `process_next` the spawned processor loop runs) for determinism; merges in
 control cases are real git merges through the git2 adapter.
 
-Unit tests added to `merge_processor.rs` for the two forge enforcement
-policies that had no merge-level coverage (`require_spec_ref`,
+Unit tests in `merge_processor.rs` for the two forge enforcement policies
+that had no merge-level coverage (`require_spec_ref`,
 `require_approved_spec`), mirroring the existing
 `warn_stale_spec`/`require_current_spec`/`require_signed_approval` tests:
 rejection with a clear reason, author notification, and a positive control
 that merges.
 
+### CI repair (this round)
+
+Durable finding: PR #817 head `e2a13024`, CI run 43419972221 — the
+"Development controller" job failed at the
+`python3 -m unittest discover -s scripts -p 'test_dev*.py'` step (go tests
+passed; later steps skipped).
+
+- Step-level conclusions pulled via the GitHub API for that run: every
+  OTHER job on the same head is green — Format, Clippy, **Test
+  (`cargo nextest run --all`, which includes the new `spec_enforcement`
+  suite and the merge_processor unit tests)**, Architecture lint, agent
+  runner tests, Web build. The candidate's own test surface passed CI.
+- The PR diff (`276918d2` → `e2a13024`) touches only
+  `crates/gyre-server/src/merge_processor.rs`,
+  `crates/gyre-server/tests/spec_enforcement.rs`, and specs docs;
+  `scripts/`, `tools/`, and `.github/` are byte-identical to the baseline
+  that passed the same job — the failing step's test surface is unchanged
+  by this PR.
+- Reproduction: six consecutive clean-environment runs (scrubbed env,
+  real rustup cargo on PATH, `GITHUB_ACTIONS=true`) of the exact failing
+  suite at the exact PR head `e2a13024` — 61 tests, `OK` every run
+  (evidence retained under `review-evidence/`).
+- Raw job-log retrieval is network-blocked from this sandbox
+  (`results-receiver.actions.githubusercontent.com` and the actions-results
+  blob endpoint: `connect: permission denied`) — the exact failing test
+  name inside the step could not be extracted locally; recorded for
+  remote verification.
+- Conclusion: runner-side flake in a job whose surface this PR does not
+  modify; no code defect found. A green re-run of CI on the new head is
+  the remote confirmation.
+
 ### Test evidence
 
-- `cargo check -p gyre-server --tests` passes (type-checks the unit tests
-  and the integration suite) — recorded under `/tmp/stage/review-evidence`.
-- The reviewer script for the row-5 gate was executed locally against
-  synthetic spec/diff fixtures: mismatch → `changes_requested`, match →
-  `approved`, exit 0 on HTTP 201 (evidence retained).
-- The git fixture flow (branch cut from main, blob-SHA extraction via
-  `rev-parse HEAD:<path>`, feature file absent from main) was verified
-  locally (evidence retained).
+- CI run 43419972221 on `e2a13024`: the full Test job
+  (`cargo nextest run --all`) passed — the `spec_enforcement` integration
+  suite and all five forge-policy unit tests are green in CI on the
+  candidate.
+- `cargo check -p gyre-server --tests` passes on the merged head
+  (`d78d004a`, candidate + current main `b9487b1b`) — the suite is intact
+  after the base merge; evidence under `review-evidence/`.
 - This sandbox's build wrapper refuses gyre-server test compilation
   (4 GiB budget) — the verifier must execute:
-  `cargo test -p gyre-server --lib -- merge_processor::tests::require_spec_ref_blocks_mr_without_spec_ref merge_processor::tests::require_approved_spec_blocks_unapproved_spec`
-  and
+  `cargo test -p gyre-server --lib -- merge_processor::tests::` (the five
+  policy unit tests) and
   `cargo test -p gyre-server --test spec_enforcement`
   (both need a loopback listener, which this sandbox supports but the
   verifier should confirm).
