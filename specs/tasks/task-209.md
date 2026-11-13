@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
 ---
 
 ## Spec Excerpt
@@ -123,50 +123,63 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 HSI §12 profile gaps (notification filtering, judgment ledger, auth
 provider info) are implemented in production code across the commits
-listed in the frontmatter; coverage row 53 is `implemented`. This round
-repairs the review finding from the f7f5c59f merge (task-125
-repo_id + task-209 exclude_types both extended
-`NotificationRepository::list_for_user`).
+listed in the frontmatter; coverage row 53 is `implemented`.
 
-### This round: test-arity repair (commit 28b9ac50)
+### This round: server test-target compile repair (commit 8e295c2e)
 
-The merge commit 0f41df8b raised `list_for_user` to the 9-parameter
-signature (user_id, workspace_id, min/max priority, notification_type,
-repo_id, exclude_types, limit, offset) across all four trait impls
-(sqlite/postgres/mem/SSE decorator), but five in-crate test call sites
-kept pre-merge arities and failed to compile (`cargo test -p
-gyre-adapters --lib` → error[E0061]/error[E0308] ×7):
+Review finding f833c3a0: the f7f5c59f merge resolution (0f41df8b) fixed
+four sibling `list_for_user` call sites in `graph_extraction.rs` but
+missed the fifth, in the broadcast test at line 2533 — the gyre-server
+lib test target did not compile (error[E0061]), so none of the
+server-side write-path/endpoint proofs in that target had been executed
+at candidate 8c76daee. The fix is mechanical: pass `&[]` as the
+`exclude_types` argument (this test asserts broadcast delivery, not
+preference filtering), matching the sibling sites.
 
-- `sqlite/notification.rs` `list_for_user_filters_by_repo` — the two
-  repo-filtered calls (hit/miss) and the unfiltered `all` call used the
-  base's signature (no `exclude_types`).
-- `sqlite/user_profile.rs`
-  `notifications_exclude_types_applies_to_list_and_count` — both calls
-  used the branch's pre-merge signature (no task-125 `repo_id`), so the
-  task's own notification-filtering proof never compiled.
+This round also corrected the evidence records that overstated what had
+run (the prior round's "all green post-remerge" and "scripted arity
+audit" claims): coverage row 53 and this file now state exactly what was
+executed and what remains the verifier's gate. No production code
+changed this round beyond the one-argument test repair.
 
-All five sites now pass the full 10-argument form (`None` for unused
-filters, `&[]` where no types are excluded). No production code changed
-this round — the adapters, write paths, and endpoints are those verified
-in earlier rounds.
+### Test evidence (this round, sandbox probes, code state 8e295c2e)
 
-### Test evidence (this round, sandbox probes)
+The docs-only round commit does not touch `crates/`, so the checked
+tree is identical.
 
-- `cargo test -p gyre-adapters --lib` — 522 passed, 0 failed (log:
-  /tmp/stage/review-evidence/task-209-repair-tests.log), including the
-  previously non-compiling
-  `notifications_exclude_types_applies_to_list_and_count`,
-  `list_for_user_filters_by_repo`, and the full `judgment_ledger_*`
-  suite (merge/sources reverse-chron, workspace filter, type filter,
-  pagination, rejection attribution, detail_zstd decompression).
-- `cargo check --workspace --lib` — clean (all crates type-check).
-- `rustfmt --check` clean on both modified files.
-- Scripted arity audit: every `list_for_user` call site in the workspace
-  matches its trait's parameter count (notification 9 params, ledger 6,
-  team 2, tokens/prefs 1).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` — clean
+  (log: /tmp/stage/review-evidence/t209-srv-lib-check.log).
+  This covers every in-module server test including the five
+  write-path/endpoint proofs named below.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — clean, covers
+  the integration test target incl. graph_integration.rs, the only other
+  `list_for_user` call-site crate surface
+  (log: t209-srv-int-check.log).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-adapters --lib --tests` — clean
+  (log: t209-adt-check.log).
+- Arity audit: the compiler IS the audit — these three commands type
+  check every `list_for_user` call site in the workspace (notification,
+  ledger, team, token/prefs traits) in their test and lib targets. The
+  crates containing `.list_for_user(` call sites are exactly
+  gyre-adapters and gyre-server (lib + tests/graph_integration.rs),
+  all covered above. The prior round's grep-count script is not
+  re-claimed as evidence.
+- Previously executed and reproducible from earlier rounds'
+  logs: `cargo test -p gyre-adapters --lib` (522 passed, incl. the
+  judgment-ledger and notification-exclusion suites).
 
-Server test compilation and full gates stay with the independent
-verifier: `SKIP_WEB_BUILD=1 cargo check --all-targets --workspace`,
-`SKIP_WEB_BUILD=1 cargo nextest run --all` (with `GYRE_JJ_TESTS_MUST_RUN=1`,
-jj v0.39.0), clippy/rustfmt diff gates vs `f7f5c59f`, `cd web && npm ci
-&& npm test`, and exact-head GitHub checks.
+### Server tests the independent verifier must execute
+
+The hard 4 GiB budget defers server test compilation/execution to the
+verifier. Required at this head:
+
+- `trust_transition_writes_trust_change_audit_event`
+- `human_approval_on_failed_gate_writes_gate_override_event`
+- `publish_writes_meta_spec_publish_audit_event`
+- `disabled_preference_excludes_type_from_inbox_and_count`
+- `get_me_returns_recorded_auth_provider_info`
+- the graph_extraction broadcast test whose call site this round
+  repaired (spec-assertion push → notification + channel broadcast)
+
+plus the standard full gates (`cargo test --all`, clippy/rustfmt,
+`cd web && npm ci && npm test`, exact-head GitHub checks).
