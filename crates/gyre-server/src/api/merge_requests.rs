@@ -164,6 +164,14 @@ pub struct ReviewResponse {
     pub reviewer_agent_id: String,
     pub decision: String,
     pub body: Option<String>,
+    /// Gate persona attribution (agent-gates.md §Gate Agent Lifecycle):
+    /// the persona of the gate whose agent produced this review. `None` for
+    /// reviews not produced by a gate agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_persona: Option<String>,
+    /// Id of the gate whose agent produced this review, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_id: Option<String>,
     pub created_at: u64,
 }
 
@@ -175,6 +183,8 @@ impl From<Review> for ReviewResponse {
             reviewer_agent_id: r.reviewer_agent_id,
             decision: review_decision_str(&r.decision),
             body: r.body,
+            reviewer_persona: r.reviewer_persona,
+            gate_id: r.gate_id.map(|g| g.to_string()),
             created_at: r.created_at,
         }
     }
@@ -1069,6 +1079,51 @@ pub async fn submit_review(
     let mut review = Review::new(new_id(), mr_id, reviewer_agent_id, decision, now_secs());
     review.body = req.body;
 
+    // Gate-agent attribution (agent-gates.md §Gate Agent Lifecycle: "gate
+    // agent reviews are attributed — the review shows which gate persona
+    // produced it"). The scoped reviewer token's `task_id` claim carries the
+    // id of the gate that minted it (see `mint_scoped`), so the persona and
+    // gate binding are derived server-side from the token — a caller-
+    // supplied attribution would be forgeable exactly like a forged
+    // reviewer_agent_id. A token whose gate no longer exists records no
+    // attribution (the identity is still bound to the token subject above).
+    if auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+        == Some(crate::auth::REVIEW_SUBMIT_SCOPE)
+    {
+        let token_gate_id = auth
+            .jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("task_id"))
+            .and_then(|s| s.as_str());
+        if let Some(gate_id) = token_gate_id {
+            match state.quality_gates.find_by_id(gate_id).await {
+                Ok(Some(gate)) => {
+                    review.gate_id = Some(gate.id.clone());
+                    review.reviewer_persona = gate.persona.clone();
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        mr_id = %id,
+                        gate_id,
+                        "scoped reviewer token references a gate that no longer exists; review recorded without gate attribution"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        mr_id = %id,
+                        gate_id,
+                        error = %e,
+                        "gate lookup for review attribution failed; review recorded without gate attribution"
+                    );
+                }
+            }
+        }
+    }
+
     state.reviews.submit_review(&review).await?;
     Ok((StatusCode::CREATED, Json(ReviewResponse::from(review))))
 }
@@ -1688,6 +1743,135 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["file_path"], "src/lib.rs");
         assert_eq!(json["line_number"], 10);
+    }
+
+    #[tokio::test]
+    async fn scoped_gate_review_records_persona_attribution() {
+        // agent-gates.md §Gate Agent Lifecycle: "gate agent reviews are
+        // attributed — the review shows which gate persona produced it".
+        // A reviewer authenticating with a gate-agent scoped token gets its
+        // persona and gate binding derived server-side from the token's
+        // task_id claim (the gate id); nothing in the request body can
+        // forge or suppress it.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Attribution test").await;
+
+        // A real gate row: the persona the review must be attributed to.
+        let gate = gyre_domain::QualityGate {
+            id: gyre_common::Id::new("gate-attrib-1"),
+            repo_id: gyre_common::Id::new("repo-1"),
+            name: "security-review".to_string(),
+            gate_type: gyre_domain::GateType::AgentReview,
+            command: Some("true".to_string()),
+            required_approvals: None,
+            persona: Some("personas/security.md".to_string()),
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            position: 0,
+            created_at: 1_700_000_000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        // Scoped reviewer token, minted exactly as the gate executor mints
+        // them: task_id carries the gate id.
+        let gate_agent_id = "gate-review-attrib".to_string();
+        let token = state
+            .agent_signing_key
+            .mint_scoped(
+                &gate_agent_id,
+                gate.id.as_str(),
+                "forge",
+                &state.base_url,
+                60,
+                crate::auth::REVIEW_SUBMIT_SCOPE,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &gate_agent_id, token.clone())
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "forged-reviewer",
+            "decision": "approved",
+            "body": "checked against the security persona"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], gate_agent_id);
+        assert_eq!(
+            json["reviewer_persona"], "personas/security.md",
+            "the review shows which gate persona produced it"
+        );
+        assert_eq!(json["gate_id"], "gate-attrib-1");
+
+        // Persisted with attribution (not just the response envelope).
+        let reviews = state
+            .reviews
+            .list_reviews(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(
+            reviews[0].reviewer_persona.as_deref(),
+            Some("personas/security.md")
+        );
+        assert_eq!(
+            reviews[0].gate_id,
+            Some(gyre_common::Id::new("gate-attrib-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_review_has_no_gate_attribution() {
+        // A regular (non-gate) reviewer gets no persona attribution — the
+        // fields are gate-agent concepts, derived from the scoped token.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "No attribution test").await;
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agent-1",
+            "decision": "approved",
+            "body": "LGTM"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert!(
+            json.get("reviewer_persona").is_none(),
+            "non-gate reviews carry no persona attribution"
+        );
+        assert!(json.get("gate_id").is_none());
     }
 
     #[tokio::test]
