@@ -13,8 +13,8 @@
 //! Both kinds share the [`InvitationStatus`] lifecycle and expire via the
 //! background job (expired rows are marked, never deleted, for audit).
 
-use crate::workspace_membership::WorkspaceRole;
 use crate::user::GlobalRole;
+use crate::workspace_membership::WorkspaceRole;
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 

@@ -480,7 +480,11 @@ mod tests {
         // tenant (pre-migration rows get the column defaults).
         let legacy = make_user("u-legacy", "local:legacy", "legacy");
         UserRepository::create(&s, &legacy).await.unwrap();
-        let found_legacy = s.find_by_external_id("local:legacy").await.unwrap().unwrap();
+        let found_legacy = s
+            .find_by_external_id("local:legacy")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found_legacy.tenant_id, None);
         assert_eq!(found_legacy.global_role, gyre_domain::GlobalRole::Member);
     }
@@ -738,11 +742,10 @@ mod tests {
             vec!["u-sso", "u-other"],
             "both tenant accounts match (case-insensitive), ordered by creation"
         );
-        assert!(
-            s.find_by_email("nobody@example.com")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(s
+            .find_by_email("nobody@example.com")
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

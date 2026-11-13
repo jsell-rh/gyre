@@ -8,6 +8,11 @@ use gyre_common::Id;
 use gyre_domain::{InvitationStatus, TenantInvitation, WorkspaceInvitation};
 
 /// Persistence for tenant-level invitations.
+// clippy 1.99 + async-trait: the macro's desugared `#[must_use]` wrapper
+// on methods returning `Result` trips `double_must_use` at the trait
+// declaration. It is an expansion artifact affecting every
+// `#[async_trait]` trait on this toolchain, not a defect in this trait.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TenantInvitationRepository: Send + Sync {
     /// Store a new invitation. Fails if a pending invitation for the same
@@ -48,6 +53,9 @@ pub trait TenantInvitationRepository: Send + Sync {
 }
 
 /// Persistence for workspace-level invitations.
+// Same async-trait expansion artifact as above — see the note on
+// `TenantInvitationRepository`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait WorkspaceInvitationRepository: Send + Sync {
     /// Store a new invitation. Fails if a pending invitation for the same

@@ -23,6 +23,7 @@ pub mod dependency;
 pub mod dependency_policy;
 pub mod git_ops;
 pub mod graph;
+pub mod invitation;
 pub mod jj_ops;
 pub mod key_binding_repo;
 pub mod kv_store;
@@ -33,7 +34,6 @@ pub mod merge_request;
 pub mod message;
 pub mod meta_spec_repository;
 pub mod meta_spec_set;
-pub mod invitation;
 pub mod network;
 pub mod notification;
 pub mod policy;
@@ -88,6 +88,7 @@ pub use dependency::DependencyRepository;
 pub use dependency_policy::DependencyPolicyRepository;
 pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
+pub use invitation::{TenantInvitationRepository, WorkspaceInvitationRepository};
 pub use jj_ops::{JjChange, JjOpsPort, JjRebaseOutcome};
 pub use key_binding_repo::KeyBindingRepository;
 pub use kv_store::KvJsonStore;
@@ -95,7 +96,6 @@ pub use llm::{
     ContentBlock, ConversationContent, ConversationMessage, LlmPort, LlmPortFactory, ToolCall,
     ToolCallingResponse, ToolDefinition,
 };
-pub use invitation::{TenantInvitationRepository, WorkspaceInvitationRepository};
 pub use llm_config::LlmConfigRepository;
 pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;

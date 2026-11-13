@@ -61,9 +61,7 @@ fn is_tenant_pending_scope_violation(err: &diesel::result::Error) -> bool {
         Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
             let msg = e.message();
             msg.contains("idx_tenant_invitations_pending_scope")
-                || msg.contains(
-                    "tenant_invitations.tenant_id, tenant_invitations.email",
-                )
+                || msg.contains("tenant_invitations.tenant_id, tenant_invitations.email")
         }
         _ => false,
     }
@@ -77,9 +75,7 @@ fn is_workspace_pending_scope_violation(err: &diesel::result::Error) -> bool {
         Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
             let msg = e.message();
             msg.contains("idx_workspace_invitations_pending_scope")
-                || msg.contains(
-                    "workspace_invitations.workspace_id, workspace_invitations.user_id",
-                )
+                || msg.contains("workspace_invitations.workspace_id, workspace_invitations.user_id")
         }
         _ => false,
     }
@@ -382,9 +378,7 @@ impl WorkspaceInvitationRepository for SqliteStorage {
             // (workspace, user) already exists.
             let existing_pending = diesel::dsl::select(diesel::dsl::exists(
                 workspace_invitations::table
-                    .filter(
-                        workspace_invitations::workspace_id.eq(inv.workspace_id.as_str()),
-                    )
+                    .filter(workspace_invitations::workspace_id.eq(inv.workspace_id.as_str()))
                     .filter(workspace_invitations::user_id.eq(inv.user_id.as_str()))
                     .filter(workspace_invitations::status.eq("Pending")),
             ))
@@ -594,7 +588,10 @@ mod tests {
         let dup = TenantInvitation { ..inv.clone() };
         assert!(TiRepo::create(&db, &dup).await.is_err());
 
-        let found = TiRepo::find_by_token_hash(&db, "abc123").await.unwrap().unwrap();
+        let found = TiRepo::find_by_token_hash(&db, "abc123")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found.id.as_str(), "ti1");
         assert_eq!(found.email, "alice@example.com");
         assert_eq!(found.workspace_ids.len(), 2);
@@ -620,7 +617,10 @@ mod tests {
         .await
         .unwrap();
         assert!(claimed, "pending → accepted must claim");
-        let accepted = TiRepo::find_by_id(&db, &Id::new("ti1")).await.unwrap().unwrap();
+        let accepted = TiRepo::find_by_id(&db, &Id::new("ti1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(accepted.status, InvitationStatus::Accepted);
         assert_eq!(accepted.accepted_at, Some(1500));
 
@@ -636,7 +636,10 @@ mod tests {
         .await
         .unwrap();
         assert!(!reclaimed, "a claimed invitation cannot be re-claimed");
-        let still = TiRepo::find_by_id(&db, &Id::new("ti1")).await.unwrap().unwrap();
+        let still = TiRepo::find_by_id(&db, &Id::new("ti1"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(still.status, InvitationStatus::Accepted);
         assert_eq!(still.accepted_at, Some(1500), "loser does not overwrite");
 
@@ -647,7 +650,9 @@ mod tests {
             ..inv
         };
         TiRepo::create(&db, &reinvite).await.unwrap();
-        let pending = TiRepo::list_by_status(&db, InvitationStatus::Pending).await.unwrap();
+        let pending = TiRepo::list_by_status(&db, InvitationStatus::Pending)
+            .await
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id.as_str(), "ti2");
     }
@@ -687,7 +692,9 @@ mod tests {
 
         let by_user = WiRepo::list_by_user(&db, &Id::new("u2")).await.unwrap();
         assert_eq!(by_user.len(), 2);
-        let by_ws = WiRepo::list_by_workspace(&db, &Id::new("ws1")).await.unwrap();
+        let by_ws = WiRepo::list_by_workspace(&db, &Id::new("ws1"))
+            .await
+            .unwrap();
         assert_eq!(by_ws.len(), 1);
 
         let claimed = WiRepo::transition_status(
@@ -743,30 +750,26 @@ mod tests {
             accepted_at: None,
         };
         WiRepo::create(&db, &inv).await.unwrap();
-        assert!(
-            WiRepo::transition_status(
-                &db,
-                &Id::new("wi-r"),
-                InvitationStatus::Pending,
-                InvitationStatus::Revoked,
-                None
-            )
-            .await
-            .unwrap()
-        );
+        assert!(WiRepo::transition_status(
+            &db,
+            &Id::new("wi-r"),
+            InvitationStatus::Pending,
+            InvitationStatus::Revoked,
+            None
+        )
+        .await
+        .unwrap());
         // Expiry job fires late: the row is already Revoked — the
         // Pending→Expired transition must not overwrite it.
-        assert!(!
-            WiRepo::transition_status(
-                &db,
-                &Id::new("wi-r"),
-                InvitationStatus::Pending,
-                InvitationStatus::Expired,
-                None
-            )
-            .await
-            .unwrap()
-        );
+        assert!(!WiRepo::transition_status(
+            &db,
+            &Id::new("wi-r"),
+            InvitationStatus::Pending,
+            InvitationStatus::Expired,
+            None
+        )
+        .await
+        .unwrap());
         assert_eq!(
             WiRepo::find_by_id(&db, &Id::new("wi-r"))
                 .await
@@ -776,17 +779,15 @@ mod tests {
             InvitationStatus::Revoked
         );
         // Unknown id → false, not an error.
-        assert!(!
-            WiRepo::transition_status(
-                &db,
-                &Id::new("nope"),
-                InvitationStatus::Pending,
-                InvitationStatus::Expired,
-                None
-            )
-            .await
-            .unwrap()
-        );
+        assert!(!WiRepo::transition_status(
+            &db,
+            &Id::new("nope"),
+            InvitationStatus::Pending,
+            InvitationStatus::Expired,
+            None
+        )
+        .await
+        .unwrap());
     }
 
     /// Task-110 review F2: the "one pending invitation per (tenant, email)"
@@ -941,14 +942,10 @@ mod tests {
 
         // Pre-000064 state: every earlier migration applied.
         let all = MIGRATIONS.migrations().unwrap();
-        let (pre, target): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
-            m.name().version().to_string() != "20261113000064"
-        });
-        assert_eq!(
-            target.len(),
-            1,
-            "000064 not found in embedded migrations"
-        );
+        let (pre, target): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|m| m.name().version().to_string() != "20261113000064");
+        assert_eq!(target.len(), 1, "000064 not found in embedded migrations");
         conn.setup().unwrap();
         conn.run_migrations(&pre).unwrap();
 

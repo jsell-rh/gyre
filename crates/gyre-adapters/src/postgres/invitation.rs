@@ -71,7 +71,8 @@ fn is_workspace_pending_scope_violation(err: &diesel::result::Error) -> bool {
     use diesel::result::{DatabaseErrorKind, Error};
     match err {
         Error::DatabaseError(DatabaseErrorKind::UniqueViolation, e) => {
-            e.message().contains("idx_workspace_invitations_pending_scope")
+            e.message()
+                .contains("idx_workspace_invitations_pending_scope")
                 || e.constraint_name() == Some("idx_workspace_invitations_pending_scope")
         }
         _ => false,
@@ -377,9 +378,7 @@ impl WorkspaceInvitationRepository for PgStorage {
             // (workspace, user) already exists.
             let existing_pending = diesel::dsl::select(diesel::dsl::exists(
                 workspace_invitations::table
-                    .filter(
-                        workspace_invitations::workspace_id.eq(inv.workspace_id.as_str()),
-                    )
+                    .filter(workspace_invitations::workspace_id.eq(inv.workspace_id.as_str()))
                     .filter(workspace_invitations::user_id.eq(inv.user_id.as_str()))
                     .filter(workspace_invitations::status.eq("Pending")),
             ))
@@ -552,4 +551,3 @@ impl WorkspaceInvitationRepository for PgStorage {
         .await?
     }
 }
-

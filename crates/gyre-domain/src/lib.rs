@@ -25,11 +25,11 @@ pub mod dependency;
 pub mod extractor;
 pub mod git_types;
 pub mod go_extractor;
+pub mod invitation;
 pub mod llm_config;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
-pub mod invitation;
 pub mod meta_spec;
 pub mod narrative;
 pub mod network_peer;
@@ -72,12 +72,7 @@ pub use attestation::{
     constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
 };
 pub use audit::{AuditEvent, AuditEventType, AuditOutcome};
-pub use budget::{
-    BudgetCallRecord, BudgetConfig, BudgetEnforcementAction, BudgetUsage,
-};
-pub use invitation::{
-    InvitationPolicy, InvitationStatus, TenantInvitation, WorkspaceInvitation,
-};
+pub use budget::{BudgetCallRecord, BudgetConfig, BudgetEnforcementAction, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use compute_target::{ComputeTargetEntity, ComputeTargetType};
 pub use constraint_evaluator::{
@@ -93,6 +88,7 @@ pub use dependency::{
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
 pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult, RevertResult};
 pub use go_extractor::GoExtractor;
+pub use invitation::{InvitationPolicy, InvitationStatus, TenantInvitation, WorkspaceInvitation};
 pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{

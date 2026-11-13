@@ -1606,7 +1606,6 @@ async fn validate_jwt(
     })
 }
 
-
 /// Find or auto-provision the user for a verified JWT, linking a
 /// previously accepted invitation (user-management.md §Tenant-Level
 /// User Onboarding, task-110 F2).
@@ -1763,7 +1762,10 @@ async fn find_or_create_user_tenant(
 /// handle, later colliding users get deterministic numeric suffixes
 /// (base-2, base-3, ...). An exhausted suffix space bails and the caller
 /// assigns a generated `u-<id>` handle (unique by the fresh primary key).
-pub(crate) async fn resolve_unique_username(state: &Arc<AppState>, base: &str) -> anyhow::Result<String> {
+pub(crate) async fn resolve_unique_username(
+    state: &Arc<AppState>,
+    base: &str,
+) -> anyhow::Result<String> {
     let mut candidate = base.to_string();
     // Bounded at 2..=10_000 so a pathological store cannot pin this loop
     // open; an exhausted space bails to the generated-handle fallback.

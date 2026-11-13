@@ -1277,11 +1277,7 @@ impl UserRepository for MemUserRepository {
         let store = self.store.lock().await;
         let mut matches: Vec<User> = store
             .values()
-            .filter(|u| {
-                u.email
-                    .as_ref()
-                    .is_some_and(|e| e.to_lowercase() == email)
-            })
+            .filter(|u| u.email.as_ref().is_some_and(|e| e.to_lowercase() == email))
             .cloned()
             .collect();
         drop(store);
@@ -1326,14 +1322,11 @@ impl UserRepository for MemUserRepository {
             .values()
             .find(|u| u.external_id == new_external_id && u.id != *user_id)
         {
-            anyhow::bail!(
-                "external_id already owned by user {}",
-                owner.id
-            );
+            anyhow::bail!("external_id already owned by user {}", owner.id);
         }
-        let user = store
-            .get_mut(user_id.as_str())
-            .ok_or_else(|| anyhow::anyhow!("cannot claim external_id for user {user_id}: not found"))?;
+        let user = store.get_mut(user_id.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("cannot claim external_id for user {user_id}: not found")
+        })?;
         user.external_id = new_external_id.to_string();
         Ok(())
     }
@@ -6174,7 +6167,7 @@ impl TenantInvitationRepository for MemTenantInvitationRepository {
             .filter(|i| i.tenant_id == *tenant_id)
             .cloned()
             .collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
         Ok(items)
     }
 
@@ -6267,7 +6260,7 @@ impl WorkspaceInvitationRepository for MemWorkspaceInvitationRepository {
             .filter(|i| i.workspace_id == *workspace_id)
             .cloned()
             .collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
         Ok(items)
     }
 
@@ -6280,7 +6273,7 @@ impl WorkspaceInvitationRepository for MemWorkspaceInvitationRepository {
             .filter(|i| i.user_id == *user_id)
             .cloned()
             .collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
         Ok(items)
     }
 

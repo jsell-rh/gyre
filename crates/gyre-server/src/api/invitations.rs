@@ -76,11 +76,7 @@ pub const EXPIRY_JOB_INTERVAL_SECS: u64 = 3600;
 /// endpoint surfaces the corruption as a 500; the PUT endpoint replaces
 /// the row (the operator's remediation path).
 pub async fn load_policy(state: &AppState, tenant_id: &str) -> Result<InvitationPolicy, ApiError> {
-    match state
-        .kv_store
-        .kv_get(POLICY_KV_NAMESPACE, tenant_id)
-        .await
-    {
+    match state.kv_store.kv_get(POLICY_KV_NAMESPACE, tenant_id).await {
         Ok(None) => Ok(InvitationPolicy::default()),
         Ok(Some(raw)) => serde_json::from_str(&raw).map_err(|e| {
             tracing::error!(tenant_id, error = %e, "stored invitation policy is corrupt");
@@ -101,8 +97,7 @@ fn generate_invitation_token() -> String {
     use ring::rand::{SecureRandom, SystemRandom};
     let rng = SystemRandom::new();
     let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes)
-        .expect("system CSPRNG must not fail");
+    rng.fill(&mut bytes).expect("system CSPRNG must not fail");
     hex::encode(bytes)
 }
 
@@ -295,9 +290,10 @@ async fn create_tenant_invitation(
     }
     let mut workspace_roles = Vec::with_capacity(req.workspace_roles.len());
     for r in &req.workspace_roles {
-        workspace_roles.push(WorkspaceRole::parse_role(r).ok_or_else(|| {
-            ApiError::InvalidInput(format!("unknown workspace role: {r}"))
-        })?);
+        workspace_roles.push(
+            WorkspaceRole::parse_role(r)
+                .ok_or_else(|| ApiError::InvalidInput(format!("unknown workspace role: {r}")))?,
+        );
     }
     if !workspace_roles.is_empty() && workspace_roles.len() != workspace_ids.len() {
         return Err(ApiError::InvalidInput(
@@ -311,7 +307,9 @@ async fn create_tenant_invitation(
     }
 
     let policy = load_policy(state, &auth.tenant_id).await?;
-    let days = req.expires_in_days.unwrap_or(policy.tenant_invite_expiry_days);
+    let days = req
+        .expires_in_days
+        .unwrap_or(policy.tenant_invite_expiry_days);
     if days == 0 {
         return Err(ApiError::InvalidInput(
             "expires_in_days must be at least 1".to_string(),
@@ -504,12 +502,17 @@ pub async fn revoke_tenant_invitation(
     // by Revoked — the Pending precondition is enforced in the write.
     let revoked = state
         .tenant_invitations
-        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Revoked, None)
+        .transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Revoked,
+            None,
+        )
         .await?;
     if !revoked {
-        return Err(ApiError::Conflict(format!(
-            "invitation is no longer pending — only pending invitations can be revoked"
-        )));
+        return Err(ApiError::Conflict(
+            "invitation is no longer pending — only pending invitations can be revoked".to_string(),
+        ));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -693,7 +696,12 @@ pub async fn accept_tenant_invitation(
         // catch it, but the caller deserves the terminal state immediately).
         state
             .tenant_invitations
-            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+            .transition_status(
+                &invitation.id,
+                InvitationStatus::Pending,
+                InvitationStatus::Expired,
+                None,
+            )
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
@@ -706,7 +714,12 @@ pub async fn accept_tenant_invitation(
     // stays usable.
     let claimed = state
         .tenant_invitations
-        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Accepted, Some(now))
+        .transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Accepted,
+            Some(now),
+        )
         .await?;
     if !claimed {
         return Err(ApiError::Conflict(format!(
@@ -821,16 +834,11 @@ async fn accept_tenant_invitation_claimed(
                         crate::auth::resolve_unique_username(state, &base)
                             .await
                             .map_err(|e| {
-                                ApiError::Internal(anyhow::anyhow!(
-                                    "derive unique username: {e}"
-                                ))
+                                ApiError::Internal(anyhow::anyhow!("derive unique username: {e}"))
                             })?
                     }
                 };
-                let display_name = req
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| username.clone());
+                let display_name = req.display_name.clone().unwrap_or_else(|| username.clone());
                 let mut user = User::new(id, tenant_ns, username, now);
                 user.display_name = display_name;
                 user.email = Some(email.clone());
@@ -966,7 +974,12 @@ pub async fn decline_tenant_invitation(
     if invitation.is_expired(now_secs()) {
         state
             .tenant_invitations
-            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+            .transition_status(
+                &invitation.id,
+                InvitationStatus::Pending,
+                InvitationStatus::Expired,
+                None,
+            )
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
@@ -974,7 +987,12 @@ pub async fn decline_tenant_invitation(
     // the read and this write must win, not be overwritten by Declined.
     let declined = state
         .tenant_invitations
-        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Declined, None)
+        .transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Declined,
+            None,
+        )
         .await?;
     if !declined {
         return Err(ApiError::Conflict(format!(
@@ -1044,14 +1062,10 @@ async fn resolve_workspace_invitee(
             u.tenant_id.as_ref() == Some(tenant_id)
                 && (u.id.as_str() == selector
                     || u.username.to_lowercase() == lower
-                    || u.email
-                        .as_ref()
-                        .is_some_and(|e| e.to_lowercase() == lower))
+                    || u.email.as_ref().is_some_and(|e| e.to_lowercase() == lower))
         });
         let found = found.ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "no user matching '{selector}' in this tenant"
-            ))
+            ApiError::NotFound(format!("no user matching '{selector}' in this tenant"))
         })?;
         match resolved {
             None => resolved = Some(found),
@@ -1141,9 +1155,8 @@ pub async fn invite_to_workspace(
         .find_by_user_and_workspace(&caller_id, &ws_id)
         .await?;
     let authorized = auth.roles.contains(&UserRole::Admin)
-        || caller_membership.is_some_and(|m| {
-            matches!(m.role, WorkspaceRole::Owner | WorkspaceRole::Admin)
-        });
+        || caller_membership
+            .is_some_and(|m| matches!(m.role, WorkspaceRole::Owner | WorkspaceRole::Admin));
     if !authorized {
         return Err(ApiError::Forbidden(
             "only workspace Owner/Admin or TenantAdmin may invite".to_string(),
@@ -1364,9 +1377,8 @@ pub async fn revoke_workspace_invitation(
         .find_by_user_and_workspace(&caller_id, &ws_id)
         .await?;
     let authorized = auth.roles.contains(&UserRole::Admin)
-        || caller_membership.is_some_and(|m| {
-            matches!(m.role, WorkspaceRole::Owner | WorkspaceRole::Admin)
-        });
+        || caller_membership
+            .is_some_and(|m| matches!(m.role, WorkspaceRole::Owner | WorkspaceRole::Admin));
     if !authorized {
         return Err(ApiError::Forbidden(
             "only workspace Owner/Admin or TenantAdmin may revoke invitations".to_string(),
@@ -1393,12 +1405,16 @@ pub async fn revoke_workspace_invitation(
     // by Revoked (same guard as the tenant revoke).
     let revoked = state
         .workspace_invitations
-        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Revoked, None)
+        .transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Revoked,
+            None,
+        )
         .await?;
     if !revoked {
         return Err(ApiError::Conflict(
-            "invitation is no longer pending — only pending invitations can be revoked"
-                .to_string(),
+            "invitation is no longer pending — only pending invitations can be revoked".to_string(),
         ));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1441,7 +1457,12 @@ pub async fn accept_workspace_invitation(
     if invitation.is_expired(now) {
         state
             .workspace_invitations
-            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+            .transition_status(
+                &invitation.id,
+                InvitationStatus::Pending,
+                InvitationStatus::Expired,
+                None,
+            )
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
@@ -1450,7 +1471,12 @@ pub async fn accept_workspace_invitation(
     // accept_tenant_invitation for the rationale.
     let claimed = state
         .workspace_invitations
-        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Accepted, Some(now))
+        .transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Accepted,
+            Some(now),
+        )
         .await?;
     if !claimed {
         return Err(ApiError::Conflict(format!(
@@ -1500,7 +1526,7 @@ async fn activate_membership(
                 new_id(),
                 invitation.user_id.clone(),
                 invitation.workspace_id.clone(),
-                invitation.role.clone(),
+                invitation.role,
                 invitation.invited_by.clone(),
                 now,
             );
@@ -1549,14 +1575,24 @@ pub async fn decline_workspace_invitation(
     if invitation.is_expired(now_secs()) {
         state
             .workspace_invitations
-            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+            .transition_status(
+                &invitation.id,
+                InvitationStatus::Pending,
+                InvitationStatus::Expired,
+                None,
+            )
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
     // Conditional transition — a concurrent accept must not be overwritten.
     let declined = state
         .workspace_invitations
-        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Declined, None)
+        .transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Declined,
+            None,
+        )
         .await?;
     if !declined {
         return Err(ApiError::Conflict(format!(
@@ -1613,13 +1649,23 @@ pub async fn accept_my_workspace_invitation(
     if invitation.is_expired(now) {
         state
             .workspace_invitations
-            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+            .transition_status(
+                &invitation.id,
+                InvitationStatus::Pending,
+                InvitationStatus::Expired,
+                None,
+            )
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
     let claimed = state
         .workspace_invitations
-        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Accepted, Some(now))
+        .transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Accepted,
+            Some(now),
+        )
         .await?;
     if !claimed {
         return Err(ApiError::Conflict(format!(
@@ -1658,13 +1704,23 @@ pub async fn decline_my_workspace_invitation(
     if invitation.is_expired(now) {
         state
             .workspace_invitations
-            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+            .transition_status(
+                &invitation.id,
+                InvitationStatus::Pending,
+                InvitationStatus::Expired,
+                None,
+            )
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
     let declined = state
         .workspace_invitations
-        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Declined, None)
+        .transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Declined,
+            None,
+        )
         .await?;
     if !declined {
         return Err(ApiError::Conflict(format!(
@@ -1730,7 +1786,12 @@ pub async fn run_expiry_once(state: &AppState) -> anyhow::Result<u64> {
         if inv.is_expired(now)
             && state
                 .tenant_invitations
-                .transition_status(&inv.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+                .transition_status(
+                    &inv.id,
+                    InvitationStatus::Pending,
+                    InvitationStatus::Expired,
+                    None,
+                )
                 .await?
         {
             expired_count += 1;
@@ -1745,7 +1806,12 @@ pub async fn run_expiry_once(state: &AppState) -> anyhow::Result<u64> {
         if inv.is_expired(now)
             && state
                 .workspace_invitations
-                .transition_status(&inv.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+                .transition_status(
+                    &inv.id,
+                    InvitationStatus::Pending,
+                    InvitationStatus::Expired,
+                    None,
+                )
                 .await?
         {
             expired_count += 1;
@@ -1828,12 +1894,15 @@ mod tests {
                 "/api/v1/tenant/invitations/:id",
                 delete(revoke_tenant_invitation),
             )
-            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
-            .route("/api/v1/invite/:token/decline", post(decline_tenant_invitation))
             .route(
-                "/api/v1/workspaces/:id/invite",
-                post(invite_to_workspace),
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
             )
+            .route(
+                "/api/v1/invite/:token/decline",
+                post(decline_tenant_invitation),
+            )
+            .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
             .route(
                 "/api/v1/workspaces/:id/invite/accept",
                 post(accept_my_workspace_invitation),
@@ -1861,7 +1930,6 @@ mod tests {
             .route("/api/v1/users/me/invitations", get(list_my_invitations))
             .with_state(state)
     }
-
 
     // NOTE: these tests run against `test_state()` whose auth_token is
     // "test-token" (mem.rs). The extractor resolves it as system/Admin.
@@ -2100,7 +2168,10 @@ mod tests {
 
         // Accept → 409 expired, and status transitions to Expired.
         let app = Router::new()
-            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
             .with_state(state.clone());
         let resp = app
             .oneshot(
@@ -2246,8 +2317,14 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/tenant/invite", post(invite_to_tenant))
-            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
-            .route("/api/v1/invite/:token/decline", post(decline_tenant_invitation))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .route(
+                "/api/v1/invite/:token/decline",
+                post(decline_tenant_invitation),
+            )
             .with_state(state.clone());
 
         // Admin invites alice@example.com.
@@ -2349,7 +2426,10 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/tenant/invite", post(invite_to_tenant))
-            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
             .with_state(state.clone());
 
         let resp = app
@@ -2414,10 +2494,20 @@ mod tests {
             now_secs(),
         );
         state.workspaces.create(&ws).await.unwrap();
-        let mut owner = User::new(Id::new("owner-1"), "tenant:default:email:o@x.com", "owner", now_secs());
+        let mut owner = User::new(
+            Id::new("owner-1"),
+            "tenant:default:email:o@x.com",
+            "owner",
+            now_secs(),
+        );
         owner.tenant_id = Some(Id::new("default"));
         state.users.create(&owner).await.unwrap();
-        let mut invitee = User::new(Id::new("invitee-1"), "tenant:default:email:i@x.com", "invitee", now_secs());
+        let mut invitee = User::new(
+            Id::new("invitee-1"),
+            "tenant:default:email:i@x.com",
+            "invitee",
+            now_secs(),
+        );
         invitee.tenant_id = Some(Id::new("default"));
         state.users.create(&invitee).await.unwrap();
         let owner_membership = WorkspaceMembership::new(
@@ -2428,17 +2518,17 @@ mod tests {
             owner.id.clone(),
             now_secs(),
         );
-        state.workspace_memberships.create(&owner_membership).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&owner_membership)
+            .await
+            .unwrap();
 
         // Owner's API key: create one so the extractor resolves user_id.
         let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
         state
             .api_keys
-            .create(
-                &crate::auth::hash_api_key(&raw_key),
-                &owner.id,
-                "test",
-            )
+            .create(&crate::auth::hash_api_key(&raw_key), &owner.id, "test")
             .await
             .unwrap();
 
@@ -2504,8 +2594,7 @@ mod tests {
                     .header("authorization", auth_header.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"user_id": "invitee-1", "role": "Viewer"})
-                            .to_string(),
+                        serde_json::json!({"user_id": "invitee-1", "role": "Viewer"}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -2552,17 +2641,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
-
     #[tokio::test]
     async fn workspace_invitation_decline_leaves_no_membership() {
         let state = test_state();
-        let ws = gyre_domain::Workspace::new(
-            Id::new("ws-d"),
-            Id::new("default"),
-            "D",
-            "d",
-            now_secs(),
-        );
+        let ws =
+            gyre_domain::Workspace::new(Id::new("ws-d"), Id::new("default"), "D", "d", now_secs());
         state.workspaces.create(&ws).await.unwrap();
         let invitation = WorkspaceInvitation {
             id: Id::new("wi-d"),
@@ -2577,7 +2660,11 @@ mod tests {
             created_at: now_secs(),
             accepted_at: None,
         };
-        state.workspace_invitations.create(&invitation).await.unwrap();
+        state
+            .workspace_invitations
+            .create(&invitation)
+            .await
+            .unwrap();
 
         let app = Router::new()
             .route(
@@ -2849,12 +2936,9 @@ mod tests {
         // Now disable re-invites and revoke the second invitation: a third
         // invite for the same email must be rejected — the inert-field
         // regression this test guards (review F1).
-        let resp = put_policy(
-            app.clone(),
-            serde_json::json!({"allow_re_invite": false}),
-        )
-        .await
-        .unwrap();
+        let resp = put_policy(app.clone(), serde_json::json!({"allow_re_invite": false}))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -2885,12 +2969,9 @@ mod tests {
 
         // The block is the policy, not a permanent side effect: enabling
         // re-invites again restores the default flow.
-        let resp = put_policy(
-            app.clone(),
-            serde_json::json!({"allow_re_invite": true}),
-        )
-        .await
-        .unwrap();
+        let resp = put_policy(app.clone(), serde_json::json!({"allow_re_invite": true}))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let resp = invite(app).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -2927,10 +3008,7 @@ mod tests {
                 "/api/v1/tenant/invitations/policy",
                 get(get_invitation_policy).put(update_invitation_policy),
             )
-            .route(
-                "/api/v1/workspaces/:id/invite",
-                post(invite_to_workspace),
-            )
+            .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
             .route(
                 "/api/v1/workspaces/:id/invitations/:id",
                 delete(revoke_workspace_invitation),
@@ -3031,10 +3109,7 @@ mod tests {
             .list_by_workspace(&Id::new("ws-inv"))
             .await
             .unwrap();
-        let for_invitee: Vec<_> = all
-            .iter()
-            .filter(|i| i.user_id == f.invitee_id)
-            .collect();
+        let for_invitee: Vec<_> = all.iter().filter(|i| i.user_id == f.invitee_id).collect();
         assert_eq!(for_invitee.len(), 2, "exactly the two revoked invitations");
         assert!(
             for_invitee
@@ -3090,7 +3165,11 @@ mod tests {
             owner.id.clone(),
             now_secs(),
         );
-        state.workspace_memberships.create(&owner_membership).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&owner_membership)
+            .await
+            .unwrap();
 
         let owner_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
         state
@@ -3101,7 +3180,11 @@ mod tests {
         let invitee_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
         state
             .api_keys
-            .create(&crate::auth::hash_api_key(&invitee_key), &invitee.id, "test")
+            .create(
+                &crate::auth::hash_api_key(&invitee_key),
+                &invitee.id,
+                "test",
+            )
             .await
             .unwrap();
         InviteeFixture {
@@ -3181,8 +3264,7 @@ mod tests {
                     .header("authorization", format!("Bearer {}", f.owner_key))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"username": "invitee", "role": "Developer"})
-                            .to_string(),
+                        serde_json::json!({"username": "invitee", "role": "Developer"}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -3419,7 +3501,11 @@ mod tests {
             created_at: now_secs(),
             accepted_at: None,
         };
-        state.workspace_invitations.create(&invitation).await.unwrap();
+        state
+            .workspace_invitations
+            .create(&invitation)
+            .await
+            .unwrap();
 
         let repo = state.workspace_invitations.clone();
         let a = repo.transition_status(
@@ -3477,13 +3563,12 @@ mod tests {
         let notifs = f
             .state
             .notifications
-            .list_for_user(&f.invitee_id, None, None, None, None, 50, 0)
+            .list_for_user(&f.invitee_id, None, None, None, None, None, 50, 0)
             .await
             .unwrap();
         let notif = notifs
             .iter()
-            .find(|n| n.source.entity_id == "ws-inv"
-                && n.source.entity_type == "workspace")
+            .find(|n| n.source.entity_id == "ws-inv" && n.source.entity_type == "workspace")
             .expect("invitation notification created for the invitee");
         // Review F1: the notification must be typed InvitationReceived
         // (user-management.md §Notification Entity) — a TrustSuggestion
@@ -3496,8 +3581,7 @@ mod tests {
             notif.notification_type,
             gyre_common::NotificationType::TrustSuggestion
         );
-        let body: serde_json::Value =
-            serde_json::from_str(notif.body.as_deref().unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_str(notif.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["kind"], "workspace_invitation");
         let accept = body["accept_url"].as_str().unwrap();
         assert!(
@@ -3518,9 +3602,7 @@ mod tests {
                     .uri("/api/v1/tenant/invite")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"email": email}).to_string(),
-                    ))
+                    .body(Body::from(serde_json::json!({"email": email}).to_string()))
                     .unwrap(),
             )
             .await
@@ -3554,13 +3636,11 @@ mod tests {
             .clone()
             .oneshot(
                 builder
-                    .body(Body::from(
-                        if body.is_null() {
-                            String::new()
-                        } else {
-                            body.to_string()
-                        },
-                    ))
+                    .body(Body::from(if body.is_null() {
+                        String::new()
+                    } else {
+                        body.to_string()
+                    }))
                     .unwrap(),
             )
             .await
@@ -3607,7 +3687,10 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/tenant/invite", post(invite_to_tenant))
-            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
             .with_state(state.clone());
 
         let (status, json) = {
@@ -3656,8 +3739,7 @@ mod tests {
         assert_eq!(json["mode"], "linked", "the existing SSO account is linked");
         assert_eq!(json["user_id"], "sso-alice-1");
         assert_eq!(
-            json["username"],
-            "sso-alice",
+            json["username"], "sso-alice",
             "the linked account keeps its immutable handle"
         );
 
@@ -3694,7 +3776,8 @@ mod tests {
             .unwrap();
         assert_eq!(linked.global_role, GlobalRole::Member);
         assert_eq!(
-            linked.roles, vec![UserRole::Developer],
+            linked.roles,
+            vec![UserRole::Developer],
             "invited Member role applied to the linked account"
         );
         // The link must not have disturbed the SSO identity binding.
@@ -3711,7 +3794,10 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/tenant/invite", post(invite_to_tenant))
-            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
             .with_state(state.clone());
 
         let (status, json) = http_invite(&app, "bob@acme.com").await;
@@ -3766,7 +3852,10 @@ mod tests {
         state.tenant_invitations.create(&t2_inv).await.unwrap();
         let (status, json) = http_accept(&app, "t2-token", serde_json::Value::Null).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["username"], "bob-3", "global uniqueness across tenants");
+        assert_eq!(
+            json["username"], "bob-3",
+            "global uniqueness across tenants"
+        );
     }
 
     /// Review F3: an explicit username must satisfy the URL-safe handle
@@ -3790,7 +3879,10 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/tenant/invite", post(invite_to_tenant))
-            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
             .with_state(state.clone());
         let (status, json) = http_invite(&app, "carol@example.com").await;
         assert_eq!(status, StatusCode::CREATED);
@@ -3804,7 +3896,12 @@ mod tests {
             .to_string();
 
         // Not URL-safe → 400, invitation rolled back to Pending.
-        let (status, _) = http_accept(&app, &token, serde_json::json!({"username": "Carol Smith!!"})).await;
+        let (status, _) = http_accept(
+            &app,
+            &token,
+            serde_json::json!({"username": "Carol Smith!!"}),
+        )
+        .await;
         assert_eq!(
             status,
             StatusCode::BAD_REQUEST,
@@ -3867,7 +3964,11 @@ mod tests {
         let other_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
         state
             .api_keys
-            .create(&crate::auth::hash_api_key(&other_key), &other_admin.id, "test")
+            .create(
+                &crate::auth::hash_api_key(&other_key),
+                &other_admin.id,
+                "test",
+            )
             .await
             .unwrap();
         let mut other_user = User::new(
@@ -3913,10 +4014,7 @@ mod tests {
                 "/api/v1/tenant/invitations/:id",
                 delete(revoke_tenant_invitation),
             )
-            .route(
-                "/api/v1/workspaces/:id/invite",
-                post(invite_to_workspace),
-            )
+            .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
             .route(
                 "/api/v1/workspaces/:id/invite/accept",
                 post(accept_my_workspace_invitation),
@@ -3935,9 +4033,17 @@ mod tests {
         // role — passes every role gate) vs the "other"-tenant workspace:
         // the tenant containment guard must be the thing that fires.
         let probes = [
-            ("POST", "/api/v1/workspaces/ws-other/invite", Some(serde_json::json!({"user_id": "other-user-1", "role": "Developer"}))),
+            (
+                "POST",
+                "/api/v1/workspaces/ws-other/invite",
+                Some(serde_json::json!({"user_id": "other-user-1", "role": "Developer"})),
+            ),
             ("GET", "/api/v1/workspaces/ws-other/invitations", None),
-            ("DELETE", "/api/v1/workspaces/ws-other/invitations/ws-inv-other", None),
+            (
+                "DELETE",
+                "/api/v1/workspaces/ws-other/invitations/ws-inv-other",
+                None,
+            ),
             ("POST", "/api/v1/workspaces/ws-other/invite/accept", None),
         ];
         for (method, uri, body) in probes {
@@ -4126,7 +4232,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/workspaces/ws-cap/invitations/{}", first.id))
+                    .uri(format!(
+                        "/api/v1/workspaces/ws-cap/invitations/{}",
+                        first.id
+                    ))
                     .header("authorization", auth.clone())
                     .body(Body::empty())
                     .unwrap(),
@@ -4180,7 +4289,11 @@ mod tests {
             created_at: now_secs() - 100,
             accepted_at: None,
         };
-        state.workspace_invitations.create(&invitation).await.unwrap();
+        state
+            .workspace_invitations
+            .create(&invitation)
+            .await
+            .unwrap();
 
         let app = Router::new()
             .route(
@@ -4207,13 +4320,11 @@ mod tests {
             .unwrap();
         assert_eq!(stored.status, InvitationStatus::Expired);
         // No membership was activated by the expired acceptance.
-        assert!(
-            state
-                .workspace_memberships
-                .find_by_user_and_workspace(&invitee.id, &Id::new("ws-exp"))
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(state
+            .workspace_memberships
+            .find_by_user_and_workspace(&invitee.id, &Id::new("ws-exp"))
+            .await
+            .unwrap()
+            .is_none());
     }
 }

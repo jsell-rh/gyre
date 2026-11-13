@@ -560,17 +560,9 @@ impl ResourceResolver {
                 // token bypasses ABAC and workspace-role conditions are not
                 // expressible in the global policy set.
                 RouteResourceMapping::api("/api/v1/tenant/invite", "tenant", Some("write")),
-                RouteResourceMapping::api(
-                    "/api/v1/tenant/invite/bulk",
-                    "tenant",
-                    Some("write"),
-                ),
+                RouteResourceMapping::api("/api/v1/tenant/invite/bulk", "tenant", Some("write")),
                 RouteResourceMapping::api("/api/v1/tenant/invitations", "tenant", None),
-                RouteResourceMapping::api(
-                    "/api/v1/tenant/invitations/policy",
-                    "tenant",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/tenant/invitations/policy", "tenant", None),
                 RouteResourceMapping::api(
                     "/api/v1/tenant/invitations/:id",
                     "tenant",
