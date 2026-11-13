@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Token Scoping"
-commits: ["c709b94ea17612d30a4437e1e8e407256293b2ef", "f3beafe789e921436efa8603d7c6412ebaf84502", "318f1fd0322c68304ae134434f74e57514449d82", "33468526f46ca5eb4dcf4afbd473d9960495ee0e", "25fc7ab37182951b5f63a09498e00f03f966ba35", "d500a34a88be3b0e0a1c967fc82b98d58b34f12b", "371bed863d11d347ac239d99921ea2ef7bed1b37", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0"]
+commits: ["c709b94ea17612d30a4437e1e8e407256293b2ef", "f3beafe789e921436efa8603d7c6412ebaf84502", "318f1fd0322c68304ae134434f74e57514449d82", "33468526f46ca5eb4dcf4afbd473d9960495ee0e", "25fc7ab37182951b5f63a09498e00f03f966ba35", "d500a34a88be3b0e0a1c967fc82b98d58b34f12b", "371bed863d11d347ac239d99921ea2ef7bed1b37", "78ac5cafce92ae65451b5ed3ee95ba9181d8265d", "894f7175715c63960f7b25dda9d2188b744c6ec0", "d4e3d9d92b46cdaabee95320d90755b2142a5dbf"]
 ---
 
 ## Spec Excerpt
@@ -83,18 +83,24 @@ Read `specs/system/platform-model.md` §1 Token Scoping for the full spec. Curre
 
 ## Shipped
 
-`platform-model.md` §1 Token Scoping is implemented end-to-end in production code on this branch. This round repairs the single review finding against candidate `248f6c86`.
+`platform-model.md` §1 Token Scoping is implemented end-to-end in production code on this branch. This round rebase-repairs the branch onto base `6f5a631c` (task-195's manifest-driven gate selection), which landed overlapping changes on the same token-scoping surfaces.
 
 ### §1 Token Scoping implementation
 
 `AgentJwtClaims` (`gyre-server/src/auth.rs`) carries `tenant_id`, `workspace_id`, `repo_id` (None on workspace orchestrators), `persona`, `attestation_level`, `scope: Vec<String>`, and workload claims (`wl_image_hash`), minted with full hierarchy context via `mint_with_workload` from `spawn.rs` / `orchestrator.rs` / `stale_agents.rs` / `signal_chain.rs` / `ralph_loop.rs`: worker agents get `["repo:{repo_name}:write"]`, workspace orchestrators get `["workspace:{ws}:read", "workspace:{ws}:spawn"]`, repo orchestrators get `["repo:{name}:write", "repo:{name}:spawn"]`. `AuthenticatedAgent` mirrors all hierarchy fields from signature-verified claims. `validate_tool_scope` in `mcp.rs` runs before dispatch on every `tools/call` for scoped tokens and rejects every mismatch with a `PERMISSION_DENIED` JSON-RPC error naming the target (no silent allow; unresolvable targets fail closed). Worker-tool targets are bound to the token's scope and the `list_mrs` fallback clamped to it.
 
-### This round: review-finding repair (`c709b94e`)
+### This round: rebase repair onto 6f5a631c (`d4e3d9d9`)
 
-The review of candidate `248f6c86` found one defect: a test-target compile error introduced by `f3beafe7` at `gate_executor.rs:1897` — `agent_review_context_resolves_blob_pinned_spec_ref` passed the owned `Arc<AppState>` returned by `test_state()` to `ensure_workspace_row(&Arc<AppState>, ...)`, error[E0308], so `cargo test -p gyre-server --lib` could not build. The implementer's recorded evidence (`cargo check -p gyre-server --lib`) does not type-check `#[cfg(test)]` code. Fixed by borrowing: `ensure_workspace_row(&state, ...)`. No production code changed this round.
+Both the task-130 branch and the new base changed the same gate/review token surfaces. The merge (`d4e3d9d9`) resolves the convergence without weakening either side:
+
+- `merge_requests.rs` `submit_review`: kept task-195's reviewer-identity binding (every agent-token principal submits under its own verified subject; human callers only under their own identity or Admin), with the `review:submit` scope check switched from the base's raw JSON string-claim read to the §1 extractor-derived `Vec<String>` `auth.scope` — an array claim read as a string silently fails open.
+- `gate_executor.rs` `spawn_manifest_gate_agent` (task-195's manifest-gate path): its `mint_scoped` call now resolves the gated MR's workspace **fail-closed** for the `tenant_id` claim (unresolvable workspace aborts the spawn; never a fabricated literal) and passes the gate persona slug — the §1 claims shape on the new gate path.
+- Tests the base added against the old 6-arg/5-arg mint signatures (`task134_review_probe.rs` inbox-route probe, `merge_requests.rs` forger-identity test) updated to the §1 signatures; the manifest-gate token test asserts the `Vec<String>` scope form.
+
+No exemption files were touched; `scripts/check-fabricated-scope-defaults.sh`, `check-abac-route-registry.sh`, `check-dead-message-kinds.sh`, `check-mem-port-contracts.sh`, `check-mcp-write-tools.sh`, `check-arch.sh`, and `check-task-commit-attribution.sh` all pass at the repair head.
 
 ### Test evidence
 
-This sandbox follows the 4 GiB budget rule (no gyre-server test binaries here). At repair head `c709b94e`: `cargo check -p gyre-server --lib --tests` exit 0 (was exit 101 pre-repair, error[E0308] at gate_executor.rs:1897:30 — logs in `/tmp/stage/review-evidence/`); `cargo fmt --check -p gyre-server` clean.
+This sandbox follows the 4 GiB budget rule (no gyre-server test binaries here). At repair head `d4e3d9d9`: `cargo check -p gyre-server --lib --tests` exit 0; `cargo fmt -p gyre-server --check` clean (logs in `/tmp/stage/review-evidence/`).
 
-The independent verifier must run: `cargo test --all` (the acceptance criterion), in particular `cargo test -p gyre-server --lib` slices `api::orchestrator::tests::workspace_orchestrator_spawn_and_scoped_jwt`, `gate_executor::tests::agent_review_context_resolves_blob_pinned_spec_ref`, and `gate_executor::tests::validation_token_ttl_covers_configured_gate_timeout`, plus the §1 slices from prior rounds (mcp/auth/abac token-scoping tests, `--test search_wiring`, `--test task134_review_probe`), `cargo test -p gyre-adapters --lib`, and `cargo test -p gyre-domain`.
+The independent verifier must run `cargo test --all` (the acceptance criterion), in particular `cargo test -p gyre-server --lib` slices `api::orchestrator::tests::workspace_orchestrator_spawn_and_scoped_jwt`, `gate_executor::tests::agent_review_context_resolves_blob_pinned_spec_ref`, `gate_executor::tests::validation_token_ttl_covers_configured_gate_timeout`, `gate_executor::tests::gate_agent_token_is_scoped_reviewer_jwt`, `gate_executor::tests::manifest-gate` slices, the §1 slices from prior rounds (mcp/auth/abac token-scoping tests, `--test search_wiring`, `--test task134_review_probe`, including `scoped_review_token_cannot_read_agent_inbox_route` and `submit_review_binds_agent_token_caller_to_own_identity` updated this round), `cargo test -p gyre-adapters --lib`, and `cargo test -p gyre-domain`.
