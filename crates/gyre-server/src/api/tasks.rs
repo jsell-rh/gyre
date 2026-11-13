@@ -235,6 +235,8 @@ pub async fn create_task(
             },
             tenant_id: None,
             facets,
+            // Entity's own update time — the since:/until: facets filter on it.
+            updated_at: Some(task.updated_at as i64),
         },
     )
     .await;

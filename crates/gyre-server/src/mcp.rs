@@ -328,11 +328,11 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "gyre_search",
-                "description": "Full-text search across tasks, agents, MRs, and specs. Returns matching entities ranked by relevance.",
+                "description": "Full-text search across tasks, agents, MRs, and specs. Supports the query language (search.md §Query Language): space-separated terms (AND), \"quoted phrases\", and facet filters — type:, workspace:, repo:, status:, priority:, label:, since:, until: (e.g. 'identity \"merge queue\" type:spec status:approved since:7d'; multiple values for one facet compose with OR). The entity_type and workspace_id args are fallback shortcuts; type:/workspace: facets in q take precedence. Returns matching entities ranked by relevance.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "q": { "type": "string", "description": "Search query" },
+                        "q": { "type": "string", "description": "Search query — supports the query language: terms, \"quoted phrases\", and type:/workspace:/repo:/status:/priority:/label:/since:/until: facets" },
                         "entity_type": {
                             "type": "string",
                             "enum": ["task", "agent", "mr", "spec"],
@@ -1992,8 +1992,20 @@ async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent
         Some(q) => q.to_string(),
         None => return tool_error("missing required field: q"),
     };
-    let entity_type = get_str(args, "entity_type").map(|s| s.to_string());
-    let workspace_id = get_str(args, "workspace_id").map(|s| s.to_string());
+    // §Query Language: parse `q` (terms, quoted phrases, facets) — the same
+    // grammar as GET /api/v1/search. entity_type / workspace_id args are
+    // fallback shortcuts; query-string facets take precedence.
+    let parsed = gyre_ports::search::parse_query(&q);
+    let entity_type = if parsed.facets.contains_key("type") {
+        None
+    } else {
+        get_str(args, "entity_type").map(|s| s.to_string())
+    };
+    let workspace_id = if parsed.facets.contains_key("workspace") {
+        None
+    } else {
+        get_str(args, "workspace_id").map(|s| s.to_string())
+    };
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     // §Access Scoping: scope comes from the agent's authenticated token
@@ -2005,6 +2017,7 @@ async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent
         .search
         .search(gyre_ports::search::SearchQuery {
             query: q.clone(),
+            parsed,
             entity_type,
             workspace_id,
             limit,
@@ -3883,6 +3896,7 @@ mod tests {
                 repo_id: repo.map(|r| r.to_string()),
                 tenant_id: Some("default".to_string()),
                 facets: std::collections::HashMap::new(),
+                updated_at: None,
             };
         state
             .search
@@ -4017,6 +4031,106 @@ mod tests {
             .unwrap()
             .contains("Created task"));
         assert!(!json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_search_query_language() {
+        // §Query Language through the MCP tool: quoted phrases, facet
+        // filters, and facet-over-arg precedence (task-154).
+        use std::collections::HashMap;
+        let state = test_state();
+        let mut in_progress = HashMap::new();
+        in_progress.insert("status".to_string(), "in_progress".to_string());
+        state
+            .search
+            .index(gyre_ports::search::SearchDocument {
+                entity_type: "task".to_string(),
+                entity_id: "t-1".to_string(),
+                title: "Merge queue rules".to_string(),
+                body: "the merge queue ordering rules".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                // Caller is the global test token (Admin, tenant "default") —
+                // §Access Scoping makes the tenant boundary fail-closed, so
+                // the docs must carry the caller's tenant to be visible.
+                tenant_id: Some("default".to_string()),
+                facets: in_progress,
+                updated_at: None,
+            })
+            .await
+            .unwrap();
+        let mut done = HashMap::new();
+        done.insert("status".to_string(), "done".to_string());
+        state
+            .search
+            .index(gyre_ports::search::SearchDocument {
+                entity_type: "task".to_string(),
+                entity_id: "t-2".to_string(),
+                title: "Merge separately".to_string(),
+                body: "merge the queue then ordering".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                tenant_id: Some("default".to_string()),
+                facets: done,
+                updated_at: None,
+            })
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state);
+
+        // Quoted phrase + term: only the adjacent-phrase doc.
+        let (status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": { "q": "\"merge queue\" ordering" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Merge queue rules"),
+            "phrase match missing: {text}"
+        );
+        assert!(
+            !text.contains("Merge separately"),
+            "non-phrase match leaked: {text}"
+        );
+
+        // Facet filter narrows; a type: facet overrides the entity_type arg.
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_search",
+                    "arguments": {
+                        "q": "ordering type:task status:done",
+                        "entity_type": "mr"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Merge separately"),
+            "facet-filtered match missing: {text}"
+        );
+        assert!(
+            !text.contains("Merge queue rules"),
+            "facet excluded doc leaked: {text}"
+        );
     }
 
     #[tokio::test]

@@ -146,6 +146,8 @@ pub async fn create_agent(
             repo_id: agent.repo_id.as_ref().map(|r| r.to_string()),
             tenant_id: None,
             facets,
+            // Entity's own update time — the since:/until: facets filter on it.
+            updated_at: Some(now as i64),
         },
     )
     .await;
