@@ -3,7 +3,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
-  import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { computeTimelineDeltaStats, computeTimelineGhostOverlays, createTimelineHistoryFetcher, resolveScrubTimestamp } from '../lib/timeline-utils.js';
   import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
   import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
@@ -1884,10 +1884,68 @@
   let timelineScrubActive = $state(false);
   let timelineScrubIndex = $state(-1); // index into graphTimeline array, -1 = current
 
-  // When timeline scrub is active, compute filtered nodes/edges to show state at that point
+  // The timeline array the scrubber scrubs over: the full insights-panel
+  // timeline once loaded, else the liveness slice loaded at repo selection.
+  let timelineArray = $derived(Array.isArray(graphTimeline) ? graphTimeline : (Array.isArray(livenessTimeline) ? livenessTimeline : []));
+  // Scrub position as unix epoch seconds (null = present / unknown).
+  let timelineScrubTimestamp = $derived(resolveScrubTimestamp(timelineArray, timelineScrubIndex));
+
+  // Server point-in-time graph (GET /repos/:id/graph?at=) for the current
+  // scrub position: { at, graph }. Set by the debounced fetch effect below;
+  // null while pending, on failure, or when time travel is off — the
+  // client-side first_seen_at filter below is the instant fallback.
+  let timelineHistoricalGraph = $state(null);
+  let timelineHistoryFetcher = null;   // debounced ?at= fetcher (per repo)
+  let timelineHistoryFetcherFor = '';  // repoId the current fetcher is bound to
+
+  $effect(() => {
+    // The "Now" position (last index) is the present — no historical fetch.
+    if (
+      !timelineScrubActive ||
+      timelineScrubTimestamp == null ||
+      !selectedRepoId ||
+      timelineScrubIndex >= timelineArray.length - 1
+    ) {
+      timelineHistoricalGraph = null;
+      return;
+    }
+    const repoId = selectedRepoId;
+    const at = timelineScrubTimestamp;
+    if (timelineHistoryFetcherFor !== repoId) {
+      timelineHistoryFetcher?.cancel();
+      timelineHistoryFetcher = createTimelineHistoryFetcher((t) => api.repoGraphAt(repoId, t));
+      timelineHistoryFetcherFor = repoId;
+    }
+    const fetcher = timelineHistoryFetcher;
+    fetcher
+      .request(at)
+      .then((g) => {
+        // null = superseded by a newer position or cancelled — keep fallback.
+        // The position check keeps a late out-of-order response for an
+        // older position from clobbering the newer position's pinned
+        // graph (the fetcher already guarantees `g` is the graph for `at`).
+        if (g?.nodes && selectedRepoId === repoId && timelineScrubActive && at === timelineScrubTimestamp) {
+          timelineHistoricalGraph = { at, graph: g };
+        }
+      })
+      .catch(() => { /* fetch failed — keep the client-side filter */ });
+  });
+
+  // When timeline scrub is active, compute filtered nodes/edges to show state at that point.
+  // The server's ?at= reconstruction (which also resurrects nodes soft-deleted after the
+  // scrub time — invisible to the current graph) replaces the client-side filter once the
+  // debounced fetch lands for this exact position.
   let timelineFilteredGraph = $derived.by(() => {
-    if (!timelineScrubActive || timelineScrubIndex < 0 || !graphTimeline?.length || !graph?.nodes?.length) return null;
-    const delta = graphTimeline[timelineScrubIndex];
+    // The "Now" position (last index) shows the current graph — no ghosts.
+    if (!timelineScrubActive || timelineScrubIndex < 0 || timelineScrubIndex >= timelineArray.length - 1 || !timelineArray.length || !graph?.nodes?.length) return null;
+    if (
+      timelineHistoricalGraph &&
+      timelineHistoricalGraph.at === timelineScrubTimestamp &&
+      timelineHistoricalGraph.graph?.nodes
+    ) {
+      return timelineHistoricalGraph.graph;
+    }
+    const delta = timelineArray[timelineScrubIndex];
     if (!delta?.timestamp) return null;
     const cutoff = typeof delta.timestamp === 'number' ? delta.timestamp : Math.floor(new Date(delta.timestamp).getTime() / 1000);
     // Filter to nodes that existed at or before the cutoff time
@@ -2003,7 +2061,7 @@
     return computeTimelineDeltaStats({
       graph,
       timelineFilteredGraph,
-      timeline: graphTimeline,
+      timeline: timelineArray,
       scrubIndex: timelineScrubIndex,
     });
   });
@@ -2017,7 +2075,7 @@
     return computeTimelineGhostOverlays({
       graph,
       timelineFilteredGraph,
-      timeline: graphTimeline,
+      timeline: timelineArray,
       scrubIndex: timelineScrubIndex,
     });
   });
@@ -2029,6 +2087,33 @@
       : ghostOverlays
   );
 
+  // ── Key moment narrative (system-explorer.md §6) ──────────────────────
+  // Clicking a key moment marker surfaces the delta's grounded narrative
+  // ("what changed and why") in a panel above the canvas.
+  let timelineMomentDetail = $state(null);
+
+  // ── Reconciliation key moments (system-explorer.md §6) ────────────────
+  // Workspace reconciliation_completed messages (persona v3 → v4 events),
+  // lazy-loaded the first time time travel is activated for a workspace
+  // (Vision Principle 2: don't fetch what the user hasn't asked to see).
+  let reconciliationEvents = $state([]);
+  let reconciliationEventsLoadedFor = '';
+  $effect(() => {
+    if (!timelineScrubActive) return;
+    const wsId = scope?.workspaceId;
+    if (!wsId || reconciliationEventsLoadedFor === wsId) return;
+    reconciliationEventsLoadedFor = wsId;
+    api.workspaceMessages(wsId, { kind: 'reconciliation_completed', limit: 100 })
+      .then((msgs) => {
+        if (scope?.workspaceId !== wsId) return; // stale
+        reconciliationEvents = Array.isArray(msgs) ? msgs : [];
+      })
+      .catch(() => {
+        // Endpoint unavailable — allow a retry on the next toggle.
+        if (scope?.workspaceId === wsId) reconciliationEventsLoadedFor = '';
+      });
+  });
+
   // Reset insights on repo change; lazy-load when panel expanded (Vision Principle 2:
   // "Right Context, Not More Context" — don't fetch data the user hasn't asked to see)
   $effect(() => {
@@ -2038,6 +2123,8 @@
     graphTypes = null;
     graphModules = null;
     graphTimeline = null;
+    timelineHistoricalGraph = null;
+    timelineMomentDetail = null;
   });
 
   // Lazy-load insights data only when the panel is expanded
@@ -2538,6 +2625,33 @@
                   {/if}
                 </div>
               {/if}
+              {#if timelineScrubActive && timelineMomentDetail}
+                <!-- Key moment narrative (system-explorer.md §6): click a key
+                     moment → the delta panel shows what changed and why. -->
+                <div class="timeline-moment-narrative" role="status" aria-label="Key moment narrative">
+                  <div class="timeline-moment-header">
+                    <span class="timeline-moment-title">Key moment</span>
+                    {#if timelineMomentDetail.timestamp}
+                      <span class="timeline-moment-date">{new Date(typeof timelineMomentDetail.timestamp === 'number' ? timelineMomentDetail.timestamp * 1000 : timelineMomentDetail.timestamp).toLocaleDateString()}</span>
+                    {/if}
+                    {#if timelineMomentDetail.spec_ref}
+                      <code class="timeline-moment-ref">{timelineMomentDetail.spec_ref}</code>
+                    {/if}
+                    <button
+                      class="timeline-moment-close"
+                      onclick={() => { timelineMomentDetail = null; }}
+                      title="Dismiss"
+                      type="button"
+                      aria-label="Dismiss key moment narrative"
+                    >×</button>
+                  </div>
+                  {#if timelineMomentDetail.narrative}
+                    <p class="timeline-moment-text">{timelineMomentDetail.narrative}</p>
+                  {:else}
+                    <p class="timeline-moment-text timeline-moment-empty">No narrative recorded for this moment.</p>
+                  {/if}
+                </div>
+              {/if}
               {#if explorerViewMode === 'boundary'}
               <!-- In-view filter panel row (ui-navigation.md §3): collapsible
                    200px left panel INSIDE the Architecture content area —
@@ -2645,9 +2759,10 @@
                 {highlightedSpanId}
                 focusRequest={traceFocusRequest}
                 windowEscape={false}
-                timeline={graphTimeline ?? livenessTimeline ?? []}
+                timeline={timelineArray}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
+                timelineReconciliationEvents={reconciliationEvents}
                 {gateRecords}
                 riskByNode={explorerLens === 'evaluative' ? riskByNode : {}}
                 riskEntries={explorerLens === 'evaluative' ? riskEntries : []}
@@ -2656,11 +2771,11 @@
                 filterConcepts={activeFilterConcepts}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
-                  if (!timelineScrubActive) timelineScrubIndex = -1;
-                  else if (graphTimeline?.length) timelineScrubIndex = graphTimeline.length - 1;
+                  if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
+                  else if (timelineArray.length) timelineScrubIndex = timelineArray.length - 1;
                 }}
                 onTimelineScrub={(idx) => { timelineScrubIndex = idx; }}
-                onTimelineMarkerClick={(_delta) => {}}
+                onTimelineMarkerClick={(delta) => { timelineMomentDetail = delta; }}
                 {timelineDeltaStats}
               />
               {/if}
@@ -2827,7 +2942,7 @@
                             class:active={timelineScrubActive}
                             onclick={() => {
                               timelineScrubActive = !timelineScrubActive;
-                              if (!timelineScrubActive) timelineScrubIndex = -1;
+                              if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
                               else timelineScrubIndex = graphTimeline.length - 1;
                             }}
                             type="button"
@@ -3735,6 +3850,42 @@
   .delta-add { color: #4ade80; font-weight: 600; }
   .delta-remove { color: #f87171; font-weight: 600; }
   .delta-modify { color: #fbbf24; font-weight: 600; }
+
+  /* ── Key moment narrative panel (system-explorer.md §6) ─────────────── */
+  .timeline-moment-narrative {
+    display: flex; flex-direction: column; gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated, #16161f);
+    border: 1px solid var(--color-border, #334155);
+    border-left: 3px solid #a855f7;
+    border-radius: var(--radius, 8px);
+    margin-bottom: var(--space-2);
+  }
+  .timeline-moment-header {
+    display: flex; align-items: center; gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+  .timeline-moment-title {
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+    color: #a855f7; font-size: var(--text-xs);
+  }
+  .timeline-moment-date {
+    color: var(--color-text-muted); font-family: var(--font-mono);
+  }
+  .timeline-moment-ref {
+    font-family: var(--font-mono); font-size: var(--text-xs);
+    color: var(--color-text-secondary, #94a3b8);
+  }
+  .timeline-moment-close {
+    margin-left: auto; background: transparent; border: none; color: var(--color-text-muted);
+    font-size: 14px; cursor: pointer; padding: 0 var(--space-1); border-radius: var(--radius-sm);
+  }
+  .timeline-moment-close:hover { color: var(--color-text-primary, #e2e8f0); background: var(--color-surface, #1e293b); }
+  .timeline-moment-text {
+    margin: 0; font-size: var(--text-sm); line-height: 1.5;
+    color: var(--color-text-primary, #e2e8f0);
+  }
+  .timeline-moment-empty { color: var(--color-text-muted); font-style: italic; }
 
   /* ── Back to repos button (workspace scope) ───────────────────────── */
   .back-to-repos-btn {

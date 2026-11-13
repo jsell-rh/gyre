@@ -38,8 +38,73 @@ use tracing::{info, warn};
 use crate::api::meta_specs::{MetaSpecSet, TenantMetaSpecSet};
 use crate::AppState;
 
+/// Current wall-clock in milliseconds. Used for wave ids: successive waves
+/// can start within the same second (tests, fast successive rollouts), and
+/// the wave id must stay unique and orderable per wave.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// Label attached to every reconciliation task (§6 flow step 4).
 pub const RECONCILIATION_LABEL: &str = "meta-spec-reconciliation";
+
+/// Prefix of the structured provenance label pinned to each reconciliation
+/// task at creation: the changed meta-spec (name and version) the task
+/// aligns code to. Read back by `maybe_emit_reconciliation_completed` to
+/// enrich the `reconciliation_completed` payload with what the wave
+/// changed (system-explorer.md §6 key-moment narrative needs it).
+const META_SPEC_LABEL_PREFIX: &str = "meta-spec:";
+
+/// Render a meta-spec provenance label (`meta-spec:{name}@v{version}`).
+fn meta_spec_label(name: &str, version: u32) -> String {
+    format!("{META_SPEC_LABEL_PREFIX}{name}@v{version}")
+}
+
+/// Parse a meta-spec provenance label back into `(name, version)`. Only
+/// labels written by [`meta_spec_label`] parse; anything else (including
+/// `RECONCILIATION_LABEL`, which shares no prefix) yields `None`.
+fn parse_meta_spec_label(label: &str) -> Option<(&str, u32)> {
+    let rest = label.strip_prefix(META_SPEC_LABEL_PREFIX)?;
+    let (name, version) = rest.rsplit_once("@v")?;
+    let version = version.parse().ok()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, version))
+}
+
+/// Prefix of the structured wave-identity label pinned to each
+/// reconciliation task at creation: the trigger time of the wave the task
+/// belongs to. A rolling rollout's follow-up batches are created later
+/// (with a fresh `now`), so creation time alone cannot group a wave's
+/// tasks; the wave id lets `maybe_emit_reconciliation_completed` scope its
+/// payload to the CURRENT wave instead of the union of every wave that
+/// ever ran in the workspace.
+const RECON_WAVE_LABEL_PREFIX: &str = "recon-wave:";
+
+/// Render a wave-identity label (`recon-wave:{wave_id}`).
+fn recon_wave_label(wave_id: u64) -> String {
+    format!("{RECON_WAVE_LABEL_PREFIX}{wave_id}")
+}
+
+/// Parse a wave-identity label back into its wave id. Only labels written
+/// by [`recon_wave_label`] parse.
+fn parse_recon_wave_label(label: &str) -> Option<u64> {
+    label.strip_prefix(RECON_WAVE_LABEL_PREFIX)?.parse().ok()
+}
+
+/// The wave a task belongs to, from its wave-identity label. `None` for
+/// tasks created before the label existed (their specs cannot be
+/// attributed to a wave and are left out of wave payloads).
+fn task_wave_id(t: &gyre_domain::Task) -> Option<u64> {
+    t.labels
+        .iter()
+        .filter_map(|l| parse_recon_wave_label(l))
+        .max()
+}
 
 /// Drift-review tasks created by the conformance sweep use this label.
 pub const DRIFT_REVIEW_LABEL: &str = "meta-spec-drift-review";
@@ -174,6 +239,32 @@ pub async fn maybe_emit_reconciliation_completed(state: &Arc<AppState>, workspac
         duration_secs,
         "reconciliation: wave complete — all reconciliation tasks terminal"
     );
+    // What the wave changed: the meta-spec provenance labels materialized
+    // on the wave's tasks at creation (name + version), scoped to the
+    // CURRENT wave by its identity label. Prior waves' terminal tasks
+    // carry older wave ids and must not bleed their specs into this
+    // wave's payload; tasks predating the labels (either kind) attribute
+    // to no wave and are left out, leaving consumers the task_count
+    // fallback. Sorted and deduplicated for a stable payload.
+    let changed_specs: Vec<serde_json::Value> = {
+        let current_wave = wave.iter().filter_map(|t| task_wave_id(t)).max();
+        let mut entries: std::collections::BTreeSet<(String, u32)> =
+            std::collections::BTreeSet::new();
+        for t in &wave {
+            if task_wave_id(t) != current_wave {
+                continue;
+            }
+            for label in &t.labels {
+                if let Some((name, version)) = parse_meta_spec_label(label) {
+                    entries.insert((name.to_string(), version));
+                }
+            }
+        }
+        entries
+            .into_iter()
+            .map(|(name, version)| serde_json::json!({ "name": name, "version": version }))
+            .collect()
+    };
     crate::emit_reconciliation_completed(
         state,
         workspace_id.clone(),
@@ -182,6 +273,7 @@ pub async fn maybe_emit_reconciliation_completed(state: &Arc<AppState>, workspac
             "wave_started_at": wave_started_at,
             "task_count": task_count,
             "duration_secs": duration_secs,
+            "specs": changed_specs,
         })),
     )
     .await;
@@ -383,6 +475,11 @@ pub async fn run_reconciliation(
     }
 
     let now = crate::api::now_secs();
+    // Wave identity for this run: millisecond trigger time, shared by every
+    // task this wave creates (including deferred rolling batches, which
+    // persist it) and read back by the completion event to scope its
+    // payload to this wave.
+    let wave_id = now_millis();
     let ws_id = workspace_id.clone();
 
     info!(
@@ -491,6 +588,7 @@ pub async fn run_reconciliation(
                 title: title.clone(),
                 spec_path: ms.name.clone(),
                 description: description.clone(),
+                meta_version: ms.version,
             });
         }
     }
@@ -516,6 +614,7 @@ pub async fn run_reconciliation(
                     &cand,
                     task_priority.clone(),
                     delegation,
+                    wave_id,
                     now,
                 )
                 .await
@@ -535,8 +634,9 @@ pub async fn run_reconciliation(
             let mut iter = candidates.into_iter();
             let first_batch: Vec<ReconciliationCandidate> =
                 iter.by_ref().take(batch_size).collect();
-            let remaining: Vec<PendingRolloutTask> =
-                iter.map(PendingRolloutTask::from_candidate).collect();
+            let remaining: Vec<PendingRolloutTask> = iter
+                .map(|c| PendingRolloutTask::from_candidate(c, wave_id))
+                .collect();
 
             // (repo_id, title) of the tasks this wave just put in flight:
             // any stored deferred entry for the same work is consumed — it
@@ -549,6 +649,7 @@ pub async fn run_reconciliation(
                     &cand,
                     task_priority.clone(),
                     true,
+                    wave_id,
                     now,
                 )
                 .await
@@ -645,6 +746,11 @@ struct ReconciliationCandidate {
     title: String,
     spec_path: String,
     description: String,
+    /// The changed meta-spec's version at trigger time. Materialized onto
+    /// the created task (provenance label) so the wave's completion event
+    /// can name what changed without depending on the registry still
+    /// holding that version when the wave finishes.
+    meta_version: u32,
 }
 
 /// Create one reconciliation task from a candidate.
@@ -659,6 +765,7 @@ async fn create_reconciliation_task(
     cand: &ReconciliationCandidate,
     priority: TaskPriority,
     delegation: bool,
+    wave_id: u64,
     now: u64,
 ) -> bool {
     let task_id = Id::new(uuid::Uuid::new_v4().to_string());
@@ -666,7 +773,21 @@ async fn create_reconciliation_task(
     // §7: task priority is the rollout policy's ReconciliationPriority
     // mapped onto the Task priority the repo orchestrator orders by.
     task.priority = priority;
-    task.labels = vec![RECONCILIATION_LABEL.to_string(), "auto-created".to_string()];
+    task.labels = vec![
+        RECONCILIATION_LABEL.to_string(),
+        // Wave identity: the trigger time of the wave this task belongs to.
+        // Follow-up rolling batches are created later (fresh `now`), so the
+        // wave id is threaded through the persisted pending state rather
+        // than taken from task creation time.
+        recon_wave_label(wave_id),
+        // Provenance for the wave's completion event: the changed meta-spec
+        // (name + version) this task aligns code to, materialized at
+        // creation like the title so `maybe_emit_reconciliation_completed`
+        // can name what the wave changed without a registry lookup that
+        // could since have advanced to a newer version.
+        meta_spec_label(&cand.spec_path, cand.meta_version),
+        "auto-created".to_string(),
+    ];
     task.description = Some(cand.description.clone());
     task.workspace_id = ws_id.clone();
     task.repo_id = cand.repo_id.clone();
@@ -755,15 +876,26 @@ struct PendingRolloutTask {
     title: String,
     spec_path: String,
     description: String,
+    /// Version of the changed meta-spec when the wave started.
+    /// `serde(default)` keeps batches persisted before these fields existed
+    /// deserializable; such tasks carry no provenance labels.
+    #[serde(default)]
+    meta_version: u32,
+    /// Trigger time of the wave this deferred task belongs to, so batches
+    /// created later still carry the wave's identity label.
+    #[serde(default)]
+    wave_id: u64,
 }
 
 impl PendingRolloutTask {
-    fn from_candidate(c: ReconciliationCandidate) -> Self {
+    fn from_candidate(c: ReconciliationCandidate, wave_id: u64) -> Self {
         Self {
             repo_id: c.repo_id.to_string(),
             title: c.title,
             spec_path: c.spec_path,
             description: c.description,
+            meta_version: c.meta_version,
+            wave_id,
         }
     }
 
@@ -773,6 +905,7 @@ impl PendingRolloutTask {
             title: self.title,
             spec_path: self.spec_path,
             description: self.description,
+            meta_version: self.meta_version,
         }
     }
 }
@@ -1023,6 +1156,11 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
             continue;
         }
         if created < batch_size {
+            // The deferred task keeps its original wave's identity label —
+            // `wave_id` was persisted at wave start, before this batch was
+            // deferred, so late-created batch tasks still group with the
+            // wave that queued them.
+            let wave_id = pending_task.wave_id;
             let cand = pending_task.into_candidate();
             if create_reconciliation_task(
                 state,
@@ -1030,6 +1168,7 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
                 &cand,
                 task_priority.clone(),
                 delegation,
+                wave_id,
                 now,
             )
             .await
@@ -1930,6 +2069,49 @@ mod tests {
 
     // -- §6: reconciliation creates tasks for affected repos ----------------
 
+    #[test]
+    fn meta_spec_label_round_trips() {
+        assert_eq!(
+            meta_spec_label("backend-developer", 4),
+            "meta-spec:backend-developer@v4"
+        );
+        assert_eq!(
+            parse_meta_spec_label("meta-spec:backend-developer@v4"),
+            Some(("backend-developer", 4))
+        );
+        // The wave label shares no prefix with these and must not parse.
+        assert_eq!(parse_meta_spec_label(RECONCILIATION_LABEL), None);
+        assert_eq!(parse_meta_spec_label("auto-created"), None);
+        assert_eq!(parse_meta_spec_label("meta-spec:"), None);
+        assert_eq!(parse_meta_spec_label("meta-spec:name@vnotanumber"), None);
+        assert_eq!(parse_meta_spec_label("meta-spec:@v4"), None);
+        // A name containing '@v' still round-trips (version split is rightmost).
+        assert_eq!(
+            parse_meta_spec_label(&meta_spec_label("a@v1-b", 2)),
+            Some(("a@v1-b", 2))
+        );
+    }
+
+    #[test]
+    fn recon_wave_label_round_trips() {
+        assert_eq!(recon_wave_label(1_700_000_000), "recon-wave:1700000000");
+        assert_eq!(
+            parse_recon_wave_label("recon-wave:1700000000"),
+            Some(1_700_000_000)
+        );
+        // The spec label and non-labels must not parse as wave ids.
+        assert_eq!(parse_recon_wave_label(RECONCILIATION_LABEL), None);
+        assert_eq!(parse_recon_wave_label("auto-created"), None);
+        assert_eq!(parse_recon_wave_label(&meta_spec_label("a", 1)), None);
+        assert_eq!(parse_recon_wave_label("recon-wave:notanumber"), None);
+        assert_eq!(parse_recon_wave_label("recon-wave:"), None);
+        // Wave id of a task: from its label, None without one.
+        let mut t = gyre_domain::Task::new(Id::new("t1"), "title", 0);
+        assert_eq!(task_wave_id(&t), None);
+        t.labels = vec![recon_wave_label(42), RECONCILIATION_LABEL.to_string()];
+        assert_eq!(task_wave_id(&t), Some(42));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn reconciliation_creates_task_for_bound_repo() {
         let state = test_state();
@@ -1949,6 +2131,16 @@ mod tests {
         );
         assert_eq!(t.priority, TaskPriority::Medium);
         assert!(t.labels.iter().any(|l| l == "auto-created"));
+        assert!(
+            t.labels
+                .iter()
+                .any(|l| l == "meta-spec:backend-developer@v4"),
+            "wave task carries the changed meta-spec provenance label"
+        );
+        assert!(
+            t.labels.iter().any(|l| l.starts_with("recon-wave:")),
+            "wave task carries the wave-identity label"
+        );
         assert_eq!(t.workspace_id.as_str(), "ws-recon-1");
         assert_eq!(t.task_type, Some(TaskType::Delegation));
         assert_eq!(t.spec_path.as_deref(), Some("backend-developer"));
@@ -3711,6 +3903,29 @@ mod tests {
             "all tasks terminal — ReconciliationCompleted must fire exactly once"
         );
 
+        // The payload names what the wave changed: the changed meta-spec
+        // (name + version) materialized as a provenance label on each wave
+        // task at creation. This is the data the Architectural Timeline's
+        // reconciliation key-moment narrative renders (system-explorer.md §6).
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &ws.id,
+                Some("reconciliation_completed"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
+            .await
+            .unwrap();
+        let payload = msgs[0].payload.as_ref().expect("completion payload");
+        assert_eq!(payload["task_count"].as_u64(), Some(2));
+        let specs = payload["specs"].as_array().expect("specs array");
+        assert_eq!(specs.len(), 1, "one changed meta-spec across both repos");
+        assert_eq!(specs[0]["name"], "backend-developer");
+        assert_eq!(specs[0]["version"].as_u64(), Some(4));
+
         // MetaSpecDrift notification for the admin member (via the shared
         // emit_reconciliation_completed helper).
         let notifs = state
@@ -3809,7 +4024,10 @@ mod tests {
 
         // Wave 2: same spec bumped to v5 (new title → new task). Created
         // within the same wall-clock second as wave 1 in the worst case —
-        // the identity must still distinguish the waves.
+        // the identity must still distinguish the waves. The wave-id label
+        // is millisecond-resolution; the sleep guarantees wave 2's id is
+        // strictly greater than wave 1's.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         state
             .meta_specs
             .update(&MetaSpec {
@@ -3839,6 +4057,38 @@ mod tests {
             count_completed().await,
             2,
             "wave 2 completion must emit its own ReconciliationCompleted"
+        );
+
+        // Wave scoping: each event's payload names only ITS wave's changed
+        // meta-spec version. Wave 1's event (emitted first, in message
+        // order) carries v4; wave 2's carries v5 — the v4 task is still
+        // terminal in the workspace and must not bleed into wave 2's
+        // payload (system-explorer.md §6 renders this as the reconciliation
+        // key-moment narrative).
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &ws.id,
+                Some("reconciliation_completed"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 2);
+        let wave1_specs = msgs[1].payload.as_ref().unwrap()["specs"].clone();
+        let wave2_specs = msgs[0].payload.as_ref().unwrap()["specs"].clone();
+        assert_eq!(
+            wave1_specs,
+            serde_json::json!([{ "name": "backend-developer", "version": 4 }]),
+            "wave 1 event names the version its wave aligned"
+        );
+        assert_eq!(
+            wave2_specs,
+            serde_json::json!([{ "name": "backend-developer", "version": 5 }]),
+            "wave 2 event must not include wave 1's version"
         );
 
         // Idempotency preserved: re-checking the complete state must not
