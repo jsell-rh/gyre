@@ -2043,20 +2043,18 @@ pub async fn abac_middleware(
                     .collect();
                 ctx.set_list("subject.workspace_ids", workspace_ids);
 
-                // Team memberships: scan each workspace's teams for
-                // membership. `Team.member_ids` is the only team-membership
-                // index (no per-user team lookup port).
+                // Team memberships: the team store's per-user lookup
+                // (list_for_user — teams in the workspace that count the
+                // user as a member, via the TeamMembership store).
                 let mut team_ids: Vec<String> = Vec::new();
                 for membership in &memberships {
                     if let Ok(teams) = state
                         .teams
-                        .list_by_workspace(&membership.workspace_id)
+                        .list_for_user(&membership.workspace_id, user_id)
                         .await
                     {
                         for team in teams {
-                            if team.member_ids.contains(user_id) {
-                                team_ids.push(team.id.to_string());
-                            }
+                            team_ids.push(team.id.to_string());
                         }
                     }
                 }
@@ -3429,15 +3427,25 @@ pub mod tests {
             .await
             .unwrap();
 
-        // Team membership in ws-1.
-        let mut team = Team::new(
+        // Team membership in ws-1 (team store + TeamMembership record).
+        let team = Team::new(
             gyre_common::Id::new("team-platform"),
             gyre_common::Id::new("ws-1"),
             "Platform",
+            "platform",
+            user_id.clone(),
             0,
         );
-        team.add_member(user_id.clone());
         state.teams.create(&team).await.unwrap();
+        state
+            .teams
+            .add_member(&gyre_domain::TeamMembership::new(
+                gyre_common::Id::new("team-platform"),
+                user_id.clone(),
+                0,
+            ))
+            .await
+            .unwrap();
 
         (state, user_id)
     }
