@@ -66,7 +66,14 @@ const AGENTS_MESSAGES_ACK_ROUTE: &str = "/api/v1/agents/:id/messages/:message_id
 /// Routes a `review:submit` gate agent may touch: read MR context, submit
 /// its verdict, read comments and gate state, and fetch the pinned spec
 /// (GYRE_SPEC_URL — agent-gates.md §Integration with Agent Gates step 1:
-/// the gate agent receives the spec at the pinned SHA).
+/// the gate agent receives the spec at the pinned SHA). Its ReviewRequest
+/// is NOT delivered over REST: it arrives via the launch env
+/// (GYRE_MR_ID / GYRE_PERSONA / …) and the /mcp surface
+/// (`gyre_message_poll`, mounted outside the ABAC-layered api router),
+/// which derives the inbox from the verified token subject. The
+/// agent-inbox route (GET /api/v1/agents/{id}/messages) is deliberately
+/// kept off this allow-list: a single-purpose review token has no need
+/// for it (least privilege / defense in depth).
 const REVIEWER_ALLOWED_ROUTES: &[&str] = &[
     MERGE_REQUESTS_ID_ROUTE,
     MERGE_REQUESTS_REVIEWS_ROUTE,
