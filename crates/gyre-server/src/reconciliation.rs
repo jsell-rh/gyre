@@ -3407,6 +3407,7 @@ mod tests {
                 Some(6),
                 Some(6),
                 None,
+                &[],
                 10,
                 0,
             )
@@ -3935,6 +3936,7 @@ mod tests {
                 Some(6),
                 Some(6),
                 None,
+                &[],
                 10,
                 0,
             )
