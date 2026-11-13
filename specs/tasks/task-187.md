@@ -2,10 +2,10 @@
 title: "Conversational Exploration — AI Q&A grounded in knowledge graph"
 spec_ref: "system-explorer.md §8"
 depends_on: [task-171, task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
-commits: ["bdf9f79f4532cb5684b096d6f605e6b78c5ee551", "a69f76ec549374252e1d8d475ccd8b69be7c72d9", "d363ce7d5f4a374530ccde7548bb52b31f242a12", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df", "a3051e834c722f5d417993fd88eae0d83a3d9c1f"]
+commits: ["bdf9f79f4532cb5684b096d6f605e6b78c5ee551", "a69f76ec549374252e1d8d475ccd8b69be7c72d9", "d363ce7d5f4a374530ccde7548bb52b31f242a12", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df", "a3051e834c722f5d417993fd88eae0d83a3d9c1f", "f7cfd96d41f4cf5e90dc6d47609927a26b3f9c40"]
 ---
 
 ## Spec Excerpt
@@ -89,7 +89,8 @@ Conversational exploration (system-explorer.md §8) as a real question →
 knowledge-graph → grounded-answer pipeline, shipped across commits
 7737e532 (feature), fa8568c5 (rustfmt/clippy repair), d363ce7d (unknown-kind
 citation tokens preserved literally), a69f76ec (char-based `short_sha` test
-expectation), and bdf9f79f (verification repair — see below):
+expectation), bdf9f79f (grounded fallback ask prompt; no-LLM test repair),
+and f7cfd96d (rebase repair against main — see below):
 
 - **Backend** — `POST /api/v1/workspaces/:id/explorer-views/ask`
   (`ask_explorer` in `api/explorer_views.rs`): the LLM prompt is grounded
@@ -98,11 +99,10 @@ expectation), and bdf9f79f (verification repair — see below):
   recency-ranked, capped), edge summaries, and recent architectural
   timeline deltas — via the `explorer-ask` prompt template. Template
   resolution is DB override → `specs/prompts/explorer-ask.md` in the repo
-  git tree → hardcoded `PROMPT_EXPLORER_ASK` fallback; **all three paths
-  now carry the `{{graph_context}}` section** (the fallback lost it before
-  bdf9f79f — see repair notes). **Grounding enforcement**: the server
-  parses every `[entity:node|spec|commit|agent:id]` citation from the
-  answer and validates it against the same graph the prompt was built
+  git tree → hardcoded `PROMPT_EXPLORER_ASK` fallback; all three paths
+  carry the `{{graph_context}}` section. **Grounding enforcement**: the
+  server parses every `[entity:node|spec|commit|agent:id]` citation from
+  the answer and validates it against the same graph the prompt was built
   from (`validate_entity_refs`); hallucinated ids are stripped to plain
   text and excluded from the returned `entity_refs` (which carry resolved
   labels). Follow-up turns replay client-owned history (max 20, rejected
@@ -115,7 +115,8 @@ expectation), and bdf9f79f (verification repair — see below):
   `view_spec` validated through the same chain as the generate endpoint;
   "what would happen if…" questions set `predict`, and the server
   resolves the repo scope and runs the task-186 structural prediction
-  machinery, returning impact data for ghost rendering.
+  machinery (`run_structural_prediction` shared with `predict_graph`),
+  returning impact data for ghost rendering.
 - **Frontend** — `ExplorerChat.svelte` / `ConversationalExplorer.svelte`:
   chat panel opened from the Ask input in the control bar, conversation
   history in component state (not persisted), responses render validated
@@ -129,35 +130,31 @@ expectation), and bdf9f79f (verification repair — see below):
   membership). Frontend: vitest component tests for panel rendering,
   citation link rendering, follow-up context, and view-spec application.
 
-### Verification repair (bdf9f79f)
+### Rebase repair (f7cfd96d)
 
-Verification of candidate c9f53cf failed two tests in
-`api::explorer_views::tests`:
+The published PR head (850ece34) conflicted with current main
+(603cc2f, task-183 Architectural Timeline). Merged origin/main into the
+branch; conflicts were confined to generated web/dist assets, resolved
+to the assignment-base (main) versions for remote rebuild. Source
+auto-merges reviewed for semantic coupling: task-183's point-in-time
+graph port methods (`list_nodes_at`/`list_edges_at`) are additive and
+task-187's calls are unchanged; `api/graph.rs` combines the timeline
+`?at=` query with the extracted `run_structural_prediction` core;
+`ExplorerView.svelte`/`api.js` combine timeline scrubber wiring with the
+conversational panel and `explorerAsk` client.
 
-- `ask_explorer_grounded_prompt_reaches_llm` — the hardcoded fallback
-  `PROMPT_EXPLORER_ASK` was missing the `{{graph_context}}` placeholder
-  (the git-tree template has it). On the fallback path the grounding was
-  built but never reached the LLM — a real production gap in the
-  "questions sent with knowledge graph context" criterion, correctly
-  caught by the test (its seeded repo has no git tree, so the fallback
-  path is what production exercises for repos without the template).
-  Fixed by adding the knowledge-graph-context section to the fallback.
-- `ask_explorer_requires_llm_and_membership` — the test used
-  `app_with_workspace()`, which wires `mem::test_state()`'s echo mock
-  LLM, so the "no LLM → 503" premise could never hold (observed 200).
-  Rebuilt the test on an explicit `llm = None` state (mirroring
-  `app_no_llm()` used by the generate endpoint's 503 test) and added the
-  foreign-tenant workspace rejection the test name promises.
+### Test evidence (merged head f7cfd96d)
 
-### Test evidence
-
-- `cargo check -p gyre-server --all-targets` passes on the repaired head
-  (exit 0; log: `/tmp/stage/review-evidence/task187-verify-repair/`).
-- The two pure unit tests were probe-verified verbatim in an earlier
-  round (see `/tmp/stage/review-evidence/probe3/`, including a negative
-  control proving discrimination).
-- **Verifier must run:** `cargo test -p gyre-server --lib
-  api::explorer_views` (the suite the verification failure was scoped
-  to; server test compilation exceeds this sandbox's 4 GiB budget) and
-  `cargo test --all` for the workspace gate. Frontend: `cd web && npm ci
-  && npm test`.
+- `cargo check -p gyre-server` — exit 0 (full log:
+  `/tmp/stage/review-evidence/task187-rebase/cargo-check.log`).
+- `cd web && npm ci && npx vitest run` on ConversationalExplorer,
+  ExplorerChat-component, TimelineScrubber, timeline-utils,
+  ExplorerCanvas (251 tests) plus ExplorerDefaultViews, ExplorerViewScope,
+  ExplorerViewLivenessWiring, ExplorerViewNavigableArchitecture
+  (30 tests) — all pass (log:
+  `/tmp/stage/review-evidence/task187-rebase/vitest.log`).
+- **Verifier must run** (server test compilation exceeds this sandbox's
+  4 GiB budget): `cargo test -p gyre-server --lib api::explorer_views`,
+  `cargo test -p gyre-server --lib api::graph`, and the full workspace
+  gates (`cargo test --all`, architecture/CI checks, `cd web && npm
+  test`).
