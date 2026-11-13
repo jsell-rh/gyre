@@ -137,9 +137,28 @@ pub struct PolicyDecision {
 - [x] Effective permissions query endpoint (upgraded to load real subject attributes from stores)
 - [x] Existing ABAC middleware migrated to new engine (task-128; all route protections re-verified against the new builtins)
 - [x] All routes registered in `api/mod.rs` (pre-existing; check-abac-route-registry passes)
-- [ ] `cargo test --all` passes — DEFERRED to the independent verifier (build wrapper blocks gyre-server test codegen in the implement stage); required probes recorded in /tmp/stage/review-evidence/task-129-evidence.md
+- [ ] `cargo test --all` passes — DEFERRED to the independent verifier (build wrapper blocks gyre-server test codegen in the implement stage); probes recorded in /tmp/stage/review-evidence/task-129-evidence.md
+
+## Agent Instructions
+
+Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run Evaluation. Existing ABAC: `gyre-server/src/abac.rs` (current policy evaluation), `abac_middleware.rs` (route protection), `policy_engine.rs` (if exists). Route registration: `gyre-server/src/api/mod.rs`. Policy domain: `gyre-domain/src/policy.rs`. Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Built-in policy seeding: grep for `builtin_policies\|seed_policies` in the codebase. The evaluation engine must integrate with the existing auth middleware — check `gyre-server/src/auth.rs` for how auth context is available in handlers. Verify API endpoint paths against `api/mod.rs` route registration before implementing.
 
 ## Shipped
+
+### Contract repair round (this commit)
+
+The controller flagged repair a0c5b5a998064ab6be494e76aa7d58eb (category:
+contract): the previous checkpoint had removed the protected
+`## Agent Instructions` section while recording progress. The executor
+restored the assigned contract; this round re-applies the progress state
+(frontmatter, acceptance-criteria checkboxes, these Shipped notes) with the
+assigned contract text preserved verbatim — `## Agent Instructions` stays
+in place. No product source changed this round: the two product commits
+(0dcb1017, 81ccc284) are intact on the branch, `cargo check -p
+gyre-server` exits 0 at the merged HEAD, and
+`scripts/check-abac-route-registry.sh` passes. Probe evidence and the
+verifier-owned test list are in
+`/tmp/stage/review-evidence/task-129-evidence.md`.
 
 ### Evaluation engine, flow, and composition (§Evaluation Engine, §Evaluation Flow, §Policy Composition)
 
@@ -233,19 +252,21 @@ prefixes) were verified. Two gaps closed:
 
 ### Test evidence
 
-- **Ran here** (implement-stage wrapper permits): `cargo check -p
-  gyre-server --tests` (0 errors), `cargo test -p gyre-domain` (pass),
-  `cargo check -p gyre-ports -p gyre-adapters` (pass), and all mechanical
-  invariant scripts (arch, mem-port-contracts, in-memory-state-stores,
-  abac-route-registry, inert-enforcement, forged-scope-fields,
-  scope-literal-defaults, fabricated-scope-defaults, lossy-secret-conversion,
-  forwarded-header-trust, unbounded-external-http, relative-path-defaults,
+- **Ran in the implement stage**: `cargo check -p gyre-server --tests`
+  (0 errors at the product commits; re-confirmed `cargo check -p
+  gyre-server` exit 0 at the merged HEAD this round), `cargo test -p
+  gyre-domain` (pass), `cargo check -p gyre-ports -p gyre-adapters` (pass),
+  and the mechanical invariant scripts (arch, mem-port-contracts,
+  in-memory-state-stores, abac-route-registry, inert-enforcement,
+  forged-scope-fields, scope-literal-defaults, fabricated-scope-defaults,
+  lossy-secret-conversion, forwarded-header-trust,
+  unbounded-external-http, relative-path-defaults,
   fail-open-ref-resolution) — all pass.
 - **Deferred to the verifier** (the build wrapper blocks gyre-server test
   codegen in this stage): `cargo test -p gyre-server --lib` for
   `abac_middleware::`, `policy_engine::tests`, `policy_cache::`,
   `api::policies::`, `gate_executor::`, `merge_processor::`,
-  `api::workspaces::`, then `cargo test --all`. The full probe list is
+  `api::workspaces::`, then `cargo test --all`. The probe list is
   recorded in `/tmp/stage/review-evidence/task-129-evidence.md`.
 - **New tests**: 5 live end-to-end builtin enforcement tests in
   abac_middleware (each new Deny enforced by the seeded set alone, no custom
