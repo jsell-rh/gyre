@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §Teams"
   - "user-management.md §Notifications"
-commits: ["e4af712a72e9e8618f126f691df3e060bed26da6", "bc0d0eac099f133695f07aeb09b3ccb22d72afac"]
+commits: ["bc0d0eac099f133695f07aeb09b3ccb22d72afac", "e4af712a72e9e8618f126f691df3e060bed26da6", "83594b91dbe13ee305036e13b3f3663237c96875"]
 ---
 
 ## Spec Excerpt
@@ -89,11 +89,12 @@ Read `specs/system/user-management.md` §API > Teams and §API > Notifications. 
 
 ## Shipped
 
-Production work: commit `bc0d0eac` (feat(task-125)) plus repair commit `e4af712a`
-(fix(task-125), verification-finding repair). The assigned task body above is
-left byte-identical to the assigned contract, including the unchecked
-acceptance criteria — checking those boxes is a normative change reserved for
-the independent reviewer.
+Production work: commit `bc0d0eac` (feat(task-125), original implementation),
+repair commit `e4af712a` (verification-finding repair), and review-repair
+commit `83594b91` (attempt acba40e3 — the two review findings below). The
+assigned task body above is left byte-identical to the assigned contract,
+including the unchecked acceptance criteria — checking those boxes is a
+normative change reserved for the independent reviewer.
 
 ### Teams (§API > Teams) — audit only, no code needed
 
@@ -124,53 +125,55 @@ team_management_requires_owner_admin_or_tenant_admin, …).
 - `PUT /api/v1/notifications/{id}/read` — spec method on the existing
   per-handler-auth mark-read handler (POST kept for pre-existing callers).
 - `POST /api/v1/notifications/mark-all-read` — new `mark_all_read` port method
-  (SQLite/PG/mem): stamps `read_at` on every unread row owned by the caller;
-  optional `?workspace_id=` narrows the sweep; returns `{marked: n}`.
-- `GET/PUT /api/v1/notifications/preferences` — spec path bound to the existing
-  HSI §12 preference handlers (same per-user scoping).
-- `GET /api/v1/notifications/stream` — real-time SSE. `AppState::
-  create_notification` is the single fan-out point: persist via the repository,
-  then broadcast; every production emitter routes through it. The stream
-  filters each event against the caller (user id AND `auth.tenant_id`, optional
-  `?workspace_id=`) before the wire, with a 30 s heartbeat (same pattern as
-  `/api/v1/audit/stream`). Broadcast is fire-and-forget so a lagged subscriber
-  can never fail a persist.
+  (all three adapters): stamps `read_at`, optional `?workspace_id=` sweep,
+  returns `{marked}`, drives unread-count to zero.
+- `GET/PUT /api/v1/notifications/preferences` — spec path for the existing
+  HSI §12 handlers.
+- `GET /api/v1/notifications/stream` — SSE stream (heartbeat keep-alive,
+  per-event user+tenant+optional-workspace filtering in the handler).
 
-All new routes are registered in `api/mod.rs` with `RouteResourceMapping::exempt`
-entries in `abac_middleware.rs` (per-handler auth, same model as every existing
-notification route); no exemption-file entries were added.
-`docs/api-reference.md` documents the new endpoints.
+### Review repair `83594b91` (attempt acba40e3) — SSE fan-out closure
 
-### This round's repair (commit `e4af712a`)
-
-The prior verification run failed its changed-lines clippy gate on exactly one
-finding: `api/users.rs:2164: clippy::let_and_return` — the seed closure in
-`spec_path_unread_count_and_mark_all_read` bound `Notification::new(...)` to a
-local only to return it. The repair returns the constructor call directly; no
-behavior change. Because the task-128 ABAC-engine merge
-(`276918d2` → merge `a3b25d8a`) landed between the failing run and this
-checkout, the merge-sensitive mechanical gates were re-run on the repaired
-head: ABAC route registry, ABAC exempt-handler per-handler auth (79 handlers),
-and architecture lint — all pass post-merge.
+- **Bare-repo persistence bypass (graph_extraction):** the two push-scoped
+  persistence sites (`ConflictingInterpretations`, `SpecAssertionFailure`)
+  wrote through the raw `NotificationRepository` handed to `DivergencePorts`,
+  so git pushes, mirror syncs, and repo imports stored notifications that
+  never reached the stream. All four production `DivergencePorts` feeders
+  (git_http.rs, mirror_sync.rs, api/repos.rs ×2) now pass
+  `AppState::broadcasting_notifications()` — a `NotificationRepository`
+  decorator (`crates/gyre-server/src/notifications.rs`) whose `create`
+  persists AND broadcasts. `AppState::create_notification` delegates to the
+  same wrapper, so the fan-out now has exactly one implementation and every
+  production emitter routes through it (verified by sweep: the only
+  `notification_broadcast_tx.send` site is the wrapper; the only remaining
+  bare `state.notifications.create` uses are `#[cfg(test)]` seeds).
+- **Lagged stream termination (users.rs):** `notification_stream` treated
+  broadcast `RecvError::Lagged` as channel-closed and silently ended a live
+  subscriber's stream after a >1024-notification burst. `Lagged` now
+  `continue`s (the channel is live; missed messages are gone); only `Closed`
+  ends the stream.
+- **Regression test:** `push_check_notifications_broadcast_to_stream_
+  subscribers` (graph_extraction.rs) drives a real failing-assertion push
+  check through `DivergencePorts` built with the broadcasting wrapper and
+  asserts the notification is both persisted and delivered on a subscribed
+  broadcast receiver — it fails at the broadcast assertion if a feeder ever
+  passes a bare repo again.
 
 ### Test evidence
 
-New server tests (in `bc0d0eac`): `spec_path_notifications_list_with_filters`,
-`spec_path_unread_count_and_mark_all_read`, `put_read_is_the_spec_method`,
-`spec_path_preferences_roundtrip`,
-`notification_stream_delivers_own_notifications_only` (SSE delivery +
-cross-user/cross-tenant filtering before the wire). Server test codegen is
-blocked by the 4 GiB build wrapper in this stage; the independent verifier
-must execute:
+In-sandbox (build wrapper): `cargo check -p gyre-server` and
+`cargo check -p gyre-server --tests` clean; `cargo clippy -p gyre-server
+--lib` shows no new warnings (129 before and after; only line-number shifts);
+check-arch, check-mem-port-contracts, check-task-commit-attribution,
+check-assertionless-tests, check-conditional-test-guards,
+check-identical-baselines, check-in-memory-state-stores, and
+check-inert-enforcement all pass. gyre-server test compilation is blocked by
+the 4 GiB build wrapper and belongs to the independent verifier — required
+probes (also recorded in /tmp/stage/review-evidence/task-125-repair-evidence.md):
 
-```
-SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::users
-SKIP_WEB_BUILD=1 cargo test -p gyre-server --all
-SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --all-targets
-```
-
-Focused probes re-run on this checkout: `cargo test -p gyre-common
-notification` (9 passed, incl. rank-band round-trip) and `cargo test -p
-gyre-adapters notification` (9 passed against real SQLite, incl.
-`count_unread_and_mark_all_read_scope_semantics`, `list_for_user_filters_by_repo`).
-Evidence under /tmp/stage/review-evidence/.
+    cargo test -p gyre-server --lib push_check_notifications_broadcast_to_stream_subscribers
+    cargo test -p gyre-server --lib push_check_creates_priority9_notifications_for_failed_assertions
+    cargo test -p gyre-server --lib notification_stream_delivers_own_notifications_only
+    cargo test -p gyre-server --lib spec_path_notifications_list_with_filters
+    cargo test -p gyre-server --lib graph_extraction::tests
+    cargo test -p gyre-server --lib notifications
