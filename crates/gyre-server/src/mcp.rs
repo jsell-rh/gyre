@@ -2676,7 +2676,11 @@ async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_spec_assist(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+async fn handle_spec_assist(
+    state: &Arc<AppState>,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
     let repo_id = match require_str(args, "repo_id") {
         Ok(r) => r.to_string(),
         Err(_) => return tool_error("missing required field: repo_id"),
@@ -6638,6 +6642,7 @@ mod tests {
                     max_cost_per_day: Some(50.0),
                     max_concurrent_agents: Some(4),
                     max_agent_lifetime_secs: Some(3_600),
+                    enforcement_action: None,
                 },
             )
             .await
