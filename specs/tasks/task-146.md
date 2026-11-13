@@ -2,7 +2,7 @@
 title: "Complete analytics event schema and auto-emitted events coverage"
 spec_ref: "analytics.md §Event Schema"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "analytics.md §Purpose"
   - "analytics.md §Event Schema"
