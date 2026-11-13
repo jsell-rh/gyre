@@ -3,11 +3,11 @@ title: "Implement gate chain configuration and gate agent lifecycle"
 spec_ref: "agent-gates.md §Gate Chains"
 depends_on:
   - task-134
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: ["9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d"]
+commits: ["9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d", "dbcd62f13c9ebd973ca4fd02a5b634a8046e553f"]
 ---
 
 ## Spec Excerpt
@@ -103,47 +103,38 @@ Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Exi
 ## Shipped
 
 Both coverage sections are implemented in production code and were
-independently approved in prior rounds. This round reconciled the branch
-with the new base (f764bc00, task-187's conversational exploration) and
-re-verified the failing "Development controller" CI check from run
-43465259045.
+independently approved in prior rounds. This round resolved the merge
+conflict against current main (6f5a631c, task-195's manifest-driven
+gate selection), which evolved the same `gate_executor.rs` surfaces
+task-135 built.
 
-### CI failure triage (run 43465259045)
+### Merge resolution (dbcd62f1)
 
-The failed check runs only `tools/fullsend-dispatcher` go tests, the
-`scripts/test_dev*.py` / `scripts/test_pipeline*.py` python suites, and
-the `scripts/**.test.mjs` node suites. Between the repair base (d9c419a0,
-whose CI passed) and the failed candidate (bb7af039) the only change
-outside `crates/`, `docs/`, `specs/`, and `web/dist/` is `Cargo.lock` —
-every input the failed job executes is byte-identical to the passing
-baseline, so no task-135 change is reachable from that job and the
-failure was transient. Evidence and probe logs are saved under
-`/tmp/stage/review-evidence/` (controller artifact path, not a repo
-path).
+The single conflicting hunk was the `run_gate` dispatch. The resolution
+keeps **both** lines of evolution:
 
-### Re-verification on the merged tree (f19438f2)
+- `RequiredApprovals` keeps task-135's live `run_required_approvals_gate`
+  (distinct-approval counting, stays `Running` until the minimum lands)
+  instead of main's delegation stub.
+- `AgentReview` takes main's constraints-aware signature so manifest-
+declared gates (spec-registry.md §16) enforce persona + attestation
+  constraints via `run_persona_review_gate`, while repo command gates
+  keep the subprocess path.
+- `check_gates_for_mr` keeps task-135's order-independent
+  `decide_gate_readiness` (required-gate failures precede waiting;
+  advisory gates never block) with live RequiredApprovals promotion —
+  this matters for manifest gates too, since materialized manifest
+  gates are unknown to `quality_gates` and default to required.
+- `submit_review` keeps both task-195's reviewer identity binding and
+  task-135's server-derived `reviewer_persona`/`gate_id` attribution.
+- Adopted main's deletion of the unrouted legacy inbox handlers
+  (`agent_messages.rs`, `messages.rs`), main's `web/dist`, and its
+  `spawn.rs` compute-target gate agent launch path (task-135's branch
+  had no divergent `spawn.rs` changes at the merge base).
+- Test call sites updated for the new `constraints` parameter; docs
+  describe both feature sets.
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean.
-- All 16 mechanical `scripts/check-*.sh` lints (arch, ABAC route
-  registry + exempt handlers, MCP write gates, migration numbering and
-  portability, attribution, scope/lint classes) — pass.
-- `cargo test -p gyre-domain` (515) and `cargo test -p gyre-adapters`
-  (516) — pass.
-- Node script suites (25 tests) — pass.
-- `env -u GYRE_PIPELINE_STAGE python3 -m unittest discover -s scripts
-  -p 'test_dev*.py'` — 61 pass; the `test_pipeline*.py` suite passes
-  except two tests that exercise `os.killpg`, which this sandbox denies
-  even on the test's own `start_new_session` child (minimal repro in
-  `/tmp/stage/review-evidence/killpg-restriction-repro.txt`). That is
-  an environment restriction for remote verification, not a code
-  defect; the same script sources passed CI on the baseline. Running
-  with the sandbox's exported `GYRE_PIPELINE_STAGE=implement` also
-  (correctly) turns the build-admission wrapper's refusals into three
-  `test_dev` failures that pass with the variable unset.
-- `go` is not installed here; `tools/fullsend-dispatcher` is unchanged
-  from the passing baseline.
-
-### Behavior (unchanged this round, from the attributed commits)
+### Behavior (from the attributed commits)
 
 - **Gate chains:** repos configure an ordered list of mixed gate types
   (TestCommand, LintCommand, AgentReview, AgentValidation,
@@ -154,15 +145,31 @@ path).
   failure blocks the MR and notifies the author agent with failure
   details; `required = false` gates record results and attach advisory
   comments without blocking. Per-MR gate status is tracked
-  Pending → Running → Passed/Failed in the `gate_results` store, and
-  `check_gates_for_mr` decides order-independently so a pending gate
-  can never mask a failed required gate.
+  Pending → Running → Passed/Failed in the `gate_results` store.
 - **Gate agent lifecycle:** review/validation agents are spawned per
   gate run with a scoped OIDC token (`review:submit`/validation scope
   only — no push, no task creation), attributed to their persona and
   gate config (`reviewer_persona`/`gate_id` set from the token, never
   from caller-supplied fields), torn down (token revoked) after the
   verdict, and their full context window captured to the audit trail.
+
+### Test evidence (this round, on dbcd62f1)
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — clean
+  (lib + integration tests, including the merged `task134_review_probe`
+  and gate-executor suites).
+- `cargo test -p gyre-domain` — 515 passed; `cargo test -p gyre-adapters`
+  — 518 passed.
+- Merge-relevant mechanical lints pass: arch, ABAC route registry +
+  exempt handlers (routes changed with the inbox-handler deletion),
+  MCP write gates, migration numbering + portability, dead message
+  kinds, byte-slice truncation, relative path defaults, fail-open ref
+  resolution, task commit attribution, mem port contracts, fabricated
+  scope defaults (main's exemption-file changes accepted), lossy secret
+  conversion, scope literal defaults, inert enforcement, forwarded
+  header trust, in-memory state stores, unbounded external HTTP,
+  forged scope fields.
 
 ### Verifier-required probes
 
