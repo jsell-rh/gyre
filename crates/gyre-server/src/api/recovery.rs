@@ -253,7 +253,7 @@ pub async fn repo_status(
         .await
         {
             Some(head_sha) => Some(
-                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha, None)
                     .await
                     .is_ok(),
             ),

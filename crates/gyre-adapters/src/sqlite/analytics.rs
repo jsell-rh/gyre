@@ -196,9 +196,28 @@ impl AnalyticsRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = analytics_events::table.into_boxed();
             if let Some(ref name) = filter.event_name {
-                // Exact or trailing-`*` prefix match (analytics.md §Query Parameters).
+                // Exact or trailing-`*` prefix match (analytics.md
+                // §Query Parameters). Prefix matching is LITERAL and
+                // case-sensitive (task-146 review R4): SQLite LIKE is
+                // ASCII-case-insensitive and honors `%`/`_` wildcards, so
+                // `MR.*` and `mr.m_rged*` would both match `mr.merged`,
+                // diverging from the mem adapter's `starts_with` and
+                // Postgres's case-sensitive LIKE. `substr(...) = ...`
+                // compares under the column's BINARY collation — literal
+                // bytes, no wildcards — matching both exactly.
                 if let Some(prefix) = name.strip_suffix('*') {
-                    query = query.filter(analytics_events::event_name.like(format!("{}%", prefix)));
+                    // `n` is a Rust-computed character count formatted as
+                    // a numeric SQL literal (injection-free by
+                    // construction); the prefix itself is a bound
+                    // parameter. diesel's `sql(...).bind(...)` appends
+                    // its `?` AFTER the fragment, so the length cannot be
+                    // a second placeholder.
+                    let n = prefix.chars().count();
+                    let predicate = format!("substr(event_name, 1, {n}) = ");
+                    query = query.filter(
+                        diesel::dsl::sql::<diesel::sql_types::Bool>(&predicate)
+                            .bind::<Text, _>(prefix),
+                    );
                 } else {
                     query = query.filter(analytics_events::event_name.eq(name.as_str()));
                 }
@@ -274,13 +293,16 @@ impl AnalyticsRepository for SqliteStorage {
             if filter.event_name.is_some() {
                 // Exact or trailing-`*` prefix match (analytics.md
                 // §Query Parameters), same operator choice as
-                // query_filtered: `=` for exact, LIKE for prefix.
+                // query_filtered: `=` for exact, literal-case-sensitive
+                // `substr(...) = ...` for prefix (task-146 review R4 —
+                // SQLite LIKE would be case-insensitive and honor `%`/`_`
+                // wildcards, diverging from mem and Postgres).
                 let is_prefix = filter
                     .event_name
                     .as_deref()
                     .is_some_and(|n| n.ends_with('*'));
                 sql.push_str(if is_prefix {
-                    " AND event_name LIKE ?"
+                    " AND substr(event_name, 1, length(?)) = ?"
                 } else {
                     " AND event_name = ?"
                 });
@@ -308,11 +330,17 @@ impl AnalyticsRepository for SqliteStorage {
             // conditionally (diesel's documented loop-binding pattern).
             let mut query = diesel::sql_query(&sql).into_boxed();
             if let Some(name) = &filter.event_name {
-                let pattern = match name.strip_suffix('*') {
-                    Some(prefix) => format!("{prefix}%"),
-                    None => name.clone(),
-                };
-                query = query.bind::<Text, _>(pattern);
+                match name.strip_suffix('*') {
+                    Some(prefix) => {
+                        // Two `?` placeholders in the substr prefix
+                        // predicate — bind the literal prefix twice.
+                        query = query.bind::<Text, _>(prefix);
+                        query = query.bind::<Text, _>(prefix);
+                    }
+                    None => {
+                        query = query.bind::<Text, _>(name);
+                    }
+                }
             }
             if let Some(id) = &filter.agent_id {
                 query = query.bind::<Text, _>(id);
@@ -1069,6 +1097,101 @@ mod tests {
             .unwrap();
         let total = CostRepository::total_by_period(&s, 200, 600).await.unwrap();
         assert!((total - 200.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn analytics_event_name_prefix_is_literal_case_sensitive() {
+        // task-146 review R4 regression: the trailing-`*` prefix match is
+        // LITERAL and case-sensitive on every adapter. SQLite LIKE is
+        // ASCII-case-insensitive and honors `%`/`_` wildcards, so the old
+        // `LIKE '{prefix}%'` filter let `MR.*` and `mr.m_rged*` match
+        // `mr.merged` — diverging from the mem adapter's `starts_with`
+        // and Postgres's case-sensitive LIKE. Both query paths must now
+        // reject case and wildcard variants while still matching the
+        // literal prefix.
+        let (_tmp, s) = setup();
+        AnalyticsRepository::record(&s, &make_event("e1", "mr.merged", 100))
+            .await
+            .unwrap();
+        AnalyticsRepository::record(&s, &make_event("e2", "mr.closed", 200))
+            .await
+            .unwrap();
+
+        // Literal prefix still matches.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.m*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(out.len(), 1, "literal prefix match");
+        assert_eq!(out[0].id, Id::new("e1"));
+
+        // Case-variant prefix must NOT match (SQLite LIKE would match).
+        let f = AnalyticsQueryFilter {
+            event_name: Some("MR.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "case-variant prefix must not match: {out:?}"
+        );
+
+        // Wildcard characters in the prefix must NOT broaden the match
+        // (SQLite LIKE would treat `_` as any-single-char).
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.m_rged*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "wildcard-bearing prefix must not match: {out:?}"
+        );
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.%*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "% in prefix is literal, not a wildcard: {out:?}"
+        );
+
+        // Same literal semantics on the grouped path.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("MR.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::count_grouped(&s, &f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert!(
+            out.is_empty(),
+            "grouped: case-variant prefix must not match"
+        );
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.m_rged*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::count_grouped(&s, &f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert!(
+            out.is_empty(),
+            "grouped: wildcard-bearing prefix must not match"
+        );
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::count_grouped(&s, &f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![("mr.closed".to_string(), 1), ("mr.merged".to_string(), 1)]
+        );
     }
 
     #[tokio::test]

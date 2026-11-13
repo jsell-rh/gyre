@@ -1566,6 +1566,28 @@ mod analytics_query_tests {
         let out = repo.query_filtered(&f).await.unwrap();
         assert_eq!(out.len(), 2, "mr.* prefix match");
 
+        // Literal, case-sensitive prefix semantics (task-146 review R4,
+        // same contract as the SQLite/Postgres adapters): `MR.*` and a
+        // wildcard-bearing `mr.m_rged*` must not match `mr.merged`.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("MR.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "case-variant prefix must not match: {out:?}"
+        );
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.m_rged*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "wildcard-bearing prefix must not match: {out:?}"
+        );
+
         // Scope filters are conjunctive.
         let f = AnalyticsQueryFilter {
             event_name: Some("mr.merged".into()),

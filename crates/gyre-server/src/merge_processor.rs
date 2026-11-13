@@ -1590,7 +1590,7 @@ async fn merge_atomic_group(
     // gate results. See platform-model.md §6.
     if let Some(last_sha) = group_merge_shas.last() {
         if let Err(failure_reason) =
-            crate::gate_executor::run_post_merge_gates(state, &repo, last_sha).await
+            crate::gate_executor::run_post_merge_gates(state, &repo, last_sha, None).await
         {
             recover_atomic_group_from_post_merge_failure(
                 state,
@@ -2767,8 +2767,13 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             // against the new HEAD of the default branch. On failure, run
             // the recovery protocol (pause queue, revert, notify, task,
             // invalidate gates). See platform-model.md §6.
-            if let Err(failure_reason) =
-                crate::gate_executor::run_post_merge_gates(state, &repo, &merge_commit_sha).await
+            if let Err(failure_reason) = crate::gate_executor::run_post_merge_gates(
+                state,
+                &repo,
+                &merge_commit_sha,
+                Some(&updated_mr.id),
+            )
+            .await
             {
                 recover_from_post_merge_failure(
                     state,
@@ -3247,9 +3252,10 @@ async fn recover_from_post_merge_failure(
     };
 
     // Step 3: re-run post-merge gates on the reverted HEAD.
-    let revert_green = crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha)
-        .await
-        .is_ok();
+    let revert_green =
+        crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha, Some(&mr.id))
+            .await
+            .is_ok();
 
     if revert_green {
         // Main is green again — resume the queue.
@@ -3501,7 +3507,7 @@ async fn recover_atomic_group_from_post_merge_failure(
     };
 
     // Step 3: re-run post-merge gates on the reverted HEAD.
-    let revert_green = crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha)
+    let revert_green = crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha, None)
         .await
         .is_ok();
 
@@ -9080,18 +9086,53 @@ mod tests {
         // for head_sha's tree, false for the base tree.
         create_post_merge_gate(&state, &repo.id, "test -f marker", true).await;
 
-        // Gates run at head_sha: marker exists → pass.
-        crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+        // Gates run at head_sha: marker exists → pass. The run is
+        // attributed to a real MR id so the analytics events carry it
+        // (task-146 review R4: post-merge evaluations must record
+        // gate.passed/gate.failed like the pre-merge path).
+        let mr_id = Id::new("mr-post-merge-r21");
+        crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha, Some(&mr_id))
             .await
             .expect("gates must pass at head_sha");
 
         // Gates run at the base SHA: marker absent → required gate fails.
-        let err = crate::gate_executor::run_post_merge_gates(&state, &repo, &base_sha)
-            .await
-            .expect_err("gates must fail at base sha");
+        let err =
+            crate::gate_executor::run_post_merge_gates(&state, &repo, &base_sha, Some(&mr_id))
+                .await
+                .expect_err("gates must fail at base sha");
         assert!(
             err.contains("post-merge-tests"),
             "failure should name the gate: {err}"
+        );
+
+        // Both post-merge evaluations recorded their gate analytics
+        // events with the gate's real ids and the attributed MR.
+        let passed = state
+            .analytics
+            .query(Some("gate.passed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            passed
+                .iter()
+                .any(|e| e.properties["mr_id"] == "mr-post-merge-r21"
+                    && e.properties["gate_type"] == "TestCommand"
+                    && e.properties["duration_secs"].is_u64()
+                    && e.repo_id.as_ref().map(|r| r.as_str()) == Some("repo-gate-r21")),
+            "post-merge gate pass must record gate.passed: {passed:?}"
+        );
+        let failed = state
+            .analytics
+            .query(Some("gate.failed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            failed
+                .iter()
+                .any(|e| e.properties["mr_id"] == "mr-post-merge-r21"
+                    && e.properties["gate_type"] == "TestCommand"
+                    && e.properties["output_snippet"].is_string()),
+            "post-merge gate failure must record gate.failed: {failed:?}"
         );
 
         // The detached gate worktree was deregistered: the only registered

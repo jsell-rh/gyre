@@ -218,6 +218,11 @@ async fn complete_task_on_merge(state: &Arc<AppState>, mr: &MergeRequest, agent_
     if task.status == TaskStatus::Done {
         return;
     }
+    // The persisted transition runs from the status loaded above to Done
+    // (task-146 review R4): the in-memory InProgress→Review hop below only
+    // satisfies the domain's transition graph — the row this path persists
+    // changes from `old_status` (the loaded status) to Done.
+    let old_status = task.status.clone();
     // Navigate to Review first (an InProgress task at merge time — e.g. the
     // MR merged while a re-spawn had returned the task to InProgress —
     // needs InProgress → Review → Done).
@@ -237,6 +242,11 @@ async fn complete_task_on_merge(state: &Arc<AppState>, mr: &MergeRequest, agent_
         tracing::warn!(task_id = %task.id, "ralph-loop: task Done persist failed: {e}");
         return;
     }
+    // Auto-track the Review→Done terminal transition (analytics.md
+    // §Auto-Emitted Events — every persisted task status transition
+    // records a task.status_changed event; task-146 review R4: this
+    // pass-path tail previously persisted Done without it).
+    crate::api::analytics::record_task_status_changed(state, &task, &old_status).await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
@@ -1437,5 +1447,21 @@ mod tests {
         assert!(msgs
             .iter()
             .any(|m| { m.payload.as_ref().and_then(|p| p["task_id"].as_str()) == Some("task-1") }));
+
+        // task-146 review R4: the Review→Done terminal transition is a
+        // persisted production status change — it must record a
+        // task.status_changed analytics event like every sibling path.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.iter().any(|e| e.properties["task_id"] == "task-1"
+                && e.properties["old_status"] == "Review"
+                && e.properties["new_status"] == "Done"
+                && e.properties["assigned_to"] == "agent-1"),
+            "merge completion must record a task.status_changed event: {events:?}"
+        );
     }
 }

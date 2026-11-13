@@ -21,6 +21,23 @@ use std::sync::Arc;
 use super::PgStorage;
 use crate::schema::{analytics_events, cost_entries};
 
+/// Escape SQL LIKE wildcards (`%`, `_`) and the escape character itself
+/// in a user-supplied event-name prefix so it is matched literally
+/// (Postgres LIKE's default escape character is the backslash).
+/// Task-146 review R4: without escaping, a caller-supplied `mr.m_rged*`
+/// filter would match `mr.merged` (`_` = any single char) — wildcard
+/// semantics the mem and SQLite adapters do not implement.
+fn escape_like_wildcards(prefix: &str) -> String {
+    let mut escaped = String::with_capacity(prefix.len());
+    for c in prefix.chars() {
+        if c == '%' || c == '_' || c == '\\' {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = analytics_events)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -196,9 +213,18 @@ impl AnalyticsRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = analytics_events::table.into_boxed();
             if let Some(name) = &filter.event_name {
-                // Exact or trailing-`*` prefix match (analytics.md §Query Parameters).
+                // Exact or trailing-`*` prefix match (analytics.md §Query
+                // Parameters). Postgres LIKE is case-sensitive, matching
+                // the mem adapter's `starts_with` and SQLite's substr
+                // equality; the prefix's LIKE wildcards (`%`, `_`, `\\`)
+                // are escaped (task-146 review R4) so a caller-supplied
+                // wildcard cannot broaden the match — literal prefix
+                // semantics on every adapter.
                 if let Some(prefix) = name.strip_suffix('*') {
-                    query = query.filter(analytics_events::event_name.like(format!("{}%", prefix)));
+                    query = query.filter(
+                        analytics_events::event_name
+                            .like(format!("{}%", escape_like_wildcards(prefix))),
+                    );
                 } else {
                     query = query.filter(analytics_events::event_name.eq(name.as_str()));
                 }
@@ -266,7 +292,13 @@ impl AnalyticsRepository for PgStorage {
                 AnalyticsGroupBy::AgentId => "COALESCE(agent_id, '(none)')".to_string(),
                 AnalyticsGroupBy::WorkspaceId => "COALESCE(workspace_id, '(none)')".to_string(),
                 AnalyticsGroupBy::Day => {
-                    "to_char(to_timestamp(timestamp), 'YYYY-MM-DD')".to_string()
+                    // UTC calendar day (port contract, same key as the
+                    // SQLite `date(ts,'unixepoch')` and mem epoch-day
+                    // adapters): `AT TIME ZONE 'UTC'` pins the rendering
+                    // to UTC instead of the server session TimeZone
+                    // (task-146 review R4 — without it a 23:30 UTC event
+                    // lands on the next day on a non-UTC deployment).
+                    "to_char(to_timestamp(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD')".to_string()
                 }
             };
             let mut ph = 0usize;
@@ -279,6 +311,10 @@ impl AnalyticsRepository for PgStorage {
                  FROM analytics_events WHERE 1=1"
             );
             if filter.event_name.is_some() {
+                // Exact or trailing-`*` prefix match (analytics.md
+                // §Query Parameters), same operator choice as
+                // query_filtered: `=` for exact, case-sensitive LIKE with
+                // escaped wildcards for prefix (task-146 review R4).
                 let is_prefix = filter
                     .event_name
                     .as_deref()
@@ -314,7 +350,7 @@ impl AnalyticsRepository for PgStorage {
             let mut query = diesel::sql_query(&sql).into_boxed();
             if let Some(name) = &filter.event_name {
                 let pattern = match name.strip_suffix('*') {
-                    Some(prefix) => format!("{prefix}%"),
+                    Some(prefix) => format!("{}%", escape_like_wildcards(prefix)),
                     None => name.clone(),
                 };
                 query = query.bind::<Text, _>(pattern);
@@ -357,7 +393,10 @@ impl AnalyticsRepository for PgStorage {
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = diesel::sql_query(
-                "SELECT to_char(to_timestamp(timestamp), 'YYYY-MM-DD') as day, COUNT(*) as cnt \
+                // UTC calendar day (task-146 review R4): pin the rendering
+                // to UTC, not the server session TimeZone — same key as
+                // the SQLite/mem adapters and the port contract doc.
+                "SELECT to_char(to_timestamp(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as day, COUNT(*) as cnt \
                  FROM analytics_events \
                  WHERE event_name = $1 AND timestamp >= $2 AND timestamp <= $3 \
                  GROUP BY day ORDER BY day",

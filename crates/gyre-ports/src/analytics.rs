@@ -7,10 +7,16 @@ use gyre_domain::{AnalyticsEvent, CostEntry};
 ///
 /// All fields are optional; `None` means no constraint on that dimension.
 /// `event_name` supports exact match or trailing-`*` prefix match
-/// (e.g. `mr.*`), per spec.
+/// (e.g. `mr.*`), per spec. Prefix matching is LITERAL and case-sensitive
+/// on every adapter (task-146 review R4: `MR.*` must not match
+/// `mr.merged`, and `%`/`_` inside the prefix are ordinary characters,
+/// not wildcards) — the mem adapter's `starts_with`, SQLite's
+/// `substr(...) = ...` under BINARY collation, and Postgres's escaped
+/// case-sensitive LIKE all implement exactly this contract.
 #[derive(Debug, Clone, Default)]
 pub struct AnalyticsQueryFilter {
-    /// Exact event name, or prefix match when it ends with `*`.
+    /// Exact event name, or literal case-sensitive prefix match when it
+    /// ends with `*`.
     pub event_name: Option<String>,
     pub agent_id: Option<String>,
     pub user_id: Option<String>,
@@ -42,18 +48,6 @@ impl AnalyticsQueryFilter {
             limit: 100,
             ..Default::default()
         }
-    }
-
-    /// Split `event_name` into a SQL LIKE pattern: `mr.*` → `mr.%`,
-    /// exact otherwise. Returns `None` when no filter is set.
-    pub fn event_name_like(&self) -> Option<String> {
-        self.event_name.as_ref().map(|name| {
-            if let Some(prefix) = name.strip_suffix('*') {
-                format!("{}%", prefix)
-            } else {
-                name.clone()
-            }
-        })
     }
 }
 

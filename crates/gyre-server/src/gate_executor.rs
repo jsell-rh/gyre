@@ -1378,6 +1378,14 @@ async fn run_command_in_dir(
 /// (platform-model.md §6). Non-required gates are advisory: failures are
 /// logged but do not fail validation.
 ///
+/// `mr_id` attributes the validation to the MR in scope when there is one
+/// (single-entry merge, single-entry revert decision); atomic-group
+/// validation and the recovery HEAD health check pass `None` — those runs
+/// are attributable to a repo HEAD, not one MR, and the emitted gate
+/// analytics events record a null mr_id rather than a fabricated one.
+/// Every evaluated command gate records a `gate.passed`/`gate.failed`
+/// analytics event (analytics.md §Auto-Emitted Events).
+///
 /// Gates run inside a detached git worktree checked out at `head_sha`, so
 /// they validate the exact merged tree (platform-model.md §6, task-095
 /// R2-1). If worktree preparation fails (e.g. mem mode without a repo on
@@ -1386,6 +1394,7 @@ pub async fn run_post_merge_gates(
     state: &AppState,
     repo: &gyre_domain::Repository,
     head_sha: &str,
+    mr_id: Option<&Id>,
 ) -> Result<(), String> {
     let gates = state
         .quality_gates
@@ -1428,7 +1437,7 @@ pub async fn run_post_merge_gates(
         }
     };
     let cwd: Option<std::path::PathBuf> = gate_dir.as_ref().map(|(p, _)| p.clone());
-    let result = run_post_merge_gate_commands(&gates, cwd.as_deref()).await;
+    let result = run_post_merge_gate_commands(state, repo, mr_id, &gates, cwd.as_deref()).await;
 
     // Remove the detached gate worktree (if created) after gates finish:
     // deregister it from the repo's worktree list; the tempdir is removed
@@ -1453,6 +1462,9 @@ pub async fn run_post_merge_gates(
 }
 
 async fn run_post_merge_gate_commands(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    mr_id: Option<&Id>,
     gates: &[gyre_domain::QualityGate],
     cwd: Option<&std::path::Path>,
 ) -> Result<(), String> {
@@ -1460,9 +1472,52 @@ async fn run_post_merge_gate_commands(
         match &gate.gate_type {
             GateType::TestCommand | GateType::LintCommand => {
                 let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
+                let started_at = now_secs();
                 let (status, output) =
                     run_command_in_dir(gate.command.as_deref().unwrap_or("true"), cwd, timeout)
                         .await;
+                let finished_at = now_secs();
+                // Auto-track the post-merge gate outcome (analytics.md
+                // §Auto-Emitted Events — task-146 review R4: post-merge
+                // evaluations are quality-gate runs too; a required
+                // post-merge failure that triggers the revert/recovery
+                // protocol must be visible to gate analytics, exactly like
+                // the pre-merge run_gate path). `mr_id` is the MR this
+                // validation is attributable to when one is in scope —
+                // atomic-group validation and the recovery HEAD health
+                // check run against a repo HEAD, not a single MR, and
+                // record a null mr_id rather than a fabricated one.
+                let gate_type_str = format!("{:?}", gate.gate_type);
+                let (event_name, props) = if status == GateStatus::Failed {
+                    (
+                        "gate.failed",
+                        serde_json::json!({
+                            "gate_id": gate.id.to_string(),
+                            "gate_type": gate_type_str,
+                            "mr_id": mr_id.map(|id| id.to_string()),
+                            "output_snippet": truncate_bytes(&output, 512),
+                        }),
+                    )
+                } else {
+                    (
+                        "gate.passed",
+                        serde_json::json!({
+                            "gate_id": gate.id.to_string(),
+                            "gate_type": gate_type_str,
+                            "mr_id": mr_id.map(|id| id.to_string()),
+                            "duration_secs": finished_at.saturating_sub(started_at),
+                        }),
+                    )
+                };
+                let ev = gyre_domain::AnalyticsEvent::new(
+                    gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                    event_name,
+                    None,
+                    props,
+                    finished_at,
+                )
+                .with_scope(None, None, Some(&repo.workspace_id), Some(&repo.id));
+                let _ = state.analytics.record(&ev).await;
                 if status == GateStatus::Failed {
                     if gate.required {
                         return Err(format!(
