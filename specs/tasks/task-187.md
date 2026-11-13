@@ -5,7 +5,7 @@ depends_on: [task-171, task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
-commits: ["7737e532ffab9166fa2a2310dc472f2de39289df"]
+commits: ["7737e532ffab9166fa2a2310dc472f2de39289df", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75"]
 ---
 
 ## Spec Excerpt
@@ -86,7 +86,9 @@ Read `system-explorer.md` §8 "Conversational Exploration" for the full specific
 ## Shipped
 
 Conversational exploration (system-explorer.md §8) as a real question →
-knowledge-graph → grounded-answer pipeline, in commit 7737e532:
+knowledge-graph → grounded-answer pipeline, in commit 7737e532, plus the
+verification repair fa8568c5 (rustfmt + clippy `len_zero` on the new lines;
+no behavior change):
 
 - **Backend** — new `POST /api/v1/workspaces/:id/explorer-views/ask`
   (`ask_explorer` in `api/explorer_views.rs`): the LLM prompt is grounded
@@ -129,27 +131,29 @@ knowledge-graph → grounded-answer pipeline, in commit 7737e532:
 ### Test evidence
 
 - `web/src/__tests__/ConversationalExplorer.test.js` (vitest, 6 tests,
-  passing here): Q&A rendering, per-type entity-ref click dispatch,
-  canvas highlight + view-spec application, prediction application,
-  follow-up history replay, error surfacing.
-- Server tests in `api/explorer_views.rs` (compile-verified here via
-  `cargo check -p gyre-server --lib --tests`; **execution belongs to the
-  independent verifier** — the 4 GiB sandbox wrapper blocks gyre-server
-  test builds): grounding/citation validation (valid tokens kept,
-  hallucinated stripped, labels resolved), view-spec passthrough vs.
-  invalid-spec drop, prediction trigger against the single-repo scope,
-  prompt grounding (provenance reaches the LLM fully substituted),
-  history caps/role rejection, LLM-unavailable 503, plus unit tests for
-  `validate_entity_refs` and `short_sha` (char-boundary safe).
+  passing in the 7737e532 round): Q&A rendering, per-type entity-ref
+  click dispatch, canvas highlight + view-spec application, prediction
+  application, follow-up history replay, error surfacing.
+- Server tests in `api/explorer_views.rs` (compile-verified via
+  `cargo check -p gyre-server --all-targets` after the fa8568c5 repair;
+  **execution belongs to the independent verifier** — the 4 GiB sandbox
+  wrapper blocks gyre-server test builds): grounding/citation validation
+  (valid tokens kept, hallucinated stripped, labels resolved), view-spec
+  passthrough vs. invalid-spec drop, prediction trigger against the
+  single-repo scope, prompt grounding (provenance reaches the LLM fully
+  substituted), history caps/role rejection, LLM-unavailable 503, plus
+  unit tests for `validate_entity_refs` and `short_sha` (char-boundary
+  safe).
 - Regression: ExplorerView/ExplorerDefaultViews/GeneratedViewChat
-  vitest suites pass (ExplorerDefaultViews expected view-selector list
-  extended with the new "Ask the graph…" entry); existing
-  `predict_graph` behavior preserved by the extraction (same prompt
-  construction, note slot, and response shape).
-- Mechanical checks pass: check-arch, check-abac-route-registry,
-  check-inert-enforcement (it caught one real flaw mid-development — a
-  discarded `enforce_flow_trace_backing` result — fixed by binding it and
-  appending the fallback note to the answer), check-abac-exempt-handlers,
+  vitest suites passed in the 7737e532 round (ExplorerDefaultViews
+  expected view-selector list extended with the new "Ask the graph…"
+  entry); existing `predict_graph` behavior preserved by the extraction
+  (same prompt construction, note slot, and response shape).
+- Mechanical checks pass (re-run on the repaired head):
+  `check-rustfmt-diff.py 890a70de` clean, `check-clippy-diff.py 890a70de`
+  clean (900 pre-existing warnings outside the change), plus in the
+  verification round: check-arch, check-abac-route-registry,
+  check-inert-enforcement, check-abac-exempt-handlers,
   check-mcp-write-tools, check-byte-slice-truncation,
   check-relative-path-defaults, check-lossy-secret-conversion,
   check-unbounded-external-http.
