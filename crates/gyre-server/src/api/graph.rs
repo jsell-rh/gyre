@@ -2052,9 +2052,11 @@ pub async fn get_workspace_graph_concept(
 /// GET /api/v1/workspaces/{id}/graph/concepts
 /// Workspace-scoped concept browser listing (system-explorer.md §4): the
 /// union of predefined concepts across the workspace's repos' spec
-/// manifests, deduped by case-insensitive name (the first repo defining a
-/// name supplies the description). Repos without manifests contribute
-/// nothing — an empty union is a valid workspace-wide answer.
+/// manifests, deduped by case-insensitive name with a deterministic
+/// winner (the lexicographically smallest spelling/description pair, so
+/// the result is independent of repo iteration order). Repos without
+/// manifests contribute nothing — an empty union is a valid workspace-wide
+/// answer.
 pub async fn list_workspace_graph_concepts(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2067,19 +2069,41 @@ pub async fn list_workspace_graph_concepts(
         .await
         .map_err(ApiError::Internal)?;
 
-    let mut concepts: Vec<ConceptSummary> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Order-independent dedupe: the port does not guarantee repo iteration
+    // order (the mem adapter returns HashMap order), so first-wins would
+    // make the surviving spelling of a case-variant name depend on adapter
+    // internals. Instead each case-insensitive name keeps one deterministic
+    // winner — the lexicographically smallest (name, description) pair —
+    // and the listing is sorted by name so every adapter returns the same
+    // response for the same manifest set.
+    let mut by_key: std::collections::BTreeMap<String, ConceptSummary> =
+        std::collections::BTreeMap::new();
     for repo in &repos {
         for def in manifest_concepts(repo).await {
-            if !seen.insert(def.name.to_lowercase()) {
-                continue;
-            }
-            concepts.push(ConceptSummary {
+            let candidate = ConceptSummary {
                 name: def.name,
                 description: def.description,
-            });
+            };
+            match by_key.entry(candidate.name.to_lowercase()) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(candidate);
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    if (candidate.name.as_str(), candidate.description.as_str())
+                        < (o.get().name.as_str(), o.get().description.as_str())
+                    {
+                        o.insert(candidate);
+                    }
+                }
+            }
         }
     }
+    let mut concepts: Vec<ConceptSummary> = by_key.into_values().collect();
+    concepts.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.description.cmp(&b.description))
+    });
 
     Ok(Json(WorkspaceConceptListResponse {
         workspace_id: id,
