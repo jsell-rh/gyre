@@ -4259,7 +4259,16 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&json!({
                             "title": "Payment reconciliation engine",
-                            "task_type": "implementation"
+                            "task_type": "implementation",
+                            // The task's search document resolves its tenant
+                            // from the task's workspace row
+                            // (search_scope::index_doc) — a task in a
+                            // workspace that does not exist is tenantless
+                            // and invisible to every tenant-scoped query
+                            // (fail-closed). ws-own exists in the caller's
+                            // tenant, mirroring production where every task
+                            // sits in a real workspace.
+                            "workspace_id": "ws-own"
                         }))
                         .unwrap(),
                     ))

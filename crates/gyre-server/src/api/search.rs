@@ -289,11 +289,30 @@ mod tests {
         let state = test_state();
         let app = crate::build_router(state.clone());
 
+        // The task's search document resolves its tenant from the task's
+        // workspace row (search_scope::index_doc) — a task in a workspace
+        // that does not exist is tenantless and invisible to every
+        // tenant-scoped query (fail-closed). Create the workspace the task
+        // lives in, mirroring production where every task sits in a real
+        // workspace of the caller's tenant.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-search"),
+                gyre_common::Id::new("default"),
+                "Search",
+                "search",
+                1000,
+            ))
+            .await
+            .unwrap();
+
         // Index a searchable task through the public API so the search port
         // has a real document (create_task indexes for search).
         let task_body = serde_json::json!({
             "title": "Payment reconciliation engine",
-            "task_type": "implementation"
+            "task_type": "implementation",
+            "workspace_id": "ws-search"
         });
         let resp = app
             .clone()

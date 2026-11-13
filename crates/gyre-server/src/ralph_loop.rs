@@ -898,6 +898,12 @@ mod tests {
         task.task_type = Some(gyre_domain::TaskType::Implementation);
         task.workspace_id = Id::new("ws-1");
         task.repo_id = Id::new("r-1");
+        // Production parity: the spawn path assigns the spawned agent onto
+        // the task (spawn.rs sets task.assigned_to = agent.id before the
+        // session starts), so a task an agent is working through review
+        // carries its assignee — the task.status_changed re-open event's
+        // assigned_to property reports it.
+        task.assigned_to = Some(Id::new("agent-1"));
         task.transition_status(TaskStatus::InProgress).unwrap();
         task.transition_status(TaskStatus::Review).unwrap();
         state.tasks.create(&task).await.unwrap();
