@@ -5,7 +5,7 @@ depends_on: [task-171, task-178]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
-commits: ["7737e532ffab9166fa2a2310dc472f2de39289df", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75"]
+commits: ["fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df"]
 ---
 
 ## Spec Excerpt
