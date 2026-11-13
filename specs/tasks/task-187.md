@@ -2,7 +2,7 @@
 title: "Conversational Exploration — AI Q&A grounded in knowledge graph"
 spec_ref: "system-explorer.md §8"
 depends_on: [task-171, task-178]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §8. Conversational Exploration"
 commits: ["3a1229f9bb023c032f62ee2bf0caf3e26db07e79", "a3051e834c722f5d417993fd88eae0d83a3d9c1f", "bdf9f79f4532cb5684b096d6f605e6b78c5ee551", "a69f76ec549374252e1d8d475ccd8b69be7c72d9", "d363ce7d5f4a374530ccde7548bb52b31f242a12", "fa8568c5c4f30ca3fd4bda6124f9d0fb54e54d75", "7737e532ffab9166fa2a2310dc472f2de39289df", "972181b36240a00dc03e7fec1ed8c8cda51c7030"]
@@ -69,15 +69,15 @@ The answer is **grounded in the knowledge graph**: provenance records, spec link
 
 ## Acceptance Criteria
 
-- [ ] Conversational Q&A panel accessible from Ask input in control bar
-- [ ] Questions sent with knowledge graph context to LLM
-- [ ] Responses grounded in knowledge graph with traceable entity references
-- [ ] Entity references rendered as clickable links
-- [ ] Click entity reference → navigate to entity or highlight on canvas
-- [ ] Follow-up questions maintain conversation context
-- [ ] "Show me X" responses update the canvas view
-- [ ] "What would happen if..." responses trigger structural predictions
-- [ ] Tests pass
+- [x] Conversational Q&A panel accessible from Ask input in control bar
+- [x] Questions sent with knowledge graph context to LLM
+- [x] Responses grounded in knowledge graph with traceable entity references
+- [x] Entity references rendered as clickable links
+- [x] Click entity reference → navigate to entity or highlight on canvas
+- [x] Follow-up questions maintain conversation context
+- [x] "Show me X" responses update the canvas view
+- [x] "What would happen if..." responses trigger structural predictions
+- [x] Tests pass
 
 ## Agent Instructions
 
@@ -89,9 +89,9 @@ Conversational exploration (system-explorer.md §8) as a real question →
 knowledge-graph → grounded-answer pipeline, shipped across commits
 7737e532 (feature), fa8568c5 (rustfmt/clippy repair), d363ce7d (unknown-kind
 citation tokens preserved literally), a69f76ec (char-based `short_sha` test
-expectation), bdf9f79f (grounded fallback ask prompt; no-LLM test repair),
-f7cfd96d (first rebase repair, vs. task-183), and 9d5c22fa (second rebase
-repair, vs. task-182 — see below):
+expectation), and bdf9f79f (grounded fallback ask prompt; no-LLM test
+repair), then carried through three rebase repairs against evolving main
+(f7cfd96d vs. task-183, 9d5c22fa vs. task-182, e04f6096 vs. task-037):
 
 - **Backend** — `POST /api/v1/workspaces/:id/explorer-views/ask`
   (`ask_explorer` in `api/explorer_views.rs`): the LLM prompt is grounded
@@ -131,29 +131,28 @@ repair, vs. task-182 — see below):
   membership). Frontend: vitest component tests for panel rendering,
   citation link rendering, follow-up context, and view-spec application.
 
-### Rebase repair (9d5c22fa)
+### Rebase repair (e04f6096)
 
-The published PR head (696feec9) conflicted with current main (b9487b1b,
-task-182 Concept Views). Merged main into the branch; the sole source
-conflict was the import block in `ExplorerView.svelte` — resolved by
-keeping the task-187 `ConversationalExplorer` import and combining the
-`generated-view.js` import to `viewSpecToViewQuery, viewDocumentToQuery`
-(main's concept-view document query helper). All other paths auto-merged;
-semantic coupling reviewed: the ask route stays registered before
-`/:view_id` with its ABAC mapping, `graph.rs` combines concept-view
-grounding with the ask grounding builder, and `ExplorerView.svelte` keeps
-both the conversational panel wiring (lines ~355, ~1566, ~2724, ~3752)
-and main's `viewDocumentToQuery` call site (line ~1535). Generated
-web/dist assets remain at the merge state; remote integration rebuilds
-them.
+The published PR head (f2b9f21d) conflicted with current main (349a32ac,
+task-037 ViewQuery `seed_match` types and validation). Merged main into
+the branch: no source conflicts — task-037's changes are additive (an
+optional `ConceptScope.seed_match` field plus validator modes) and touch
+no task-187 surface, so all source paths auto-merged. Only generated
+`web/dist` assets conflicted; resolved to main's verified assets (HEAD's
+dist is byte-identical to 349a32ac's; remote integration rebuilds them
+from the merged source). Coupling reviewed: task-187's frontend does not
+use `seed_match`, and the ConversationalExplorer / ExplorerChat /
+ExplorerView suites pass unchanged against main's extended validator.
 
-### Test evidence (merged head 9d5c22fa)
+### Test evidence (merged head e04f6096)
 
 - `cargo check -p gyre-server` — exit 0.
-- `cargo test -p gyre-common -p gyre-domain` — all pass.
-- `cd web && npm ci && npm test` — 113 files, 2299 passed, 41 skipped,
-  including ConversationalExplorer, ExplorerChat, ExplorerConceptViews
-  (main's task-182 suite), and generated-view tests on the merged tree.
+- `cargo test -p gyre-common -p gyre-domain` — 631 passed, 0 failed.
+- `cd web && npm ci && npx vitest run` focused on the coupled surfaces —
+  ConversationalExplorer, view-query-validator (main's task-037 suite),
+  ExplorerConceptViews, ExplorerDefaultViews, ExplorerGeneratedViews,
+  generated-view, view-query-scope, view-spec, ExplorerChat
+  (component/streaming) — 270 passed, 0 failed.
 - **Verifier must run** (server test compilation exceeds this sandbox's
   4 GiB budget): `cargo test -p gyre-server --lib api::explorer_views`,
   `cargo test -p gyre-server --lib api::graph`, and the full workspace
