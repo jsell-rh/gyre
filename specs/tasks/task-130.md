@@ -66,16 +66,16 @@ A worker agent's token is scoped to its repo. The Workspace Orchestrator's token
 
 ## Acceptance Criteria
 
-- [x] `AgentJwtClaims` includes `tenant_id`, `workspace_id`, `repo_id`, `persona`, `attestation_level`
-- [x] `scope` field is `Vec<String>` with fine-grained permissions
-- [x] Token minting populates hierarchy claims from spawn context
-- [x] Worker agent tokens scoped to their repo
-- [x] Workspace orchestrator tokens scoped to their workspace
-- [x] MCP server validates scope on every tool call
-- [x] Scope mismatch returns clear error (not silent allow)
-- [x] `AuthenticatedAgent` exposes workspace_id and repo_id
-- [x] All existing tests updated for new claim fields
-- [x] `cargo test --all` passes
+- [ ] `AgentJwtClaims` includes `tenant_id`, `workspace_id`, `repo_id`, `persona`, `attestation_level`
+- [ ] `scope` field is `Vec<String>` with fine-grained permissions
+- [ ] Token minting populates hierarchy claims from spawn context
+- [ ] Worker agent tokens scoped to their repo
+- [ ] Workspace orchestrator tokens scoped to their workspace
+- [ ] MCP server validates scope on every tool call
+- [ ] Scope mismatch returns clear error (not silent allow)
+- [ ] `AuthenticatedAgent` exposes workspace_id and repo_id
+- [ ] All existing tests updated for new claim fields
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
