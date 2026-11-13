@@ -54,81 +54,73 @@ Read `specs/system/message-bus.md` §"Relationship to Notifications" and §"Impl
 
 ## Shipped
 
-### Merge state (this round)
+### Round 5 — contract restore re-verification
 
 The executor restored the assigned task contract (progress reset, shipped
 notes stripped) while preserving the production fix on the branch. This
-round re-verified the merged head 88ceb71d0 (candidate 0d2de17a3 merged
-with main @ a218b956, task-198 spec links): the merge is purely additive
-for task-198 code — no changes to `message_dispatcher.rs`, `main.rs`, the
-notification surface, or the three `try_send` call sites — and
-`cargo check -p gyre-server` passes on the merged head (8m41s, exit 0).
-All task-162 product commits are listed in `commits:` frontmatter.
+round re-verified the merged head `49858412` (production fix merged with
+assigned base `41f4d56e`): `git diff --name-only 88ceb71d..49858412`
+shows **zero changes under `crates/`** — the task-162 server source
+(`message_dispatcher.rs`, `main.rs` wiring, all tests) is byte-identical
+to the previously verified checkpoint. On this head,
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server` passes (exit 0, 6m09s) and
+`cargo check -p gyre-server --tests` passes (exit 0, 2m47s). Server test
+execution is deferred to the independent verifier (4 GiB budget rule):
+run `cargo test -p gyre-server message_dispatcher`, then the full
+`cargo test --all` acceptance gate. Evidence:
+`/tmp/stage/review-evidence/task-162-round5.txt`.
 
 ### Dispatcher (§Relationship to Notifications)
 
 `spawn_message_consumer()` (`crates/gyre-server/src/message_dispatcher.rs`,
-called from `main.rs`) takes single-owner possession of the 256-capacity
-mpsc receiver via `AppState::take_message_dispatch_rx()` (a second call is
-a logged no-op) and spawns the background drain task. `MessageDispatcher`
-holds `Vec<Arc<dyn MessageConsumer>>` and dispatches every drained message
-to all registered consumers. The first registered consumer is
-`NotificationBridge`, which derives Inbox notifications from Event-tier
-messages:
+called from `main.rs` after `build_state`) takes single-owner possession of
+the 256-capacity mpsc receiver via `AppState::take_message_dispatch_rx()`
+(a second call is a logged no-op) and spawns the background drain task.
+`MessageDispatcher` holds `Vec<Arc<dyn MessageConsumer>>` and dispatches
+every drained message to all registered consumers. The send hot path
+(`AppState::emit_event`, the REST send handler, and the MCP `message.send`
+tool) does one non-blocking `try_send` and returns immediately; a full
+channel drops the message with a warning log — consumers are downstream
+observers and cannot block delivery.
 
-- `GateFailure` → rank-3 `GateFailure` for the MR author agent's spawning
-  user (MR → author agent → spawner chain; tenant resolved from the
-  workspace record, never fabricated). Only Workspace/Broadcast-targeted
-  GateFailure events are consumed — the Agent-directed copy from
-  `ralph_loop::on_gates_failed` is the agent's inbox record, not a
-  human-notification trigger (round-1 dedupe repair, commit dd716a986).
-- `BudgetWarning` → rank-4 `AgentBudgetWarning` for workspace
+The first registered consumer is `NotificationBridge`, which derives
+user-facing notifications from bus messages via the shared
+`notify_rich` creation path:
+
+- `GateFailure` → rank-3 `GateFailure` notification for the MR author
+  agent's spawning user. Only the Workspace/Broadcast-targeted event is
+  consumed; the Agent-directed copy emitted by `ralph_loop::on_gates_failed`
+  is the agent's inbox record and is ignored (regression-tested —
+  consuming both duplicated the p3 notification).
+- `BudgetWarning` → rank-4 `AgentBudgetWarning` for the workspace's
   Admin/Developer/Owner members.
-- `AgentError` → rank-2 `AgentEscalation` for the failing agent's spawning
-  user.
-- `ReconciliationCompleted` → rank-6 `MetaSpecDrift` for workspace
-  Admin/Developer/Owner members (HSI §8 p6).
+- `AgentError` → rank-2 `AgentEscalation` for the failing agent's
+  spawning user.
+- `ReconciliationCompleted` → rank-6 `MetaSpecDrift` for the workspace's
+  Admin/Developer/Owner members (HSI §8 p6 routing).
 
-Bridge creation delegates to `notifications::notify_rich`, so
-bridge-derived notifications carry the same structured
-`NotificationSource` and deep-link derivation as every other producer.
-All three send paths (`AppState::emit_event`, REST send handler,
-MCP `message.send`) clone into the channel via non-blocking `try_send`; a
-full channel drops with a warning log and never blocks the send path.
+Unknown workspaces or missing spawning users skip the notification with a
+log — no fabricated scope identity.
 
 ### Event TTL expiry job (§Implementation Notes)
 
-`spawn_message_expiry()` starts the hourly job (3600s interval,
-`MissedTickBehavior::Delay`), registered as `message_expiry` in the admin
-job registry (`POST /admin/jobs/message_expiry/run` triggers on demand).
-Each cycle runs `run_message_expiry`:
-`expire_events(now_ms − GYRE_EVENT_TTL_SECS·1000)` for Event-tier cleanup
-plus `expire_acked_inboxes(now_ms − GYRE_DEAD_INBOX_TTL_SECS·1000)` for
-completed/orphaned agent inbox cleanup. Both env vars default to 604800
-(7 days); invalid values warn and fall back. Implemented by the SQLite,
-PostgreSQL, and mem `MessageRepository` adapters.
+`spawn_message_expiry()` (wired in `main.rs`) runs hourly with
+`MissedTickBehavior::Delay`, registered as `message_expiry` in the admin
+job registry (on-demand `POST /admin/jobs/message_expiry/run`). Each cycle
+(`run_message_expiry`) calls `messages.expire_events(now_ms - TTL)` and
+`messages.expire_acked_inboxes(now_ms - TTL)`, reading
+`GYRE_EVENT_TTL_SECS` and `GYRE_DEAD_INBOX_TTL_SECS` (defaults 604800 =
+7 days; invalid values warn and fall back to default).
 
-### Test evidence
+### Tests
 
-Focused tests in `crates/gyre-server/src/message_dispatcher.rs` (run in
-prior rounds on the pre-merge candidate; the merged head type-checks and
-the merge did not touch any file in this surface):
-`notification_bridge_creates_gate_failure_notification`,
-`notification_bridge_ignores_agent_directed_gate_failure_copy`,
-`notification_bridge_creates_meta_spec_drift_notification`,
-`notification_bridge_creates_budget_warning_notification`,
-`notification_bridge_creates_agent_error_notification`,
-`notification_bridge_skips_unknown_workspace`,
-`dispatcher_dispatches_to_all_consumers`,
-`message_expiry_deletes_old_events_and_dead_inboxes` (retention
-boundaries: unacked Directed and explicit-ack rows retained),
-`message_expiry_env_ttl_respected` (1s TTL deletes only >1s-old events),
-`spawn_message_consumer_end_to_end`.
-
-Server test compilation exceeds this sandbox's budget and must run in the
-independent verifier:
-
-```
-cargo test -p gyre-server message_dispatcher
-cargo test --all
-```
+`crates/gyre-server/src/message_dispatcher.rs` tests cover: bridge →
+notification creation for all four kinds (asserting type, priority rank,
+tenant, source entity), the agent-directed GateFailure dedupe regression,
+viewer-role exclusion from workspace fan-out, unknown-workspace skip,
+dispatcher fan-out to multiple consumers, `run_message_expiry`
+semantics (expired Event-tier deleted, fresh retained, unacked Directed
+retained, dead-inbox vs explicit-ack distinction), env-var TTL override
+(1s TTL deletes only the >1s-old event), and a `spawn_message_consumer`
+end-to-end test through the real `emit_event` send path including the
+single-dispatcher guard.
