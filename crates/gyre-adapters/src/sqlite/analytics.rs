@@ -4,7 +4,7 @@ use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Text};
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, CostEntry};
-use gyre_ports::analytics::{AnalyticsRepository, CostRepository};
+use gyre_ports::analytics::{AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 use std::sync::Arc;
 
 use super::SqliteStorage;
@@ -17,6 +17,10 @@ struct AnalyticsEventRow {
     id: String,
     event_name: String,
     agent_id: Option<String>,
+    user_id: Option<String>,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+    repo_id: Option<String>,
     properties: String,
     timestamp: i64,
     #[allow(dead_code)]
@@ -31,6 +35,10 @@ impl From<AnalyticsEventRow> for AnalyticsEvent {
             id: Id::new(r.id),
             event_name: r.event_name,
             agent_id: r.agent_id,
+            user_id: r.user_id,
+            session_id: r.session_id,
+            workspace_id: r.workspace_id,
+            repo_id: r.repo_id,
             properties,
             timestamp: r.timestamp as u64,
         }
@@ -43,6 +51,10 @@ struct AnalyticsEventRecord<'a> {
     id: &'a str,
     event_name: &'a str,
     agent_id: Option<&'a str>,
+    user_id: Option<&'a str>,
+    session_id: Option<&'a str>,
+    workspace_id: Option<&'a str>,
+    repo_id: Option<&'a str>,
     properties: String,
     timestamp: i64,
     tenant_id: &'a str,
@@ -110,6 +122,10 @@ impl AnalyticsRepository for SqliteStorage {
                 id: e.id.as_str(),
                 event_name: &e.event_name,
                 agent_id: e.agent_id.as_deref(),
+                user_id: e.user_id.as_deref(),
+                session_id: e.session_id.as_deref(),
+                workspace_id: e.workspace_id.as_deref(),
+                repo_id: e.repo_id.as_deref(),
                 properties: props,
                 timestamp: e.timestamp as i64,
                 tenant_id: "default",
@@ -145,6 +161,48 @@ impl AnalyticsRepository for SqliteStorage {
                 .limit(limit as i64)
                 .load::<AnalyticsEventRow>(&mut *conn)
                 .context("query analytics_events")?;
+            Ok(rows.into_iter().map(AnalyticsEvent::from).collect())
+        })
+        .await?
+    }
+
+    async fn query_filtered(&self, filter: &AnalyticsQueryFilter) -> Result<Vec<AnalyticsEvent>> {
+        let pool = Arc::clone(&self.pool);
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AnalyticsEvent>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let mut query = analytics_events::table.into_boxed();
+            if let Some(ref name) = filter.event_name {
+                // Exact or trailing-`*` prefix match (analytics.md §Query Parameters).
+                if let Some(prefix) = name.strip_suffix('*') {
+                    query = query.filter(analytics_events::event_name.like(format!("{}%", prefix)));
+                } else {
+                    query = query.filter(analytics_events::event_name.eq(name.as_str()));
+                }
+            }
+            if let Some(ref id) = filter.agent_id {
+                query = query.filter(analytics_events::agent_id.eq(id.as_str()));
+            }
+            if let Some(ref id) = filter.user_id {
+                query = query.filter(analytics_events::user_id.eq(id.as_str()));
+            }
+            if let Some(ref id) = filter.workspace_id {
+                query = query.filter(analytics_events::workspace_id.eq(id.as_str()));
+            }
+            if let Some(ref id) = filter.repo_id {
+                query = query.filter(analytics_events::repo_id.eq(id.as_str()));
+            }
+            if let Some(s) = filter.since {
+                query = query.filter(analytics_events::timestamp.ge(s as i64));
+            }
+            if let Some(u) = filter.until {
+                query = query.filter(analytics_events::timestamp.le(u as i64));
+            }
+            let rows = query
+                .order(analytics_events::timestamp.desc())
+                .limit(filter.limit as i64)
+                .load::<AnalyticsEventRow>(&mut *conn)
+                .context("query analytics_events (filtered)")?;
             Ok(rows.into_iter().map(AnalyticsEvent::from).collect())
         })
         .await?
@@ -444,6 +502,225 @@ mod tests {
         assert_eq!(d1.1, 2);
         let d2 = agg.iter().find(|(d, _)| d == "2024-01-02").unwrap();
         assert_eq!(d2.1, 1);
+    }
+
+    #[tokio::test]
+    async fn analytics_query_filtered_all_params() {
+        let (_tmp, s) = setup();
+        // Cross-cutting seed: agents span workspaces (a1 in ws-1 and ws-2),
+        // workspaces span repos (ws-2 holds r1 and r2), and users span
+        // workspaces (u1 in ws-1 and ws-3). No scope predicate is redundant
+        // with another, so dropping any one predicate from query_filtered
+        // must change the result sets asserted below.
+        let mk = |id: &str,
+                  name: &str,
+                  agent: Option<&str>,
+                  ws: Option<&str>,
+                  repo: Option<&str>,
+                  user: Option<&str>,
+                  ts: u64| {
+            AnalyticsEvent {
+                id: Id::new(id),
+                event_name: name.to_string(),
+                agent_id: agent.map(str::to_string),
+                user_id: user.map(str::to_string),
+                session_id: None,
+                workspace_id: ws.map(str::to_string),
+                repo_id: repo.map(str::to_string),
+                properties: serde_json::json!({}),
+                timestamp: ts,
+            }
+        };
+        AnalyticsRepository::record(
+            &s,
+            &mk(
+                "f1",
+                "mr.merged",
+                Some("a1"),
+                Some("ws-1"),
+                Some("r1"),
+                Some("u1"),
+                100,
+            ),
+        )
+        .await
+        .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk(
+                "f2",
+                "mr.merged",
+                Some("a1"),
+                Some("ws-2"),
+                Some("r1"),
+                None,
+                200,
+            ),
+        )
+        .await
+        .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk(
+                "f3",
+                "mr.merged",
+                Some("a2"),
+                Some("ws-2"),
+                Some("r2"),
+                Some("u2"),
+                300,
+            ),
+        )
+        .await
+        .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk(
+                "f4",
+                "mr.merged",
+                Some("a3"),
+                Some("ws-3"),
+                Some("r3"),
+                Some("u1"),
+                400,
+            ),
+        )
+        .await
+        .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk(
+                "f5",
+                "task.status_changed",
+                Some("a4"),
+                Some("ws-4"),
+                Some("r4"),
+                Some("u3"),
+                500,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let ids = |out: &[AnalyticsEvent]| -> Vec<String> {
+            let mut v: Vec<String> = out.iter().map(|e| e.id.as_str().to_string()).collect();
+            v.sort();
+            v
+        };
+
+        // Event name: exact.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.merged".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(
+            ids(&out),
+            vec!["f1", "f2", "f3", "f4"],
+            "exact event_name match"
+        );
+
+        // Event name: prefix wildcard.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f1", "f2", "f3", "f4"], "mr.* prefix match");
+
+        // Each scope predicate individually. Because the seed is
+        // cross-cutting, each of these assertions fails if its predicate is
+        // dropped from query_filtered (the unfiltered set is all 5 events).
+        let f = AnalyticsQueryFilter {
+            agent_id: Some("a1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f1", "f2"], "agent a1 spans ws-1 and ws-2");
+
+        let f = AnalyticsQueryFilter {
+            agent_id: Some("a2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f3"], "agent a2 only in ws-2");
+
+        let f = AnalyticsQueryFilter {
+            workspace_id: Some("ws-2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(
+            ids(&out),
+            vec!["f2", "f3"],
+            "ws-2 holds two agents and two repos"
+        );
+
+        let f = AnalyticsQueryFilter {
+            workspace_id: Some("ws-3".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f4"], "ws-3 holds only f4");
+
+        let f = AnalyticsQueryFilter {
+            repo_id: Some("r1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f1", "f2"], "repo r1 spans ws-1 and ws-2");
+
+        let f = AnalyticsQueryFilter {
+            repo_id: Some("r2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f3"], "repo r2 holds only f3");
+
+        let f = AnalyticsQueryFilter {
+            user_id: Some("u1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f1", "f4"], "user u1 spans ws-1 and ws-3");
+
+        let f = AnalyticsQueryFilter {
+            user_id: Some("u2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f3"], "user u2 holds only f3");
+
+        // Conjunctive scope filters.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.merged".into()),
+            agent_id: Some("a1".into()),
+            workspace_id: Some("ws-1".into()),
+            repo_id: Some("r1".into()),
+            user_id: Some("u1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f1"], "all scope predicates conjunctive");
+
+        // Inclusive since/until bounds.
+        let f = AnalyticsQueryFilter {
+            since: Some(200),
+            until: Some(200),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(ids(&out), vec!["f2"], "inclusive since/until bounds");
+
+        // Limit truncates, newest first.
+        let f = AnalyticsQueryFilter {
+            limit: 2,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, Id::new("f5"), "newest event first");
+        assert_eq!(out[1].id, Id::new("f4"), "second-newest next");
     }
 
     // --- CostRepository tests ---

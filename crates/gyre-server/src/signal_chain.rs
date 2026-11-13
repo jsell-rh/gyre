@@ -1227,7 +1227,7 @@ async fn try_spawn_worker(
         Ok(resp) => {
             let reason =
                 "compute target spawn_process failed (agent-runtime.md §1 Phase 7)".to_string();
-            teardown_failed_spawn(state, &Id::new(&resp.agent.id), repo).await;
+            teardown_failed_spawn(state, &Id::new(&resp.agent.id), repo, &reason).await;
             WorkerSpawnOutcome::LaunchFailed(reason)
         }
         // Budget exhausted mid-flight (race between the pre-check and the
@@ -1241,10 +1241,19 @@ async fn try_spawn_worker(
 
 /// Tear down the agent record a failed launch left behind: Failed status,
 /// token removed, budget counter released.
-async fn teardown_failed_spawn(state: &Arc<AppState>, agent_id: &Id, repo: &Repository) {
+async fn teardown_failed_spawn(
+    state: &Arc<AppState>,
+    agent_id: &Id,
+    repo: &Repository,
+    reason: &str,
+) {
     if let Ok(Some(mut agent)) = state.agents.find_by_id(agent_id).await {
         let _ = agent.transition_status(AgentStatus::Failed);
         let _ = state.agents.update(&agent).await;
+        // Auto-track agent.failed (analytics.md §Auto-Emitted Events):
+        // the launch failed, so the freshly-created agent record dies
+        // with it — the trigger is a real agent death, not a no-op status.
+        crate::api::analytics::record_agent_failed(state, &agent, reason).await;
     }
     let _ = state
         .kv_store

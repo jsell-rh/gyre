@@ -60,6 +60,27 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 // `active_agents` slot (review F3).
                 let was_active = agent.status == AgentStatus::Active;
                 let _ = agent.transition_status(AgentStatus::Dead);
+                // agent.failed analytics event (analytics.md §Auto-Emitted
+                // Events: "Agent fails or is killed"). Heartbeat timeout is
+                // a failure; the admin kill and fail_agent paths are others.
+                let ev = gyre_domain::AnalyticsEvent::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    "agent.failed",
+                    Some(agent.id.to_string()),
+                    serde_json::json!({
+                        "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                        "reason": "heartbeat timeout (abort)",
+                        "duration_secs": now.saturating_sub(agent.spawned_at),
+                    }),
+                    now,
+                )
+                .with_scope(
+                    None,
+                    None,
+                    Some(&agent.workspace_id),
+                    agent.repo_id.as_ref(),
+                );
+                let _ = state.analytics.record(&ev).await;
                 let _ = state.agents.update(&agent).await;
 
                 if was_active {
@@ -110,9 +131,22 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                     if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
                         use gyre_domain::TaskStatus;
                         if task.status == TaskStatus::InProgress {
+                            let pre_block_status = task.status.clone();
                             let _ = task.transition_status(TaskStatus::Blocked);
                             task.updated_at = now;
                             let _ = state.tasks.update(&task).await;
+                            // task.status_changed analytics event (analytics.md
+                            // §Auto-Emitted Events: "Task transitions status") —
+                            // the stale-abort auto-block is a production
+                            // transition.
+                            if task.status != pre_block_status {
+                                crate::api::analytics::record_task_status_changed(
+                                    state,
+                                    &task,
+                                    &pre_block_status,
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
@@ -371,9 +405,91 @@ pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::mem::test_state;
     use gyre_common::Id;
     use gyre_domain::{Agent, AgentStatus, DisconnectedBehavior};
+
+    /// analytics.md §Auto-Emitted Events: an agent aborted by heartbeat
+    /// timeout ("fails or is killed") must record agent.failed with the
+    /// spec-required task_id/reason properties. Fails on the old behavior
+    /// where the abort path recorded no analytics event.
+    #[tokio::test]
+    async fn abort_records_agent_failed_analytics_event() {
+        let state = test_state();
+
+        let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = gyre_domain::Agent::new(Id::new("stale-agent-1"), "doomed", 1_000);
+        agent.disconnected_behavior = DisconnectedBehavior::Abort;
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // In-flight task assigned to the agent — the abort path blocks it.
+        let mut task = gyre_domain::Task::new(Id::new("task-stale-1"), "Stale task", 1_000);
+        task.transition_status(gyre_domain::TaskStatus::InProgress)
+            .ok();
+        state.tasks.create(&task).await.unwrap();
+        let mut with_task = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        with_task.current_task_id = Some(Id::new("task-stale-1"));
+        state.agents.update(&with_task).await.unwrap();
+
+        // Age past the heartbeat timeout, no heartbeat ever recorded.
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let dead = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(dead.status, AgentStatus::Dead);
+
+        let blocked = state
+            .tasks
+            .find_by_id(&Id::new("task-stale-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.status, gyre_domain::TaskStatus::Blocked);
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "stale abort must record the agent.failed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "agent.failed");
+        assert_eq!(ev.agent_id.as_deref(), Some("stale-agent-1"));
+        assert_eq!(ev.properties["reason"], "heartbeat timeout (abort)");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+
+        // analytics.md §Auto-Emitted Events: task.status_changed — the
+        // stale-abort auto-block is a production transition and must record.
+        let status_events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            status_events.len(),
+            1,
+            "stale-abort auto-block must record task.status_changed"
+        );
+        let sev = &status_events[0];
+        assert_eq!(sev.properties["task_id"], "task-stale-1");
+        assert_eq!(sev.properties["old_status"], "InProgress");
+        assert_eq!(sev.properties["new_status"], "Blocked");
+    }
 
     fn now_secs() -> u64 {
         std::time::SystemTime::now()

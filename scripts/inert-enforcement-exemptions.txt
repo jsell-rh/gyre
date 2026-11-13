@@ -14,5 +14,7 @@
 # (No entries: the merge-time ABAC audit-only sites in merge_processor.rs
 # were fixed by the task-077 revision (results bound and branched on), and
 # the void validate_persona sites in api/orchestrator.rs were fixed by the
-# task-099 revision rounds (persona validation is enforced server-side).
-# Both fix sets are present in this tree.)
+# task-099 revision rounds (persona validation is enforced server-side —
+# the upstream base replaced this branch's advisory warn_unapproved_persona
+# rename with fail-closed resolve_orchestrator_persona). Both fix sets are
+# present in this tree.)

@@ -22,13 +22,9 @@
 #   fallback; the value is a deterministic function of the verified token,
 #   and "default" is the real bootstrapped Tenant row. Entry removed,
 #   count lowered 3→2.
-#   gate_executor.rs gate-event ws_id fallback — FIXED in task-134's
-#   gate-executor rewrite: an unresolvable MR now skips the scope-scoped
-#   event emission and logs instead of fabricating a "default" workspace.
-#   The task-134 rebase onto task-108's b5a872087 (task-103's auth.rs fix
-#   from the base, task-134's gate-executor fix from the branch) combines
-#   both sides' fixes in one tree, leaving exactly one flagged site
-#   (verified by running the checker's scan on the merged tree); entry
-#   removed and count lowered 2→1 per the any-growth-fails freeze
-#   principle.
+#   gate_executor.rs GateFailure ws_id fallback — FIXED in task-134's
+#   gate-executor rewrite (and independently on task-146's branch, merged
+#   in task-146's rebase onto that base): an unresolvable MR now skips the
+#   scope-scoped event emission and logs instead of fabricating a
+#   "default" workspace. Entry removed, count lowered 2→1.
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification
