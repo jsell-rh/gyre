@@ -2,14 +2,14 @@
 title: "Complete analytics event schema and auto-emitted events coverage"
 spec_ref: "analytics.md §Event Schema"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "analytics.md §Purpose"
   - "analytics.md §Event Schema"
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["f17756774160de561cc1e0a9c1576a43e18b7505", "e1088342c4f52d501dc18f12b26bcb9a8b93987e", "9f68c1fed65784766f3f967de39cddc7e8466358", "a3afa55f6ff37e35473dc6f95b33811626510e3c", "b49cea80f1536251e1376a1b366aeb3cf0d7e93b", "9bf30a10b6db85a0a8bd8c29fe1c3d6a4378c4c0", "5fb9e9b83b1b8f30da3e87c4ad419267b8543092", "24b2d851a053d1da22c7e75db0a742bd903c0f7f", "e9e597a07dcbc28feadcce79500e7b845d030bb9", "f301cff2c388a93a12566692550cd4420f69e9db", "ad7d3e33a7e7ed0dd49c7bcad057e8d5be8a0494", "57d722692429f2433bae6790e8ceb56a139e40b3", "29d73e8102d4c0f55cd4cdcb28fa2a99f298ed2a", "02b8c9073a9fa0c153c17abadb23933bd492ea86", "6f469a6bbf65aa915005360bca99e2123c5d700e", "897b5565d8791abde8b81cf4de4fa26e3e23eda7", "17face906b7d075c68c798094f914b5d63488039", "3bcd6f5254589c02811ca2a902e98e22c06ab09b", "d7641dddcc0ba8d5d3a7ff660d159b404cab4f54", "8f0ee1903e62beb75639ce30a7c8dc3bd4ee7e55", "ed7ac6d36b4eed6931538def2cd893c2b19c9a06"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -93,44 +93,3 @@ pub struct AnalyticsEvent {
 - Read `crates/gyre-server/src/api/specs.rs` for spec approval events
 - Read `crates/gyre-server/src/api/search.rs` for search endpoint
 - Do NOT create new endpoints — the query API routes already exist. Only add missing auto-emitted events and verify completeness.
-
-## Shipped
-
-The task-146 analytics surface shipped in earlier rounds — see the
-`commits:` list: event schema with all 9 spec fields, all 12 auto-emitted
-events with spec-required properties at their real trigger points, and the
-query API with the full spec filter set plus server-side `group_by`
-aggregation (semantics identical across the mem, SQLite, and Postgres
-adapters). Round f1775677 additionally repaired the `task.status_changed`
-repo scope and corrected the grouped-filter test.
-
-This round resolved the rebase onto the task-191 budget-enforcement base
-(d9c419a09), which conflicted in `api/admin.rs` (merge commit c65edaca):
-
-- Kept task-191's shared `kill_agent()` helper with the `was_active`
-  budget active-agent slot release inside it — the slot is released
-  exactly once, only for agents that held one.
-- Kept task-146's analytics emissions on the new structure:
-  `task.status_changed` on the kill auto-block (inside `kill_agent`, via
-  the shared `record_task_status_changed` helper that carries the repo
-  scope), and `agent.failed` on the admin kill route with `task_id`,
-  `reason`, `duration_secs`, and workspace/repo scope.
-- Dropped the now-duplicate `decrement_active_agents` call in
-  `admin_kill_agent` (would double-release the slot) and the duplicate
-  task-block in the handler (now inside `kill_agent`).
-- The `budget.warning` analytics emission survived the auto-merge inside
-task-191's reworked enforcement path unchanged.
-
-### Test evidence
-
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --quiet` — exit 0
-  (evidence: `/tmp/stage/review-evidence/task-146-rebase-resolution.log`).
-- gyre-server test compilation is deferred to the independent verifier
-  (hard 4 GiB sandbox budget); the verifier must run:
-  `cargo test -p gyre-server --lib api::admin::tests` (covers
-  `admin_kill_agent_sets_dead` asserting the `agent.failed` event with
-  reason and `duration_secs`, plus the budget slot release tests),
-  `cargo test -p gyre-server --lib api::analytics::tests`, and
-  `cargo test -p gyre-server --lib api::budget::tests` (task-191
-  enforcement interaction).
-
