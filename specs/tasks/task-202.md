@@ -2,10 +2,10 @@
 title: "Index all searchable entity types and implement real full reindex"
 spec_ref: "search.md §Searchable Entities"
 depends_on: [task-201]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["3e5f747b95b46e48c02e9431c8126dfe833e1d31", "1f80f64f4fa013634d38e985b271fb20d4a09a1a", "b316bc37f64c6f032c563b9e590a823ee8a626e4", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9", "2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -61,70 +61,3 @@ Depends on task-201 (real FTS backend + `SearchPort` semantics). Populate every 
 - The file/code-search job MUST use the existing `JobRegistry` (`AppState.job_registry`) — do not invent a new async runtime.
 - Keep FTS SQL in `gyre-adapters`; the coordinator only calls the port. Preserve hexagonal boundaries.
 - Run validation once at the end. On completion set `progress: ready-for-review` and record commit SHAs.
-
-## Shipped
-
-All 10 searchable entity types from search.md §Searchable Entities are
-indexed with real content and the specced indexed fields and facets, and
-`POST /api/v1/admin/search/reindex` performs a true full rebuild from
-domain storage. The production implementation is commits `80f13a70`/
-`309fc7dd` (plus review/verification repairs `3e223c8a`, `e2583917`,
-`2faf26af2`, `3dc6cdcc5`, `b522dd5cd`, `b316bc37f`, rebase repairs
-`f38e8ad07`/`1f80f64f4`, clippy repair `3e5f747b9`). This round
-(`9f8461dd2`) resolves the rebase against assignment base `3b734b1af`,
-whose lineage had evolved `SearchPort` with §Access Scoping semantics
-(tenant-scoped documents/queries; `suggest`/`facet_counts` carrying the
-caller's resolved scope) that the task-202 candidate predated.
-
-### Behavior
-
-- Spec: indexed on push from the pushed git blob (`index_repo_specs`),
-  with ledger-sourced title/owner/approval_status/links facets; commit:
-  message/author read from the git object store on the post-receive path;
-  file/code search: `search_code_index` `JobRegistry` job walks the
-  default-branch tree, skipping binary (NUL-sniffed) and >1 MiB blobs;
-  task/mr/agent/persona/review/activity-event/audit-event: indexed on
-  every repository write via the `search_sync` decorators plus handler
-  and emit-path calls, with the full specced facet maps.
-- `reindex_all` (server coordinator) clears the index through the port,
-  then rebuilds every type from the domain repositories and git object
-  store, returning the true document count.
-
-### Rebase resolution (this round)
-
-- Handler conflicts (tasks/agents/merge_requests): kept the task-202
-  `search_indexer` document builders (full specced facets) over the
-  base's partial inline `search_scope::index_doc` documents.
-- Port-shape adaptation: document builders carry `tenant_id` (unset);
-  the new `search_scope::with_tenant_resolution` port decorator resolves
-  a document's tenant from the workspace's real scope row at index time,
-  uniformly for every index path (handlers, decorators, jobs, reindex) —
-  mem mode has no workspace table to derive it from, and per-callsite
-  resolution was the fragile pattern `search_sync` exists to avoid.
-  Wired in both `build_state` and the mem test states.
-- `postgres/search.rs` test module: both merged test sets kept (PK
-  reconciliation + §Access Scoping query composition) — all referenced
-  helpers exist in the merged implementation.
-
-### Test evidence
-
-- Local (this sandbox): `cargo check --workspace --all-targets` clean;
-  `cargo clippy -p gyre-server -p gyre-adapters --all-targets` — no
-  findings in touched files (remaining warnings are pre-existing
-  tool-version noise in untouched files); `cargo test -p gyre-adapters
-  --lib search` — 30/30 pass (both merged postgres test sets, SQLite
-  FTS5 incl. §Access Scoping); `bash scripts/check-arch.sh` and all
-  invariant check scripts pass (migration versions, ABAC registry,
-  mem-port contracts, attribution after restoring the commits list).
-- The build wrapper defers gyre-server test compilation to the
-  independent verifier (4 GiB budget). Required probes:
-  `cargo test -p gyre-server --lib search_indexer search_scope
-  search_sync`, `cargo test -p gyre-server --lib api::tasks`,
-  `cargo test -p gyre-server --test search_wiring`,
-  `cargo test -p gyre-server --test git_integration`, then the full
-  `cargo test --all`. The `search_indexer` suite is the acceptance test:
-  it seeds all 10 entity types against a real SQLite FTS5 backend,
-  poisons the index with a stale doc, and asserts each type is
-  retrievable (spec-by-body-content, commit-by-message) after a rebuild
-  that drops the stale doc; it fails if any type is skipped or reindex
-  counts stale docs.
