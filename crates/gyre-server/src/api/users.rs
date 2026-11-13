@@ -162,6 +162,17 @@ pub async fn update_me(
                 "display_name must not be empty".to_string(),
             ));
         }
+        // The reserved system ABAC identity (task-129 review round 3):
+        // API-key/JWT auth resolves the caller's ABAC subject.id from
+        // display_name, and `system-full-access` (priority 1000) matches
+        // that identity — accepting it here would let any user grant
+        // themselves full access by renaming.
+        if dn == gyre_domain::SYSTEM_ABAC_IDENTITY {
+            return Err(ApiError::InvalidInput(format!(
+                "display_name '{}' is reserved for the system principal",
+                gyre_domain::SYSTEM_ABAC_IDENTITY
+            )));
+        }
         user.display_name = dn;
     }
     if let Some(tz) = req.timezone {
@@ -1354,6 +1365,19 @@ pub async fn create_user(
     // admin's chosen handle.
     User::validate_username(&username).map_err(ApiError::InvalidInput)?;
 
+    // The reserved system ABAC identity (task-129 review round 3):
+    // `User::new` derives display_name from the username, and API-key/JWT
+    // auth resolves the user's ABAC subject.id from display_name — a user
+    // provisioned under this handle would match `system-full-access`
+    // (priority 1000) and gain full access.
+    if username == gyre_domain::SYSTEM_ABAC_IDENTITY {
+        return Err(ApiError::InvalidInput(format!(
+            "username '{}' is reserved: it would become the user's display_name \
+             and reserved system ABAC identity",
+            gyre_domain::SYSTEM_ABAC_IDENTITY
+        )));
+    }
+
     // Parse roles; default to Admin (this is the bootstrap admin-user path).
     let mut roles: Vec<UserRole> = Vec::new();
     for r in req.roles.unwrap_or_else(|| vec!["Admin".to_string()]) {
@@ -2051,6 +2075,48 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// Task-129 review round 3 (privilege escalation): admin-created users
+    /// derive display_name from the username, and display_name becomes the
+    /// user's ABAC subject.id under API-key/JWT auth — a user provisioned
+    /// under the reserved system identity would match `system-full-access`
+    /// (priority 1000) and gain full access.
+    #[tokio::test]
+    async fn create_user_rejects_reserved_system_username() {
+        let state = test_state();
+        seed_tenant(&state).await;
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"gyre-system-token","tenant_id":"t-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "the reserved system ABAC identity must not be provisionable as a username"
+        );
+
+        // And no user row was created under the reserved handle.
+        assert!(
+            state
+                .users
+                .find_by_username("gyre-system-token")
+                .await
+                .unwrap()
+                .is_none(),
+            "rejected reserved-identity provisioning must not create a user"
+        );
+    }
+
     #[tokio::test]
     async fn create_user_rejects_duplicate_external_id() {
         let state = test_state();
@@ -2321,6 +2387,54 @@ mod tests {
         assert_eq!(
             json2["display_name"], "put-me-bad",
             "rejected update must not partially apply"
+        );
+    }
+
+    /// Task-129 review round 3 (privilege escalation): display_name becomes
+    /// the caller's ABAC subject.id under API-key/JWT auth, and the seeded
+    /// `system-full-access` policy (priority 1000) matches the reserved
+    /// system identity — so a user renaming themselves to it must be
+    /// rejected, and nothing applied.
+    #[tokio::test]
+    async fn put_me_rejects_reserved_system_display_name() {
+        let (state, _user_id, key) = bootstrap_user("put-me-reserved").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"display_name":"gyre-system-token","timezone":"UTC"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "the reserved system ABAC identity must not be assignable as display_name"
+        );
+
+        // Nothing was applied — the display_name is unchanged.
+        let app2 = crate::api::api_router().with_state(state);
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json2 = body_json(resp2).await;
+        assert_ne!(
+            json2["display_name"], "gyre-system-token",
+            "rejected reserved-identity rename must not apply"
         );
     }
 

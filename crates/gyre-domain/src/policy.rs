@@ -136,16 +136,28 @@ pub struct PolicyDecision {
 // Built-in policy helpers
 // ---------------------------------------------------------------------------
 
+/// The reserved ABAC subject identity of the global system principal
+/// (the global `GYRE_AUTH_TOKEN`). `system-full-access` matches this exact
+/// identity, so it MUST NOT be assignable to any other subject: API-key and
+/// JWT auth resolve a user's ABAC `subject.id` from the user's display_name,
+/// so every display_name write path (profile update, admin provisioning, SSO
+/// provisioning) rejects this string, and the ABAC middleware denies any
+/// non-system principal that still presents it (pre-existing row, direct DB
+/// edit) before policy evaluation.
+pub const SYSTEM_ABAC_IDENTITY: &str = "gyre-system-token";
+
 /// Create the set of built-in tenant-level policies that Gyre ships with.
 ///
 /// These enforce fundamental invariants and cannot be deleted.
 ///
 /// # Key design decisions (HSI §2)
 ///
-/// - `system-full-access` matches on `subject.id == "gyre-system-token"` (NOT
-///   `subject.type == "system"`). This means the merge processor (`subject.type:
-///   "system"`, `subject.id: "merge-processor"`) is subject to ABAC and can be
-///   blocked by trust-preset policies such as `trust:require-human-mr-review`.
+/// - `system-full-access` matches on `subject.id == SYSTEM_ABAC_IDENTITY`
+///   (NOT `subject.type == "system"`). This means the merge processor
+///   (`subject.type: "system"`, `subject.id: "merge-processor"`) is subject
+///   to ABAC and can be blocked by trust-preset policies such as
+///   `trust:require-human-mr-review`. The identity is reserved (see
+///   [`SYSTEM_ABAC_IDENTITY`]): only the genuine global token carries it.
 ///
 /// - `builtin:require-human-spec-approval` is `immutable: true`. Immutable Deny
 ///   policies are evaluated before all priority-based evaluation — including the
@@ -175,7 +187,7 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
             conditions: vec![Condition {
                 attribute: "subject.id".to_string(),
                 operator: ConditionOp::Equals,
-                value: ConditionValue::String("gyre-system-token".to_string()),
+                value: ConditionValue::String(SYSTEM_ABAC_IDENTITY.to_string()),
             }],
             actions: vec!["*".to_string()],
             resource_types: vec!["*".to_string()],

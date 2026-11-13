@@ -3,8 +3,15 @@
 //! Runs after `require_auth_middleware` (which identifies the caller) and before
 //! any handler. Uses the existing `policy_engine` and `PolicyRepository`.
 //!
-//! System tokens (global `GYRE_AUTH_TOKEN`) bypass ABAC entirely — they are the
-//! superuser escape hatch for bootstrap and emergency access.
+//! The global `GYRE_AUTH_TOKEN` is allowed BY POLICY, not by a bypass: the
+//! genuine system principal (`is_system_principal()`: agent_id "system" AND no
+//! backing user row) is mapped to the reserved ABAC identity
+//! [`gyre_domain::SYSTEM_ABAC_IDENTITY`] ("gyre-system-token"), which the
+//! `system-full-access` builtin (priority 1000) allows — above
+//! tenant-isolation (950) and every role band. The reserved identity is
+//! rejected at every display_name write path and denied at evaluation time
+//! for any non-system principal that still presents it, so it cannot be
+//! spoofed.
 //!
 //! Pipeline position (per hierarchy-enforcement.md §4):
 //! ```text
@@ -1954,12 +1961,47 @@ pub async fn abac_middleware(
         None => method_to_action(&method),
     };
 
-    // System token bypasses ABAC entirely. `is_system_principal()` (not an
-    // agent_id string match): API-key/JWT auth sets agent_id from the user's
-    // display_name, so a user named "system" would otherwise spoof this
-    // bypass (task-099 F1 revision).
-    if auth.is_system_principal() {
-        return next.run(req).await;
+    // Reserved-identity containment (review round 3, task-129): the ABAC
+    // identity "gyre-system-token" is matched by `system-full-access`
+    // (priority 1000 — above tenant-isolation 950 and every role band), so a
+    // NON-system principal carrying it would match that Allow and gain full
+    // access. Every supported write path rejects the string (PUT /users/me
+    // display_name, admin user creation, SSO provisioning), but a
+    // pre-existing row or direct DB edit can still produce it — deny it
+    // here, before evaluation. `is_system_principal()` (agent_id "system"
+    // AND no user row) is the only legitimate source of the identity: an
+    // attacker's key/JWT resolves to their own user id, so
+    // `user_id.is_none()` cannot be forged.
+    if auth.agent_id == gyre_domain::SYSTEM_ABAC_IDENTITY && !auth.is_system_principal() {
+        let subject_type = if auth.roles.contains(&gyre_domain::UserRole::Agent) {
+            "agent"
+        } else {
+            "user"
+        };
+        tracing::warn!(
+            subject_id = %auth.agent_id,
+            pattern = %pattern,
+            "ABAC denied request: non-system principal carrying the reserved system ABAC identity"
+        );
+        let decision = policy_engine::build_decision(
+            &policy_engine::EvalResult {
+                effect: gyre_domain::PolicyEffect::Deny,
+                matched_policy: None,
+                evaluated_count: 0,
+                evaluation_ms: 0.0,
+            },
+            &auth.agent_id,
+            subject_type,
+            action,
+            resource_type,
+            &pattern,
+        );
+        let _ = state.policies.record_decision(&decision).await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "reserved system identity"})),
+        )
+            .into_response();
     }
 
     // Task-134 (agent-gates.md §Gate Agent Lifecycle): scoped tokens are
@@ -2037,14 +2079,20 @@ pub async fn abac_middleware(
     // global GYRE_AUTH_TOKEN — `is_system_principal` requires
     // agent_id == "system" AND no user identity, so a user merely NAMED
     // "system" does not match) carries the reserved ABAC identity
-    // "gyre-system-token". `system-full-access` matches BY ID (not by
-    // subject.type), so the token identity must be the reserved string no
-    // JWT/API-key subject can produce. The AUDIT identity (agent_id in
-    // PolicyDecision / audit events) stays "system" — only the ABAC
-    // attribute changes. This also keeps the merge processor (subject.id
-    // "merge-processor") OUTSIDE system-full-access, per HSI §2.
+    // `SYSTEM_ABAC_IDENTITY` ("gyre-system-token"). There is no early
+    // bypass — the system principal flows through evaluation like every
+    // other subject, and `system-full-access` (priority 1000, matched BY
+    // ID, not by subject.type) is the policy that allows it: above
+    // tenant-isolation (950), below only immutable Deny. The reserved
+    // string is non-spoofable: every display_name write path rejects it
+    // (PUT /users/me, admin creation, SSO provisioning) and the guard above
+    // denies any non-system principal that still presents it. The AUDIT
+    // identity (agent_id in PolicyDecision / audit events) stays "system"
+    // — only the ABAC attribute changes. This also keeps the merge
+    // processor (subject.id "merge-processor") OUTSIDE
+    // system-full-access, per HSI §2.
     if auth.is_system_principal() {
-        ctx.set("subject.id", "gyre-system-token");
+        ctx.set("subject.id", gyre_domain::SYSTEM_ABAC_IDENTITY);
     }
 
     let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
@@ -2406,10 +2454,16 @@ pub mod tests {
         state
     }
 
+    /// The global GYRE_AUTH_TOKEN is allowed BY the seeded
+    /// `system-full-access` policy (priority 1000), not by a middleware
+    /// bypass: the decision audit trail must record the match. Killing
+    /// directions: removing the subject.id mapping (or the policy, or its
+    /// priority 1000) makes this fail — with no other Allow above the role
+    /// bands and tenant-isolation, the token falls through to default-deny.
     #[tokio::test(flavor = "multi_thread")]
-    async fn system_token_bypasses_abac() {
+    async fn system_token_allowed_by_system_full_access_policy() {
         let state = setup_state_with_policies();
-        let app = build_test_app(state);
+        let app = build_test_app(state.clone());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -2421,6 +2475,83 @@ pub mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
+        // The 200 must be a system-full-access policy match, not a bypass:
+        // the decision audit trail names the matched policy. The audit
+        // subject identity is the agent_id ("system"), not the reserved
+        // ABAC identity.
+        let decisions = state
+            .policies
+            .list_decisions(Some("system"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().any(|d| {
+                d.decision == gyre_domain::PolicyEffect::Allow
+                    && d.matched_policy
+                        .as_ref()
+                        .map(|p| p.as_str() == "builtin-system-access")
+                        .unwrap_or(false)
+            }),
+            "the global token's 200 must come from the system-full-access \
+             policy match recorded in the decision audit trail"
+        );
+    }
+
+    /// Review round 3 (privilege escalation): the reserved ABAC identity
+    /// "gyre-system-token" is matched by `system-full-access` (priority
+    /// 1000, above tenant-isolation 950). A NON-system principal carrying
+    /// it — a user row no supported write path can produce anymore
+    /// (pre-existing row, direct DB edit) — must be DENIED before
+    /// evaluation, never allowed by the builtin. API-key auth resolves
+    /// agent_id from the user's display_name, so this key authenticates as
+    /// the reserved identity with a real user backing it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spoofed_system_identity_denied_before_evaluation() {
+        let state = setup_state_with_policies();
+
+        let mut user = gyre_domain::User::new(Id::new("u-spoof"), "local:spoof", "spoof", 0);
+        user.display_name = gyre_domain::SYSTEM_ABAC_IDENTITY.to_string();
+        user.roles = vec![gyre_domain::UserRole::Developer];
+        user.tenant_id = Some(Id::new("default"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre-spoof-reserved-identity";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "spoof")
+            .await
+            .unwrap();
+
+        let app = build_test_app(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-system principal carrying the reserved system ABAC identity \
+             must be denied before policy evaluation"
+        );
+
+        // The denial is audited under the spoofed identity.
+        let decisions = state
+            .policies
+            .list_decisions(Some(gyre_domain::SYSTEM_ABAC_IDENTITY), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            decisions
+                .iter()
+                .any(|d| d.decision == gyre_domain::PolicyEffect::Deny),
+            "the reserved-identity denial must be recorded in the decision audit trail"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6459,13 +6590,16 @@ pub mod tests {
 
     /// `tenant-isolation` (live): a default-tenant user reading a t-1 spec
     /// is denied by the SEEDED builtin alone — no custom policy. The same
-    /// request under the global GYRE_AUTH_TOKEN is allowed: the system
-    /// principal's ABAC identity ("gyre-system-token") matches
-    /// system-full-access at priority 1000, above tenant-isolation at 950.
-    /// Killing directions: without the subject.id mapping the global token
-    /// would be denied (it resolves the bootstrap tenant "default" while
-    /// the spec lives in t-1); without the builtin the member_jwt request
-    /// would be allowed by developer-write-access (800).
+    /// request under the global GYRE_AUTH_TOKEN is allowed BY the
+    /// `system-full-access` policy (there is no bypass — the system
+    /// principal flows through evaluation): its reserved ABAC identity
+    /// ("gyre-system-token") matches system-full-access at priority 1000,
+    /// above tenant-isolation at 950. Killing directions: without the
+    /// subject.id mapping the global token would be denied (it resolves the
+    /// bootstrap tenant "default" while the spec lives in t-1); without the
+    /// builtin the member_jwt request would be allowed by
+    /// developer-write-access (800); without the decision-audit assertion
+    /// the 200 could silently regress to a bypass.
     #[tokio::test(flavor = "multi_thread")]
     async fn builtin_tenant_isolation_denies_cross_tenant_live() {
         let state = setup_entity_state().await;
@@ -6517,6 +6651,26 @@ pub mod tests {
             StatusCode::OK,
             "the global GYRE_AUTH_TOKEN identity must be allowed across tenants \
              (system-full-access at 1000 outranks tenant-isolation at 950)"
+        );
+
+        // The 200 must be a system-full-access policy match recorded in
+        // the decision audit trail (subject "system" — the audit identity),
+        // proving the allow came from evaluation, not a middleware bypass.
+        let decisions = state
+            .policies
+            .list_decisions(Some("system"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().any(|d| {
+                d.decision == gyre_domain::PolicyEffect::Allow
+                    && d.matched_policy
+                        .as_ref()
+                        .map(|p| p.as_str() == "builtin-system-access")
+                        .unwrap_or(false)
+            }),
+            "the global token's cross-tenant 200 must be a system-full-access \
+             policy match in the decision audit trail, not a bypass"
         );
     }
 
