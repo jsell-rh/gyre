@@ -845,7 +845,14 @@ async fn build_ask_grounding(
     repo_filter: Option<&Id>,
 ) -> (String, GraphGrounding) {
     let repos: Vec<gyre_domain::Repository> = match repo_filter {
-        Some(rid) => state.repos.find_by_id(rid).await.ok().flatten().into_iter().collect(),
+        Some(rid) => state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect(),
         None => state
             .repos
             .list_by_workspace(workspace_id)
@@ -886,9 +893,7 @@ async fn build_ask_grounding(
             if let Some(agent) = &n.last_modified_by {
                 grounding.agent_ids.insert(agent.to_string());
             }
-            grounding
-                .node_names
-                .insert(id.clone(), n.name.clone());
+            grounding.node_names.insert(id.clone(), n.name.clone());
             node_lines.push(serde_json::json!({
                 "id": id,
                 "name": n.name,
@@ -1038,14 +1043,11 @@ fn validate_entity_refs(answer: &str, grounding: &GraphGrounding) -> (String, Ve
                 let kind = &after_prefix[..colon];
                 let id = &after_prefix[colon + 1..close];
                 let resolved = match kind {
-                    "node" => grounding
-                        .node_names
-                        .get(id)
-                        .map(|name| EntityRef {
-                            kind: "node".to_string(),
-                            id: id.to_string(),
-                            label: name.clone(),
-                        }),
+                    "node" => grounding.node_names.get(id).map(|name| EntityRef {
+                        kind: "node".to_string(),
+                        id: id.to_string(),
+                        label: name.clone(),
+                    }),
                     "spec" => grounding.spec_paths.get(id).map(|_| EntityRef {
                         kind: "spec".to_string(),
                         id: id.to_string(),
@@ -1150,7 +1152,9 @@ pub async fn ask_explorer(
     // ── Request validation (before any LLM budget is spent) ───────────
     let question = req.question.trim();
     if question.is_empty() {
-        return Err(ApiError::BadRequest("question must not be empty".to_string()));
+        return Err(ApiError::BadRequest(
+            "question must not be empty".to_string(),
+        ));
     }
     if question.len() > ASK_MAX_QUESTION_LEN {
         return Err(ApiError::BadRequest(format!(
@@ -1312,7 +1316,8 @@ pub async fn ask_explorer(
         .filter(|a| !a.trim().is_empty())
         .unwrap_or_else(|| {
             tracing::warn!(workspace_id = %workspace_id, "LLM ask response missing answer field");
-            "The assistant could not produce a grounded answer — try rephrasing the question.".to_string()
+            "The assistant could not produce a grounded answer — try rephrasing the question."
+                .to_string()
         });
 
     // Grounding enforcement: validate every citation against the graph the
@@ -1327,7 +1332,9 @@ pub async fn ask_explorer(
     if result.get("view_spec").is_some_and(|v| v.is_object()) {
         let mut spec = result["view_spec"].clone();
         if parse_and_validate(&spec).is_err()
-            || validate_repo_ownership(&state, &workspace_id, &spec).await.is_err()
+            || validate_repo_ownership(&state, &workspace_id, &spec)
+                .await
+                .is_err()
         {
             tracing::warn!(workspace_id = %workspace_id, "LLM ask view_spec failed validation — dropping");
         } else {
@@ -1349,14 +1356,22 @@ pub async fn ask_explorer(
     // over the resolved repo scope; best-effort — a prediction failure
     // degrades to the text answer, it does not fail the request.
     let mut prediction: Option<AskPrediction> = None;
-    if result.get("predict").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if result
+        .get("predict")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         match resolve_prediction_repo(&state, &ws_id, repo_filter.as_ref()).await? {
             Some(repo_id) => {
                 let instruction = format!(
                     "Predict the structural impact of this hypothetical change:\n\n{question}"
                 );
                 match super::graph::run_structural_prediction(
-                    &state, &ws_id, &repo_id, &instruction, None,
+                    &state,
+                    &ws_id,
+                    &repo_id,
+                    &instruction,
+                    None,
                 )
                 .await
                 {
@@ -1655,8 +1670,8 @@ async fn validate_repo_ownership(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_generate_user_prompt, generated_view_explanation, recent_mrs_with_traces,
-        short_sha, validate_entity_refs, GraphGrounding, MrWithTrace,
+        build_generate_user_prompt, generated_view_explanation, recent_mrs_with_traces, short_sha,
+        validate_entity_refs, GraphGrounding, MrWithTrace,
     };
     use axum::{body::Body, http::Request};
     use http::StatusCode;
@@ -3259,7 +3274,8 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, body)
     }
 
@@ -3278,7 +3294,12 @@ mod tests {
         });
         let (app, _state, ws_id) = app_with_ask_graph(llm).await;
 
-        let (status, body) = post_ask(app, &ws_id, r#"{"question":"Why does SearchService exist?"}"#).await;
+        let (status, body) = post_ask(
+            app,
+            &ws_id,
+            r#"{"question":"Why does SearchService exist?"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
 
         // Valid tokens survive verbatim (the frontend parses the same syntax).
@@ -3288,7 +3309,10 @@ mod tests {
         assert!(answer.contains("[entity:agent:agent-worker-12]"));
         assert!(answer.contains("[entity:spec:specs/system/SearchService.md]"));
         // The hallucinated citation is stripped — bare id text, no token.
-        assert!(!answer.contains("[entity:node:ghost-node]"), "hallucinated ref must be stripped: {answer}");
+        assert!(
+            !answer.contains("[entity:node:ghost-node]"),
+            "hallucinated ref must be stripped: {answer}"
+        );
         assert!(answer.contains("ghost-node"));
 
         let refs = body["entity_refs"].as_array().unwrap();
@@ -3323,7 +3347,12 @@ mod tests {
             "predict": false
         }))
         .await;
-        let (status, body) = post_ask(app, &ws_id, r#"{"question":"Show me services that implement CachePort"}"#).await;
+        let (status, body) = post_ask(
+            app,
+            &ws_id,
+            r#"{"question":"Show me services that implement CachePort"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["view_spec"]["name"], "Cache implementors");
         assert_eq!(body["view_spec"]["layout"], "list");
@@ -3351,13 +3380,17 @@ mod tests {
             "predict": true
         }))
         .await;
-        let (status, body) =
-            post_ask(app, &ws_id, r#"{"question":"What would happen if I removed CachePort?"}"#).await;
+        let (status, body) = post_ask(
+            app,
+            &ws_id,
+            r#"{"question":"What would happen if I removed CachePort?"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let prediction = body.get("prediction").expect("prediction present");
         assert_eq!(prediction["repo_id"], "repo-ask");
         assert!(
-            prediction["predictions"].as_array().unwrap().len() >= 1,
+            !prediction["predictions"].as_array().unwrap().is_empty(),
             "prediction payload carries predictions"
         );
     }
@@ -3400,16 +3433,29 @@ mod tests {
         }));
         let app = crate::build_router(Arc::new(s));
 
-        let (status, _body) = post_ask(app, &ws_id, r#"{"question":"What is PaymentService?"}"#).await;
+        let (status, _body) =
+            post_ask(app, &ws_id, r#"{"question":"What is PaymentService?"}"#).await;
         assert_eq!(status, StatusCode::OK);
 
         let captured = mock.captured_system_prompts.lock().unwrap();
         assert_eq!(captured.len(), 1);
         let prompt = &captured[0];
-        assert!(prompt.contains("PaymentService"), "node name grounds the prompt");
-        assert!(prompt.contains("specs/system/PaymentService.md"), "spec linkage grounds the prompt");
-        assert!(prompt.contains("agent-worker-12"), "agent provenance grounds the prompt");
-        assert!(prompt.contains("[entity:node:"), "citation syntax is instructed");
+        assert!(
+            prompt.contains("PaymentService"),
+            "node name grounds the prompt"
+        );
+        assert!(
+            prompt.contains("specs/system/PaymentService.md"),
+            "spec linkage grounds the prompt"
+        );
+        assert!(
+            prompt.contains("agent-worker-12"),
+            "agent provenance grounds the prompt"
+        );
+        assert!(
+            prompt.contains("[entity:node:"),
+            "citation syntax is instructed"
+        );
         assert!(
             !prompt.contains("{{"),
             "unsubstituted template variables reached the LLM: {prompt}"
@@ -3441,9 +3487,7 @@ mod tests {
             if i > 0 {
                 history.push(',');
             }
-            history.push_str(&format!(
-                "{{\"role\": \"user\", \"content\": \"q{i}\"}}"
-            ));
+            history.push_str(&format!("{{\"role\": \"user\", \"content\": \"q{i}\"}}"));
         }
         history.push(']');
         let over = format!(r#"{{"question": "q", "history": {history}}}"#);
@@ -3461,8 +3505,7 @@ mod tests {
     async fn ask_explorer_requires_llm_and_membership() {
         // No LLM configured → 503, same as the generate endpoint.
         let app = app_with_workspace("ws-ask-nollm").await;
-        let (status, body) =
-            post_ask(app, "ws-ask-nollm", r#"{"question": "q"}"#).await;
+        let (status, body) = post_ask(app, "ws-ask-nollm", r#"{"question": "q"}"#).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], "llm_unavailable");
     }
@@ -3476,12 +3519,8 @@ mod tests {
         grounding
             .spec_paths
             .insert("specs/system/search.md".to_string());
-        grounding
-            .commit_shas
-            .insert("deadbeefdeadbeef".to_string());
-        grounding
-            .agent_ids
-            .insert("worker-7".to_string());
+        grounding.commit_shas.insert("deadbeefdeadbeef".to_string());
+        grounding.agent_ids.insert("worker-7".to_string());
 
         let (cleaned, refs) = validate_entity_refs(
             "[entity:node:n1] was created per [entity:spec:specs/system/search.md] in \

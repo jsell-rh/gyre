@@ -2029,9 +2029,10 @@ pub async fn predict_graph(
     // spec-edit framing note rides the system prompt (same slot it used
     // before the core was extracted) so the model sees it as instruction,
     // not as part of the user's question.
-    let (user_prompt, system_note) =
-        if let (Some(spec_path), Some(draft)) = (&req.spec_path, &req.draft_content) {
-            (
+    let (user_prompt, system_note) = if let (Some(spec_path), Some(draft)) =
+        (&req.spec_path, &req.draft_content)
+    {
+        (
                 format!(
                     "Predict what would change in the codebase if this spec is implemented:\n\nSpec: {spec_path}\n\nContent:\n{draft}"
                 ),
@@ -2039,14 +2040,21 @@ pub async fn predict_graph(
                     "\n\nThe user is editing a spec and wants to understand the structural impact.",
                 ),
             )
-        } else if let Some(spec_path) = &req.spec_path {
-            (format!("Predict structural improvements related to spec: {spec_path}"), None)
-        } else {
-            (format!("Predict structural improvements for repo {id}."), None)
-        };
+    } else if let Some(spec_path) = &req.spec_path {
+        (
+            format!("Predict structural improvements related to spec: {spec_path}"),
+            None,
+        )
+    } else {
+        (
+            format!("Predict structural improvements for repo {id}."),
+            None,
+        )
+    };
 
     let predictions =
-        run_structural_prediction(&state, &workspace_id, &repo_id, &user_prompt, system_note).await?;
+        run_structural_prediction(&state, &workspace_id, &repo_id, &user_prompt, system_note)
+            .await?;
 
     Ok(Json(PredictResponse {
         repo_id: id,
