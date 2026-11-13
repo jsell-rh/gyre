@@ -113,14 +113,37 @@ export function nodeMatchesConcept(node, concept) {
 }
 
 /**
- * Node ids hidden by the filter panel's current state.
- *
- * A node is hidden when its category checkbox is unchecked, or when
- * concepts are selected and the node matches none of them (concept
- * selection focuses the canvas on the concept's elements).
+ * Node ids belonging to the active concepts — the emphasis set for the
+ * concept view fade (system-explorer.md §4, task-182). A node is a
+ * concept member when it matches ANY selected concept (same substring
+ * semantics as nodeMatchesConcept); everything else fades to background
+ * rather than being hidden.
  *
  * @param {object[]} nodes Graph nodes.
- * @param {{ hiddenCategories?: string[]|Set<string>, concepts?: string[] }} state
+ * @param {string[]} concepts Selected concept names.
+ * @returns {Set<string>}
+ */
+export function conceptNodeIds(nodes, concepts = []) {
+  const out = new Set();
+  const active = (concepts ?? []).filter(Boolean);
+  if (active.length === 0) return out;
+  for (const n of nodes ?? []) {
+    if (!n || n.deleted_at) continue;
+    if (active.some((c) => nodeMatchesConcept(n, c))) out.add(n.id);
+  }
+  return out;
+}
+
+/**
+ * Node ids hidden by the filter panel's current state.
+ *
+ * A node is hidden when its category checkbox is unchecked. Concept
+ * selection is deliberately NOT hiding (system-explorer.md §4: "everything
+ * else fades to background", task-182) — concept membership resolves
+ * through conceptNodeIds and drives the canvas fade instead.
+ *
+ * @param {object[]} nodes Graph nodes.
+ * @param {{ hiddenCategories?: string[]|Set<string> }} state
  * @returns {Set<string>}
  */
 export function hiddenNodeIds(nodes, state = {}) {
@@ -129,16 +152,11 @@ export function hiddenNodeIds(nodes, state = {}) {
       ? state.hiddenCategories
       : [...(state.hiddenCategories ?? [])]
   );
-  const concepts = (state.concepts ?? []).filter(Boolean);
   const out = new Set();
-  if (hidden.size === 0 && concepts.length === 0) return out;
+  if (hidden.size === 0) return out;
   for (const n of nodes ?? []) {
     if (!n || n.deleted_at) continue;
-    if (hidden.size > 0 && hidden.has(nodeCategory(n))) {
-      out.add(n.id);
-      continue;
-    }
-    if (concepts.length > 0 && !concepts.some((c) => nodeMatchesConcept(n, c))) {
+    if (hidden.has(nodeCategory(n))) {
       out.add(n.id);
     }
   }

@@ -841,6 +841,7 @@ fn resolve_scope_with_adjacency(
             expand_edges,
             expand_depth,
             expand_direction,
+            seed_match,
         } => {
             let edge_types: Vec<EdgeType> = expand_edges
                 .iter()
@@ -856,39 +857,75 @@ fn resolve_scope_with_adjacency(
             let mut result = HashSet::new();
             let mut all_depths = HashMap::new();
 
-            let total_seeds = seed_nodes.len();
-            let mut resolved_seeds = 0usize;
-            for seed_name in seed_nodes {
-                if let Some(seed) = find_node_by_name(&active_nodes, seed_name) {
-                    resolved_seeds += 1;
-                    let depth_map = bfs_traverse_with_depths(
-                        &seed.id.to_string(),
-                        &edge_types,
-                        direction,
-                        *expand_depth,
-                        outgoing,
-                        incoming,
-                    );
-                    for (id, d) in &depth_map {
-                        let entry = all_depths.entry(id.clone()).or_insert(*d);
-                        if *d < *entry {
-                            *entry = *d;
-                        }
+            // Seed resolution mode (ui-layout.md §4 "Data source
+            // distinction"): "exact" resolves each seed to the one node it
+            // names; "substring" — the ViewSpec `data.concept` mechanism —
+            // seeds EVERY node whose name or qualified_name contains the
+            // seed (case-insensitive), like the graph endpoint's
+            // `?concept=` substring filter.
+            let substring = seed_match == "substring";
+            let seed_node_ids: Vec<String> = if substring {
+                let mut ids = Vec::new();
+                for seed_name in seed_nodes {
+                    let lower = seed_name.to_lowercase();
+                    let matches: Vec<&GraphNode> = active_nodes
+                        .iter()
+                        .copied()
+                        .filter(|n| {
+                            n.name.to_lowercase().contains(&lower)
+                                || n.qualified_name.to_lowercase().contains(&lower)
+                        })
+                        .collect();
+                    if matches.is_empty() {
+                        warnings.push(format!(
+                            "Concept seed '{}' matched no node name or qualified_name (substring)",
+                            seed_name
+                        ));
                     }
-                    result.extend(depth_map.into_keys());
-                } else {
-                    warnings.push(format!(
-                        "Concept seed node '{}' not found in graph — check spelling or use qualified_name",
-                        seed_name
-                    ));
+                    for n in matches {
+                        ids.push(n.id.to_string());
+                    }
                 }
+                ids
+            } else {
+                let mut ids = Vec::new();
+                for seed_name in seed_nodes {
+                    match find_node_by_name(&active_nodes, seed_name) {
+                        Some(seed) => ids.push(seed.id.to_string()),
+                        None => warnings.push(format!(
+                            "Concept seed node '{}' not found in graph — check spelling or use qualified_name",
+                            seed_name
+                        )),
+                    }
+                }
+                ids
+            };
+
+            let resolved_seeds = seed_node_ids.len();
+            for seed_id in seed_node_ids {
+                let depth_map = bfs_traverse_with_depths(
+                    &seed_id,
+                    &edge_types,
+                    direction,
+                    *expand_depth,
+                    outgoing,
+                    incoming,
+                );
+                for (id, d) in &depth_map {
+                    let entry = all_depths.entry(id.clone()).or_insert(*d);
+                    if *d < *entry {
+                        *entry = *d;
+                    }
+                }
+                result.extend(depth_map.into_keys());
             }
             // Warn when only some seed nodes resolved — the view may look
             // complete but is silently missing part of the intended concept.
-            if resolved_seeds > 0 && resolved_seeds < total_seeds {
+            if resolved_seeds > 0 && resolved_seeds < seed_nodes.len() {
                 warnings.push(format!(
                     "Concept scope partially resolved: {} of {} seed nodes found — results may be incomplete",
-                    resolved_seeds, total_seeds
+                    resolved_seeds,
+                    seed_nodes.len()
                 ));
             }
             (result, all_depths)
@@ -2907,6 +2944,7 @@ mod tests {
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 2,
                 expand_direction: "both".to_string(),
+                seed_match: "exact".to_string(),
             },
             &nodes,
             &edges,
@@ -3858,6 +3896,7 @@ mod tests {
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 5,
                 expand_direction: "outgoing".to_string(),
+                seed_match: "exact".to_string(),
             },
             &nodes,
             &edges,
@@ -3889,6 +3928,7 @@ mod tests {
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 2,
                 expand_direction: "both".to_string(),
+                seed_match: "exact".to_string(),
             },
             &nodes,
             &edges,
@@ -3912,6 +3952,7 @@ mod tests {
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 2,
                 expand_direction: "both".to_string(),
+                seed_match: "exact".to_string(),
             },
             &nodes,
             &edges,
@@ -4338,6 +4379,7 @@ mod tests {
                 expand_edges: vec![],
                 expand_depth: 200,
                 expand_direction: "outgoing".to_string(),
+                seed_match: "exact".to_string(),
             },
             emphasis: Default::default(),
             edges: Default::default(),
@@ -5632,6 +5674,119 @@ mod tests {
         );
     }
 
+    // ── Concept scope seed_match='substring' tests (ui-layout.md §4
+    //    "Data source distinction": the ViewSpec data.concept mechanism) ──
+
+    #[test]
+    fn test_concept_substring_seed_match_seeds_all_name_matches() {
+        // No node is NAMED "auth" — exact seed matching resolves nothing
+        // here. Substring matching seeds EVERY node whose name or
+        // qualified_name contains "auth" (case-insensitive):
+        // JwtAuthProvider and AuthMiddleware, not ShippingCalculator.
+        let nodes = vec![
+            make_node("n1", "JwtAuthProvider", NodeType::Type),
+            make_node("n2", "AuthMiddleware", NodeType::Function),
+            make_node("n3", "ShippingCalculator", NodeType::Type),
+        ];
+        let result = resolve_scope(
+            &Scope::Concept {
+                seed_nodes: vec!["auth".to_string()],
+                expand_edges: vec!["calls".to_string()],
+                expand_depth: 0,
+                expand_direction: "both".to_string(),
+                seed_match: "substring".to_string(),
+            },
+            &nodes,
+            &[],
+            None,
+        );
+        assert!(result.contains("n1"), "JwtAuthProvider contains 'auth'");
+        assert!(result.contains("n2"), "AuthMiddleware contains 'auth'");
+        assert!(
+            !result.contains("n3"),
+            "ShippingCalculator must not match the 'auth' concept"
+        );
+    }
+
+    #[test]
+    fn test_concept_substring_seed_match_expands_from_all_seeds() {
+        let nodes = vec![
+            make_node("n1", "JwtAuthProvider", NodeType::Type),
+            make_node("n2", "TokenStore", NodeType::Type),
+            make_node("n3", "ShippingCalculator", NodeType::Type),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n2", EdgeType::Calls)];
+        let result = resolve_scope(
+            &Scope::Concept {
+                seed_nodes: vec!["AUTH".to_string()], // case-insensitive
+                expand_edges: vec!["calls".to_string()],
+                expand_depth: 2,
+                expand_direction: "both".to_string(),
+                seed_match: "substring".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        // n1 is the substring seed (qualified_name pkg.JwtAuthProvider);
+        // TokenStore joins via the calls edge; ShippingCalculator does not.
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"), "expansion from the substring seed");
+        assert!(!result.contains("n3"));
+    }
+
+    #[test]
+    fn test_concept_substring_seed_match_warns_when_no_node_matches() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Function)];
+        let result = resolve_scope_with_depths(
+            &Scope::Concept {
+                seed_nodes: vec!["zzz".to_string()],
+                expand_edges: vec![],
+                expand_depth: 2,
+                expand_direction: "both".to_string(),
+                seed_match: "substring".to_string(),
+            },
+            &nodes,
+            &[],
+            None,
+        );
+        assert!(result.matched.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("zzz") && w.contains("substring")),
+            "expected an unmatched-substring-seed warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_concept_invalid_seed_match() {
+        let query = ViewQuery {
+            scope: Scope::Concept {
+                seed_nodes: vec!["A".to_string()],
+                expand_edges: vec![],
+                expand_depth: 2,
+                expand_direction: "both".to_string(),
+                seed_match: "fuzzy".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("Invalid seed_match")),
+            "Should reject invalid Concept seed_match, got: {:?}",
+            errors
+        );
+    }
+
     #[test]
     fn test_viewquery_validate_concept_invalid_direction() {
         let query = ViewQuery {
@@ -5640,6 +5795,7 @@ mod tests {
                 expand_edges: vec![],
                 expand_depth: 2,
                 expand_direction: "diagonal".to_string(),
+                seed_match: "exact".to_string(),
             },
             emphasis: Default::default(),
             edges: Default::default(),
