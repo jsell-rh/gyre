@@ -1245,6 +1245,9 @@ pub async fn invite_to_workspace(
     state.workspace_invitations.create(&invitation).await?;
 
     // In-app notification to the invitee (spec step 3: "in-app always").
+    // Typed InvitationReceived (user-management.md §Notification Entity:
+    // "A user was invited to a workspace") so the invitee's Inbox groups
+    // it under workspace invitations, not trust-policy suggestions.
     // The body carries the accept route so the invitee can act on the
     // invitation end-to-end: the invitee has no membership yet (so the
     // workspace-scoped listing is unreachable) and must not need the
@@ -1256,7 +1259,7 @@ pub async fn invite_to_workspace(
         new_id(),
         ws_id.clone(),
         user_id.clone(),
-        gyre_common::NotificationType::TrustSuggestion,
+        gyre_common::NotificationType::InvitationReceived,
         format!(
             "You have been invited to workspace {} with role {}",
             workspace.name,
@@ -3448,7 +3451,9 @@ mod tests {
     }
 
     /// Review F1: the in-app notification must carry the accept path so
-    /// the invitee can act on the invitation without the inviter's token.
+    /// the invitee can act on the invitation without the inviter's token,
+    /// and must be typed InvitationReceived so the Inbox classifies it
+    /// as a workspace invitation (not a trust-policy suggestion).
     #[tokio::test]
     async fn invite_notification_carries_accept_path() {
         let f = invitee_fixture().await;
@@ -3480,6 +3485,17 @@ mod tests {
             .find(|n| n.source.entity_id == "ws-inv"
                 && n.source.entity_type == "workspace")
             .expect("invitation notification created for the invitee");
+        // Review F1: the notification must be typed InvitationReceived
+        // (user-management.md §Notification Entity) — a TrustSuggestion
+        // type misclassifies it as a trust-policy suggestion in the Inbox.
+        assert_eq!(
+            notif.notification_type,
+            gyre_common::NotificationType::InvitationReceived
+        );
+        assert_ne!(
+            notif.notification_type,
+            gyre_common::NotificationType::TrustSuggestion
+        );
         let body: serde_json::Value =
             serde_json::from_str(notif.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["kind"], "workspace_invitation");
