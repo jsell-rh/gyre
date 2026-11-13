@@ -201,3 +201,112 @@ export function computeTimelineGhostOverlays({ graph, timelineFilteredGraph, tim
 
   return overlays;
 }
+
+/**
+ * Resolve the scrubber position to a unix-epoch-seconds timestamp.
+ *
+ * @param {Array} timeline - Array of ArchitecturalDelta records
+ * @param {number} scrubIndex - Current scrubber index (-1 = present)
+ * @returns {number|null} Epoch seconds at the scrubber position, or null
+ *   when the timeline is empty, the index is out of range, or the delta
+ *   has no usable timestamp.
+ */
+export function resolveScrubTimestamp(timeline, scrubIndex) {
+  if (!timeline?.length || scrubIndex < 0 || scrubIndex >= timeline.length) return null;
+  const delta = timeline[scrubIndex];
+  if (!delta) return null;
+  const ts = typeof delta.timestamp === 'number'
+    ? delta.timestamp
+    : Number(delta.timestamp);
+  if (Number.isFinite(ts) && ts > 0) return ts;
+  const parsed = typeof delta.timestamp === 'string' ? Date.parse(delta.timestamp) : NaN;
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+/**
+ * Debounced point-in-time graph fetcher (system-explorer.md §6).
+ *
+ * Coalesces rapid scrub positions into one server `GET /repos/:id/graph?at=`
+ * request per debounce window (200ms default), and drops stale responses:
+ * a fetch only settles the waiters for its OWN target position, so a
+ * request made while an older fetch is still in flight never resolves with
+ * the older position's graph; it is served by its own fetch once its
+ * debounce window closes. Positions superseded within a debounce window
+ * (and cancel()) resolve null so the caller keeps its client-side fallback
+ * graph. A failed fetch rejects so the caller can do the same.
+ *
+ * @param {function} fetchAt - `(at: number) => Promise<object>` graph fetcher
+ * @param {number} [delayMs=200] - debounce window in milliseconds
+ * @returns {{ request: (at: number) => Promise<object>, cancel: () => void }}
+ */
+export function createTimelineHistoryFetcher(fetchAt, delayMs = 200) {
+  let timer = null;
+  let latestAt = null;
+  let pending = [];
+
+  // Settle the waiters for ONE fetch target. Waiters for other positions
+  // stay pending: their own fetch starts when their debounce window closes
+  // (a newer request restarts the timer), so they must never receive this
+  // fetch's graph. Matching by the fetch's target (not by `latestAt`) is
+  // what prevents an in-flight fetch for an older position from resolving
+  // a newer position's waiter with the older graph.
+  function settleTarget(target, ok, value) {
+    const remaining = [];
+    for (const w of pending) {
+      if (w.at !== target) {
+        remaining.push(w);
+        continue;
+      }
+      if (ok) w.resolve(value);
+      else w.reject(value);
+    }
+    pending = remaining;
+  }
+
+  // Resolve every waiter whose position will NOT get its own fetch with
+  // null (keep the client-side fallback instead of hanging): positions
+  // superseded within the debounce window, or every waiter on cancel().
+  function releaseSuperseded(exceptAt) {
+    const remaining = [];
+    for (const w of pending) {
+      if (exceptAt != null && w.at === exceptAt) {
+        remaining.push(w);
+        continue;
+      }
+      w.resolve(null);
+    }
+    pending = remaining;
+  }
+
+  return {
+    request(at) {
+      latestAt = at;
+      return new Promise((resolve, reject) => {
+        pending.push({ at, resolve, reject });
+        if (timer != null) clearTimeout(timer);
+        timer = setTimeout(() => {
+          timer = null;
+          const target = latestAt;
+          if (target == null) {
+            releaseSuperseded(null);
+            return;
+          }
+          // Only the latest position in the window gets a fetch; earlier
+          // positions in the same window are superseded and resolve null.
+          releaseSuperseded(target);
+          fetchAt(target)
+            .then((graph) => settleTarget(target, true, graph))
+            .catch((err) => settleTarget(target, false, err));
+        }, delayMs);
+      });
+    },
+    cancel() {
+      if (timer != null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      latestAt = null;
+      releaseSuperseded(null); // release all waiters without a fetch
+    },
+  };
+}

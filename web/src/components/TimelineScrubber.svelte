@@ -9,6 +9,7 @@
     active = false,           // Whether time travel mode is active
     scrubIndex = -1,          // Current index into timeline array (-1 = present)
     nodes = [],               // Current graph nodes (for key moment marker extraction)
+    reconciliationEvents = [], // Workspace reconciliation_completed messages (key moments, system-explorer.md §6)
     onToggle = () => {},      // Callback to toggle time travel mode
     onScrub = (_idx) => {},   // Callback when scrubber position changes
     onMarkerClick = (_delta) => {}, // Callback when a key moment marker is clicked
@@ -24,6 +25,10 @@
   function tsMs(ts) {
     const ms = typeof ts === 'number' ? ts * 1000 : new Date(ts).getTime();
     return Number.isFinite(ms) ? ms : null;
+  }
+
+  function safeParse(s) {
+    try { return JSON.parse(s); } catch { return null; }
   }
 
   let timeScale = $derived.by(() => {
@@ -93,6 +98,48 @@
       }
     }
 
+    // Reconciliation events (persona v3 → v4, system-explorer.md §6): workspace
+    // reconciliation_completed messages. `created_at` is epoch milliseconds.
+    // The narrative derives ONLY from fields the production emitter sends
+    // (maybe_emit_reconciliation_completed → emit_reconciliation_completed:
+    // workspace_id, wave_started_at, task_count, duration_secs, specs[] (the
+    // changed meta-specs as {name, version}). Fields no emitter sends
+    // are never read, so no fabricated persona/specs narrative can appear.
+    for (const ev of reconciliationEvents ?? []) {
+      const payload = typeof ev?.payload === 'string' ? safeParse(ev.payload) : ev?.payload;
+      const tsMs = typeof ev?.created_at === 'number' ? ev.created_at : null;
+      if (tsMs == null) continue;
+      const ts = Math.floor(tsMs / 1000);
+      const idx = findClosestIndex(ts);
+      if (idx < 0) continue;
+      const taskCount = Number(payload?.task_count ?? 0);
+      const specLabels = (Array.isArray(payload?.specs) ? payload.specs : [])
+        .map((s) => {
+          if (typeof s === 'string') return s;
+          const name = s?.name;
+          if (!name) return null;
+          const v = Number(s?.version);
+          return name && Number.isFinite(v) && s.version != null ? `${name} v${s.version}` : name;
+        })
+        .filter(Boolean);
+      const duration = formatDuration(payload?.duration_secs);
+      const tasksText = `${taskCount} task${taskCount === 1 ? '' : 's'}`;
+      const narrative = specLabels.length
+        ? `Reconciliation wave complete: ${tasksText} aligned code with ${specLabels.join(', ')}${duration ? ` (${duration})` : ''}.`
+        : `Reconciliation wave complete: ${tasksText}${duration ? ` (${duration})` : ''}.`;
+      moments.push({
+        index: idx,
+        delta: {
+          timestamp: ts,
+          spec_ref: specLabels.length === 1 ? specLabels[0] : null,
+          narrative,
+        },
+        eventType: 'reconciliation',
+        addedCount: 0,
+        removedCount: 0,
+      });
+    }
+
     // Deduplicate by index proximity (merge moments within 1 index)
     moments.sort((a, b) => a.index - b.index);
     const deduped = [];
@@ -133,6 +180,20 @@
     const ms = typeof ts === 'number' ? ts * 1000 : new Date(ts).getTime();
     const d = new Date(ms);
     return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  // Human-readable duration for reconciliation narratives
+  // (duration_secs from the production reconciliation_completed payload).
+  function formatDuration(secs) {
+    const s = Number(secs);
+    if (!Number.isFinite(s) || s <= 0) return '';
+    const days = Math.floor(s / 86400);
+    const hours = Math.floor((s % 86400) / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+    if (hours > 0) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    if (mins > 0) return `${mins}m`;
+    return `${Math.floor(s)}s`;
   }
 
   // Marker position as percentage — by timestamp through the d3-scale time
@@ -337,6 +398,12 @@
               {#if selectedMoment.addedCount && selectedMoment.removedCount}, {/if}
               {#if selectedMoment.removedCount}<span class="tl-stat-remove">-{selectedMoment.removedCount} removed</span>{/if}
             </span>
+          </div>
+        {/if}
+        {#if selectedMoment.delta?.narrative}
+          <div class="tl-popover-field">
+            <span class="tl-popover-label">Why</span>
+            <span class="tl-popover-value">{selectedMoment.delta.narrative}</span>
           </div>
         {/if}
       </div>

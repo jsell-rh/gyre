@@ -321,4 +321,116 @@ describe('TimelineScrubber', () => {
     expect(slider).toBeTruthy();
     expect(slider.getAttribute('max')).toBe('0');
   });
+
+  // ── Reconciliation key moments (system-explorer.md §6) ────────────────────
+
+  // Plain timeline with no significant deltas — no spec_ref, small adds —
+  // so the only key moment comes from the reconciliation event.
+  const PLAIN_TIMELINE = [
+    { id: 'p1', repo_id: 'r1', commit_sha: 'aa1', timestamp: NOW_TS - 86400 * 30, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'p2', repo_id: 'r1', commit_sha: 'bb2', timestamp: NOW_TS - 86400 * 20, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'p3', repo_id: 'r1', commit_sha: 'cc3', timestamp: NOW_TS - 86400 * 10, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'p4', repo_id: 'r1', commit_sha: 'dd4', timestamp: NOW_TS - 86400 * 5, spec_ref: null, agent_id: null, delta_json: null },
+    { id: 'p5', repo_id: 'r1', commit_sha: 'ee5', timestamp: NOW_TS, spec_ref: null, agent_id: null, delta_json: null },
+  ];
+
+  // Exact production payload shape of reconciliation_completed messages:
+  // crates/gyre-server/src/reconciliation.rs `maybe_emit_reconciliation_completed`
+  // → `emit_reconciliation_completed` sends {workspace_id, wave_started_at,
+  // task_count, duration_secs, specs}. `specs` entries are the changed
+  // meta-specs as {name, version} (provenance labels materialized on the
+  // wave's tasks at creation). `created_at` is epoch milliseconds.
+  const RECONCILIATION_EVENTS = [
+    {
+      id: 'm1',
+      kind: 'reconciliation_completed',
+      created_at: (NOW_TS - 86400 * 15) * 1000, // epoch milliseconds
+      payload: {
+        workspace_id: 'ws1',
+        wave_started_at: NOW_TS - 86400 * 16,
+        task_count: 7,
+        duration_secs: 86400,
+        specs: [{ name: 'architect', version: 4 }],
+      },
+    },
+  ];
+
+  it('renders reconciliation key moment markers from workspace messages', () => {
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: PLAIN_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: RECONCILIATION_EVENTS }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    expect(markers.length).toBe(1);
+    // Reconciliation markers are purple (eventTypeColor('reconciliation'))
+    expect(markers[0].style.background).toBe('rgb(168, 85, 247)');
+    // Positioned by timestamp: -15d in a 30d span → 50% along the time axis
+    const left = parseFloat(markers[0].style.left);
+    expect(left).toBeGreaterThan(46);
+    expect(left).toBeLessThan(54);
+  });
+
+  it('reconciliation marker click shows the narrative in the popover and calls onMarkerClick', async () => {
+    const onMarkerClick = vi.fn();
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: PLAIN_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: RECONCILIATION_EVENTS, onMarkerClick }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    expect(markers.length).toBe(1);
+    await fireEvent.click(markers[0]);
+    expect(onMarkerClick).toHaveBeenCalledTimes(1);
+    const passedDelta = onMarkerClick.mock.calls[0][0];
+    // Narrative derives from the production payload fields only: task_count,
+    // specs[] (changed meta-spec name + version), duration_secs.
+    expect(passedDelta.narrative).toContain('7 tasks');
+    expect(passedDelta.narrative).toContain('architect v4');
+    expect(passedDelta.narrative).toContain('1d');
+    // Popover shows the narrative under the "Why" label
+    const popover = container.querySelector('.tl-popover');
+    expect(popover).toBeTruthy();
+    const labels = Array.from(popover.querySelectorAll('.tl-popover-label')).map((el) => el.textContent);
+    expect(labels).toContain('Why');
+    expect(popover.textContent).toContain('Reconciliation wave complete: 7 tasks aligned code with architect v4 (1d).');
+  });
+
+  it('reconciliation narrative falls back to task_count/duration_secs when the wave predates specs provenance', async () => {
+    // Waves whose tasks were created before the meta-spec provenance label
+    // exist emit the payload without a specs array; the narrative must
+    // still be true (task count + duration) and must not fabricate a
+    // persona/specs-evaluated story no emitter ever sent.
+    const legacyEvents = [
+      {
+        id: 'm1',
+        kind: 'reconciliation_completed',
+        created_at: (NOW_TS - 86400 * 15) * 1000,
+        payload: { workspace_id: 'ws1', wave_started_at: NOW_TS - 86400 * 16, task_count: 7, duration_secs: 86400 },
+      },
+    ];
+    const onMarkerClick = vi.fn();
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: PLAIN_TIMELINE, active: true, scrubIndex: 4, nodes: [], reconciliationEvents: legacyEvents, onMarkerClick }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    expect(markers.length).toBe(1);
+    await fireEvent.click(markers[0]);
+    const passedDelta = onMarkerClick.mock.calls[0][0];
+    expect(passedDelta.narrative).toBe('Reconciliation wave complete: 7 tasks (1d).');
+    // The fabricated pre-fix narrative read fields no emitter sends.
+    expect(passedDelta.narrative).not.toContain('specs evaluated');
+    expect(passedDelta.narrative).not.toContain('persona');
+  });
+
+  it('popover shows the grounded narrative for delta-backed key moments', async () => {
+    const withNarrative = TIMELINE.map((d) =>
+      d.id === 'd2' ? { ...d, narrative: 'Auth extraction added four types governing session handling.' } : d
+    );
+    const { container } = render(TimelineScrubber, {
+      props: { timeline: withNarrative, active: true, scrubIndex: 4, nodes: [] }
+    });
+    const markers = container.querySelectorAll('.tl-marker');
+    // d2 (spec_approval) is the first marker
+    await fireEvent.click(markers[0]);
+    const popover = container.querySelector('.tl-popover');
+    expect(popover).toBeTruthy();
+    expect(popover.textContent).toContain('Auth extraction added four types governing session handling.');
+  });
 });
