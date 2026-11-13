@@ -1292,8 +1292,12 @@ pub async fn git_receive_pack(
             } else {
                 None
             };
+            // §API > Notifications: pass the broadcasting wrapper, not the
+            // bare repo — push-scoped notifications must fan out to live
+            // /notifications/stream subscribers (task-125 review repair).
+            let divergence_notifications = state_clone.broadcasting_notifications();
             let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                notification_repo: state_clone.notifications.as_ref(),
+                notification_repo: &divergence_notifications,
                 membership_repo: state_clone.workspace_memberships.as_ref(),
             });
             // §9 spec-assertion notifications are scoped by the repo's

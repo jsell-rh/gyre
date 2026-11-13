@@ -571,7 +571,15 @@ pub async fn notification_stream(
                 let result = tokio::time::timeout(STREAM_HEARTBEAT_SECS, rx.recv()).await;
                 let msg = match result {
                     Ok(Ok(msg)) => msg,
-                    Ok(Err(_)) => return None, // channel closed
+                    // Lagged: this subscriber fell behind the channel buffer;
+                    // the channel is still live and the missed messages are
+                    // simply gone — keep streaming rather than terminating
+                    // the client's stream.
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        continue;
+                    }
+                    // Closed: every sender (AppState) is gone — end the stream.
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
                     Err(_) => {
                         // Timeout - send a heartbeat comment.
                         return Some((

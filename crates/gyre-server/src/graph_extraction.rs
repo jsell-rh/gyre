@@ -89,6 +89,12 @@ pub struct PushNotificationScope {
 /// check (spec assertion failures use the notification + membership repos).
 ///
 /// Bundled into a single struct to stay within clippy's argument-count limit.
+///
+/// `notification_repo` must be the broadcasting wrapper
+/// (`AppState::broadcasting_notifications()`) in production: a bare
+/// repository handle persists fine but bypasses the `/notifications/stream`
+/// SSE fan-out, so connected clients never see the notification
+/// (task-125 review finding).
 pub struct DivergencePorts<'a> {
     pub notification_repo: &'a dyn NotificationRepository,
     pub membership_repo: &'a dyn WorkspaceMembershipRepository,
@@ -2442,6 +2448,115 @@ mod tests {
             dev_notifs_new_commit.len(),
             2,
             "a new commit with a failing assertion must notify again"
+        );
+    }
+
+    /// Regression test for the task-125 review finding: push-scoped
+    /// persistence must fan out to the SSE broadcast channel, not only
+    /// store. When `DivergencePorts` is built with the broadcasting wrapper
+    /// (as every production feeder does since the repair), a spec-assertion
+    /// failure on push is both persisted AND delivered to a live
+    /// `/notifications/stream` subscriber. With the bare repository this
+    /// test fails at the first `try_recv` (persisted but never broadcast).
+    #[tokio::test]
+    async fn push_check_notifications_broadcast_to_stream_subscribers() {
+        use crate::mem::{
+            MemNotificationRepository, MemSpecAssertionResultRepository,
+            MemWorkspaceMembershipRepository,
+        };
+        use crate::notifications::BroadcastingNotificationRepo;
+        use gyre_common::NotificationType;
+        use gyre_domain::{WorkspaceMembership, WorkspaceRole};
+
+        // Same fixture shape as the test above: one failing assertion
+        // (subject node absent from the graph), one Developer in the notify
+        // set.
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs_dir = dir.path().join("specs").join("system");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("architecture.md"),
+            "# Architecture\n\n<!-- gyre:assert type=\"implements\" subject=\"SearchService\" trait=\"FullTextPort\" -->\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-assert-broadcast");
+        let nodes: Vec<GraphNode> = vec![];
+        let results_repo = MemSpecAssertionResultRepository::default();
+        let notif_repo: Arc<dyn NotificationRepository> =
+            Arc::new(MemNotificationRepository::default());
+        let membership_repo = MemWorkspaceMembershipRepository::default();
+        membership_repo
+            .create(&WorkspaceMembership::new(
+                Id::new("m-dev-broadcast"),
+                Id::new("user-dev"),
+                Id::new("ws-1"),
+                WorkspaceRole::Developer,
+                Id::new("inviter"),
+                1_000,
+            ))
+            .await
+            .unwrap();
+
+        // The SSE subscriber, wired exactly like the /notifications/stream
+        // handler: a receiver on the broadcast channel.
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<String>(64);
+        let broadcasting = BroadcastingNotificationRepo::new(Arc::clone(&notif_repo), tx);
+        let ports = DivergencePorts {
+            notification_repo: &broadcasting,
+            membership_repo: &membership_repo,
+        };
+        let scope = PushNotificationScope {
+            workspace_id: "ws-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+        };
+
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef",
+            Some(&scope),
+            Some(&ports),
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        // Persisted …
+        let dev_notifs = notif_repo
+            .list_for_user(
+                &Id::new("user-dev"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(dev_notifs.len(), 1, "developer must be notified");
+
+        // … AND broadcast: exactly one event on the channel, carrying the
+        // same notification the stream handler would parse and deliver.
+        let msg = rx.try_recv().expect(
+            "push-check notification must be broadcast to the SSE channel, not only persisted",
+        );
+        let notif: gyre_common::Notification =
+            serde_json::from_str(&msg).expect("broadcast payload must be serialized Notification JSON");
+        assert_eq!(notif.notification_type, NotificationType::SpecAssertionFailure);
+        assert_eq!(notif.user_id.as_str(), "user-dev");
+        assert_eq!(notif.workspace_id.as_str(), "ws-1");
+        assert_eq!(
+            notif.source.repo_id.as_ref().map(|r| r.as_str()),
+            Some("repo-assert-broadcast")
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one broadcast event is expected (no viewer notification)"
         );
     }
 

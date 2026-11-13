@@ -587,19 +587,17 @@ impl AppState {
     /// (user-management.md §API > Notifications: real-time stream).
     ///
     /// Single fan-out point for notification creation: every production
-    /// emitter goes through here so a connected `/notifications/stream`
-    /// client sees every notification the moment it is stored. Broadcast is
-    /// fire-and-forget (no subscribers, or a lagged one, must never fail the
-    /// persist).
+    /// emitter goes through here (or through the
+    /// [`BroadcastingNotificationRepo`](crate::notifications::BroadcastingNotificationRepo)
+    /// this delegates to, which background paths without an `&AppState` use)
+    /// so a connected `/notifications/stream` client sees every notification
+    /// the moment it is stored. Broadcast is fire-and-forget (no subscribers,
+    /// or a lagged one, must never fail the persist).
     pub async fn create_notification(
         &self,
         notification: &gyre_common::Notification,
     ) -> anyhow::Result<()> {
-        self.notifications.create(notification).await?;
-        if let Ok(json) = serde_json::to_string(notification) {
-            let _ = self.notification_broadcast_tx.send(json);
-        }
-        Ok(())
+        self.broadcasting_notifications().create(notification).await
     }
 
     /// Resolve the tenant scope for a server-originated message about a
