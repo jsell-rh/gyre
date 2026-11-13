@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -97,51 +97,3 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
-## Shipped
-
-**Repair round 14 (review F1): the workspace-invite notification is now
-typed `InvitationReceived`.** `invite_to_workspace` had constructed the
-invitee's in-app notification as `NotificationType::TrustSuggestion`, so
-the invitee's Inbox (web `Inbox.svelte`) classified every workspace
-invitation as a trust-policy suggestion. Commit `ea366b15` constructs it
-with `NotificationType::InvitationReceived` (user-management.md
-§Notification Entity: "A user was invited to a workspace", matching the
-sibling `invite_member` handler) and extends
-`invite_notification_carries_accept_path` to assert `notification_type`
-is `InvitationReceived` and not `TrustSuggestion` — the old code fails
-that assertion, so the mis-typing cannot silently return.
-
-### Verification (re-confirmed this round at head a7799ac0)
-
-- `cargo check -p gyre-server --lib --tests` — exit 0.
-- `cargo test -p gyre-domain invitation` — 4 passed, 0 failed.
-- `cargo test -p gyre-adapters invitation` — 5 passed, 0 failed.
-- All seven frontmatter commits verified as ancestors of this head.
-- Evidence retained at `/tmp/stage/review-evidence/task-110-verification.md`.
-- The gyre-server test build exceeds this sandbox's 4 GiB budget and is
-  recorded for the independent verifier:
-  `cargo test -p gyre-server --lib api::invitations` (26 tests, incl.
-  `invite_notification_carries_accept_path`), then `cargo test --all`.
-
-### Shipped behavior (carried from prior rounds, unchanged this round)
-
-- **Domain & storage:** `TenantInvitation`/`WorkspaceInvitation`/
-  `InvitationStatus`/`InvitationPolicy` entities
-  (`gyre-domain/src/invitation.rs`), port traits
-  (`gyre-ports/src/invitation.rs`), SQLite + Postgres migrations and
-  adapters, mem adapters. Tokens are CSPRNG-generated and stored only as
-  SHA-256 hashes; the raw token appears solely in the invite response.
-- **Tenant invitations:** the five specced endpoints — single invite,
-  bulk invite, list with status filter, revoke, magic-link
-  accept/decline — with TenantAdmin-only authorization, per-tenant
-  `InvitationPolicy` expiry/max-pending caps, and SSO-account linking on
-  accept when the email already has an account.
-- **Workspace invitations:** invite → pending → accept/decline/expire
-  lifecycle with membership creation on accept, inviter-side listing,
-  invitee-facing `GET /api/v1/users/me/invitations`, and per-workspace
-  `max_pending_invitations` enforcement.
-- **Expiry:** background sweeper marks `Pending` invitations past
-  `expires_at` as `Expired` for both invitation kinds.
-- **Routes & ABAC:** all routes registered in `api/mod.rs` with ABAC
-  resolver mappings in `abac_middleware.rs`; no exemption-file entries.
