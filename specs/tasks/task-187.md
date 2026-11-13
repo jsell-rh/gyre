@@ -69,15 +69,15 @@ The answer is **grounded in the knowledge graph**: provenance records, spec link
 
 ## Acceptance Criteria
 
-- [x] Conversational Q&A panel accessible from Ask input in control bar
-- [x] Questions sent with knowledge graph context to LLM
-- [x] Responses grounded in knowledge graph with traceable entity references
-- [x] Entity references rendered as clickable links
-- [x] Click entity reference → navigate to entity or highlight on canvas
-- [x] Follow-up questions maintain conversation context
-- [x] "Show me X" responses update the canvas view
-- [x] "What would happen if..." responses trigger structural predictions
-- [x] Tests pass
+- [ ] Conversational Q&A panel accessible from Ask input in control bar
+- [ ] Questions sent with knowledge graph context to LLM
+- [ ] Responses grounded in knowledge graph with traceable entity references
+- [ ] Entity references rendered as clickable links
+- [ ] Click entity reference → navigate to entity or highlight on canvas
+- [ ] Follow-up questions maintain conversation context
+- [ ] "Show me X" responses update the canvas view
+- [ ] "What would happen if..." responses trigger structural predictions
+- [ ] Tests pass
 
 ## Agent Instructions
 
@@ -85,45 +85,42 @@ Read `system-explorer.md` §8 "Conversational Exploration" for the full specific
 
 ## Shipped
 
-Conversational exploration (system-explorer.md §8) as a real question →
-knowledge-graph → grounded-answer pipeline, shipped across commits
-7737e532 (feature), fa8568c5 (rustfmt/clippy repair), d363ce7d (unknown-kind
-citation tokens preserved literally), a69f76ec (char-based `short_sha` test
-expectation), and bdf9f79f (grounded fallback ask prompt; no-LLM test
-repair), then carried through three rebase repairs against evolving main
-(f7cfd96d vs. task-183, 9d5c22fa vs. task-182, e04f6096 vs. task-037):
+Conversational exploration (system-explorer.md §8) ships as a real question →
+knowledge-graph → grounded-answer pipeline (feature commit 7737e532, repairs
+fa8568c5/d363ce7d/a69f76ec/bdf9f79f, verified asset builds a3051e83/
+3a1229f9/972181b3), carried through three rebase repairs against evolving
+main (f7cfd96d, 9d5c22fa, e04f6096 — all source-level auto-merges, only
+generated web/dist conflicts):
 
 - **Backend** — `POST /api/v1/workspaces/:id/explorer-views/ask`
   (`ask_explorer` in `api/explorer_views.rs`): the LLM prompt is grounded
   in the workspace's live graph — nodes with spec linkage and commit/agent
   provenance (`created_sha`, `last_modified_sha`, `last_modified_by`,
   recency-ranked, capped), edge summaries, and recent architectural
-  timeline deltas — via the `explorer-ask` prompt template. Template
-  resolution is DB override → `specs/prompts/explorer-ask.md` in the repo
-  git tree → hardcoded `PROMPT_EXPLORER_ASK` fallback; all three paths
-  carry the `{{graph_context}}` section. **Grounding enforcement**: the
-  server parses every `[entity:node|spec|commit|agent:id]` citation from
-  the answer and validates it against the same graph the prompt was built
+  timeline deltas — via the `explorer-ask` prompt template (DB override →
+  `specs/prompts/explorer-ask.md` in the repo git tree → hardcoded
+  fallback; all three paths carry `{{graph_context}}`). **Grounding
+  enforcement**: every `[entity:node|spec|commit|agent:id]` citation in
+  the answer is validated against the same graph the prompt was built
   from (`validate_entity_refs`); hallucinated ids are stripped to plain
-  text and excluded from the returned `entity_refs` (which carry resolved
-  labels). Follow-up turns replay client-owned history (max 20, rejected
-  beyond, roles validated). Rate limit, budget/cost recording, and
-  template-SHA audit match the other LLM endpoints; ABAC maps the route
-  to `explorer_view`/`generate` (Developer+ workspace role), registered
-  before `/:view_id`. No LLM configured → 503 `llm_unavailable`;
-  cross-tenant workspace → 403 before any LLM budget is spent.
-- **Canvas actions in the answer** — "show me X" questions return a
-  `view_spec` validated through the same chain as the generate endpoint;
-  "what would happen if…" questions set `predict`, and the server
-  resolves the repo scope and runs the task-186 structural prediction
-  machinery (`run_structural_prediction` shared with `predict_graph`),
-  returning impact data for ghost rendering.
+  text and excluded from the returned `entity_refs`. Follow-up turns
+  replay client-owned history (max 20, roles validated). Rate limit,
+  budget/cost recording, and template-SHA audit match the other LLM
+  endpoints; ABAC maps the route to `explorer_view`/`generate`
+  (Developer+), registered before `/:view_id`. No LLM configured → 503
+  `llm_unavailable`; cross-tenant workspace → 403 before any LLM budget
+  is spent.
+- **Canvas actions** — "show me X" questions return a `view_spec`
+  validated through the same chain as the generate endpoint; "what would
+  happen if…" questions set `predict` and run the task-186 structural
+  prediction machinery (`run_structural_prediction`, shared with
+  `predict_graph`), returning impact data for ghost rendering.
 - **Frontend** — `ExplorerChat.svelte` / `ConversationalExplorer.svelte`:
   chat panel opened from the Ask input in the control bar, conversation
   history in component state (not persisted), responses render validated
-  `[entity:...]` citations as clickable links (commit → git, spec →
-  inline open, node → canvas highlight, agent → provenance), and apply
-  returned view specs / predictions to the canvas.
+  `[entity:...]` citations as clickable links (commit → git, spec → inline
+  open, node → canvas highlight, agent → provenance), and apply returned
+  view specs / predictions to the canvas.
 - **Tests** — server: unit tests for `validate_entity_refs` and
   `short_sha` plus tokio integration tests for the ask endpoint
   (grounded prompt content, citation validation, view-spec validation,
@@ -131,30 +128,36 @@ repair), then carried through three rebase repairs against evolving main
   membership). Frontend: vitest component tests for panel rendering,
   citation link rendering, follow-up context, and view-spec application.
 
-### Rebase repair (e04f6096)
-
-The published PR head (f2b9f21d) conflicted with current main (349a32ac,
-task-037 ViewQuery `seed_match` types and validation). Merged main into
-the branch: no source conflicts — task-037's changes are additive (an
-optional `ConceptScope.seed_match` field plus validator modes) and touch
-no task-187 surface, so all source paths auto-merged. Only generated
-`web/dist` assets conflicted; resolved to main's verified assets (HEAD's
-dist is byte-identical to 349a32ac's; remote integration rebuilds them
-from the merged source). Coupling reviewed: task-187's frontend does not
-use `seed_match`, and the ConversationalExplorer / ExplorerChat /
-ExplorerView suites pass unchanged against main's extended validator.
-
-### Test evidence (merged head e04f6096)
+### Test evidence (merged head e04f6096, unchanged since)
 
 - `cargo check -p gyre-server` — exit 0.
 - `cargo test -p gyre-common -p gyre-domain` — 631 passed, 0 failed.
 - `cd web && npm ci && npx vitest run` focused on the coupled surfaces —
-  ConversationalExplorer, view-query-validator (main's task-037 suite),
-  ExplorerConceptViews, ExplorerDefaultViews, ExplorerGeneratedViews,
-  generated-view, view-query-scope, view-spec, ExplorerChat
-  (component/streaming) — 270 passed, 0 failed.
+  270 passed, 0 failed (incl. main's task-037 view-query-validator suite
+  after the third rebase).
 - **Verifier must run** (server test compilation exceeds this sandbox's
   4 GiB budget): `cargo test -p gyre-server --lib api::explorer_views`,
   `cargo test -p gyre-server --lib api::graph`, and the full workspace
   gates (`cargo test --all`, architecture/CI checks, `cd web && npm
   test`).
+
+### Contract repair (this round)
+
+The prior round checked the Acceptance Criteria boxes inside the
+protected task text, which the executor reverted. This round restores
+the task document to a valid state — `progress: ready-for-review`, the
+branch's product-surface commit attribution, and these notes under the
+required `## Shipped` heading — while leaving every protected line
+(Spec Excerpt, Implementation Plan, unchecked Acceptance Criteria,
+Agent Instructions) byte-identical to the assigned contract. The
+production fix is preserved unchanged: `git diff` against the approved
+candidate head touches only `specs/tasks/task-187.md`. Acceptance is
+left for the independent reviewer and deterministic gates to decide.
+
+### Merge state
+
+The PR #818 conflict against main was resolved in e04f6096 (merge of
+main 349a32ac): no source conflicts — task-037's ViewQuery changes are
+additive and touch no task-187 surface; only generated web/dist assets
+conflicted and were resolved to main's verified build (remote
+integration rebuilds them from the merged source).
