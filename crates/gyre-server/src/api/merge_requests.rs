@@ -398,6 +398,8 @@ pub async fn create_mr(
             repo_id: Some(mr.repository_id.to_string()),
             tenant_id: None,
             facets,
+            // Entity's own update time — the since:/until: facets filter on it.
+            updated_at: Some(mr.updated_at as i64),
         },
     )
     .await;
