@@ -4,6 +4,13 @@
 //! GET  /api/v1/users/me
 //! PUT  /api/v1/users/me
 //! GET  /api/v1/users/me/notifications?workspace_id=&min_priority=&max_priority=&limit=&offset=
+//! GET  /api/v1/notifications?workspace_id=&repo_id=&type=&priority=&limit=&offset=
+//! GET  /api/v1/notifications/unread-count?workspace_id=
+//! PUT  /api/v1/notifications/:id/read (POST kept for pre-existing callers)
+//! POST /api/v1/notifications/mark-all-read?workspace_id=
+//! GET  /api/v1/notifications/preferences
+//! PUT  /api/v1/notifications/preferences
+//! GET  /api/v1/notifications/stream?workspace_id= (SSE)
 //! POST /api/v1/notifications/:id/dismiss
 //! POST /api/v1/notifications/:id/resolve
 //! POST /api/v1/workspaces/:id/members   (invite)
@@ -29,9 +36,11 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, Sse},
     Json,
 };
-use gyre_common::{Id, Notification, NotificationType};
+use futures_util::stream;
+use gyre_common::{Id, Notification, NotificationPriority, NotificationType};
 use gyre_domain::{
     JudgmentType, Team, TeamMembership, User, UserNotificationPreference, UserRole, UserToken,
     WorkspaceMembership, WorkspaceRole,
@@ -39,11 +48,16 @@ use gyre_domain::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
 use super::error::ApiError;
 use super::{new_id, now_secs};
+
+/// How long the SSE notification stream waits on the broadcast channel
+/// before emitting a heartbeat comment.
+const STREAM_HEARTBEAT_SECS: Duration = Duration::from_secs(30);
 
 // ─── User profile ────────────────────────────────────────────────────────────
 
@@ -203,7 +217,18 @@ pub struct NotificationParams {
     pub workspace_id: Option<String>,
     pub min_priority: Option<u8>,
     pub max_priority: Option<u8>,
+    /// Filter by taxonomy type. Query key `type` per the spec's filter
+    /// surface (`?type=`); `notification_type` kept as an alias for the
+    /// pre-existing `/users/me/notifications` clients.
+    #[serde(rename = "type", alias = "notification_type")]
     pub notification_type: Option<String>,
+    /// Repo filter (user-management.md §In-App Notification UI: filter by
+    /// type, priority, workspace, repo). Matches the notification's source
+    /// repo.
+    pub repo_id: Option<String>,
+    /// Four-level priority name (Low/Medium/High/Urgent), case-insensitive —
+    /// widens to the HSI §8 rank band it covers.
+    pub priority: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
@@ -272,7 +297,54 @@ pub async fn get_my_notifications(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
+    list_my_notifications_impl(user_id, params, state).await
+}
+
+/// GET /api/v1/notifications?workspace_id=&repo_id=&type=&priority=&limit=&offset=
+///
+/// Spec path (user-management.md §API > Notifications: "My notifications
+/// (paginated, filterable)"). Same per-handler scoping as the legacy
+/// `/users/me/notifications` route — the listing is keyed to the caller's
+/// user identity, so no ABAC resource type applies.
+pub async fn list_my_notifications(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    list_my_notifications_impl(user_id, params, state).await
+}
+
+/// Shared listing implementation behind the spec path
+/// (`GET /api/v1/notifications`) and the legacy `/users/me/notifications`.
+/// Both routes resolve the caller's user identity in-handler and pass it
+/// here — the listing is scoped to that identity.
+async fn list_my_notifications_impl(
+    user_id: Id,
+    params: NotificationParams,
+    state: Arc<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let repo_id = params.repo_id.as_deref().map(Id::new);
+    // `?priority=` takes the four-level name (Low/Medium/High/Urgent,
+    // case-insensitive) and widens to the HSI §8 rank band it covers so the
+    // stored rank column can serve the filter (user-management.md
+    // §Notification Entity: the level is the band of the rank).
+    let (band_min, band_max) = match params.priority.as_deref() {
+        Some(level) => {
+            let normalized = level.trim().to_ascii_lowercase();
+            let parsed = NotificationPriority::from_level_str(&normalized).ok_or_else(|| {
+                ApiError::InvalidInput(format!(
+                    "invalid priority filter '{level}': expected one of Low, Medium, High, Urgent"
+                ))
+            })?;
+            let band = parsed.rank_band();
+            (Some(band.0), Some(band.1))
+        }
+        None => (None, None),
+    };
+    let min_priority = params.min_priority.or(band_min);
+    let max_priority = params.max_priority.or(band_max);
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
     let notifications = state
@@ -280,9 +352,10 @@ pub async fn get_my_notifications(
         .list_for_user(
             &user_id,
             workspace_id.as_ref(),
-            params.min_priority,
-            params.max_priority,
+            min_priority,
+            max_priority,
             params.notification_type.as_deref(),
+            repo_id.as_ref(),
             limit,
             offset,
         )
@@ -311,6 +384,46 @@ pub async fn get_notification_count(
         .count_unresolved(&user_id, workspace_id.as_ref())
         .await?;
     Ok(Json(serde_json::json!({ "count": count })))
+}
+
+/// GET /api/v1/notifications/unread-count?workspace_id=
+///
+/// Spec path (user-management.md §API > Notifications: "Unread count (for
+/// bell badge)"). Counts active (unresolved, undismissed) notifications the
+/// caller has not read. Scoped to the caller's user identity — no ABAC
+/// resource type applies.
+pub async fn get_unread_count(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let count = state
+        .notifications
+        .count_unread(&user_id, workspace_id.as_ref())
+        .await?;
+    Ok(Json(serde_json::json!({ "count": count })))
+}
+
+/// POST /api/v1/notifications/mark-all-read?workspace_id=
+///
+/// Spec path (user-management.md §API > Notifications: "Mark all read").
+/// Marks every unread notification owned by the caller read (stamping
+/// `read_at`); an optional `workspace_id` narrows the sweep. Scoped to the
+/// caller's user identity — no ABAC resource type applies.
+pub async fn mark_all_read_notifications(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    let marked = state
+        .notifications
+        .mark_all_read(&user_id, workspace_id.as_ref())
+        .await?;
+    Ok(Json(serde_json::json!({ "marked": marked })))
 }
 
 /// POST /api/v1/notifications/:id/dismiss
@@ -371,11 +484,13 @@ pub async fn resolve_notification(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /api/v1/notifications/:id/read
+/// PUT/POST /api/v1/notifications/:id/read
 ///
 /// Marks the notification read (stamps `read_at`). Per-handler auth: verifies
 /// notification belongs to caller AND caller.tenant_id matches
-/// (user-management.md §Notification Entity read state).
+/// (user-management.md §Notification Entity read state; §API > Notifications
+/// specifies PUT — POST is kept for pre-existing callers of the same
+/// handler).
 pub async fn mark_notification_read(
     auth: AuthenticatedAgent,
     Path(id): Path<String>,
@@ -426,6 +541,87 @@ pub async fn mark_notification_unread(
         .mark_read(&notif_id, &user_id, false)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/notifications/stream?workspace_id=
+///
+/// Real-time notification stream (user-management.md §API > Notifications:
+/// "GET (SSE)"). Subscribes to the notification broadcast channel fed by
+/// `AppState::create_notification` — every notification is emitted the
+/// moment it is persisted. Per-handler auth (ABAC-exempt, like every other
+/// notification route): each event is filtered against the caller — the
+/// notification must belong to the caller's user identity AND its tenant
+/// must match `auth.tenant_id`, otherwise it is dropped before it reaches
+/// the wire. An optional `workspace_id` narrows delivery to one workspace.
+pub async fn notification_stream(
+    auth: AuthenticatedAgent,
+    Query(params): Query<NotificationParams>,
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let user_id = resolve_user_id(&auth);
+    let tenant_id = auth.tenant_id.clone();
+    let workspace_filter = params.workspace_id.map(Id::new);
+    let rx = state.notification_broadcast_tx.subscribe();
+    let s = stream::unfold(
+        (rx, user_id, tenant_id, workspace_filter),
+        |(mut rx, user_id, tenant_id, workspace_filter)| async move {
+            loop {
+                // Poll with a heartbeat timeout so the connection stays alive
+                // even when nothing is being created.
+                let result = tokio::time::timeout(STREAM_HEARTBEAT_SECS, rx.recv()).await;
+                let msg = match result {
+                    Ok(Ok(msg)) => msg,
+                    // Lagged: this subscriber fell behind the channel buffer;
+                    // the channel is still live and the missed messages are
+                    // simply gone — keep streaming rather than terminating
+                    // the client's stream.
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        continue;
+                    }
+                    // Closed: every sender (AppState) is gone — end the stream.
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+                    Err(_) => {
+                        // Timeout - send a heartbeat comment.
+                        return Some((
+                            Ok(Event::default().comment("heartbeat")),
+                            (rx, user_id, tenant_id, workspace_filter),
+                        ));
+                    }
+                };
+                // Per-handler scoping: parse the broadcast notification and
+                // deliver only if it belongs to the caller (user + tenant),
+                // and — when requested — the workspace. Unparseable payloads
+                // and other users' notifications are silently skipped; the
+                // stream itself never terminates on them.
+                let Ok(notif) = serde_json::from_str::<Notification>(&msg) else {
+                    continue;
+                };
+                if notif.user_id != user_id || notif.tenant_id != tenant_id {
+                    continue;
+                }
+                if workspace_filter
+                    .as_ref()
+                    .is_some_and(|ws| notif.workspace_id != *ws)
+                {
+                    continue;
+                }
+                let data =
+                    serde_json::to_string(&NotificationResponse::from(notif)).unwrap_or_default();
+                if data.is_empty() {
+                    continue;
+                }
+                return Some((
+                    Ok(Event::default().event("notification").data(data)),
+                    (rx, user_id, tenant_id, workspace_filter),
+                ));
+            }
+        },
+    );
+    Sse::new(s).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 // ─── Workspace Members ───────────────────────────────────────────────────────
@@ -1586,6 +1782,7 @@ pub async fn get_judgments(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use futures_util::StreamExt;
     use gyre_common::{Id, Notification, NotificationType};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -1853,6 +2050,390 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!n.read, "cross-user mark_read must not mutate");
+    }
+
+    /// Spec path (user-management.md §API > Notifications): GET
+    /// /api/v1/notifications lists the caller's notifications with pagination
+    /// and the specced filter surface (type, priority level, workspace, repo).
+    #[tokio::test]
+    async fn spec_path_notifications_list_with_filters() {
+        let state = test_state();
+        let mut with_repo = Notification::new(
+            Id::new("notif-spec-1"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::GateFailure, // rank 3 → High band
+            "Gate failed on repo-a MR",
+            "default",
+            1_700_000_000,
+        );
+        with_repo.source.entity_type = "mr".to_string();
+        with_repo.source.entity_id = "mr-1".to_string();
+        with_repo.source.repo_id = Some(Id::new("repo-a"));
+        state.create_notification(&with_repo).await.unwrap();
+        let no_repo = Notification::new(
+            Id::new("notif-spec-2"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::AgentCompleted, // rank 9 → Low band
+            "Agent worker-1 completed",
+            "default",
+            1_700_000_001,
+        );
+        state.create_notification(&no_repo).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        async fn list(app: &Router, uri: &str) -> serde_json::Value {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "GET {uri}");
+            body_json(resp).await
+        }
+
+        // Unfiltered: both seeded notifications.
+        let json = list(&app, "/api/v1/notifications").await;
+        assert_eq!(json["notifications"].as_array().unwrap().len(), 2);
+
+        // ?type= filter (spec filter surface).
+        let json = list(&app, "/api/v1/notifications?type=AgentCompleted").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "type filter must narrow to the match");
+        assert_eq!(notifs[0]["id"], "notif-spec-2");
+
+        // ?repo_id= filter — matches the notification's source repo.
+        let json = list(&app, "/api/v1/notifications?repo_id=repo-a").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "repo filter must narrow to the match");
+        assert_eq!(notifs[0]["id"], "notif-spec-1");
+
+        // ?priority= filter — four-level name widens to its rank band:
+        // GateFailure (rank 3) is High, AgentCompleted (rank 9) is Low.
+        let json = list(&app, "/api/v1/notifications?priority=high").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(
+            notifs.len(),
+            1,
+            "priority=high must match only the High item"
+        );
+        assert_eq!(notifs[0]["id"], "notif-spec-1");
+        let json = list(&app, "/api/v1/notifications?priority=low").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "priority=low must match only the Low item");
+        assert_eq!(notifs[0]["id"], "notif-spec-2");
+
+        // An unknown priority level is a 400, not a silently ignored filter.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications?priority=critical")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Pagination: limit=1 returns one item and echoes the window.
+        let json = list(&app, "/api/v1/notifications?limit=1&offset=1").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(json["limit"], 1);
+        assert_eq!(json["offset"], 1);
+    }
+
+    /// Spec path (user-management.md §API > Notifications): unread-count
+    /// counts active-but-unread notifications for the bell badge, and
+    /// mark-all-read drives it to zero (only the caller's rows are touched).
+    #[tokio::test]
+    async fn spec_path_unread_count_and_mark_all_read() {
+        let state = test_state();
+        let seed = |id: &str, user: &str, ty: NotificationType| {
+            Notification::new(
+                Id::new(id),
+                Id::new("ws-default"),
+                Id::new(user),
+                ty,
+                id,
+                "default",
+                1_700_000_000,
+            )
+        };
+        // Caller ("system"): one unread, one already read, one dismissed-but-unread.
+        let unread = seed("notif-unread", "system", NotificationType::GatePassed);
+        state.create_notification(&unread).await.unwrap();
+        let read = seed("notif-read", "system", NotificationType::GatePassed);
+        state.create_notification(&read).await.unwrap();
+        state
+            .notifications
+            .mark_read(&Id::new("notif-read"), &Id::new("system"), true)
+            .await
+            .unwrap();
+        let dismissed = seed("notif-dismissed", "system", NotificationType::GatePassed);
+        state.create_notification(&dismissed).await.unwrap();
+        state
+            .notifications
+            .dismiss(&Id::new("notif-dismissed"), &Id::new("system"))
+            .await
+            .unwrap();
+        // Another user's unread notification must not count for the caller.
+        let other = seed("notif-other", "someone-else", NotificationType::GatePassed);
+        state.create_notification(&other).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/unread-count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["count"], 1,
+            "only the caller's active unread item counts (read and dismissed excluded)"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/notifications/mark-all-read")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["marked"], 2,
+            "the unread and dismissed-unread rows flip; the already-read row does not"
+        );
+
+        // Badge reaches zero and the other user's row stays unread.
+        let count = state
+            .notifications
+            .count_unread(&Id::new("system"), None)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let other_row = state
+            .notifications
+            .get(&Id::new("notif-other"), &Id::new("someone-else"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !other_row.read,
+            "mark-all-read must stay scoped to the caller"
+        );
+    }
+
+    /// Spec path/method (user-management.md §API > Notifications): PUT
+    /// /api/v1/notifications/{id}/read marks read.
+    #[tokio::test]
+    async fn put_read_is_the_spec_method() {
+        let state = test_state();
+        let notif = Notification::new(
+            Id::new("notif-put-read"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::MrMerged,
+            "MR merged",
+            "default",
+            1_700_000_000,
+        );
+        state.create_notification(&notif).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/notif-put-read/read")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let n = state
+            .notifications
+            .get(&Id::new("notif-put-read"), &Id::new("system"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n.read);
+        assert!(n.read_at.is_some());
+    }
+
+    /// Spec path (user-management.md §API > Notifications): preferences
+    /// get/put at /api/v1/notifications/preferences (same handlers as the
+    /// HSI §12 /users/me/notification-preferences route).
+    #[tokio::test]
+    async fn spec_path_preferences_roundtrip() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["preferences"].as_array().unwrap().len(), 0);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"preferences": [
+                            {"notification_type": "AgentBudgetWarning", "enabled": false}
+                        ]})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let prefs = json["preferences"].as_array().unwrap();
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0]["notification_type"], "AgentBudgetWarning");
+        assert_eq!(prefs[0]["enabled"], false);
+    }
+
+    /// Spec path (user-management.md §API > Notifications): the SSE stream
+    /// delivers the caller's notifications as they are persisted and drops
+    /// other users' (and other tenants') notifications before the wire.
+    #[tokio::test]
+    async fn notification_stream_delivers_own_notifications_only() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Connect: the handler subscribes to the broadcast channel before
+        // the response (Sse) is returned, so once oneshot resolves the
+        // subscription is live.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/stream")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        // Create one notification for the caller and one for another user
+        // (plus a cross-tenant one addressed to the caller's user id).
+        let own = Notification::new(
+            Id::new("notif-stream-own"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::SpecApprovalRequested,
+            "Streamed to caller",
+            "default",
+            1_700_000_000,
+        );
+        state.create_notification(&own).await.unwrap();
+        let other_user = Notification::new(
+            Id::new("notif-stream-other-user"),
+            Id::new("ws-default"),
+            Id::new("someone-else"),
+            NotificationType::SpecApprovalRequested,
+            "Not the caller",
+            "default",
+            1_700_000_001,
+        );
+        state.create_notification(&other_user).await.unwrap();
+        let other_tenant = Notification::new(
+            Id::new("notif-stream-other-tenant"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::SpecApprovalRequested,
+            "Wrong tenant",
+            "another-tenant",
+            1_700_000_002,
+        );
+        state.create_notification(&other_tenant).await.unwrap();
+
+        // Read SSE chunks until the heartbeat timeout: the caller's event
+        // must arrive; the other two must never reach the wire.
+        let mut body = resp.into_body().into_data_stream();
+        let mut received = Vec::<u8>::new();
+        loop {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(1), body.next()).await;
+            match next {
+                Err(_) => break, // 1s with no chunk: nothing more is coming
+                Ok(Some(Ok(chunk))) => received.extend_from_slice(&chunk),
+                Ok(Some(Err(_))) | Ok(None) => break,
+            }
+        }
+        let text = String::from_utf8_lossy(&received).to_string();
+        assert!(
+            text.contains("event: notification"),
+            "stream must emit notification events; got: {text}"
+        );
+        assert!(
+            text.contains("notif-stream-own"),
+            "the caller's notification must be delivered; got: {text}"
+        );
+        assert!(
+            !text.contains("notif-stream-other-user"),
+            "another user's notification must be filtered out; got: {text}"
+        );
+        assert!(
+            !text.contains("notif-stream-other-tenant"),
+            "a cross-tenant notification must be filtered out; got: {text}"
+        );
     }
 
     #[tokio::test]
