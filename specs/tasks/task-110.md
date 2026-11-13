@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["8f66d5a436ac2926fa8b12714abc34540a81d1fb", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "ea366b150438e6b185edcf812cab5c5b1384b77a", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "46f498345c5891530c32a5918ddae7945f1bf50b", "1b961567bee1201fb8435d548f2c69d6dcdfd710", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209"]
+commits: ["e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
 ---
 
 ## Spec Excerpt
