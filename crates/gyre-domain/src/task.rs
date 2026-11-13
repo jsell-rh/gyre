@@ -86,6 +86,23 @@ pub struct Task {
     pub generation: u32,
 }
 
+/// Bind constructors without a workspace parameter to the provisioned
+/// bootstrap workspace.
+///
+/// This is the DOCUMENTED contract, not a fabricated fallback (same pattern
+/// as `Agent::new` / `MergeRequest::new`): hierarchy-enforcement.md §1
+/// "Bootstrap Behavior" provisions a default workspace under the default
+/// tenant on first startup, and its migration strategy backfills tasks,
+/// agents, and merge requests into that workspace ("Same for tasks, agents,
+/// merge_requests"); its single-tenant note states construction-time scope
+/// defaults suffice while the default tenant is the only tenant.
+/// Constructors without a workspace parameter bind the entity to that
+/// provisioned bootstrap workspace; callers with a real workspace at hand
+/// MUST assign it explicitly (the spawn/assignment paths do).
+fn bootstrap_workspace() -> Id {
+    Id::new("default")
+}
+
 impl Task {
     pub fn new(id: Id, title: impl Into<String>, created_at: u64) -> Self {
         Self {
@@ -101,7 +118,7 @@ impl Task {
             pr_link: None,
             spec_path: None,
             spec_ref: None,
-            workspace_id: Id::new("default"),
+            workspace_id: bootstrap_workspace(),
             repo_id: Id::new(""),
             cancelled_at: None,
             cancelled_reason: None,
