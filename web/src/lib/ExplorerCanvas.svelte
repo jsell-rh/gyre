@@ -55,7 +55,7 @@
   // hiddenNodeIds set, so the draw loop classifies them directly — the
   // synthetic package/module groups ARE the boundary boxes the default
   // zoom shows (system-explorer.md §1 "default zoom shows boundaries").
-  import { nodeCategory, nodeMatchesConcept } from './filter-categories.js';
+  import { nodeCategory } from './filter-categories.js';
   // Risk Map overlay (system-explorer.md §7, task-181): heat map metric
   // scale + anomaly detection on the /graph/risks data.
   import { buildRiskHeatMap, detectRiskAnomalies } from './risk-map.js';
@@ -111,8 +111,9 @@
     // callouts (system-explorer.md §7).
     riskEntries = [],
     // Node ids hidden by the in-view filter panel (filter-categories.js
-    // hiddenNodeIds) — category checkboxes and concept selection toggle
-    // node visibility on the canvas.
+    // hiddenNodeIds) — category checkboxes toggle node visibility on the
+    // canvas. Concept selection fades instead (system-explorer.md §4,
+    // task-182) — see the conceptNodeIds prop.
     hiddenNodeIds = null,
     // The same panel state BEFORE reduction to node ids: unchecked category
     // ids and selected concepts. Tree-group containers are synthetic (ids
@@ -122,12 +123,36 @@
     // selected concepts to decide whether the container box is filtered.
     hiddenCategories = null,
     filterConcepts = null,
+    // Concept view emphasis set (system-explorer.md §4, task-182): node
+    // ids belonging to the active concept — the manifest concept's
+    // projection unioned with any discovered-concept matches. Concept
+    // nodes keep full opacity and gain a highlighted border; everything
+    // else fades to background (CONCEPT_FADE_ALPHA) instead of being
+    // removed. null when no concept is active.
+    conceptNodeIds = null,
+    // Ad-hoc concept creation (system-explorer.md §4): called with the
+    // multi-selected node ids when the user picks "Create concept" —
+    // the shell (ExplorerView) opens the naming dialog and saves the
+    // grouping as an explorer view.
+    onCreateConcept = null,
   } = $props();
 
   // Filter-panel state for tree-group containers (see hiddenCategories
   // above): derived once so every draw-frame read is cheap.
   let hiddenFilterCategories = $derived(new Set(hiddenCategories ?? []));
   let activeFilterConcepts = $derived(Array.isArray(filterConcepts) ? filterConcepts : []);
+
+  // ── Concept views (system-explorer.md §4, task-182) ───────────────
+  // Non-concept nodes fade to this opacity — the spec's "everything else
+  // fades to background" (0.1–0.2), never removal.
+  const CONCEPT_FADE_ALPHA = 0.15;
+  // Purple — the concept-creation accent (multi-select, ad-hoc grouping).
+  // Deliberately distinct from every legend edge color (calls #60a5fa,
+  // implements #34d399, …) so the concept emphasis is unambiguous.
+  const CONCEPT_EDGE_COLOR = '#a78bfa';
+  let conceptFilterIds = $derived(
+    conceptNodeIds instanceof Set && conceptNodeIds.size > 0 ? conceptNodeIds : null
+  );
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
   // When a view query uses "$clicked" as scope.node, we store the template
@@ -2281,31 +2306,41 @@
       return matched.size > 0 ? matched : null;
     }
 
-    // Concept scope: start from seed nodes, expand along edges
+    // Concept scope: start from seed nodes, expand along edges.
+    // seed_match 'substring' (the ViewSpec data.concept mechanism,
+    // ui-layout.md §4): every node whose name/qualified_name contains the
+    // seed (case-insensitive) is a seed. Default 'exact': the seed names
+    // one node by name/qualified_name/id (ad-hoc groupings, grammar
+    // examples).
     if (scope.type === 'concept') {
       const seeds = scope.seed_nodes ?? [];
+      const substring = String(scope.seed_match ?? 'exact') === 'substring';
       const expandEdges = new Set((scope.expand_edges ?? ['calls']).map(e => e.toLowerCase()));
       const maxDepth = scope.expand_depth ?? 2;
       const dir = scope.expand_direction ?? 'both';
       const dm = new Map();
 
       for (const seedName of seeds) {
-        const seedNode = nodes.find(n =>
-          n.name === seedName || n.qualified_name === seedName || n.id === seedName
-        );
-        if (!seedNode || dm.has(seedNode.id)) continue;
-        dm.set(seedNode.id, 0);
-        const q = [{ id: seedNode.id, depth: 0 }];
-        while (q.length > 0) {
-          const { id, depth } = q.shift();
-          if (depth >= maxDepth) continue;
-          for (const nb of (adjacency.get(id) ?? [])) {
-            if (dm.has(nb.targetId)) continue;
-            if (!expandEdges.has(nb.edgeType)) continue;
-            if (dir === 'outgoing' && nb.reverse) continue;
-            if (dir === 'incoming' && !nb.reverse) continue;
-            dm.set(nb.targetId, depth + 1);
-            q.push({ id: nb.targetId, depth: depth + 1 });
+        const seedNodes = substring
+          ? nodes.filter(n =>
+              String(n.name ?? '').toLowerCase().includes(seedName.toLowerCase()) ||
+              String(n.qualified_name ?? '').toLowerCase().includes(seedName.toLowerCase()))
+          : [nodes.find(n => n.name === seedName || n.qualified_name === seedName || n.id === seedName)].filter(Boolean);
+        for (const seedNode of seedNodes) {
+          if (dm.has(seedNode.id)) continue;
+          dm.set(seedNode.id, 0);
+          const q = [{ id: seedNode.id, depth: 0 }];
+          while (q.length > 0) {
+            const { id, depth } = q.shift();
+            if (depth >= maxDepth) continue;
+            for (const nb of (adjacency.get(id) ?? [])) {
+              if (dm.has(nb.targetId)) continue;
+              if (!expandEdges.has(nb.edgeType)) continue;
+              if (dir === 'outgoing' && nb.reverse) continue;
+              if (dir === 'incoming' && !nb.reverse) continue;
+              dm.set(nb.targetId, depth + 1);
+              q.push({ id: nb.targetId, depth: depth + 1 });
+            }
           }
         }
       }
@@ -2371,16 +2406,26 @@
     return m;
   });
 
-  // Does a tree-group contain any matched nodes?
-  function treeGroupHasMatch(ln) {
-    if (!queryMatchedIds) return true;
-    if (queryMatchedIds.has(ln.id)) return true;
+  // Does a tree-group contain any matched nodes? Children are matched via
+  // parentTreeGroup IDENTITY OF ID, not object reference: layoutNodes is a
+  // $state array, so the draw loop's `ln` and the raw parentTreeGroup
+  // references are different Svelte proxies of the same node — reference
+  // equality silently never matches (the original query-matching recursion
+  // was dead code for the same reason).
+  function treeGroupHasAny(ln, ids) {
+    if (!ids) return true;
+    if (ids.has(ln.id)) return true;
     // Check children
+    const lnId = ln.id;
     for (const cln of layoutNodes) {
-      if (cln.parentTreeGroup === ln && queryMatchedIds.has(cln.id)) return true;
-      if (cln.parentTreeGroup === ln && cln.kind === 'tree-group' && treeGroupHasMatch(cln)) return true;
+      if (cln.parentTreeGroup?.id === lnId && ids.has(cln.id)) return true;
+      if (cln.parentTreeGroup?.id === lnId && cln.kind === 'tree-group' && treeGroupHasAny(cln, ids)) return true;
     }
     return false;
+  }
+
+  function treeGroupHasMatch(ln) {
+    return treeGroupHasAny(ln, queryMatchedIds);
   }
 
   function queryNodeOpacity(ln) {
@@ -2639,15 +2684,13 @@
   // Is a tree-group container filtered out by the in-view filter panel?
   // Containers follow the panel through their OWN node: synthetic groups
   // carry node_type package/module (→ Boundaries), and real nodes drawn as
-  // containers carry their real node_type. Concept focus hides containers
-  // whose name matches no selected concept — the same matching semantics
-  // as the leaf rules in filter-categories.js.
+  // containers carry their real node_type. Concept selection no longer
+  // hides containers — concept views fade non-concept elements to
+  // background instead of removing them (system-explorer.md §4), so the
+  // concept branch lives in the draw loop's fade math, not here.
   function treeGroupFilterHidden(ln) {
     if (!ln.node) return false;
     if (hiddenFilterCategories.size > 0 && hiddenFilterCategories.has(nodeCategory(ln.node))) {
-      return true;
-    }
-    if (activeFilterConcepts.length > 0 && !activeFilterConcepts.some((c) => nodeMatchesConcept(ln.node, c))) {
       return true;
     }
     return false;
@@ -2765,14 +2808,16 @@
       if (ss > 0 && ss < 10) return;
       if (!isTreeGroup && op < 0.01) return;
 
-      // In-view filter panel (ui-navigation.md §3): category checkboxes and
-      // concept selection toggle node visibility — hidden nodes are skipped
-      // entirely. Tree-group containers are filtered through their own node
-      // (the synthetic package/module groups are the boundary boxes the
-      // default zoom shows): a filtered group skips its box but keeps
-      // drawing children, so zoomed-in content of other categories stays
-      // visible when only the container's category is unchecked.
-      if (hiddenNodeIds?.size > 0 || hiddenFilterCategories.size > 0 || activeFilterConcepts.length > 0) {
+      // In-view filter panel (ui-navigation.md §3): category checkboxes
+      // toggle node visibility — hidden nodes are skipped entirely.
+      // Concept selection fades instead (see the concept fade below), so
+      // it no longer feeds this branch. Tree-group containers are filtered
+      // through their own node (the synthetic package/module groups are
+      // the boundary boxes the default zoom shows): a filtered group skips
+      // its box but keeps drawing children, so zoomed-in content of other
+      // categories stays visible when only the container's category is
+      // unchecked.
+      if (hiddenNodeIds?.size > 0 || hiddenFilterCategories.size > 0) {
         if (!isTreeGroup) {
           const filterNid = ln.node?.id ?? ln.id;
           if (hiddenNodeIds?.has(filterNid)) return;
@@ -2793,8 +2838,12 @@
       if (!isTreeGroup && ln.node) {
         const nt = ln.node.node_type ?? '';
         const isQueryMatched = activeQuery && queryMatchedIds?.has(ln.node.id);
+        // Concept nodes stay visible regardless of zoom — the concept view
+        // "shows only elements related to the selected concept" even when
+        // the semantic-zoom hierarchy would normally hide the node type.
+        const isConceptNode = conceptFilterIds?.has(ln.node.id) ?? false;
         // Always show query-matched nodes regardless of zoom
-        if (!isQueryMatched) {
+        if (!isQueryMatched && !isConceptNode) {
           if (cam.zoom < 0.3 && !['package', 'module'].includes(nt)) return;
           if (cam.zoom < 0.6 && ['function', 'method', 'endpoint', 'field', 'constant', 'table', 'component', 'class', 'enum_variant'].includes(nt)) return;
           if (cam.zoom < 1.0 && ['function', 'method', 'field', 'constant', 'enum_variant'].includes(nt)) return;
@@ -2805,6 +2854,18 @@
       // Draw this node if it has any opacity
       if (op > 0.01) {
         let drawOp = op * filterOpacity(ln);
+
+        // Concept view fade (system-explorer.md §4): concept elements keep
+        // full opacity; everything else fades to background — NOT removed.
+        // Tree-group containers stay emphasized when they contain concept
+        // nodes (their own node id may itself be a concept member).
+        if (conceptFilterIds) {
+          const inConcept = isTreeGroup
+            ? treeGroupHasAny(ln, conceptFilterIds)
+            : (ln.node?.id ? conceptFilterIds.has(ln.node.id) : conceptFilterIds.has(ln.id));
+
+          if (!inConcept) drawOp *= CONCEPT_FADE_ALPHA;
+        }
 
         if (activeQuery && drawOp > 0.01) {
           const qOp = queryNodeOpacity(ln);
@@ -3386,6 +3447,18 @@
       ctx.lineWidth = ln.id === selectedNodeId ? 2.5 : 1.5;
       ctx.stroke();
 
+      // Concept view emphasis (system-explorer.md §4): containers holding
+      // concept nodes carry the highlighted concept border — the overview-
+      // zoom counterpart of the leaf emphasis border.
+      if (conceptFilterIds && treeGroupHasAny(ln, conceptFilterIds)) {
+        ctx.save();
+        ctx.strokeStyle = CONCEPT_EDGE_COLOR;
+        ctx.lineWidth = 2.5;
+        roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // Label
       const fontSize = Math.max(8, Math.min(22, Math.min(sw, sh) * 0.22));
       ctx.fillStyle = '#e2e8f0';
@@ -3500,6 +3573,18 @@
       roundRect(ctx, s.x - sw / 2 - 2, s.y - sh / 2 - 2, sw + 4, sh + 4, r + 1);
       ctx.stroke();
       ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // ── Concept view emphasis (system-explorer.md §4) ────────────────
+    // Concept nodes render at full opacity with a highlighted border —
+    // the visual counterpart of the fade applied to everything else.
+    if (conceptFilterIds?.has(ln.id)) {
+      ctx.save();
+      ctx.strokeStyle = CONCEPT_EDGE_COLOR;
+      ctx.lineWidth = 2.5;
+      roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -4102,6 +4187,19 @@
         }
       }
 
+      // Concept view emphasis (system-explorer.md §4): edges between
+      // concept nodes are highlighted; edges touching faded nodes dim
+      // with them — relationships within the concept stay readable.
+      if (conceptFilterIds) {
+        if (conceptFilterIds.has(srcId) && conceptFilterIds.has(tgtId)) {
+          color = CONCEPT_EDGE_COLOR;
+          edgeAlpha = Math.max(edgeAlpha, 0.8);
+          lineWidth = Math.max(lineWidth, 2);
+        } else {
+          edgeAlpha *= 0.15;
+        }
+      }
+
       // Query edge filter
       if (queryMatchedIds) {
         if (!queryMatchedIds.has(srcId) || !queryMatchedIds.has(tgtId)) {
@@ -4213,6 +4311,16 @@
       bundles.get(key).count++;
     }
 
+    // Groups containing concept nodes (concept view emphasis — see the
+    // bundle loop below).
+    let conceptGroups = null;
+    if (conceptFilterIds) {
+      conceptGroups = new Set();
+      for (const [nid, gid] of nodeToGroup) {
+        if (conceptFilterIds.has(nid)) conceptGroups.add(gid);
+      }
+    }
+
     for (const [, bundle] of bundles) {
       const sln = layoutNodeMap.get(bundle.sg);
       const tln = layoutNodeMap.get(bundle.tg);
@@ -4227,10 +4335,24 @@
       if (ss.y < -50 && ts.y < -50) continue;
       if (ss.y > H + 50 && ts.y > H + 50) continue;
 
-      const thickness = Math.max(1, Math.min(5, Math.log2(bundle.count + 1)));
-      const alpha = Math.min(0.6, 0.2 + bundle.count / 100);
+      let thickness = Math.max(1, Math.min(5, Math.log2(bundle.count + 1)));
+      let alpha = Math.min(0.6, 0.2 + bundle.count / 100);
+      let color = '#64748b';
 
-      drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, '#64748b', alpha, thickness);
+      // Concept view fade (system-explorer.md §4): bundles between groups
+      // that contain concept nodes are highlighted; the rest dim to
+      // background with their endpoints.
+      if (conceptGroups) {
+        if (conceptGroups.has(bundle.sg) && conceptGroups.has(bundle.tg)) {
+          color = CONCEPT_EDGE_COLOR;
+          alpha = Math.max(alpha, 0.7);
+          thickness += 1;
+        } else {
+          alpha *= 0.15;
+        }
+      }
+
+      drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, color, alpha, thickness);
 
       // Label bundle count
       if (thickness > 1.5) {
@@ -5206,6 +5328,34 @@
     };
   }
 
+  /** Resolve a set of selected layout ids (leaves and/or tree-groups) to
+   *  the real graph node ids they cover. A synthetic tree-group selection
+   *  (its summary box is what the click hits at overview zoom) covers every
+   *  graph node inside it — the ad-hoc concept groups nodes, not layout
+   *  artifacts, so the shell receives node ids that exist in the graph. */
+  function selectionNodeIds(ids) {
+    const out = new Set();
+    const addLayoutNode = (ln) => {
+      if (!ln) return;
+      if (ln.kind === 'leaf') {
+        if (ln.node?.id) out.add(ln.node.id);
+        return;
+      }
+      // Tree-group: its own real node id (real container nodes drawn as
+      // groups), the synthetic path group's direct graph nodes, and every
+      // descendant group/leaf.
+      if (ln.node?.id && !String(ln.node.id).startsWith('__tree__')) out.add(ln.node.id);
+      for (const gn of ln.treeNode?.graphNodes ?? []) out.add(gn.id);
+      for (const child of childrenIndex.get(ln.id) ?? []) addLayoutNode(child);
+    };
+    for (const id of ids) {
+      const ln = layoutNodeMap.get(id);
+      if (ln) addLayoutNode(ln);
+      else out.add(id); // already a raw node id
+    }
+    return [...out];
+  }
+
   function contextMenuAction(action) {
     if (!contextMenu) return;
     const node = contextMenu.node;
@@ -5215,6 +5365,18 @@
     if (action === 'clear_trace') {
       // Exit trace mode (right-click affordance — explorer-canvas.md §6 "Exit trace mode")
       onInteractiveQuery(null);
+    } else if (action === 'create_concept') {
+      // Ad-hoc concept creation (system-explorer.md §4): group the
+      // multi-selected nodes (plus the right-clicked node when it isn't
+      // already among them) into a named concept — the shell opens the
+      // naming dialog and saves the grouping as an explorer view.
+      const ids = new Set(multiSelectedIds);
+      if (node?.id) ids.add(node.id);
+      if (ids.size >= 2 && onCreateConcept) {
+        onCreateConcept(selectionNodeIds(ids));
+        multiSelectedIds = new Set();
+        scheduleRedraw();
+      }
     } else if (action === 'trace') {
       startTraceFromNode(node);
     } else if (action === 'blast') {
@@ -5649,7 +5811,7 @@
 
   // Trigger redraws on reactive state changes (NOT hoveredNodeId — that triggers scheduleRedraw directly)
   $effect(() => {
-    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays, queryResult];
+    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays, queryResult, conceptFilterIds];
     scheduleRedraw();
   });
 
@@ -5896,17 +6058,25 @@
     <div class="concept-creation-bar" role="status">
       <span class="concept-count">{multiSelectedIds.size} nodes selected</span>
       <button class="concept-create-btn" type="button" onclick={() => {
-        const seedNodes = [...multiSelectedIds].map(id => {
-          const n = nodes.find(nd => nd.id === id);
-          return n?.qualified_name ?? n?.name ?? id;
-        });
-        const conceptQuery = {
-          scope: { type: 'concept', seed_nodes: seedNodes, expand_edges: ['calls', 'implements', 'contains'], expand_depth: 1 },
-          emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.12 },
-          zoom: 'fit',
-          annotation: { title: `Concept: ${seedNodes.length} seed nodes`, description: `{{count}} related nodes across {{group_count}} modules` },
-        };
-        onInteractiveQuery(conceptQuery);
+        if (onCreateConcept) {
+          // Ad-hoc concept creation (system-explorer.md §4): the shell
+          // opens the naming dialog and saves the grouping as an explorer
+          // view. The legacy interactive query below stays as the
+          // standalone-canvas fallback (no shell callback wired).
+          onCreateConcept(selectionNodeIds(multiSelectedIds));
+        } else {
+          const seedNodes = [...multiSelectedIds].map(id => {
+            const n = nodes.find(nd => nd.id === id);
+            return n?.qualified_name ?? n?.name ?? id;
+          });
+          const conceptQuery = {
+            scope: { type: 'concept', seed_nodes: seedNodes, expand_edges: ['calls', 'implements', 'contains'], expand_depth: 1 },
+            emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.12 },
+            zoom: 'fit',
+            annotation: { title: `Concept: ${seedNodes.length} seed nodes`, description: `{{count}} related nodes across {{group_count}} modules` },
+          };
+          onInteractiveQuery(conceptQuery);
+        }
         multiSelectedIds = new Set();
       }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
@@ -6367,6 +6537,15 @@
             </button>
           {/if}
           <div class="ctx-sep"></div>
+          <!-- Ad-hoc concept creation (system-explorer.md §4): visible only
+               while nodes are multi-selected (Shift+Click). Groups the
+               selection into a named concept saved as an explorer view. -->
+          {#if multiSelectedIds.size >= 2}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('create_concept')} data-testid="ctx-create-concept">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+              Create concept ({multiSelectedIds.size} selected)
+            </button>
+          {/if}
           <!-- Secondary actions in collapsible "More..." -->
           <button class="ctx-more-toggle" onclick={() => { ctxMoreOpen = !ctxMoreOpen; }} aria-expanded={ctxMoreOpen}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">

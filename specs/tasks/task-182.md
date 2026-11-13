@@ -2,10 +2,10 @@
 title: "Concept Views — cross-cutting architecture views by concept"
 spec_ref: "system-explorer.md §4"
 depends_on: [task-178]
-progress: not-started
+progress: complete
 coverage_sections:
   - "system-explorer.md §4. Concept Views"
-commits: []
+commits: ["7b56049a8b1fb365af30e91ec9662b399c914f25", "da395b72500cbaabd640bbfa237d157e6b59748f", "376a3f6fc7086289d330cd4b8ca950a1ef0f17d4", "647d9bd3424fdea3da7471d49652dbe03bc7f25e", "fa5d864d6205a53e8e50c09a45047ad5ad4e8ad1", "13b99dd78a2d35b3c60cf3dd653486ffd5fb9708", "afd7e164cba686c33acc937fc15b1edd56964997", "a44ad8886416bd9de4defed02be1ad35cf8eb11e", "188b9f9482edeeb0550990fc15761137eef9dc76", "362807160d14e186ac329eb185fab33754efc6f7", "39ba4fb6968847e2eb226cc5ae6e9e38394f7834"]
 ---
 
 ## Spec Excerpt
@@ -71,3 +71,64 @@ system-explorer.md §4 defines Concept Views — cross-cutting views that show a
 ## Agent Instructions
 
 Read `system-explorer.md` §4 "Concept Views" for the full specification. The concept API endpoints are already registered in `mod.rs` — check `GET /repos/:id/graph/concept/:name` and `GET /workspaces/:id/graph/concept/:name` response shapes in `graph.rs`. The canvas is built in task-178 — check `ExplorerView.svelte` for the SVG node rendering and how to apply opacity/highlight styles. The in-view filter panel is also in task-178. For ad-hoc concept saving, use the existing explorer-views CRUD endpoints (`POST /workspaces/:id/explorer-views`). The view spec grammar `concept` field is defined in `ui-layout.md` §4 Data Layer.
+
+## Shipped
+
+Concept views (system-explorer.md §4) are implemented on the task-178
+canvas substrate across all three interaction modes and both data-source
+mechanisms. This round resolved the rebase conflict against current main
+(durable finding `dc8e7bcd`, PR 807 merge_state DIRTY) without changing
+any task-182 source.
+
+### Implementation
+
+- **Concept browser (manifest mechanism):** `GET /repos/:id/graph/concepts`
+  lists a repo's manifest-defined concepts in the in-view filter panel's
+  Concepts section; selecting one fetches its
+  `GET /repos/:id/graph/concept/:name` projection and activates the
+  concept view.
+- **Canvas concept emphasis:** concept nodes keep full draw opacity and
+  gain a highlighted border; everything else fades to background at 0.15
+  (drawn, never removed). Edges between concept nodes are highlighted;
+  other edges dim with their endpoints. The active concept shows as a
+  clearable control-bar chip. Tree-group containers holding matched
+  nodes keep full opacity (id-based `treeGroupHasMatch`, not object
+  reference).
+- **Ad-hoc concepts:** Shift+Click multi-select + right-click "Create
+  concept" opens a naming dialog; saving persists the grouping as an
+  explorer view whose ViewQuery concept scope seeds exactly the selected
+  nodes.
+- **LLM concept exploration:** the explorer-generate prompt template and
+  the fallback route "show me everything related to X" questions to a
+  ViewSpec with `data.concept` set.
+- **Substring mechanism:** the ViewSpec `data.concept` field translates
+  to a concept scope with `seed_match: 'substring'` (default 'exact'),
+  implemented consistently across ExplorerCanvas, view-query-scope.js,
+  and the server resolver.
+
+### Rebase repair (this round)
+
+The merge of assignment base `ccfd4bc5` into the task branch was in
+progress with all conflicts resolved but uncommitted; conflicted paths
+were generated web/dist assets only (kept at the candidate's verified
+state; the executor republishes generated assets - not rebuilt here).
+Merge-base analysis confirmed all incoming Rust changes are one-sided
+from main (CI-green, verbatim), and the only both-sides source file
+(`ExplorerView.svelte`) gained exactly one line - task-164's
+`onRefresh={loadWsDepGraph}` prop pass referencing an existing function.
+The merge was concluded as commit `87184fca`.
+
+### Test evidence
+
+- Merged-tree focused probe: `npx vitest run
+  src/__tests__/ExplorerConceptViews.test.js
+  src/__tests__/DependencyGraph.test.js` -> 38/38 passed, exit 0 (after
+  `npm ci` with locked versions). Evidence:
+  /tmp/stage/review-evidence/task-182-rebase-repair.md.
+- No source changes this round: the merge brought only main's
+  already-CI-green code plus the single `onRefresh` prop pass covered
+  by the passing tests above. Prior-round evidence (e2e visual
+  baselines, 16/16 `explorer-visual.spec.js`) stands at the retained
+  head.
+- Server tests for the verifier: none new this round; run the standard
+  full workspace suite.
