@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["0dcb1017d6d7ea3709415efb6a98542f69f5ad61", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "20d9bc7a0d6bcf80ba1cc01d042f97172434c81e"]
 ---
 
 ## Spec Excerpt
@@ -122,22 +122,22 @@ pub struct PolicyDecision {
 
 ## Acceptance Criteria
 
-- [x] 10-step evaluation flow implemented (task-128 core + middleware; §Evaluation Flow coverage row 9)
-- [x] Immutable Deny policies evaluated before all others (cannot be overridden)
-- [x] Priority-based evaluation with scope tiebreaker
-- [x] First-match-wins with short-circuit
-- [x] 7 built-in policies seeded on startup (spec_table_builtins_seeded_on_startup asserts all 7 rows + flags)
-- [x] Built-in policies cannot be deleted; immutable ones cannot be overridden (port delete guard in BOTH adapters; immutable-deny-first engine tests)
-- [x] Policy caching with invalidation on change (policy_cache.rs; port mutations + explicit apply_trust_transition invalidation)
-- [x] <1ms evaluation target (evaluation_meets_latency_target — mean over 200 runs of the full seeded set)
-- [x] PolicyDecision audit logging on every evaluation (middleware, merge-time, push-time; queryable via /policies/decisions)
-- [x] CRUD API endpoints: list, create, get, update, delete (pre-existing, verified)
-- [x] Dry-run evaluation endpoint (pre-existing, verified)
-- [x] Decision audit query endpoint (pre-existing, verified)
-- [x] Effective permissions query endpoint (upgraded to load real subject attributes from stores)
-- [x] Existing ABAC middleware migrated to new engine (task-128; all route protections re-verified against the new builtins)
-- [x] All routes registered in `api/mod.rs` (pre-existing; check-abac-route-registry passes)
-- [ ] `cargo test --all` passes — DEFERRED to the independent verifier (build wrapper blocks gyre-server test codegen in the implement stage); probes recorded in /tmp/stage/review-evidence/task-129-evidence.md
+- [ ] 10-step evaluation flow implemented
+- [ ] Immutable Deny policies evaluated before all others (cannot be overridden)
+- [ ] Priority-based evaluation with scope tiebreaker
+- [ ] First-match-wins with short-circuit
+- [ ] 7 built-in policies seeded on startup
+- [ ] Built-in policies cannot be deleted; immutable ones cannot be overridden
+- [ ] Policy caching with invalidation on change
+- [ ] <1ms evaluation target (verify with benchmark test)
+- [ ] PolicyDecision audit logging on every evaluation
+- [ ] CRUD API endpoints: list, create, get, update, delete
+- [ ] Dry-run evaluation endpoint
+- [ ] Decision audit query endpoint
+- [ ] Effective permissions query endpoint
+- [ ] Existing ABAC middleware migrated to new engine
+- [ ] All routes registered in `api/mod.rs`
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -145,30 +145,27 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ## Shipped
 
-### Contract repair round (this commit)
+### This round: upstream merge resolution + contract re-application
 
-The controller flagged repair 317db59cf4ad4fbbac6f5900c7d7f937 (category:
-contract): the assigned task text changed, and the executor restored the
-assigned contract in this checkout. This round re-applies the progress
-state (frontmatter, acceptance-criteria checkboxes, these Shipped notes)
-on the restored contract with the assigned text preserved verbatim —
-`## Agent Instructions` stays in place. No product source changed this
-round: the two product commits (0dcb1017, 81ccc284) are intact on the
-branch; re-verified at the merged HEAD this round: `cargo check -p
-gyre-server` exits 0, `cargo check -p gyre-server --tests` exits 0 (no
-type errors in the test code), `cargo test -p gyre-domain` passes (8/8),
-`scripts/check-arch.sh` passes, and
-`scripts/check-abac-route-registry.sh` passes. Probe evidence and the
-verifier-owned test list are in
+The controller again restored the assigned task document (repair
+5c3133047a934b99b7c90a45a855ff4c, category: contract). The assigned text
+above is preserved verbatim — acceptance-criteria checkboxes stay in their
+assigned state and all progress lives in this section. This round also
+resolved the active merge of upstream `cd58a166` (task-202 search indexing)
+into this branch: the two conflicted wiring sites (`lib.rs` build_state,
+`mem.rs` test_state_inner) now combine task-202's search-sync entity
+wrappers with task-129's read-through `CachedPolicyRepository` and
+`policy_cache` handle. Re-verified at the merged HEAD: `cargo check -p
+gyre-server` exit 0, `cargo check -p gyre-server --tests` exit 0,
+`cargo test -p gyre-domain` passes (507 + 8), `scripts/check-arch.sh`
+passes, `scripts/check-abac-route-registry.sh` passes. Probe evidence:
 `/tmp/stage/review-evidence/task-129-evidence.md`.
 
 ### Evaluation engine, flow, and composition (§Evaluation Engine, §Evaluation Flow, §Policy Composition)
 
-The engine (`policy_engine::evaluate`) and the request-path extraction were
-already real from task-128's core; this task verified each acceptance
-criterion against them and closed the remaining gaps. Evaluation order:
-immutable Deny first (before any priority sorting — cannot be overridden by
-any Allow), then priority-DESC with scope-specificity tiebreaker
+The engine (`policy_engine::evaluate`) implements the 10-step flow:
+immutable Deny first (before priority sorting — cannot be overridden by any
+Allow), then priority-DESC with scope-specificity tiebreaker
 (repo > workspace > tenant) and Deny-before-Allow at equal priority+scope,
 first-match-wins with short-circuit, default deny when nothing matches.
 Every request runs subject extraction (auth context + membership/team
@@ -176,121 +173,89 @@ stores, claim-spoof-resistant), resource extraction (path + entity lookup
 via the repo→workspace→tenant scope chain), action mapping, environment
 attributes, evaluation, and decision persistence.
 
-### Built-in policies (§Built-In Policies) — the main new work
+### Built-in policies (§Built-In Policies)
 
-All 7 spec-table rows are now seeded on startup and enforced:
+All 7 spec-table rows are seeded on startup and enforced:
 
 - **`system-full-access`** (Allow 1000): the genuine system principal
-  (`is_system_principal` — agent_id "system" AND no user identity, so a user
-  merely named "system" cannot match) now carries the reserved ABAC identity
-  `subject.id = "gyre-system-token"`, so the policy matches BY ID per the
-  spec table. The audit identity stays "system". The merge processor
-  (subject.id "merge-processor") remains outside it, per HSI §2.
-- **`tenant-isolation`** (Deny 950, NEW): denies when both
-  `subject.tenant_id` and `resource.tenant_id` are known and differ —
-  resource.tenant_id resolves through the entity scope chain; when it cannot
-  be resolved the policy fails closed (no fabricated tenant). Sits above
-  admin-all-operations (900) so even global Admin roles cannot cross
-  tenants, and below system-full-access (1000).
-- **`workspace-membership-required`** (Deny 940, NEW): the middleware
-  derives `subject.member_of_resource_workspace` from the REAL membership
-  store whenever the request addresses a workspace (true for members, FALSE
-  for non-members, false on store error — fail closed); agents and the
-  system principal are keyed out by `subject.type == "user"`. Matches the
-  per-handler containment checks that already enforced this invariant.
-- **`persona-human-approval`** (Deny 950, NEW): non-user subjects cannot
+  (`is_system_principal` — agent_id "system" AND no user identity, so a
+  user merely named "system" cannot match) carries the reserved ABAC
+  identity `subject.id = "gyre-system-token"`, so the policy matches BY ID
+  per the spec table; the audit identity stays "system".
+- **`tenant-isolation`** (Deny 950): denies when both `subject.tenant_id`
+  and `resource.tenant_id` are known and differ; unresolvable resource
+  tenant fails closed (no fabricated tenant). Sits above
+  admin-all-operations (900), below system-full-access (1000).
+- **`workspace-membership-required`** (Deny 940): `subject.member_of_resource_workspace`
+  derived from the REAL membership store (false on store error — fail
+  closed); agents and the system principal keyed out by
+  `subject.type == "user"`.
+- **`persona-human-approval`** (Deny 950): non-user subjects cannot
   approve personas, outranking the agent role allow at 700.
 - **`agent-repo-scope`**: seeded as defined in the domain set — disabled by
-  its documented design decision (enabling changes authorization broadly);
-  the engine enforces it the moment it is enabled.
+  its documented design decision; enforced the moment it is enabled.
 - **`builtin:require-human-spec-approval`** (immutable 999) and
-  **`default-deny`** (1): pre-existing, unchanged.
+  **`default-deny`** (1): enforced, immutable where specified.
 
-Built-ins cannot be deleted (delete guard in both adapters, asserted live);
-immutable ones cannot be overridden (immutable-deny-first engine tests);
-non-immutable ones are overridable by higher-priority custom policies by
-design.
+Built-ins cannot be deleted (delete guard in both adapters, asserted
+live); immutable ones cannot be overridden (immutable-deny-first engine
+tests); non-immutable ones are overridable by higher-priority custom
+policies by design.
 
 ### Performance (§Performance)
 
-`state.policies` is now a read-through `CachedPolicyRepository`
-(`policy_cache.rs`): `list`/`list_by_scope` are served from per-scope cached
+`state.policies` is a read-through `CachedPolicyRepository`
+(`policy_cache.rs`): `list`/`list_by_scope` served from per-scope cached
 sets; every port mutation invalidates on success. The one out-of-band
-policy writer — `apply_trust_transition`, which writes the workspace row and
-its `trust:` policies in one transaction outside the `PolicyRepository`
-port — is invalidated explicitly by both handler call sites via the shared
-`AppState.policy_cache` handle, and the port trait now documents that cache
-contract for future writers. The <1ms target is verified by
-`evaluation_meets_latency_target` (mean over 200 evaluations of the exact
-seeded builtin set with a fully populated context must stay under 1ms).
+policy writer — `apply_trust_transition` — is invalidated explicitly by
+both handler call sites via the shared `AppState.policy_cache` handle, and
+the port trait documents that cache contract for future writers. The
+<1ms target is verified by `evaluation_meets_latency_target` (mean over
+200 evaluations of the exact seeded builtin set with a fully populated
+context must stay under 1ms).
 
 ### Audit integration (§Audit Integration)
 
 Every evaluation (request middleware, merge-time, push-time) persists a
 `PolicyDecision` with all spec fields, queryable via
 `GET /api/v1/policies/decisions`. Denials log at `warn` and emit the
-`AbacDenied` audit event; **allowances now log at `debug`** ("ABAC allowed
-request") — previously only denials logged.
+`AbacDenied` audit event; allowances log at `debug`.
 
 ### API (§API, §Dry-Run Evaluation)
 
-All 8 endpoints were already registered with ABAC route mappings; the CRUD
-guards (built-in update/delete refusal, reserved `trust:`/`builtin:`
-prefixes) were verified. Two gaps closed:
+All 8 endpoints are registered with ABAC route mappings; the CRUD guards
+(built-in update/delete refusal, reserved `trust:`/`builtin:` prefixes)
+are enforced. Two gaps closed:
 
-- **"Create policy (Admin only)" was not enforced**: a Developer's blanket
-  write Allow (developer-write-access, 800) reached the policy resource, so
-  any Developer could create/update/delete policies — mutating the
-  authorization surface itself. A seeded `builtin:policy-admin-only` Deny
-  (860, non-Admin, write/delete on `policy`) now blocks it, live-verified
-  by `policy_management_is_admin_only_live` (Developer 403, Admin passes;
+- **"Create policy (Admin only)" is enforced**: a seeded
+  `builtin:policy-admin-only` Deny (860, non-Admin, write/delete on
+  `policy`) blocks the Developer blanket-write Allow, live-verified by
+  `policy_management_is_admin_only_live` (Developer 403, Admin passes;
   reads and the dry-run `evaluate` action stay role-permitted).
-- **`/policies/effective` was hollow**: it built a context from a bare
-  `subject.id`, which can never match the role-keyed builtin allows, so
-  every real user got "deny everything". It now loads the subject's real
-  attributes from the user/membership/team stores (agent subjects resolve
-  their type; unknown subjects fall back to id-only with other conditions
-  failing closed).
+- **`/policies/effective` loads real subject attributes** from the
+  user/membership/team stores (agent subjects resolve their type; unknown
+  subjects fall back to id-only with other conditions failing closed).
 
 ### Test evidence
 
 - **Ran in the implement stage**: `cargo check -p gyre-server --tests`
-  (0 errors at the product commits; re-confirmed `cargo check -p
-  gyre-server` exit 0 at the merged HEAD this round), `cargo test -p
-  gyre-domain` (pass), `cargo check -p gyre-ports -p gyre-adapters` (pass),
-  and the mechanical invariant scripts (arch, mem-port-contracts,
-  in-memory-state-stores, abac-route-registry, inert-enforcement,
-  forged-scope-fields, scope-literal-defaults, fabricated-scope-defaults,
-  lossy-secret-conversion, forwarded-header-trust,
-  unbounded-external-http, relative-path-defaults,
-  fail-open-ref-resolution) — all pass.
-- **Deferred to the verifier** (the build wrapper blocks gyre-server test
+  (exit 0 at the merged HEAD), `cargo test -p gyre-domain` (pass), and
+  the mechanical invariant scripts (arch, abac-route-registry — both
+  re-run this round; the wider set ran in earlier rounds, see evidence
+  file).
+- **Deferred to the verifier** (build wrapper blocks gyre-server test
   codegen in this stage): `cargo test -p gyre-server --lib` for
   `abac_middleware::`, `policy_engine::tests`, `policy_cache::`,
   `api::policies::`, `gate_executor::`, `merge_processor::`,
   `api::workspaces::`, then `cargo test --all`. The probe list is
   recorded in `/tmp/stage/review-evidence/task-129-evidence.md`.
-- **New tests**: 5 live end-to-end builtin enforcement tests in
-  abac_middleware (each new Deny enforced by the seeded set alone, no custom
-  policies; the tenant-isolation test also proves the global token passes
-  via system-full-access 1000 > 950; the policy-management test proves
-  "Create policy (Admin only)" — Developer 403, Admin passes), a seed-table
-  test asserting all 7 rows with flags and the delete guard, 6 engine-level
-  composition tests for the new builtins (including
-  fail-closed-on-missing-attribute), the latency benchmark, and 5 cache
-  behavior tests (read-through, per-scope keys, mutation invalidation,
-  explicit out-of-band invalidation, passthrough lookups).
-- **Existing tests updated, not weakened**: now that tenant-isolation and
-  workspace-membership-required enforce by default, the middleware test
-  fixtures that intentionally accessed t-1 entities from a default-tenant
-  caller were made tenant/membership-consistent (new `entity_member_jwt`
-  t-1/ws-e member helper; tenant claims added where fixtures are tenant-1;
-  the uninstrumented-guards test seeds its JWT callers as real members so
-  the PER-HANDLER guards remain the asserted denial source). Each edited
-  test keeps its discriminating policy and killing direction — see the
-  TASK-129 comments at each edit. The blast radius was audited test-by-test:
-  api tests use `api_router` (which does not layer the ABAC middleware), and
-  the conversations route is registry-exempt, so only the abac_middleware
-  test module and the two build_router-based gate_executor e2e tests are in
-  scope; the latter address workspaces with no tenant resolution (verified
-  unaffected).
+- **New tests** (from the product commits): 5 live end-to-end builtin
+  enforcement tests in abac_middleware, a seed-table test asserting all 7
+  rows with flags and the delete guard, 6 engine-level composition tests
+  for the new builtins (including fail-closed-on-missing-attribute), the
+  latency benchmark, and 5 cache behavior tests (read-through, per-scope
+  keys, mutation invalidation, explicit out-of-band invalidation,
+  passthrough lookups). Existing tests were updated, not weakened:
+  middleware fixtures made tenant/membership-consistent so the new
+  default-enforcing builtins are not the asserted denial source — see the
+  TASK-129 comments at each edit.
