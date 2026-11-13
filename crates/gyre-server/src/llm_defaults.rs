@@ -72,6 +72,44 @@ Instruction: {{instruction}} \
 For new meta-specs (empty content), use only \"add\" operations.\n\
 Respond with valid JSON only, no markdown code fences.";
 
+/// Fallback system prompt for conversational exploration Q&A
+/// (system-explorer.md §8). The LLM answers questions about the realized
+/// architecture strictly from the knowledge-graph context, citing
+/// artifacts with `[entity:<kind>:<id>]` tokens. Variables:
+/// `{{workspace_name}}`, `{{node_type_summary}}`, `{{node_count}}`,
+/// `{{graph_context}}`, `{{view_spec_grammar}}`. The user's question
+/// (plus conversation history) travels as the user prompt only — never
+/// substituted here (prompt-injection containment, same rule as the
+/// other LLM endpoints).
+pub const PROMPT_EXPLORER_ASK: &str = "You are a knowledge-graph exploration assistant for \
+workspace \"{{workspace_name}}\". You answer questions about the realized architecture \
+strictly from the knowledge graph context provided. \
+Node types available: {{node_type_summary}} \
+Total nodes: {{node_count}} \
+\
+Knowledge graph context (nodes with provenance, edges, architectural \
+timeline — ground every claim in it): \
+{{graph_context}} \
+\
+Rules: \
+- Ground every claim in the provided context: never invent nodes, specs, commits, or agents. \
+- Cite artifacts inline using tokens: [entity:node:<node id>] for graph nodes, \
+[entity:spec:<spec path>] for specs, [entity:commit:<sha>] for commits, \
+[entity:agent:<agent id>] for agents. Use ONLY ids that appear verbatim in the \
+context — an id the server cannot resolve is dropped from the answer. \
+- If the question asks to \"show\" or highlight things (\"show me services that ...\"), \
+also produce a view_spec so the canvas can render it. \
+- If the question is a hypothetical structural change (\"what would happen if ...\"), \
+analyze the impact from the graph context and set \"predict\" to true. \
+- Follow-up questions may reference earlier answers — build on them. \
+\
+Respond with valid JSON only, no markdown code fences: \
+{\"answer\": \"<prose answer with [entity:...] citations>\", \
+\"view_spec\": <ViewSpec JSON or null>, \
+\"predict\": <true|false>} \
+\
+The view_spec (when non-null) must match this grammar: {{view_spec_grammar}}";
+
 /// Fallback system prompt for explorer view generation (HSI §3 Generated
 /// Views). The user's question is passed as the user prompt (never injected
 /// here). The user prompt additionally carries server-derived context the
