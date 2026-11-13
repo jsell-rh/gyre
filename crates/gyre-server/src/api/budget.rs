@@ -1457,6 +1457,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.0,
                 model: "test-model".to_string(),
+                prompt_template_sha: None,
             },
         )
         .await;
@@ -1541,6 +1542,7 @@ mod tests {
                 output_tokens: 50,
                 cost_usd: 0.0,
                 model: "test-model".to_string(),
+                prompt_template_sha: None,
             },
         )
         .await;
