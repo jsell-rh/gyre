@@ -4222,9 +4222,25 @@ specs:
                 .unwrap();
         }
 
+        // The workspace record the manifest-gate messages are scoped to.
+        // emit_event resolves a server-originated message's tenant from the
+        // workspace record and SKIPS persistence when it is missing (the
+        // anti-forged-scope invariant — a fabricated tenant would re-target
+        // delivery), so the fixture must create the workspace exactly as
+        // production does when a repo lands in one. Without it the spawned
+        // gate agent's ReviewRequest is never delivered.
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-manifest-gates"),
+            Id::new("tenant-manifest-gates"),
+            "manifest-gates",
+            "manifest-gates",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
         let repo = gyre_domain::Repository::new(
             Id::new(repo_id),
-            Id::new("ws-manifest-gates"),
+            ws.id.clone(),
             "manifest-repo",
             path,
             now_secs(),
