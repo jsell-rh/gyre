@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §Teams"
   - "user-management.md §Notifications"
-commits: ["bc0d0eac099f133695f07aeb09b3ccb22d72afac", "e4af712a72e9e8618f126f691df3e060bed26da6", "83594b91dbe13ee305036e13b3f3663237c96875"]
+commits: ["83594b91dbe13ee305036e13b3f3663237c96875", "e4af712a72e9e8618f126f691df3e060bed26da6", "bc0d0eac099f133695f07aeb09b3ccb22d72afac"]
 ---
 
 ## Spec Excerpt
