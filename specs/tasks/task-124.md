@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "60c86252706b2392866b1dddd66634ab4cb123d6", "38b3134feeaa28be0e443e2e29344980ea6db552", "3350817099f10cc5fde2e505f9cb4ad8bb5d129e"]
+commits: ["3350817099f10cc5fde2e505f9cb4ad8bb5d129e", "38b3134feeaa28be0e443e2e29344980ea6db552", "60c86252706b2392866b1dddd66634ab4cb123d6", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
 ---
 
 ## Spec Excerpt
