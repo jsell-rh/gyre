@@ -383,17 +383,20 @@ async fn sqlite_url_wires_fts5_search_port() {
     assert_eq!(persisted[0].title, "Quokka census");
 
     // ── §Query Language (task-154): quoted phrases, facets, time bounds ────
+    // Both docs carry the caller's tenant (the global test token is Admin,
+    // tenant "default"): §Access Scoping makes the tenant boundary
+    // fail-closed, so a doc indexed with no resolvable tenant is invisible
+    // to every scoped query — the same contract the MCP query-language test
+    // seeds against (1bb3c01b).
     // A doc with both words but never adjacent: a phrase query must not match.
-    state
-        .search
-        .index(doc(
-            "task",
-            "scattered",
-            "Quokka elsewhere",
-            "Count only the island quokkas every quarter.",
-        ))
-        .await
-        .unwrap();
+    let mut scattered = doc(
+        "task",
+        "scattered",
+        "Quokka elsewhere",
+        "Count only the island quokkas every quarter.",
+    );
+    scattered.tenant_id = Some("default".to_string());
+    state.search.index(scattered).await.unwrap();
     // A 40-day-old doc: since: must exclude it, absolute bounds must not.
     let mut ancient = doc(
         "task",
@@ -401,6 +404,7 @@ async fn sqlite_url_wires_fts5_search_port() {
         "Ancient survey",
         "ancient relic keyword census",
     );
+    ancient.tenant_id = Some("default".to_string());
     ancient.updated_at = Some(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
