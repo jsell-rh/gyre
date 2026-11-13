@@ -45,7 +45,7 @@ $diff(set_a, set_b)                         — set difference (in A but not B)
 | `filter` | Show nodes matching `node_types` or computed set |
 | `test_gaps` | Nodes NOT reachable from any test function |
 | `diff` | Changes between two commits |
-| `concept` | Cross-cutting concept from seed nodes expanded along edges |
+| `concept` | Cross-cutting concept from seed nodes expanded along edges. `seed_match`: `"exact"` (default — each seed names one node by name/qualified_name/id) or `"substring"` (each seed is a case-insensitive substring on node name/qualified_name, seeding ALL matches — the ViewSpec `data.concept` mechanism per ui-layout.md §4 "Data source distinction") |
 
 ### 3. Emphasis — How to Color It
 
