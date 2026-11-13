@@ -50,6 +50,7 @@ pub mod spec_approval_event;
 pub mod spec_assertion_results;
 pub mod spec_ledger;
 pub mod spec_lifecycle;
+pub mod spec_links;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -276,6 +277,9 @@ mod tests {
             "trust_anchors",
             "key_bindings",
             "chain_attestations",
+            // Spec-link graph (spec-links.md §Forge-Maintained Spec Graph,
+            // migration 000056, task-198)
+            "spec_links",
             // Dependency breaking changes + policies (migration 000060, task-163)
             "breaking_changes",
             "dependency_policies",
