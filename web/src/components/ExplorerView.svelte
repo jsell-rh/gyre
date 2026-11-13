@@ -21,7 +21,7 @@
   // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
   // workspace generate endpoint (read-only query translator).
   import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
-  import { viewSpecToViewQuery } from '../lib/generated-view.js';
+  import { viewSpecToViewQuery, viewDocumentToQuery } from '../lib/generated-view.js';
   import { FLOW_TEMPLATES, matchFlowTemplate, flowTemplateQuery, pickTraceMr } from '../lib/flow-templates.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -38,7 +38,7 @@
   // In-view filter panel (ui-navigation.md §3, task-178): category filters +
   // discovered concepts, toggled by the filter icon in the control bar.
   import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
-  import { hiddenNodeIds as computeHiddenNodeIds, CATEGORY_IDS } from '../lib/filter-categories.js';
+  import { hiddenNodeIds as computeHiddenNodeIds, conceptNodeIds as computeConceptNodeIds, CATEGORY_IDS } from '../lib/filter-categories.js';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
@@ -140,13 +140,129 @@
   let specApprovals = $state([]);
   let explorerSavedViews = $state([]);
 
-  // ── In-view filter panel (ui-navigation.md §3, task-178) ─────────────
-  // Collapsible 200px left panel inside the Architecture content area
-  // (NOT the app sidebar). Category checkboxes + concept selection toggle
-  // node visibility on the canvas via filter-categories.js.
+  // In-view filter panel (ui-navigation.md §3, task-178): filter icon in
+  // the control bar opens the collapsible 200px left panel inside the
+  // Architecture content area (not the app sidebar). Category checkboxes
+  // toggle node visibility; concept selection fades the canvas to the
+  // concept's elements (task-182, system-explorer.md §4).
   let filterPanelOpen = $state(false);
   let activeFilterCategories = $state({ boundaries: true, interfaces: true, data: true, specs: true });
   let activeFilterConcepts = $state([]);
+
+  // ── Concept views (system-explorer.md §4, task-182) ─────────────
+  // Predefined concepts from the repo's spec manifest (served by
+  // GET /repos/:id/graph/concepts); selecting one fetches its projection
+  // (GET /repos/:id/graph/concept/:name) and fades the canvas to the
+  // concept's nodes. Discovered concepts (activeFilterConcepts above)
+  // use the substring mechanism — both are supported per the spec's data
+  // source distinction.
+  let manifestConcepts = $state([]);
+  let manifestConceptsLoadedFor = $state('');
+  let activeManifestConcept = $state(null); // { name, nodeIds: Set|null }
+
+  // Fetch the manifest concept listing when the filter panel opens at
+  // repo scope (once per repo — the panel is the only consumer).
+  $effect(() => {
+    if (!filterPanelOpen || !selectedRepoId || explorerViewMode !== 'boundary') return;
+    if (manifestConceptsLoadedFor === selectedRepoId) return;
+    const repoId = selectedRepoId;
+    manifestConceptsLoadedFor = repoId;
+    api.repoGraphConcepts(repoId)
+      .then((res) => {
+        if (selectedRepoId !== repoId) return; // stale
+        manifestConcepts = Array.isArray(res?.concepts) ? res.concepts : [];
+      })
+      .catch(() => {
+        // No manifest / endpoint unavailable — no predefined concepts to
+        // list; allow a retry on the next panel open.
+        if (selectedRepoId === repoId) manifestConceptsLoadedFor = '';
+      });
+  });
+
+  /** Toggle a manifest concept view: fetching the projection resolves the
+   *  concept's node set (manifest-based — distinct from the substring
+   *  mechanism); toggling the active concept clears it. */
+  async function toggleManifestConcept(name) {
+    if (activeManifestConcept?.name === name) {
+      activeManifestConcept = null;
+      return;
+    }
+    activeManifestConcept = { name, nodeIds: null }; // projection loading
+    pushInteraction({ action: 'concept', detail: `manifest:${name}` });
+    try {
+      const result = await api.getGraphConcept(selectedRepoId, name);
+      if (activeManifestConcept?.name !== name) return; // stale toggle
+      const ids = new Set((result?.nodes ?? []).map((n) => n?.id).filter(Boolean));
+      activeManifestConcept = { name, nodeIds: ids };
+    } catch (e) {
+      if (activeManifestConcept?.name === name) activeManifestConcept = null;
+      showToast(`Concept "${name}" could not be loaded: ${e.message}`, { type: 'error' });
+    }
+  }
+
+  // ── Ad-hoc concept creation (system-explorer.md §4) ─────────────
+  // Multi-select on the canvas (Shift+Click) + "Create concept" (context
+  // menu or the selection bar) opens a naming dialog; saving persists the
+  // grouping as an explorer view (POST /workspaces/:id/explorer-views)
+  // whose ViewQuery concept scope seeds exactly the selected nodes.
+  let conceptDialog = $state(null); // { name, error, saving, nodes: [...] }
+
+  function openConceptDialog(nodeIds) {
+    const ids = Array.isArray(nodeIds) ? nodeIds : [...(nodeIds ?? [])];
+    const nodes = (effectiveGraph?.nodes ?? []).filter((n) => ids.includes(n.id));
+    if (nodes.length < 2) return;
+    conceptDialog = { name: '', error: '', saving: false, nodes };
+  }
+
+  function closeConceptDialog() {
+    conceptDialog = null;
+  }
+
+  async function saveConceptDialog() {
+    if (!conceptDialog) return;
+    const name = (conceptDialog.name ?? '').trim();
+    if (!name) {
+      conceptDialog = { ...conceptDialog, error: 'Name the concept before saving.' };
+      return;
+    }
+    const workspaceId = scope?.workspaceId;
+    if (!workspaceId) {
+      conceptDialog = { ...conceptDialog, error: 'No workspace scope — cannot save a view here.' };
+      return;
+    }
+    // ViewQuery grammar (view-query-grammar.md): a concept scope seeded
+    // with the selected nodes' qualified names. No edge expansion — the
+    // ad-hoc concept is exactly the grouped nodes.
+    const seedNodes = conceptDialog.nodes.map((n) => n.qualified_name ?? n.name);
+    const spec = {
+      scope: {
+        type: 'concept',
+        seed_nodes: seedNodes,
+        expand_edges: [],
+        expand_depth: 0,
+        expand_direction: 'both',
+      },
+      emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.15 },
+      zoom: 'fit',
+      annotation: {
+        title: `Concept: ${name}`,
+        description: `${seedNodes.length} grouped nodes`,
+      },
+    };
+    conceptDialog = { ...conceptDialog, saving: true, error: '' };
+    try {
+      await api.saveExplorerView(workspaceId, {
+        name,
+        description: `Ad-hoc concept grouping ${seedNodes.length} nodes`,
+        spec,
+      });
+      pushInteraction({ action: 'save_concept', detail: name });
+      showToast(`Concept "${name}" saved as an explorer view`, { type: 'success' });
+      conceptDialog = null;
+    } catch (e) {
+      conceptDialog = { ...conceptDialog, saving: false, error: e.message };
+    }
+  }
 
   // ── View spec editor (ui-navigation.md §3, task-178) ────────────────
   // "Edit view spec" opens a collapsible JSON editor for the view spec
@@ -1277,8 +1393,9 @@
   // dropdown opens; best-effort (a failed fetch keeps the current list).
   // Both scopes are merged by id, mirroring the socket's ListViews: the
   // repo-scoped records carry the stored ViewQuery directly, the
-  // workspace-scoped records carry a ViewSpec (translated via
-  // viewSpecToViewQuery).
+  // workspace-scoped records carry a stored document in EITHER grammar
+  // (ViewSpec — generated views; ViewQuery — ad-hoc concept groupings),
+  // translated via viewDocumentToQuery.
   let savedViewsRefreshing = false;
   async function refreshSavedViews() {
     if (savedViewsRefreshing) return;
@@ -1300,7 +1417,7 @@
         byId.set(r.id, {
           ...r,
           is_system: r.is_system ?? r.is_builtin ?? false,
-          query: r.query ?? (r.spec ? viewSpecToViewQuery(r.spec) : null),
+          query: r.query ?? (r.spec ? viewDocumentToQuery(r.spec) : null),
         });
       }
       explorerSavedViews = [...byId.values()];
@@ -1798,6 +1915,7 @@
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
       if (viewSelectOpen) { viewSelectOpen = false; return; }
+      if (conceptDialog) { conceptDialog = null; return; }
       if (viewMenu) { viewMenu = null; return; }
       if (viewTooltip) { viewTooltip = null; return; }
       if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
@@ -1969,15 +2087,35 @@
 
   // ── In-view filter panel → canvas node visibility (task-178) ──────────
   // filter-categories.js owns the classification; the panel's category
-  // checkboxes and concept chips reduce to the set of node ids the canvas
-  // hides. null when no filter is active (no filtering cost on the draw loop).
+  // checkboxes reduce to the set of node ids the canvas hides (concept
+  // selection fades instead — see explorerConceptNodeIds below). null when
+  // no category is unchecked (no filtering cost on the draw loop).
   let explorerHiddenNodeIds = $derived.by(() => {
     const hiddenCategories = CATEGORY_IDS.filter((id) => !activeFilterCategories[id]);
-    if (hiddenCategories.length === 0 && activeFilterConcepts.length === 0) return null;
+    if (hiddenCategories.length === 0) return null;
     return computeHiddenNodeIds(effectiveGraph.nodes ?? [], {
       hiddenCategories,
-      concepts: activeFilterConcepts,
     });
+  });
+
+  // ── Concept view emphasis set (task-182, system-explorer.md §4) ──────
+  // Union of the manifest concept's projection node ids and the
+  // discovered-concept substring matches. The canvas fades every node
+  // outside this set to background (0.15) and highlights edges within it.
+  // null when no concept is active.
+  let explorerConceptNodeIds = $derived.by(() => {
+    const sets = [];
+    if (activeManifestConcept?.nodeIds && activeManifestConcept.nodeIds.size > 0) {
+      sets.push(activeManifestConcept.nodeIds);
+    }
+    if (activeFilterConcepts.length > 0) {
+      const discovered = computeConceptNodeIds(effectiveGraph.nodes ?? [], activeFilterConcepts);
+      if (discovered.size > 0) sets.push(discovered);
+    }
+    if (sets.length === 0) return null;
+    const union = new Set();
+    for (const s of sets) for (const id of s) union.add(id);
+    return union.size > 0 ? union : null;
   });
 
   // Unchecked category ids + selected concepts, BEFORE reduction to node
@@ -2559,6 +2697,36 @@
           {/if}
         {/if}
         {/if}
+
+        <!-- Active concept filter chips (system-explorer.md §4, task-182):
+             the active concept view (manifest or discovered) shows as a chip
+             in the control bar — click ✕ to clear, restoring the full graph. -->
+        {#if explorerViewMode === 'boundary'}
+          {#if activeManifestConcept}
+            <span class="concept-chip concept-filter-chip" data-testid="concept-filter-chip">
+              Concept: {activeManifestConcept.name}
+              <button
+                class="chip-clear"
+                onclick={() => { activeManifestConcept = null; }}
+                aria-label="Clear concept filter"
+                data-testid="concept-filter-chip-clear"
+                type="button"
+              >✕</button>
+            </span>
+          {/if}
+          {#each activeFilterConcepts as c (c)}
+            <span class="concept-chip concept-filter-chip" data-testid="concept-filter-chip">
+              Concept: {c}
+              <button
+                class="chip-clear"
+                onclick={() => { activeFilterConcepts = activeFilterConcepts.filter((x) => x !== c); }}
+                aria-label="Clear concept filter"
+                data-testid="concept-filter-chip-clear"
+                type="button"
+              >✕</button>
+            </span>
+          {/each}
+        {/if}
       </div>
     {/if}
 
@@ -2662,6 +2830,9 @@
                   nodes={effectiveGraph.nodes ?? []}
                   bind:activeCategories={activeFilterCategories}
                   bind:activeConcepts={activeFilterConcepts}
+                  manifestConcepts={manifestConcepts}
+                  activeManifestConcept={activeManifestConcept?.name ?? null}
+                  onToggleManifestConcept={toggleManifestConcept}
                   onClose={() => { filterPanelOpen = false; }}
                 />
               {/if}
@@ -2769,6 +2940,8 @@
                 hiddenNodeIds={explorerHiddenNodeIds}
                 hiddenCategories={explorerHiddenCategories}
                 filterConcepts={activeFilterConcepts}
+                conceptNodeIds={explorerConceptNodeIds}
+                onCreateConcept={openConceptDialog}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
                   if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
@@ -3456,6 +3629,57 @@
         {/if}
       </div>
         <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
+    </div>
+  </div>
+{/if}
+
+<!-- ── Ad-hoc concept creation dialog (system-explorer.md §4, task-182) ──── -->
+{#if conceptDialog}
+  <div
+    class="concept-dialog-backdrop"
+    onclick={closeConceptDialog}
+    oncontextmenu={(e) => { e.preventDefault(); closeConceptDialog(); }}
+    role="presentation"
+  ></div>
+  <div
+    class="concept-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Create concept"
+    data-testid="concept-dialog"
+  >
+    <h3 class="concept-dialog-title">Create concept</h3>
+    <p class="concept-dialog-desc">
+      Group {conceptDialog.nodes.length} selected nodes into a named concept. Saving stores it
+      as an explorer view you can reload from the view selector.
+    </p>
+    <label class="concept-dialog-label" for="concept-dialog-name">Concept name</label>
+    <input
+      id="concept-dialog-name"
+      class="concept-dialog-input"
+      type="text"
+      bind:value={conceptDialog.name}
+      placeholder="e.g. Authentication"
+      data-testid="concept-dialog-name"
+      disabled={conceptDialog.saving}
+    />
+    {#if conceptDialog.error}
+      <p class="concept-dialog-error" role="alert">{conceptDialog.error}</p>
+    {/if}
+    <div class="concept-dialog-actions">
+      <button
+        class="concept-dialog-save"
+        onclick={saveConceptDialog}
+        disabled={conceptDialog.saving}
+        data-testid="concept-dialog-save"
+        type="button"
+      >{conceptDialog.saving ? 'Saving…' : 'Save concept'}</button>
+      <button
+        class="concept-dialog-cancel"
+        onclick={closeConceptDialog}
+        disabled={conceptDialog.saving}
+        type="button"
+      >Cancel</button>
     </div>
   </div>
 {/if}
@@ -4187,6 +4411,107 @@
 
   .chip-clear:hover { opacity: 1; }
   .chip-clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* Active concept filter chip (system-explorer.md §4) — distinct accent
+     from the search result chip: the concept view is a filter, not a
+     search result. */
+  .concept-filter-chip {
+    background: color-mix(in srgb, #a78bfa 12%, transparent);
+    border-color: color-mix(in srgb, #a78bfa 40%, transparent);
+    color: #c4b5fd;
+  }
+
+  /* ── Ad-hoc concept creation dialog (system-explorer.md §4) ─────── */
+  .concept-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.6);
+    z-index: 300;
+  }
+
+  .concept-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 301;
+    width: min(400px, calc(100vw - 48px));
+    padding: var(--space-5);
+    background: var(--color-bg-secondary, #0f172a);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius-lg, 10px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+
+  .concept-dialog-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text-primary, #e2e8f0);
+  }
+
+  .concept-dialog-desc {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted, #94a3b8);
+    line-height: 1.5;
+  }
+
+  .concept-dialog-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted, #94a3b8);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .concept-dialog-input {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-bg-primary, #0f0f1a);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius-md, 6px);
+    color: var(--color-text-primary, #e2e8f0);
+    font-size: var(--text-sm);
+  }
+  .concept-dialog-input:focus-visible {
+    outline: 2px solid var(--color-focus, #3b82f6);
+    outline-offset: 1px;
+  }
+
+  .concept-dialog-error {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-danger, #ef4444);
+  }
+
+  .concept-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .concept-dialog-save,
+  .concept-dialog-cancel {
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md, 6px);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .concept-dialog-save {
+    background: var(--color-focus, #3b82f6);
+    color: #fff;
+    border-color: var(--color-focus, #3b82f6);
+  }
+  .concept-dialog-save:disabled { opacity: 0.6; cursor: default; }
+  .concept-dialog-cancel {
+    background: transparent;
+    color: var(--color-text-muted, #94a3b8);
+    border-color: var(--color-border-strong, #334155);
+  }
 
   /* ── Workspace repo error ─────────────────────────────────────────────── */
   .error-banner {
