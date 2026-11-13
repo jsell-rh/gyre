@@ -186,6 +186,120 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // TASK-129 (§Built-In Policies): users and agents cannot access
+        // other tenants. Fires only when BOTH tenant ids are known —
+        // `resource.tenant_id` resolves through the entity scope chain
+        // (repo → workspace → tenant), so resource types without an entity
+        // lookup fail closed (attribute unset → condition unmet → fall
+        // through to the rest of the policy set). Priority 950: above
+        // admin-all-operations (900) so even global Admin roles cannot cross
+        // tenants, and below system-full-access (1000) so the global
+        // GYRE_AUTH_TOKEN identity (which legitimately spans tenants) is
+        // still allowed.
+        Policy {
+            id: Id::new("builtin-tenant-isolation"),
+            name: "tenant-isolation".to_string(),
+            description:
+                "Users and agents cannot access resources belonging to another tenant"
+                    .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 950,
+            effect: PolicyEffect::Deny,
+            conditions: vec![
+                Condition {
+                    attribute: "subject.tenant_id".to_string(),
+                    operator: ConditionOp::Exists,
+                    value: ConditionValue::Null,
+                },
+                Condition {
+                    attribute: "resource.tenant_id".to_string(),
+                    operator: ConditionOp::Exists,
+                    value: ConditionValue::Null,
+                },
+                Condition {
+                    attribute: "subject.tenant_id".to_string(),
+                    operator: ConditionOp::NotEquals,
+                    value: ConditionValue::String("$resource.tenant_id".to_string()),
+                },
+            ],
+            actions: vec!["*".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // TASK-129 (§Built-In Policies): users must be workspace members to
+        // access workspace-scoped resources (user-management.md §Repo
+        // Access: repo access is inherited from workspace membership). The
+        // middleware sets the derived boolean `subject.member_of_resource_workspace`
+        // from the real membership store whenever the request addresses a
+        // workspace (directly or via a repo/entity scope chain); agents and
+        // the system principal carry no user membership and are keyed out by
+        // the `subject.type == "user"` condition. Priority 940: above
+        // admin-all-operations (900) — a global Admin role does not bypass
+        // membership, matching the per-handler containment checks (e.g.
+        // explorer_views / saved_views / messages) that already enforce
+        // this invariant without an admin exemption.
+        Policy {
+            id: Id::new("builtin-workspace-membership-required"),
+            name: "workspace-membership-required".to_string(),
+            description: "Users must be members of the addressed workspace to access its resources"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 940,
+            effect: PolicyEffect::Deny,
+            conditions: vec![
+                Condition {
+                    attribute: "subject.type".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("user".to_string()),
+                },
+                Condition {
+                    attribute: "subject.member_of_resource_workspace".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::Bool(false),
+                },
+            ],
+            actions: vec!["*".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // TASK-129 (§Built-In Policies): persona approval is human-only.
+        // Agents (and any other non-user subject) cannot approve personas.
+        // Priority 950: above agent-scoped-access (700), which would
+        // otherwise allow the `approve` action for the global Agent role.
+        Policy {
+            id: Id::new("builtin-persona-human-approval"),
+            name: "persona-human-approval".to_string(),
+            description: "Only human users can approve personas".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 950,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.type".to_string(),
+                operator: ConditionOp::NotEquals,
+                value: ConditionValue::String("user".to_string()),
+            }],
+            actions: vec!["approve".to_string()],
+            resource_types: vec!["persona".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Spec approval is always human. Immutable — evaluated before ALL
         // priority-based policies including system-full-access at priority 1000.
         // Cannot be overridden by any Allow regardless of priority.

@@ -395,10 +395,80 @@ pub async fn effective_permissions(
 ) -> Result<Json<Vec<EffectivePermission>>, ApiError> {
     let policies = state.policies.list().await?;
 
-    // Build a basic context from query params.
+    // Build the subject's attribute context from REAL stores (§API:
+    // "What can this user/agent do on this resource type?"). A bare
+    // subject.id cannot answer that — the builtin allows key on
+    // global_role / workspace_role / tenant, so before this the endpoint
+    // answered "deny everything" for every real user. Resolution order:
+    // user by id → user by external id (the JWT `sub`) → agent by id →
+    // fallback to just subject.id (unknown subject, conditions on other
+    // attributes fail closed).
     let mut ctx = AttributeContext::default();
     if let Some(sid) = &q.subject_id {
         ctx.set("subject.id", sid);
+        let user = match state.users.find_by_id(&Id::new(sid.clone())).await {
+            Ok(u) => u,
+            Err(e) => {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "user lookup for effective permissions failed: {e}"
+                )))
+            }
+        };
+        let user = match user {
+            Some(u) => Some(u),
+            None => match state.users.find_by_external_id(sid).await {
+                Ok(u) => u,
+                Err(e) => {
+                    return Err(ApiError::Internal(anyhow::anyhow!(
+                        "user lookup for effective permissions failed: {e}"
+                    )))
+                }
+            },
+        };
+        if let Some(user) = user {
+            ctx.set("subject.type", "user");
+            if let Some(role) = user.roles.first() {
+                ctx.set("subject.global_role", role.as_str());
+            }
+            if let Some(tid) = &user.tenant_id {
+                ctx.set("subject.tenant_id", tid.as_str());
+            }
+            // Memberships + teams, same sources as the middleware's
+            // extraction (§Attributes: "Memberships", "Team memberships").
+            match state.workspace_memberships.list_by_user(&user.id).await {
+                Ok(memberships) => {
+                    let workspace_ids: Vec<String> = memberships
+                        .iter()
+                        .map(|m| m.workspace_id.to_string())
+                        .collect();
+                    if !workspace_ids.is_empty() {
+                        ctx.set_list("subject.workspace_ids", workspace_ids);
+                    }
+                    let mut team_ids: Vec<String> = Vec::new();
+                    for m in &memberships {
+                        if let Ok(teams) =
+                            state.teams.list_for_user(&m.workspace_id, &user.id).await
+                        {
+                            for team in teams {
+                                team_ids.push(team.id.to_string());
+                            }
+                        }
+                    }
+                    if !team_ids.is_empty() {
+                        ctx.set_list("subject.team_ids", team_ids);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        subject_id = %sid,
+                        err = %e,
+                        "membership lookup failed for effective permissions"
+                    );
+                }
+            }
+        } else if let Ok(Some(_agent)) = state.agents.find_by_id(&Id::new(sid.clone())).await {
+            ctx.set("subject.type", "agent");
+        }
     }
 
     // Sample action/resource_type pairs to test.

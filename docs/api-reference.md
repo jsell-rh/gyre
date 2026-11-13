@@ -284,8 +284,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins (immutable Deny evaluated first); default-deny (M22.6); **400** on create for reserved name prefixes `trust:` / `builtin:` — server-managed (HSI §2, TASK-077) |
 | `GET/PUT/DELETE` | `/api/v1/policies/{id}` | Read / update / delete policy (M22.6); update rejected (400) for `built_in` or `immutable` policies; delete rejected (400) for `built_in`; reserved-prefix rename rejected (400) (TASK-077) |
 | `POST` | `/api/v1/policies/evaluate` | Dry-run evaluation: `{context}` -> `{decision: Allow|Deny, matched_policy?, reason}` (M22.6) |
-| `GET` | `/api/v1/policies/decisions` | Decision audit log (`?policy_id=&effect=&since=`) (M22.6) |
-| `GET` | `/api/v1/policies/effective` | Effective permissions explorer for a given attribute context (M22.6) |
+| `GET` | `/api/v1/policies/decisions` | Decision audit log (`?subject_id=&resource_type=&limit=`, default limit 100) — every evaluation (request, merge-time, push-time) is persisted (M22.6, task-129) |
+| `GET` | `/api/v1/policies/effective` | Effective permissions for a subject (`?subject={id}&resource_type={type}`): the subject's real attributes (user global role/tenant, memberships, teams — or agent type) are loaded from the stores and evaluated against the live policy set for each sampled action (task-129) |
 | `POST` | `/api/v1/admin/jobs/{name}/run` | Manually trigger a named background job (Admin only) |
 | `POST` | `/api/v1/admin/snapshot` | Create point-in-time DB snapshot (Admin only) |
 | `GET` | `/api/v1/admin/snapshots` | List all snapshots (Admin only) |

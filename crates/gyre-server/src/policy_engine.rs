@@ -878,6 +878,321 @@ mod tests {
         );
     }
 
+    // --- TASK-129: §Built-In Policies table rows --------------------------------
+
+    /// The domain builtin set must contain every §Built-In Policies table
+    /// row by name (the seeding filter in abac_middleware selects from this
+    /// set — a missing row means the policy can never be seeded).
+    #[test]
+    fn builtin_set_contains_spec_table_rows() {
+        let names: Vec<String> = gyre_domain::builtin_policies("system")
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        for required in [
+            "system-full-access",
+            "tenant-isolation",
+            "agent-repo-scope",
+            "workspace-membership-required",
+            "persona-human-approval",
+            "builtin:require-human-spec-approval",
+            "default-deny",
+        ] {
+            // default-deny is owned by the m34 seed list; the rest live in
+            // the domain set.
+            if required != "default-deny" {
+                assert!(
+                    names.iter().any(|n| n == required),
+                    "§Built-In Policies table row '{required}' must exist in the domain builtin set"
+                );
+            }
+        }
+    }
+
+    /// `tenant-isolation`: a subject whose tenant differs from the
+    /// resource's tenant is denied — even when a same-tenant Allow would
+    /// otherwise grant, and even for a global Admin role (the Allow at 900
+    /// is below the builtin Deny at 950). Same-tenant access passes through
+    /// to the rest of the policy set.
+    #[test]
+    fn tenant_isolation_denies_cross_tenant_even_for_admin() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let tenant_isolation = builtins
+            .iter()
+            .find(|p| p.name == "tenant-isolation")
+            .expect("tenant-isolation must exist")
+            .clone();
+
+        // Cross-tenant subject: an Admin (role allow at 900 would grant
+        // without the builtin).
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "user");
+        ctx.set("subject.tenant_id", "tenant-acme");
+        ctx.set("resource.tenant_id", "tenant-other");
+
+        let admin_allow = allow_policy(900, vec![Condition {
+            attribute: "subject.global_role".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("Admin".to_string()),
+        }]);
+        let mut ctx_admin = ctx.clone();
+        ctx_admin.set("subject.global_role", "Admin");
+
+        let result = evaluate(
+            vec![admin_allow.clone(), tenant_isolation.clone()],
+            &ctx_admin,
+            "read",
+            "task",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "cross-tenant access must be denied even for a global Admin role"
+        );
+        assert_eq!(
+            result.matched_policy.as_deref(),
+            Some("builtin-tenant-isolation")
+        );
+
+        // Same tenant: the builtin does not match; the Admin allow grants.
+        let mut ctx_same = ctx;
+        ctx_same.set("resource.tenant_id", "tenant-acme");
+        ctx_same.set("subject.global_role", "Admin");
+        let result = evaluate(vec![admin_allow, tenant_isolation], &ctx_same, "read", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "same-tenant access must fall through to the role allow"
+        );
+    }
+
+    /// `tenant-isolation` fails closed when either tenant attribute is
+    /// absent: the Exists conditions must not match, so evaluation falls
+    /// through to the rest of the policy set (no fabricated tenant).
+    #[test]
+    fn tenant_isolation_fails_closed_on_missing_attributes() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let tenant_isolation = builtins
+            .iter()
+            .find(|p| p.name == "tenant-isolation")
+            .unwrap()
+            .clone();
+
+        // resource.tenant_id unpopulated (collection route / no entity
+        // lookup): the builtin must NOT match — an Allow may grant.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.tenant_id", "tenant-acme");
+        let allow = allow_policy(500, vec![]);
+        let result = evaluate(vec![allow, tenant_isolation], &ctx, "read", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "absent resource.tenant_id must fail the Exists condition, not fabricate a tenant"
+        );
+    }
+
+    /// `system-full-access` (priority 1000) outranks `tenant-isolation`
+    /// (950): the global token identity spans tenants by design — it is the
+    /// server itself, resolving the bootstrap tenant while administering
+    /// every tenant's resources.
+    #[test]
+    fn system_full_access_outranks_tenant_isolation() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let get = |name: &str| {
+            builtins
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .clone()
+        };
+
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.id", "gyre-system-token");
+        ctx.set("subject.tenant_id", "default");
+        ctx.set("resource.tenant_id", "tenant-acme");
+
+        let result = evaluate(
+            vec![get("tenant-isolation"), get("system-full-access")],
+            &ctx,
+            "write",
+            "task",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "the global token identity must be allowed across tenants (priority 1000 > 950)"
+        );
+        assert_eq!(
+            result.matched_policy.as_deref(),
+            Some("builtin-system-access")
+        );
+    }
+
+    /// `workspace-membership-required`: a user who is not a member of the
+    /// addressed workspace is denied (the middleware derives
+    /// `subject.member_of_resource_workspace` from the real membership
+    /// store); a member falls through to the role allows. Agents carry no
+    /// user membership, so the subject.type condition keys them out.
+    #[test]
+    fn workspace_membership_required_denies_non_member_users() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let membership_required = builtins
+            .iter()
+            .find(|p| p.name == "workspace-membership-required")
+            .unwrap()
+            .clone();
+
+        let dev_allow = allow_policy(800, vec![Condition {
+            attribute: "subject.global_role".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("Developer".to_string()),
+        }]);
+
+        // Non-member user: boolean false → denied even with the Developer
+        // role allow at 800 (the builtin Deny sits at 940).
+        let mut non_member = AttributeContext::default();
+        non_member.set("subject.type", "user");
+        non_member.set("subject.global_role", "Developer");
+        non_member.set_bool("subject.member_of_resource_workspace", false);
+        let result = evaluate(
+            vec![dev_allow.clone(), membership_required.clone()],
+            &non_member,
+            "read",
+            "task",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "a non-member user must be denied workspace resources regardless of global role"
+        );
+        assert_eq!(
+            result.matched_policy.as_deref(),
+            Some("builtin-workspace-membership-required")
+        );
+
+        // Member: boolean true → falls through to the Developer allow.
+        let mut member = non_member;
+        member.set_bool("subject.member_of_resource_workspace", true);
+        let result = evaluate(vec![dev_allow, membership_required], &member, "read", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "a member must fall through to the role allow"
+        );
+    }
+
+    /// `persona-human-approval`: non-user subjects cannot approve personas,
+    /// outranking the agent role allow (700) that would otherwise permit
+    /// the approve action.
+    #[test]
+    fn persona_human_approval_denies_agents() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let human_only = builtins
+            .iter()
+            .find(|p| p.name == "persona-human-approval")
+            .unwrap()
+            .clone();
+
+        let mut agent_allow = allow_policy(700, vec![Condition {
+            attribute: "subject.global_role".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("Agent".to_string()),
+        }]);
+        agent_allow.actions = vec!["read".to_string(), "approve".to_string()];
+
+        // Agent approving a persona → denied by the builtin (950 > 700).
+        let mut agent = AttributeContext::default();
+        agent.set("subject.type", "agent");
+        agent.set("subject.global_role", "Agent");
+        let result = evaluate(
+            vec![agent_allow.clone(), human_only.clone()],
+            &agent,
+            "approve",
+            "persona",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "agents must not approve personas"
+        );
+        assert_eq!(
+            result.matched_policy.as_deref(),
+            Some("builtin-persona-human-approval")
+        );
+
+        // User approving a persona → allowed by the role allow.
+        let mut user = AttributeContext::default();
+        user.set("subject.type", "user");
+        user.set("subject.global_role", "Agent");
+        let result = evaluate(vec![agent_allow, human_only], &user, "approve", "persona");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "human users keep the role-allowed approve action on personas"
+        );
+    }
+
+    /// §Performance: "Target: <1ms per evaluation. With cached policies and
+    /// precomputed attributes, this is achievable." Verifies the ENGINE's
+    /// per-evaluation latency against the full built-in policy set (m34's
+    /// 12 policies + the 6 domain splices — the exact set a fresh server
+    /// seeds) with a fully populated attribute context. The mean over 200
+    /// evaluations must stay under 1ms; using the mean (not a single run)
+    /// keeps the assertion robust to scheduler noise in debug builds. A
+    /// regressed engine (e.g. per-policy store lookups, quadratic condition
+    /// evaluation) blows through this budget by orders of magnitude.
+    #[test]
+    fn evaluation_meets_latency_target() {
+        // The exact seeded set: m34 builtins + the domain splice.
+        let mut policies = crate::abac_middleware::m34_builtin_policies();
+        policies.extend(crate::abac_middleware::domain_builtin_policies());
+        assert!(
+            policies.len() >= 15,
+            "expected the full seeded builtin set, got {}",
+            policies.len()
+        );
+
+        // Fully populated context: subject, resource, and environment
+        // attributes, mirroring the middleware's extraction.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "user");
+        ctx.set("subject.id", "member-user");
+        ctx.set("subject.tenant_id", "tenant-acme");
+        ctx.set("subject.global_role", "Developer");
+        ctx.set("subject.workspace_role", "Developer");
+        ctx.set_list(
+            "subject.workspace_ids",
+            vec!["ws-1".to_string(), "ws-2".to_string()],
+        );
+        ctx.set_list("subject.team_ids", vec!["team-platform".to_string()]);
+        ctx.set("resource.id", "task-42");
+        ctx.set("resource.workspace_id", "ws-1");
+        ctx.set("resource.repo_id", "repo-1");
+        ctx.set("resource.tenant_id", "tenant-acme");
+        ctx.set("resource.owner", "user:alice");
+        ctx.set("resource.approval_status", "pending");
+        ctx.set("env.ip", "10.0.0.5");
+        ctx.set_number("env.budget_remaining", 600);
+        ctx.set("env.main_health", "green");
+
+        // Warmup (first call pays context-clone and sort setup).
+        let _ = evaluate(policies.clone(), &ctx, "read", "task");
+
+        const RUNS: usize = 200;
+        let mut total_ms = 0.0f64;
+        for _ in 0..RUNS {
+            let result = evaluate(policies.clone(), &ctx, "read", "task");
+            total_ms += result.evaluation_ms;
+        }
+        let mean_ms = total_ms / RUNS as f64;
+        assert!(
+            mean_ms < 1.0,
+            "mean evaluation latency {mean_ms:.3}ms over {RUNS} runs with {} policies \
+             must stay under the 1ms spec target (§Performance)",
+            policies.len()
+        );
+    }
+
     // --- TASK-061: Attestation chain attribute evaluation ---
 
     #[test]

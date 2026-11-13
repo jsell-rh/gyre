@@ -297,6 +297,7 @@ mod tests {
             workspaces: base.workspaces.clone(),
             personas: base.personas.clone(),
             policies: base.policies.clone(),
+            policy_cache: base.policy_cache.clone(),
             workspace_memberships: base.workspace_memberships.clone(),
             repo_access_overrides: base.repo_access_overrides.clone(),
             teams: base.teams.clone(),

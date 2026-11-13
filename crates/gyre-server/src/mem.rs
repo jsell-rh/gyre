@@ -4511,6 +4511,15 @@ fn test_state_inner(
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
     let meta_spec_binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    // §Performance: wrap the policy repo in the read-through cache, same as
+    // build_state, so middleware/engine tests exercise the cached path.
+    let policy_cache = Arc::new(crate::policy_cache::PolicyCache::default());
+    let cached_policies: Arc<dyn gyre_ports::PolicyRepository> = Arc::new(
+        crate::policy_cache::CachedPolicyRepository::new(
+            policies,
+            Arc::clone(&policy_cache),
+        ),
+    );
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
@@ -4593,7 +4602,8 @@ fn test_state_inner(
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
         personas: Arc::new(MemPersonaRepository::default()),
-        policies,
+        policies: cached_policies,
+        policy_cache,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
         repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),

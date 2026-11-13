@@ -1609,14 +1609,29 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
 /// TASK-077 (HSI §2): the immutable `builtin:require-human-spec-approval`
 /// policy lives in the domain builtin set
 /// (`gyre_domain::builtin_policies`) — that set is the single source of truth
-/// for its definition. Only this policy is spliced into the startup seed:
-/// the remaining domain-set policies are owned by their own task-specific
-/// seeding flows and enabling them here would change authorization behavior
-/// beyond TASK-077's scope.
-fn domain_builtin_policies() -> Vec<Policy> {
+/// for its definition.
+///
+/// TASK-129 (§Built-In Policies): the full spec-table builtin set is now
+/// spliced into the startup seed — `system-full-access`,
+/// `tenant-isolation`, `workspace-membership-required`,
+/// `persona-human-approval`, `agent-repo-scope` (seeded disabled by design,
+/// see its definition), and `builtin:require-human-spec-approval`.
+/// Excluded from the domain set: `developer-generate-access` (the m34 list
+/// owns the `builtin-developer-generate-access` id with the richer,
+/// workspace-role-keyed definition) and `viewer-no-spawn` (a §Policy
+/// Examples policy, not a §Built-In Policies table row).
+pub(crate) fn domain_builtin_policies() -> Vec<Policy> {
+    const SEEDED_DOMAIN_BUILTINS: [&str; 6] = [
+        "system-full-access",
+        "tenant-isolation",
+        "workspace-membership-required",
+        "persona-human-approval",
+        "agent-repo-scope",
+        "builtin:require-human-spec-approval",
+    ];
     gyre_domain::builtin_policies("system")
         .into_iter()
-        .filter(|p| p.name == "builtin:require-human-spec-approval")
+        .filter(|p| SEEDED_DOMAIN_BUILTINS.contains(&p.name.as_str()))
         .collect()
 }
 
@@ -1980,6 +1995,19 @@ pub async fn abac_middleware(
     // Subject identity from the auth context: the authenticated identity
     // string (JWT display name, agent-token id, or API-key subject).
     ctx.set("subject.id", &auth.agent_id);
+    // TASK-129 (§Built-In Policies): the genuine system principal (the
+    // global GYRE_AUTH_TOKEN — `is_system_principal` requires
+    // agent_id == "system" AND no user identity, so a user merely NAMED
+    // "system" does not match) carries the reserved ABAC identity
+    // "gyre-system-token". `system-full-access` matches BY ID (not by
+    // subject.type), so the token identity must be the reserved string no
+    // JWT/API-key subject can produce. The AUDIT identity (agent_id in
+    // PolicyDecision / audit events) stays "system" — only the ABAC
+    // attribute changes. This also keeps the merge processor (subject.id
+    // "merge-processor") OUTSIDE system-full-access, per HSI §2.
+    if auth.is_system_principal() {
+        ctx.set("subject.id", "gyre-system-token");
+    }
 
     let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
     ctx.set("subject.global_role", global_role);
@@ -2036,50 +2064,81 @@ pub async fn abac_middleware(
     // matches), which is the safe direction.
     if let Some(user_id) = &auth.user_id {
         match state.workspace_memberships.list_by_user(user_id).await {
-            Ok(memberships) if !memberships.is_empty() => {
-                let workspace_ids: Vec<String> = memberships
-                    .iter()
-                    .map(|m| m.workspace_id.to_string())
-                    .collect();
-                ctx.set_list("subject.workspace_ids", workspace_ids);
-
-                // Team memberships: the team store's per-user lookup
-                // (list_for_user — teams in the workspace that count the
-                // user as a member, via the TeamMembership store).
-                let mut team_ids: Vec<String> = Vec::new();
-                for membership in &memberships {
-                    if let Ok(teams) = state
-                        .teams
-                        .list_for_user(&membership.workspace_id, user_id)
-                        .await
-                    {
-                        for team in teams {
-                            team_ids.push(team.id.to_string());
-                        }
-                    }
-                }
-                if !team_ids.is_empty() {
-                    ctx.set_list("subject.team_ids", team_ids);
-                }
-
-                // `subject.workspace_role` (source "Membership") is the role
-                // the caller holds in the workspace being addressed. When the
-                // path names a workspace, use that membership's role; agents
-                // and workspace-less requests have none.
+            Ok(memberships) => {
+                // TASK-129 (§Built-In Policies `workspace-membership-required`):
+                // derived membership boolean, set whenever the request
+                // addresses a workspace (directly or via the entity/repo
+                // scope chain backfilled above) — true for a member, FALSE
+                // for a non-member, so the builtin Deny can key on it. Set
+                // from the REAL membership store, never from claims.
                 if let Some(ws_id) = ctx.get("resource.workspace_id").and_then(|v| match v {
                     AttrValue::Single(s) => Some(s.clone()),
                     _ => None,
                 }) {
-                    if let Some(m) = memberships
+                    let is_member = memberships
                         .iter()
-                        .find(|m| m.workspace_id.to_string() == ws_id)
+                        .any(|m| m.workspace_id.to_string() == ws_id);
+                    ctx.set_bool("subject.member_of_resource_workspace", is_member);
+                }
+
+                if memberships.is_empty() {
+                    // no memberships — list attributes stay unset (the
+                    // boolean above is still set when a workspace is
+                    // addressed: a membership-less caller is a non-member).
+                } else {
+                    let workspace_ids: Vec<String> = memberships
+                        .iter()
+                        .map(|m| m.workspace_id.to_string())
+                        .collect();
+                    ctx.set_list("subject.workspace_ids", workspace_ids);
+
+                    // Team memberships: the team store's per-user lookup
+                    // (list_for_user — teams in the workspace that count the
+                    // user as a member, via the TeamMembership store).
+                    let mut team_ids: Vec<String> = Vec::new();
+                    for membership in &memberships {
+                        if let Ok(teams) = state
+                            .teams
+                            .list_for_user(&membership.workspace_id, user_id)
+                            .await
+                        {
+                            for team in teams {
+                                team_ids.push(team.id.to_string());
+                            }
+                        }
+                    }
+                    if !team_ids.is_empty() {
+                        ctx.set_list("subject.team_ids", team_ids);
+                    }
+
+                    // `subject.workspace_role` (source "Membership") is the role
+                    // the caller holds in the workspace being addressed. When the
+                    // path names a workspace, use that membership's role; agents
+                    // and workspace-less requests have none.
+                    if let Some(ws_id) =
+                        ctx.get("resource.workspace_id").and_then(|v| match v {
+                            AttrValue::Single(s) => Some(s.clone()),
+                            _ => None,
+                        })
                     {
-                        ctx.set("subject.workspace_role", m.role.as_str());
+                        if let Some(m) = memberships
+                            .iter()
+                            .find(|m| m.workspace_id.to_string() == ws_id)
+                        {
+                            ctx.set("subject.workspace_role", m.role.as_str());
+                        }
                     }
                 }
             }
-            Ok(_) => {} // no memberships — attributes stay unset
             Err(e) => {
+                // Fail closed for the membership boolean: the builtin
+                // `workspace-membership-required` Deny keys on `false`, so
+                // leaving it unset on a store failure would turn a store
+                // outage into a fail-open (non-membership cannot be
+                // established → deny). List attributes stay unset as before.
+                if ctx.has("resource.workspace_id") {
+                    ctx.set_bool("subject.member_of_resource_workspace", false);
+                }
                 tracing::warn!(
                     user_id = %user_id,
                     err = %e,
@@ -2131,11 +2190,11 @@ pub async fn abac_middleware(
     }
 
     // Load policies and evaluate.
-    // Policies are loaded from the shared store on EVERY request — there is
-    // no ABAC policy-result cache in gyre-server (only JWKS / graph /
-    // dep-staleness caches exist, none of which cache policy decisions).
-    // Trust-level transitions write workspace row + trust: policies through
-    // this same store in one transaction, so any transition is visible to the
+    // §Performance: `state.policies` is the read-through caching decorator
+    // (policy_cache::CachedPolicyRepository) — the first `list()` after a
+    // change loads from the store; every subsequent request is served from
+    // the cached set until a policy mutation (or an out-of-band
+    // apply_trust_transition, invalidated by its handlers) clears it.
     let policies = state.policies.list().await.unwrap_or_default();
     let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
 
@@ -2166,7 +2225,20 @@ pub async fn abac_middleware(
     let _ = state.policies.record_decision(&decision).await;
 
     match result.effect {
-        PolicyEffect::Allow => next.run(req).await,
+        PolicyEffect::Allow => {
+            // §Audit Integration: allowed decisions are logged at debug
+            // level (denials at warn, below). The full decision record is
+            // persisted to the queryable audit log above, regardless.
+            tracing::debug!(
+                subject_id = %auth.agent_id,
+                action = %action,
+                resource_type = %resource_type,
+                pattern = %pattern,
+                matched_policy = ?result.matched_policy,
+                "ABAC allowed request"
+            );
+            next.run(req).await
+        }
         PolicyEffect::Deny => {
             tracing::warn!(
                 subject_id = %auth.agent_id,
@@ -2505,6 +2577,7 @@ pub mod tests {
         // the middleware layer permissive for the caller (Developer write /
         // Admin all) so the per-handler guard is the only denial source.
         async fn denied_state(scope_key: &str) -> Arc<AppState> {
+            use gyre_domain::{User, WorkspaceMembership, WorkspaceRole};
             let state = make_test_state_with_jwt();
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
@@ -2525,6 +2598,45 @@ pub mod tests {
                     scope_key,
                     serde_json::to_string(&policies).unwrap(),
                 )
+                .await
+                .unwrap();
+            // TASK-129: seed the JWT callers as real users with workspace
+            // memberships matching the fixtures below (dev-sub in ws-1 for
+            // the repo-addressed cases; admin-sub in ws-briefing for the
+            // briefing case) so the builtin workspace-membership-required
+            // policy passes them through the middleware and the PER-HANDLER
+            // G6 guard remains the denial source this test asserts on.
+            // Roles are irrelevant to the G6 claim check (team=infra).
+            let dev_user_id = gyre_common::Id::new("44444444-4444-4444-4444-444444444444");
+            let mut dev_user = User::new(dev_user_id.clone(), "dev-sub", "dev-user", 0);
+            dev_user.roles = vec![gyre_domain::UserRole::Developer];
+            state.users.create(&dev_user).await.unwrap();
+            state
+                .workspace_memberships
+                .create(&WorkspaceMembership::new(
+                    gyre_common::Id::new("m-dev-sub-ws1"),
+                    dev_user_id,
+                    gyre_common::Id::new("ws-1"),
+                    WorkspaceRole::Developer,
+                    gyre_common::Id::new("inviter"),
+                    0,
+                ))
+                .await
+                .unwrap();
+            let admin_user_id = gyre_common::Id::new("55555555-5555-5555-5555-555555555555");
+            let mut admin_user = User::new(admin_user_id.clone(), "admin-sub", "admin-user", 0);
+            admin_user.roles = vec![gyre_domain::UserRole::Admin];
+            state.users.create(&admin_user).await.unwrap();
+            state
+                .workspace_memberships
+                .create(&WorkspaceMembership::new(
+                    gyre_common::Id::new("m-admin-sub-briefing"),
+                    admin_user_id,
+                    gyre_common::Id::new("ws-briefing"),
+                    WorkspaceRole::Admin,
+                    gyre_common::Id::new("inviter"),
+                    0,
+                ))
                 .await
                 .unwrap();
             state
@@ -2579,7 +2691,11 @@ pub mod tests {
 
         // Keycloak-style Developer JWT: builtin policies allow read/write/
         // spawn at the middleware layer, but it carries jwt_claims, so the
-        // per-handler G6 evaluation must still apply (and deny).
+        // per-handler G6 evaluation must still apply (and deny). TASK-129:
+        // the caller is a member of ws-1 (seeded below in denied_state) so
+        // the builtin workspace-membership-required policy does not fire at
+        // the middleware layer — the per-handler G6 guard must be the
+        // denial source this test asserts on.
         let developer_jwt = sign_test_jwt(
             &serde_json::json!({
                 "sub": "dev-sub",
@@ -2592,11 +2708,15 @@ pub mod tests {
         // allow-list, so an Admin caller (allowed everywhere at the
         // middleware layer) isolates the per-handler guard as the denial
         // source — same construction as briefing_ask_repo_scope_abac_denied
-        //_returns_403 in graph.rs.
+        //_returns_403 in graph.rs. TASK-129: tenant-1 claim + ws-briefing
+        // membership (seeded below) so the builtin tenant-isolation and
+        // workspace-membership-required policies do not fire at the
+        // middleware layer — the per-handler G6 guard is the denial source.
         let admin_jwt = sign_test_jwt(
             &serde_json::json!({
                 "sub": "admin-sub",
                 "preferred_username": "admin-user",
+                "tenant_id": "tenant-1",
                 "realm_access": { "roles": ["admin"] }
             }),
             3600,
@@ -3329,6 +3449,11 @@ pub mod tests {
             &serde_json::json!({
                 "sub": "dev-llm-sub",
                 "preferred_username": "developer",
+                // TASK-129: the caller's tenant matches some-ws's tenant so
+                // the builtin tenant-isolation policy (950) stays out of this
+                // test's scope (it isolates the generate Allow's
+                // workspace-role keying).
+                "tenant_id": "tenant-1",
                 "realm_access": { "roles": ["developer"] },
                 "workspace_role": "Developer"
             }),
@@ -3367,6 +3492,7 @@ pub mod tests {
             &serde_json::json!({
                 "sub": "viewer-llm-sub",
                 "preferred_username": "viewer",
+                "tenant_id": "tenant-1",
                 "realm_access": { "roles": ["developer"] },
                 "workspace_role": "Viewer"
             }),
@@ -5597,7 +5723,52 @@ pub mod tests {
             .await
             .unwrap();
 
+        // TASK-129: a tenant t-1 Developer who is a MEMBER of ws-e — the
+        // tenant- and membership-consistent caller for the entity-attribute
+        // tests. The builtin `tenant-isolation` (950) and
+        // `workspace-membership-required` (940) policies now deny
+        // cross-tenant / non-member access by default, so the allow-path
+        // halves of those tests must use a caller whose scope matches the
+        // seeded entities (the deny-path halves keep `member_jwt`, whose
+        // tenant is "default").
+        let entity_member_id = gyre_common::Id::new("33333333-3333-3333-3333-333333333333");
+        let mut entity_member = gyre_domain::User::new(
+            entity_member_id.clone(),
+            "entity-sub",
+            "entity-user",
+            0,
+        );
+        entity_member.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&entity_member).await.unwrap();
         state
+            .workspace_memberships
+            .create(&gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new("m-entity-member"),
+                entity_member_id,
+                gyre_common::Id::new("ws-e"),
+                gyre_domain::WorkspaceRole::Developer,
+                gyre_common::Id::new("inviter"),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        state
+    }
+
+    /// JWT for the tenant t-1 Developer member of ws-e seeded by
+    /// [`setup_entity_state`] — see the seeding comment there.
+    fn entity_member_jwt() -> String {
+        use crate::auth::test_helpers::sign_test_jwt;
+        sign_test_jwt(
+            &serde_json::json!({
+                "sub": "entity-sub",
+                "preferred_username": "entity-user",
+                "tenant_id": "t-1",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        )
     }
 
     /// `resource.owner` and `resource.approval_status` must come from the
@@ -5650,13 +5821,16 @@ pub mod tests {
             .with_state(state.clone());
 
         // The seeded spec's owner IS user:alice → the NotEquals deny does not
-        // match → the Developer read allow (800) grants.
+        // match → the Developer read allow (800) grants. TASK-129: the caller
+        // is the t-1 ws-e member (`entity_member_jwt`) so the builtin
+        // tenant-isolation / workspace-membership-required policies stay out
+        // of the way — this test isolates the OWNER attribute.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri(SPEC_DOC_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5683,7 +5857,7 @@ pub mod tests {
             .oneshot(
                 Request::builder()
                     .uri(SPEC_DOC_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5767,7 +5941,7 @@ pub mod tests {
             .oneshot(
                 Request::builder()
                     .uri(SPEC_DOC_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5794,11 +5968,13 @@ pub mod tests {
             .await
             .unwrap();
 
+        // TASK-129: t-1 ws-e member caller — keeps the builtin
+        // tenant/membership containment policies out of this test's scope.
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(SPEC_DOC_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5857,7 +6033,10 @@ pub mod tests {
             ))
             .with_state(state.clone());
 
-        let token = member_jwt();
+        // TASK-129: t-1 ws-e member caller — the builtin tenant/membership
+        // containment policies must stay out of this test's scope (it
+        // isolates the approval_status attribute).
+        let token = entity_member_jwt();
         let req = || {
             Request::builder()
                 .method("POST")
@@ -5898,21 +6077,26 @@ pub mod tests {
     /// not name any scope ids. The dynamic-reference form
     /// (`$subject.tenant_id`) must compare against it.
     ///
-    /// Discriminating form: a Deny at priority 810 (above the builtin
-    /// developer-write-access Allow at 800) keyed on cross-tenant mismatch.
-    /// `member_jwt()` carries no `tenant_id` claim → `subject.tenant_id`
-    /// is "default", while the seeded chain resolves the spec's tenant to
-    /// t-1 — so the deny must match. A Deny (not a same-tenant Allow) is
-    /// required here: a non-matching Allow would fall through to the
-    /// builtin Developer Allow at 800, which grants read regardless of
-    /// tenant, masking both a correct lookup and a fabricated one.
+    /// Discriminating form: a Deny at priority 960 — above the builtin
+    /// `tenant-isolation` policy (950, TASK-129) so THIS policy is the one
+    /// that fires, keeping the test's discrimination on its own condition —
+    /// keyed on cross-tenant mismatch. `member_jwt()` carries no
+    /// `tenant_id` claim → `subject.tenant_id` is "default", while the
+    /// seeded chain resolves the spec's tenant to t-1 — so the deny must
+    /// match. A Deny (not a same-tenant Allow) is required here: a
+    /// non-matching Allow would fall through to the builtin Developer Allow
+    /// at 800, which grants read regardless of tenant, masking both a
+    /// correct lookup and a fabricated one. (Without the 960 priority the
+    /// builtin tenant-isolation at 950 would fire first — it keys on the
+    /// same resolved attribute, but the custom policy would be dead.)
     #[tokio::test(flavor = "multi_thread")]
     async fn spec_resource_tenant_resolves_via_scope_chain() {
         let state = setup_entity_state().await;
 
         // Deny spec reads when the resource's tenant differs from the
         // subject's tenant (cross-tenant read → deny, outranking the
-        // builtin Developer read allow at 800).
+        // builtin Developer read allow at 800 AND the builtin
+        // tenant-isolation policy at 950).
         state
             .policies
             .create(&Policy {
@@ -5921,7 +6105,7 @@ pub mod tests {
                 description: String::new(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 810,
+                priority: 960,
                 effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
                     attribute: "resource.tenant_id".to_string(),
@@ -6030,11 +6214,15 @@ pub mod tests {
             ))
             .with_state(state.clone());
 
+        // TASK-129: the t-1 ws-e member caller keeps the builtin
+        // tenant-isolation (950) out of the way so THIS test's t-1-keyed
+        // Deny at 810 is the operative policy (the task is in ws-e → the
+        // member's workspace → membership containment also stays out).
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/tasks/task-e")
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6116,12 +6304,18 @@ pub mod tests {
             ))
             .with_state(state.clone());
 
+        // TASK-129: the t-1 ws-e member caller — the persona lives in ws-e
+        // (tenant t-1), so the builtin tenant-isolation /
+        // workspace-membership-required policies stay out of this test's
+        // scope (it isolates owner + approval_status attributes). The
+        // caller's username ("entity-user") still differs from the owner
+        // ("user:alice"), so the pending+non-owner Deny fires as before.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri(PERSONA_E_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6143,7 +6337,7 @@ pub mod tests {
             .oneshot(
                 Request::builder()
                     .uri(PERSONA_E_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6179,6 +6373,224 @@ pub mod tests {
             policies.is_empty(),
             "no policies should be persisted when seeding fails, got {}",
             policies.len()
+        );
+    }
+
+    // --- TASK-129: §Built-In Policies live enforcement -------------------------
+
+    /// Every §Built-In Policies table row must be seeded on startup, marked
+    /// built-in, and — where the table says so — immutable. The delete guard
+    /// (built-ins cannot be deleted) is exercised through the port the API
+    /// uses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_table_builtins_seeded_on_startup() {
+        let state = test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        let policies = state.policies.list().await.unwrap();
+        for (name, must_be_immutable) in [
+            ("system-full-access", false),
+            ("tenant-isolation", false),
+            ("agent-repo-scope", false),
+            ("workspace-membership-required", false),
+            ("persona-human-approval", false),
+            ("builtin:require-human-spec-approval", true),
+            ("default-deny", false),
+        ] {
+            let p = policies
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("§Built-In Policies row '{name}' must be seeded"));
+            assert!(p.built_in, "'{name}' must be marked built_in");
+            assert_eq!(
+                p.immutable, must_be_immutable,
+                "'{name}' immutable flag must match the spec table"
+            );
+            // Built-ins cannot be deleted — the port the API delete handler
+            // uses refuses.
+            let err = state.policies.delete(p.id.as_str()).await;
+            assert!(
+                err.is_err(),
+                "built-in '{name}' must not be deletable through the policy repository"
+            );
+        }
+    }
+
+    /// `tenant-isolation` (live): a default-tenant user reading a t-1 spec
+    /// is denied by the SEEDED builtin alone — no custom policy. The same
+    /// request under the global GYRE_AUTH_TOKEN is allowed: the system
+    /// principal's ABAC identity ("gyre-system-token") matches
+    /// system-full-access at priority 1000, above tenant-isolation at 950.
+    /// Killing directions: without the subject.id mapping the global token
+    /// would be denied (it resolves the bootstrap tenant "default" while
+    /// the spec lives in t-1); without the builtin the member_jwt request
+    /// would be allowed by developer-write-access (800).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_tenant_isolation_denies_cross_tenant_live() {
+        let state = setup_entity_state().await;
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(SPECS_PATH_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // Cross-tenant member (default) reading the t-1 spec → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(SPEC_DOC_URI)
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the seeded tenant-isolation builtin must deny cross-tenant reads"
+        );
+
+        // The same request under the global token → 200 via
+        // system-full-access (priority 1000 > 950).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(SPEC_DOC_URI)
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the global GYRE_AUTH_TOKEN identity must be allowed across tenants \
+             (system-full-access at 1000 outranks tenant-isolation at 950)"
+        );
+    }
+
+    /// `workspace-membership-required` (live): a user who is a member of
+    /// ws-1 (setup_membership_state) is denied on a DIFFERENT workspace's
+    /// route by the seeded builtin alone — no custom policy. The member's
+    /// own workspace still passes through to the Developer allow (covered
+    /// by the generate/membership tests above).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_workspace_membership_required_denies_non_member_live() {
+        use axum::routing::get;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        // member-sub is a member of ws-1 ONLY; ws-other is a different
+        // workspace → member_of_resource_workspace = false → 403.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/ws-other/tasks")
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the seeded workspace-membership-required builtin must deny non-members"
+        );
+    }
+
+    /// `persona-human-approval` (live): an agent token POSTing the persona
+    /// approve route is denied by the seeded builtin alone — no custom
+    /// policy, and despite the agent role allow at 700 covering `approve`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_persona_human_approval_denies_agent_live() {
+        use axum::routing::post;
+
+        let state = crate::mem::test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        // Mint and register a real agent token (same path as
+        // agent_jwt_claims_reach_live_evaluation).
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-persona-approve",
+                "task-1",
+                "spawner",
+                &state.base_url,
+                3600,
+                "ws-x",
+                "repo-x",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "agent-persona-approve",
+                token.clone(),
+            )
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/personas/:id/approve", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/personas/persona-x/approve")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the seeded persona-human-approval builtin must deny agent persona approvals"
         );
     }
 }
