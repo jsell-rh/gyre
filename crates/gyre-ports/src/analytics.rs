@@ -24,6 +24,18 @@ pub struct AnalyticsQueryFilter {
     pub limit: usize,
 }
 
+/// Grouping dimension for `AnalyticsRepository::count_grouped`
+/// (analytics.md §Query Parameters: `group_by`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyticsGroupBy {
+    EventName,
+    AgentId,
+    WorkspaceId,
+    /// UTC calendar day, keyed `YYYY-MM-DD` (same key format as
+    /// `aggregate_by_day`).
+    Day,
+}
+
 impl AnalyticsQueryFilter {
     pub fn new() -> Self {
         Self {
@@ -60,6 +72,18 @@ pub trait AnalyticsRepository: Send + Sync {
     /// scope ids, since/until bounds, limit.
     async fn query_filtered(&self, filter: &AnalyticsQueryFilter) -> Result<Vec<AnalyticsEvent>>;
     async fn count(&self, event_name: &str, since: u64, until: u64) -> Result<u64>;
+    /// Count events matching `filter` grouped by `group_by`, aggregated
+    /// server-side over the FULL filtered set (task-146 review F1: the
+    /// event-level `limit` must NOT truncate the input to the
+    /// aggregation — grouped totals must stay consistent with `count`).
+    /// Here `filter.limit` bounds the number of returned GROUPS instead.
+    /// Returns `(group_key, count)` pairs ordered by group key ascending;
+    /// NULL agent_id/workspace_id group under `"(none)"`.
+    async fn count_grouped(
+        &self,
+        filter: &AnalyticsQueryFilter,
+        group_by: AnalyticsGroupBy,
+    ) -> Result<Vec<(String, u64)>>;
     /// Returns (date_str, count) pairs grouped by calendar day (UTC).
     async fn aggregate_by_day(
         &self,

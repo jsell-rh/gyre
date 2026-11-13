@@ -5,7 +5,7 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, CostEntry};
-use gyre_ports::analytics::AnalyticsQueryFilter;
+use gyre_ports::analytics::{AnalyticsGroupBy, AnalyticsQueryFilter};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -51,7 +51,9 @@ pub struct QueryEventsParams {
     pub until: Option<String>,
     pub limit: Option<usize>,
     /// Aggregate by field instead of returning raw events:
-    /// `event_name`, `agent_id`, `workspace_id`, `day`.
+    /// `event_name`, `agent_id`, `workspace_id`, `day`. Aggregated
+    /// server-side over the full filtered set; `limit` bounds the number
+    /// of returned groups (task-146 review F1).
     pub group_by: Option<String>,
 }
 
@@ -317,51 +319,35 @@ pub async fn query_events(
         until,
         limit,
     };
-    let events = state.analytics.query_filtered(&filter).await?;
-
     // group_by aggregation (analytics.md §Query Parameters): event_name,
     // agent_id, workspace_id, day. Falls back to raw event list.
-    if let Some(field) = params.group_by.as_deref() {
-        let counts: serde_json::Map<String, serde_json::Value> = match field {
-            "event_name" => {
-                let mut m = std::collections::BTreeMap::new();
-                for e in &events {
-                    *m.entry(e.event_name.clone()).or_insert(0u64) += 1;
-                }
-                m.into_iter().map(|(k, v)| (k, serde_json::Value::from(v))).collect()
-            }
-            "agent_id" => {
-                let mut m = std::collections::BTreeMap::new();
-                for e in &events {
-                    *m.entry(e.agent_id.clone().unwrap_or_else(|| "(none)".into()))
-                        .or_insert(0u64) += 1;
-                }
-                m.into_iter().map(|(k, v)| (k, serde_json::Value::from(v))).collect()
-            }
-            "workspace_id" => {
-                let mut m = std::collections::BTreeMap::new();
-                for e in &events {
-                    *m.entry(e.workspace_id.clone().unwrap_or_else(|| "(none)".into()))
-                        .or_insert(0u64) += 1;
-                }
-                m.into_iter().map(|(k, v)| (k, serde_json::Value::from(v))).collect()
-            }
-            "day" => {
-                let mut m = std::collections::BTreeMap::new();
-                for e in &events {
-                    let day = epoch_day_string(e.timestamp);
-                    *m.entry(day).or_insert(0u64) += 1;
-                }
-                m.into_iter().map(|(k, v)| (k, serde_json::Value::from(v))).collect()
-            }
-            other => {
-                return Err(ApiError::InvalidInput(format!(
-                    "unsupported group_by field: {other} (expected event_name, agent_id, workspace_id, day)"
-                )))
-            }
-        };
+    let group_by = match params.group_by.as_deref() {
+        Some("event_name") => Some(AnalyticsGroupBy::EventName),
+        Some("agent_id") => Some(AnalyticsGroupBy::AgentId),
+        Some("workspace_id") => Some(AnalyticsGroupBy::WorkspaceId),
+        Some("day") => Some(AnalyticsGroupBy::Day),
+        Some(other) => {
+            return Err(ApiError::InvalidInput(format!(
+                "unsupported group_by field: {other} (expected event_name, agent_id, workspace_id, day)"
+            )))
+        }
+        None => None,
+    };
+    if let Some(group_by) = group_by {
+        // task-146 review F1: grouped counts aggregate the FULL filtered
+        // set server-side (port-level GROUP BY, like aggregate_by_day) —
+        // `limit` bounds the number of returned groups, never the input
+        // to the aggregation, so grouped totals stay consistent with
+        // /count instead of counting only the newest `limit` events.
+        let rows = state.analytics.count_grouped(&filter, group_by).await?;
+        let counts: serde_json::Map<String, serde_json::Value> = rows
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::from(v)))
+            .collect();
         return Ok(Json(serde_json::Value::Object(counts)));
     }
+
+    let events = state.analytics.query_filtered(&filter).await?;
 
     Ok(Json(serde_json::Value::Array(
         events
@@ -371,14 +357,10 @@ pub async fn query_events(
     )))
 }
 
-/// Format a unix-seconds timestamp as a UTC `YYYY-MM-DD` day key.
-fn epoch_day_string(ts: u64) -> String {
-    let days = ts / 86_400;
-    let (y, m, d) = epoch_days_to_ymd(days as i64);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
 /// Civil-from-days algorithm (Howard Hinnant) — same math as mem.rs.
+/// Test-only: the inverse used to round-trip-check the production
+/// `ymd_to_epoch_days` in `parse_time_param_roundtrips_epoch_day_string`.
+#[cfg(test)]
 fn epoch_days_to_ymd(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -1788,6 +1770,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn query_events_group_by_counts_full_filtered_set() {
+        // task-146 review round 2 F1 regression: group_by must aggregate
+        // the FULL filtered set, not the limit-truncated event list — the
+        // exact repro from the review seeds 150 events (default limit is
+        // 100) and the grouped total must agree with /count. The old
+        // in-memory grouping returned {"mr.merged": 100} here.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        for i in 0..150u64 {
+            let ev = gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(format!("g-full-{i}")),
+                "mr.merged",
+                None,
+                serde_json::json!({}),
+                1000 + i,
+            );
+            state.analytics.record(&ev).await.unwrap();
+        }
+        for i in 0..7u64 {
+            let ev = gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(format!("g-full-closed-{i}")),
+                "mr.closed",
+                None,
+                serde_json::json!({}),
+                1000 + i,
+            );
+            state.analytics.record(&ev).await.unwrap();
+        }
+
+        // Grouped totals over the full set (150 > default limit 100).
+        let json = get_events(&app, "group_by=event_name").await;
+        let obj = json.as_object().expect("group_by returns an object");
+        assert_eq!(
+            obj.get("mr.merged").and_then(|v| v.as_u64()),
+            Some(150),
+            "group_by must count the full filtered set, not the newest 100"
+        );
+        assert_eq!(obj.get("mr.closed").and_then(|v| v.as_u64()), Some(7));
+
+        // Consistency with /count on the same question (the review's
+        // disagreement repro). i64::MAX, not u64::MAX: the SQL adapters
+        // bind `until` as i64.
+        let count = state
+            .analytics
+            .count("mr.merged", 0, i64::MAX as u64)
+            .await
+            .unwrap();
+        assert_eq!(count, 150);
+
+        // limit bounds the number of returned GROUPS (ordered by key:
+        // "mr.closed" sorts before "mr.merged"), never the totals.
+        let json = get_events(&app, "group_by=event_name&limit=1").await;
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 1, "limit bounds the number of groups");
+        assert_eq!(obj.get("mr.closed").and_then(|v| v.as_u64()), Some(7));
+
+        // The grouped path honors the same filter parameters as the raw
+        // path: prefix event_name filter still yields the full total.
+        let json = get_events(&app, "group_by=event_name&event_name=mr.m*").await;
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("mr.merged").and_then(|v| v.as_u64()), Some(150));
+        assert_eq!(obj.get("mr.closed").and_then(|v| v.as_u64()), Some(7));
     }
     #[test]
     fn parse_time_param_accepts_unix_seconds() {

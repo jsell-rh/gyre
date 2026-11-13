@@ -1,10 +1,21 @@
+// `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+// `Self { field: field, … }` with spans mapped onto the field declarations
+// below (DayCount, GroupCount), so clippy::redundant_field_names fires on
+// derive-generated code. The generated construction sits in a dummy module
+// that inherits neither struct- nor field-level `#[allow]` (verified: both
+// still warn; same as postgres/search.rs), so the lint is scoped off for
+// this whole module instead. Nothing in this file writes `field: field`
+// initializations by hand.
+#![allow(clippy::redundant_field_names)]
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Text};
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, CostEntry};
-use gyre_ports::analytics::{AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
+use gyre_ports::analytics::{
+    AnalyticsGroupBy, AnalyticsQueryFilter, AnalyticsRepository, CostRepository,
+};
 use std::sync::Arc;
 
 use super::PgStorage;
@@ -106,6 +117,18 @@ struct CostEntryRecord<'a> {
 struct DayCount {
     #[diesel(sql_type = Text)]
     day: String,
+    #[diesel(sql_type = BigInt)]
+    cnt: i64,
+}
+
+// The QueryableByName derive expands to field-name-shorthand struct
+// initialization, tripping clippy::redundant_field_names with spans on
+// these definition lines (same as DayCount above); see the module-level
+// allow at the top of this file.
+#[derive(QueryableByName)]
+struct GroupCount {
+    #[diesel(sql_type = Text)]
+    k: String,
     #[diesel(sql_type = BigInt)]
     cnt: i64,
 }
@@ -221,6 +244,104 @@ impl AnalyticsRepository for PgStorage {
                 .get_result::<i64>(&mut *conn)
                 .context("count analytics_events")?;
             Ok(n as u64)
+        })
+        .await?
+    }
+
+    async fn count_grouped(
+        &self,
+        filter: &AnalyticsQueryFilter,
+        group_by: AnalyticsGroupBy,
+    ) -> Result<Vec<(String, u64)>> {
+        let pool = Arc::clone(&self.pool);
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Server-side aggregation over the FULL filtered set (task-146
+            // review F1): the WHERE clause mirrors query_filtered exactly
+            // (exact/trailing-`*` event_name, scope equality, inclusive
+            // since/until); LIMIT bounds the number of returned groups.
+            let key_expr = match group_by {
+                AnalyticsGroupBy::EventName => "event_name".to_string(),
+                AnalyticsGroupBy::AgentId => "COALESCE(agent_id, '(none)')".to_string(),
+                AnalyticsGroupBy::WorkspaceId => "COALESCE(workspace_id, '(none)')".to_string(),
+                AnalyticsGroupBy::Day => {
+                    "to_char(to_timestamp(timestamp), 'YYYY-MM-DD')".to_string()
+                }
+            };
+            let mut ph = 0usize;
+            let mut placeholder = || {
+                ph += 1;
+                format!("${ph}")
+            };
+            let mut sql = format!(
+                "SELECT {key_expr} AS k, COUNT(*) AS cnt \
+                 FROM analytics_events WHERE 1=1"
+            );
+            if filter.event_name.is_some() {
+                let is_prefix = filter
+                    .event_name
+                    .as_deref()
+                    .is_some_and(|n| n.ends_with('*'));
+                sql.push_str(if is_prefix {
+                    " AND event_name LIKE "
+                } else {
+                    " AND event_name = "
+                });
+                sql.push_str(&placeholder());
+            }
+            if filter.agent_id.is_some() {
+                sql.push_str(&format!(" AND agent_id = {}", placeholder()));
+            }
+            if filter.user_id.is_some() {
+                sql.push_str(&format!(" AND user_id = {}", placeholder()));
+            }
+            if filter.workspace_id.is_some() {
+                sql.push_str(&format!(" AND workspace_id = {}", placeholder()));
+            }
+            if filter.repo_id.is_some() {
+                sql.push_str(&format!(" AND repo_id = {}", placeholder()));
+            }
+            if filter.since.is_some() {
+                sql.push_str(&format!(" AND timestamp >= {}", placeholder()));
+            }
+            if filter.until.is_some() {
+                sql.push_str(&format!(" AND timestamp <= {}", placeholder()));
+            }
+            sql.push_str(&format!(" GROUP BY k ORDER BY k LIMIT {}", placeholder()));
+            // into_boxed(): bind() returns Self, so binds can be applied
+            // conditionally (diesel's documented loop-binding pattern).
+            let mut query = diesel::sql_query(&sql).into_boxed();
+            if let Some(name) = &filter.event_name {
+                let pattern = match name.strip_suffix('*') {
+                    Some(prefix) => format!("{prefix}%"),
+                    None => name.clone(),
+                };
+                query = query.bind::<Text, _>(pattern);
+            }
+            if let Some(id) = &filter.agent_id {
+                query = query.bind::<Text, _>(id);
+            }
+            if let Some(id) = &filter.user_id {
+                query = query.bind::<Text, _>(id);
+            }
+            if let Some(id) = &filter.workspace_id {
+                query = query.bind::<Text, _>(id);
+            }
+            if let Some(id) = &filter.repo_id {
+                query = query.bind::<Text, _>(id);
+            }
+            if let Some(s) = filter.since {
+                query = query.bind::<BigInt, _>(s as i64);
+            }
+            if let Some(u) = filter.until {
+                query = query.bind::<BigInt, _>(u as i64);
+            }
+            query = query.bind::<BigInt, _>(filter.limit as i64);
+            let rows = query
+                .load::<GroupCount>(&mut *conn)
+                .context("count_grouped analytics_events")?;
+            Ok(rows.into_iter().map(|r| (r.k, r.cnt as u64)).collect())
         })
         .await?
     }
