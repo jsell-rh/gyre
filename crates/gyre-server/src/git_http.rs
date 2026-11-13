@@ -8236,7 +8236,7 @@ specs:
         loop {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user_id), None, None, None, None, 100, 0)
+                .list_for_user(&Id::new(user_id), None, None, None, None, None, 100, 0)
                 .await
                 .unwrap();
             if let Some(n) = notifs.into_iter().find(|n| n.notification_type == kind) {
