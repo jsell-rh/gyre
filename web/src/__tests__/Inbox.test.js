@@ -65,6 +65,7 @@ const dismissedNotif = makeNotification({
 
 // Mock the api module
 vi.mock('../lib/api.js', () => ({
+  selfReviewerId: vi.fn().mockResolvedValue('u-test-self'),
   api: {
     myNotifications: vi.fn().mockResolvedValue([]),
     getSpec: vi.fn().mockResolvedValue({ path: 'system/api-conventions.md', current_sha: 'fetchedsha000000000000000000000000000000' }),

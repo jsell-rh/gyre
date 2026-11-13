@@ -833,3 +833,22 @@ export const api = {
       body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
     }),
 };
+
+// Reviewer identity binding (spec-registry.md §16 manifest gates): a human
+// caller may record an MR review only under their own verified identity —
+// the server rejects a request-body reviewer_agent_id naming anyone else for
+// non-admin principals. Resolves the caller's user id once per session and
+// caches it. Falls back to the legacy pseudo-id, which the server rejects
+// (fail closed, surfaced as an error toast) rather than silently
+// re-attributing the review; a failed lookup is not cached so a transient
+// error can recover on the next submission.
+let selfReviewerIdPromise = null;
+export async function selfReviewerId() {
+  if (!selfReviewerIdPromise) {
+    selfReviewerIdPromise = api.me().then(me => me?.id ?? null).catch(() => null);
+  }
+  const id = await selfReviewerIdPromise;
+  if (id) return id;
+  selfReviewerIdPromise = null;
+  return 'human-reviewer';
+}
