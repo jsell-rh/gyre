@@ -4,7 +4,7 @@ spec_ref: "user-management.md §API > User Management"
 depends_on:
   - task-120
   - task-121
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
