@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["5acae62c983d21a1288b652a6628e8f81392fd59", "3e5f747b95b46e48c02e9431c8126dfe833e1d31", "1f80f64f4fa013634d38e985b271fb20d4a09a1a", "b316bc37f64c6f032c563b9e590a823ee8a626e4", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9", "2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: ["5acae62c983d21a1288b652a6628e8f81392fd59", "3e5f747b95b46e48c02e9431c8126dfe833e1d31", "1f80f64f4fa013634d38e985b271fb20d4a09a1a", "b316bc37f64c6f032c563b9e590a823ee8a626e4", "b522dd5cdb4eb4e6049d224dc3f745e5939ce3b9", "2faf26af2c4ca2fa00052be4fd9cf5429677c837", "3dc6cdcc5413b4eabd004920fcf13090dd658708", "3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced", "9921ca8549c689ae456e317b751bf63400e81981"]
 ---
 
 ## Spec Excerpt
@@ -70,9 +70,14 @@ indexed with real content and the specced indexed fields and facets, and
 storage. The production implementation is commits `80f13a70`/`309fc7dd`
 plus review/verification repairs (`3e223c8a`, `e2583917`, `2faf26af`,
 `3dc6cdcc`, `b522dd5c`, `b316bc37`, `1f80f64f`, `3e5f747b`, `5acae62c`).
-This round (`e9f6b2f4`) resolves the rebase against current main, where
-task-154's search query language had landed in conflict with the
-all-entity indexer.
+This round (`9921ca85`) resolves the rebase against current main
+(4dc0eb9), where task-119's budget enforcement cascade and task-139's
+forge enforcement had landed in conflict with the all-entity indexer.
+Both content conflicts were in AppState construction (lib.rs
+`build_state`, mem.rs `test_state_inner`): main added the
+`budget_grace_in_progress` field in the same region where this branch
+hoists the search-sync-decorated repository locals; the resolution keeps
+both sides.
 
 ### Behavior
 
@@ -89,8 +94,8 @@ all-entity indexer.
   every entity repository and returns the true document count;
   `reindex_handler` (`POST /api/v1/admin/search/reindex`) invokes this
   coordinator.
-- Rebase integration (`e9f6b2f4`): every document builder carries the
-  entity's real timestamp in main's new `SearchDocument.updated_at` field
+- Rebase integrations (`e9f6b2f4`, `9921ca85`): every document builder carries the
+  entity's real timestamp in main's `SearchDocument.updated_at` field
   so the `since:`/`until:` query facets filter on entity time, not index
   time; the Postgres INSERT upsert combines main's `updated_at` column
   ($9) with the 4-column scope-aware ON CONFLICT target; the API handler
@@ -99,7 +104,11 @@ all-entity indexer.
   alias/placeholder-contiguity invariants formerly asserted against the
   removed `*_BASE_SQL` constants are now asserted against the extracted
   `search_sql`/`suggest_sql`/`facet_sql` composers the port methods
-  actually execute, alongside both sides' existing tests.
+  actually execute, alongside both sides' existing tests. The task-119
+  merge keeps main's `budget_grace_in_progress` AppState field and the
+  rolling-window budget job alongside the search-sync decorators, which
+  wrap the same `analytics`/`audit` repositories main's budget and forge
+  enforcement code consumes.
 
 ### Test evidence
 
@@ -110,10 +119,19 @@ all-entity indexer.
   task-202's PK-upgrade tests and task-154's tsv-predicate/scope tests
   after the merge resolution).
 - `cargo test -p gyre-adapters --lib mem_search` — 11 passed.
+- `cargo test -p gyre-adapters --lib` (full) — 499 passed, 0 failed
+  after the merge (includes the 43 search, 14 postgres::search, and 11
+  mem_search tests above).
 - `cargo check --workspace --all-targets` (type-checks all server tests),
-  `cargo clippy` on the touched crates (zero warnings in touched files),
+  `python3 scripts/check-clippy-diff.py HEAD^1` (changed lines clean,
+  42 Rust files),
   `cargo fmt --check`, `bash scripts/check-arch.sh`, and the ABAC
-  route-registry / inert-enforcement / unbounded-HTTP checks pass.
+  route-registry / exempt-handlers / mcp-write-tools / migration-version /
+  dead-message-kinds / byte-slice / relative-path / fail-open-ref /
+  mem-port-contracts / fabricated-scope / lossy-secret /
+  scope-literal / inert-enforcement / migration-portability /
+  forged-scope-fields / forwarded-header / in-memory-state /
+  unbounded-HTTP checks all pass.
 - Deferred to the independent verifier (gyre-server test codegen exceeds
   the sandbox 4 GiB budget; type-checked here):
   `cargo test -p gyre-server --lib search_indexer` (includes
