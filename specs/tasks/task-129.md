@@ -3,7 +3,7 @@ title: "Implement ABAC evaluation engine, API, and audit integration"
 spec_ref: "abac-policy-engine.md §Evaluation Engine"
 depends_on:
   - task-128
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "abac-policy-engine.md §Evaluation Engine"
   - "abac-policy-engine.md §Evaluation Flow"
@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -142,66 +142,3 @@ pub struct PolicyDecision {
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run Evaluation. Existing ABAC: `gyre-server/src/abac.rs` (current policy evaluation), `abac_middleware.rs` (route protection), `policy_engine.rs` (if exists). Route registration: `gyre-server/src/api/mod.rs`. Policy domain: `gyre-domain/src/policy.rs`. Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Built-in policy seeding: grep for `builtin_policies\|seed_policies` in the codebase. The evaluation engine must integrate with the existing auth middleware — check `gyre-server/src/auth.rs` for how auth context is available in handlers. Verify API endpoint paths against `api/mod.rs` route registration before implementing.
-
-## Shipped
-
-### Round 5: persist decisions on the supervised-trust-hold and push-time paths (commit `0dc466e7`)
-
-The engine, CRUD/dry-run/decisions/effective API, builtin seeding, caching,
-and the round-1 through round-4 repairs (agent-repo-scope containment,
-`?subject=` binding, reserved system identity + policy-allowed global
-token, scope applicability, stale security-model comments) are in the
-earlier commits listed above. Round 5 closes the round-4 review finding
-(360234bd): coverage row 13 claimed `record_decision` on every evaluation
-path, but `evaluate_merge_abac` (the supervised-trust hold) and the
-git_http push-time attestation evaluation only logged — they never
-persisted a PolicyDecision, so the "every evaluation is logged and
-queryable" acceptance criterion was not literally met on those two paths.
-
-**Repair (real recording, not a note correction):**
-
-- `evaluate_merge_abac` now builds and records a PolicyDecision (subject
-  `merge-processor`/`system`, action `merge`, resource `mr`/MR id) after
-  evaluation. An explicit Deny match (the hold) logs at `warn`, everything
-  else at `debug` — the same log-level contract as the middleware.
-- The git_http push-time attestation evaluation was extracted into
-  `evaluate_push_attestation_abac` (identical attribute context, resource
-  scope chain, and engine call as the inline code it replaces) which
-  records its decision (subject `agent`, action `push`, resource
-  `attestation`/repo id) before the existing info log. The push call site
-  carries the documented `// enforcement:ok` exemption because the gate is
-  audit-only by spec (TASK-006 Phase 1) — decision recorded, never
-  enforced, exactly as at base.
-
-Four production `record_decision` call sites now exist: middleware
-requests, `evaluate_merge_abac`, `evaluate_attestation_abac`, and
-`evaluate_push_attestation_abac`. Coverage row 13 cites these real sites
-and the tests below.
-
-### Test evidence
-
-Two new tests, one per repaired path, each seeding a real matching policy
-(so the record carries a non-default matched policy — a stub persisting a
-hardcoded decision cannot pass) and asserting the persisted decision via
-the same audit-store surface `GET /api/v1/policies/decisions` reads:
-
-- `evaluate_merge_abac_records_decision_to_audit_trail`
-  (merge_processor.rs): seeds an Allow for the merge-processor service
-  identity, asserts the returned EvalResult, then asserts the recorded
-  decision's subject_id/subject_type/action/resource_type/resource_id/
-  decision/matched_policy.
-- `push_attestation_abac_records_decision_to_audit_trail` (git_http.rs):
-  seeds an Allow keyed on `subject.attestation_chain_present`, calls the
-  extracted helper with a real single-root chain, and asserts the same
-  fields on the persisted decision.
-
-Removing either `record_decision` call fails its test
-  (`decisions.len() == 1`). In-sandbox probes: `cargo check -p gyre-server`
-  and `cargo check -p gyre-server --tests` both clean (build wrapper);
-  mechanical checks check-inert-enforcement, check-arch,
-  check-dead-message-kinds, check-mem-port-contracts,
-  check-fabricated-scope-defaults, check-lossy-secret-conversion,
-  check-relative-path-defaults all OK. gyre-server test execution is
-deferred to the independent verifier (4 GiB budget): run
-`cargo test -p gyre-server --lib evaluate_merge_abac_records_decision_to_audit_trail push_attestation_abac_records_decision_to_audit_trail`,
-then the full suite. Evidence: `/tmp/stage/review-evidence/task-129-round5-audit-recording.md`.
