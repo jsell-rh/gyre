@@ -80,6 +80,9 @@ async fn run_simulation_tick(state: &AppState) -> anyhow::Result<()> {
         );
 
         state.audit.record(&event).await?;
+        // search.md §Searchable Entities: audit events are indexed on write.
+        crate::search_indexer::index(state, crate::search_indexer::audit_event_document(&event))
+            .await;
         // Broadcast the full envelope - SSE consumers get every field.
         let _ = state
             .audit_broadcast_tx

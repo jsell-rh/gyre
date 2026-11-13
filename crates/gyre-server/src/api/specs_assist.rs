@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,24 @@ pub struct SpecAssistRequest {
     pub spec_path: String,
     pub instruction: String,
     pub draft_content: Option<String>,
+}
+
+/// Request body for POST /api/v1/workspaces/:id/meta-specs/assist — the
+/// workspace-scoped LLM assist for the §9 meta-spec preview loop's State 1
+/// chat (ui-layout.md §9). No repo or spec file is involved; the effective
+/// content is the caller's in-editor draft (or the stored registry prompt
+/// when only `meta_spec_id` is given).
+#[derive(Deserialize)]
+pub struct MetaSpecAssistRequest {
+    pub instruction: String,
+    /// The in-editor draft of the meta-spec prompt; overrides the stored
+    /// registry prompt when present.
+    #[serde(default)]
+    pub draft_content: Option<String>,
+    /// Registry id of the meta-spec being edited. Used to load the stored
+    /// prompt (when no draft is given) and to scope-check the target.
+    #[serde(default)]
+    pub meta_spec_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +104,23 @@ fn spec_path_slug(spec_path: &str) -> String {
         .bytes()
         .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     format!("{}-{:04x}", slug, hash & 0xffff)
+}
+
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+/// Mirrors the private helper in `graph.rs`.
+fn sse_error_stream(
+    message: String,
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 /// A single line in an LCS-based text diff between two spec versions.
@@ -308,13 +343,14 @@ pub async fn assist_spec(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id.
     {
         let workspace_id = repo.workspace_id.to_string();
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &workspace_id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -394,38 +430,78 @@ pub async fn assist_spec(
         }
     };
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&repo.workspace_id, "specs-assist")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
-
-    let system_prompt = template_content
-        .replace("{{spec_path}}", &req.spec_path)
-        .replace("{{spec_content}}", &spec_content)
-        .replace("{{graph_context}}", &graph_context)
-        .replace("{{instruction}}", &req.instruction)
-        // Backward compat: old templates may use {{draft_content}}
-        .replace(
-            "{{draft_content}}",
-            req.draft_content.as_deref().unwrap_or(&spec_content),
-        );
+    // Prompt template (ui-layout.md §2): DB override → this repo's git tree
+    // (specs/prompts/specs-assist.md on the default branch) → hardcoded
+    // fallback. `sha` carries git provenance for the cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &repo.workspace_id,
+        Some(&repo.id),
+        "specs-assist",
+        crate::llm_defaults::PROMPT_SPECS_ASSIST,
+    )
+    .await;
+    // Meta-spec-set binding (ui-layout.md §2: templates are "Bound to the
+    // workspace's meta-spec-set"): the workspace's pinned personas,
+    // principles, standards, and process specs are injected as
+    // `{{meta_spec_context}}`.
+    let meta_spec_context =
+        crate::llm_helpers::workspace_meta_spec_context(&state, &repo.workspace_id, Some(&repo.id))
+            .await;
+    // Spec content and graph context travel in the system template as
+    // grounding variables; the instruction is the user prompt only
+    // (injection containment — blank its template placeholder).
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("spec_path", req.spec_path.as_str()),
+            ("spec_content", spec_content.as_str()),
+            ("graph_context", graph_context.as_str()),
+            ("meta_spec_context", meta_spec_context.as_str()),
+            ("instruction", ""),
+        ],
+    );
     let user_prompt = format!("Instruction: {}", req.instruction);
 
     // Resolve model and call streaming LLM.
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &repo.workspace_id, "specs-assist").await;
-    let llm_stream = factory
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let llm_stream = match factory
         .for_model(&model)
         .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(repo_id = %repo_id, model = %model, error = ?e, "LLM stream_complete failed in assist_spec");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(llm_stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
 
     // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158,
     // platform-model.md §Budget Tracking). The LlmPort does not return actual
@@ -448,8 +524,10 @@ pub async fn assist_spec(
         tracing::warn!("Failed to record specs/assist cost entry: {e}");
     }
 
-    // Per-call budget record + workspace/tenant counter increment
-    // (platform-model.md §Budget Tracking).
+    // Per-call `llm_query` budget record + workspace/tenant counter
+    // increment (platform-model.md §Budget Tracking), with the
+    // prompt-template git SHA for audit (ui-layout.md §2). Tenant scope
+    // comes from the repo's workspace; skip and log if unresolvable.
     let ws_for_budget = state
         .workspaces
         .find_by_id(&repo.workspace_id)
@@ -470,6 +548,7 @@ pub async fn assist_spec(
                 output_tokens: (base_estimate - estimated_input as f64) as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
+                prompt_template_sha: template.sha.clone(),
             },
         )
         .await;
@@ -480,12 +559,216 @@ pub async fn assist_spec(
         );
     }
 
-    // Build SSE events: partial events stream the explanation progressively,
-    // complete event carries the full {diff, explanation} response.
+    Ok(assist_sse_response(assist_sse_events(&full_text)))
+}
+
+/// POST /api/v1/workspaces/:id/meta-specs/assist
+///
+/// Workspace-scoped LLM assist for the §9 meta-spec preview loop's State 1
+/// chat (ui-layout.md §9): the persona/principle editor's chat input calls
+/// this endpoint with the in-editor draft, and the response uses the same
+/// SSE `{diff, explanation}` protocol as the repo-scoped specs/assist so the
+/// editor renders the same inline Accept/Edit/Dismiss suggestion blocks.
+///
+/// Unlike the repo-scoped route there is no repo or spec file: the effective
+/// content is the caller's `draft_content`, falling back to the stored
+/// registry prompt when only `meta_spec_id` is given. Rate limiting and
+/// budget accounting are keyed to the workspace.
+///
+/// ABAC: resource_type "meta_spec", action "generate" (same action as the
+/// repo-scoped specs/assist).
+pub async fn assist_meta_spec(
+    State(state): State<Arc<AppState>>,
+    Path(workspace_id): Path<String>,
+    caller: AuthenticatedAgent,
+    Json(req): Json<MetaSpecAssistRequest>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
+    let ws_id = Id::new(&workspace_id);
+    let ws = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+
+    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s —
+    // same limits as the repo-scoped assist, keyed to the workspace.
+    {
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = check_rate_limit(
+            &mut limiter,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
+            &workspace_id,
+            LLM_RATE_LIMIT,
+            LLM_WINDOW_SECS,
+        ) {
+            return Err(ApiError::RateLimited(retry_after));
+        }
+    }
+
+    // Require LLM to be configured.
+    let factory = state
+        .llm
+        .as_ref()
+        .ok_or(super::error::ApiError::LlmUnavailable)?;
+
+    // Resolve the meta-spec target: registry entry (when an id is given) plus
+    // the effective content (draft overrides the stored prompt). A
+    // Workspace-scoped meta-spec from another workspace is a cross-scope
+    // access, not a miss — reject it as Forbidden rather than leaking its
+    // existence via a different error shape.
+    let (meta_kind, meta_name, published_prompt) = match req.meta_spec_id.as_deref() {
+        Some(id) => {
+            let ms = state
+                .meta_specs
+                .get_by_id(&Id::new(id))
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| ApiError::NotFound(format!("meta-spec {id} not found")))?;
+            if ms.scope == gyre_domain::MetaSpecScope::Workspace
+                && ms.scope_id.as_deref() != Some(workspace_id.as_str())
+            {
+                return Err(ApiError::Forbidden(format!(
+                    "meta-spec {id} does not belong to workspace {workspace_id}"
+                )));
+            }
+            (
+                ms.kind.as_str().to_string(),
+                ms.name.clone(),
+                Some(ms.prompt),
+            )
+        }
+        None => ("meta-spec".to_string(), "draft".to_string(), None),
+    };
+
+    let spec_content = req
+        .draft_content
+        .clone()
+        .or(published_prompt)
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "draft_content or meta_spec_id is required for meta-spec assist".to_string(),
+            )
+        })?;
+
+    // Prompt template (ui-layout.md §2): DB workspace/tenant override →
+    // workspace git tree (specs/prompts/meta-specs-assist.md) → hardcoded
+    // fallback — the same resolution chain as the repo-scoped assist, with
+    // `sha` carrying git provenance for the budget cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &ws_id,
+        None,
+        "meta-specs-assist",
+        crate::llm_defaults::PROMPT_META_SPECS_ASSIST,
+    )
+    .await;
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("meta_spec_kind", meta_kind.as_str()),
+            ("meta_spec_name", meta_name.as_str()),
+            ("meta_spec_content", spec_content.as_str()),
+            ("instruction", req.instruction.as_str()),
+        ],
+    );
+    let user_prompt = format!("Instruction: {}", req.instruction);
+
+    // Resolve model and call streaming LLM.
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(&state, &ws_id, "meta-specs-assist").await;
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2), and mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (same contract as the repo-scoped assist).
+    let llm_stream = match factory
+        .for_model(&model)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(workspace_id = %workspace_id, model = %model, error = ?e, "LLM stream_complete failed in assist_meta_spec");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(llm_stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
+    let full_text = chunks.join("");
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
+
+    // Budget tracking: charge the workspace for LLM usage (same estimate as
+    // the repo-scoped assist — ~4 chars per token plus response overhead and
+    // a 3x reasoning multiplier), split into input/output for the per-call
+    // budget record.
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
+    let cost_entry = CostEntry::new(
+        new_id(),
+        Id::new(caller.agent_id.clone()),
+        None,
+        "llm_query",
+        base_estimate,
+        "tokens",
+        now_secs(),
+    );
+    if let Err(e) = state.costs.record(&cost_entry).await {
+        tracing::warn!("Failed to record meta-specs/assist cost entry: {e}");
+    }
+
+    super::budget::record_llm_call_usage(
+        &state,
+        &super::budget::LlmCallUsage {
+            tenant_id: ws.tenant_id.clone(),
+            workspace_id: ws.id.clone(),
+            repo_id: None,
+            agent_id: None,
+            task_id: None,
+            usage_type: "llm_query".to_string(),
+            input_tokens: estimated_input as u64,
+            output_tokens: (base_estimate - estimated_input as f64) as u64,
+            cost_usd: 0.0,
+            model: model.clone(),
+            prompt_template_sha: template.sha.clone(),
+        },
+    )
+    .await;
+
+    Ok(assist_sse_response(assist_sse_events(&full_text)))
+}
+
+// ── Shared SSE protocol ───────────────────────────────────────────────────────
+
+/// Build the SSE event list for an LLM assist response.
+///
+/// Shared by the repo-scoped spec assist (`POST /repos/:id/specs/assist`) and
+/// the workspace-scoped meta-spec assist (`POST /workspaces/:id/meta-specs/assist`)
+/// so both surfaces emit the identical wire protocol the editor's SSE parser
+/// consumes: `partial` events streaming the explanation progressively, a final
+/// `complete` event carrying `{diff, explanation}`, or an `error` event when the
+/// LLM output is not valid `{diff, explanation}` JSON with well-formed ops.
+fn assist_sse_events(full_text: &str) -> Vec<Result<Event, std::convert::Infallible>> {
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
 
     // Try to parse the LLM response as the spec-required {diff, explanation} JSON.
-    match serde_json::from_str::<serde_json::Value>(&full_text) {
+    match serde_json::from_str::<serde_json::Value>(full_text) {
         Ok(parsed) if parsed.get("diff").is_some() && parsed.get("explanation").is_some() => {
             // Valid response — stream explanation as partial events.
             let explanation = parsed["explanation"].as_str().unwrap_or("");
@@ -551,12 +834,55 @@ pub async fn assist_spec(
         }
     }
 
+    events
+}
+
+/// Wrap pre-built assist SSE events in a keep-alive SSE response.
+///
+/// Returns the same concrete iterator-backed stream type as
+/// `sse_error_stream`: both handlers funnel every return path (error and
+/// success) through one `impl Trait` return slot, so the two helpers must
+/// agree on the underlying stream type or the opaque types fail to unify.
+fn assist_sse_response(
+    events: Vec<Result<Event, std::convert::Infallible>>,
+) -> Sse<stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
     let s = stream::iter(events);
-    Ok(Sse::new(s).keep_alive(
+    Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    ))
+    )
+}
+
+/// Git blob SHA of `content` as stored at `spec_path` on `branch`.
+///
+/// Primary path: `git rev-parse <branch>:<path>` via the spec registry
+/// (handles any object format). Fallback when git is unavailable: derive the
+/// SHA-1 git blob id directly from the content just written to the branch —
+/// a blob id is sha1("blob <len>\0<content>") over the exact bytes
+/// `write_file` stored, so it matches what rev-parse returns for the same
+/// content (the same value `git hash-object` prints for those bytes).
+///
+/// Never returns "": an empty spec_sha is a fail-open that pushes the Inbox
+/// approve action onto a legacy fallback which approves the pre-edit ledger
+/// version — a no-op masked by an "Approved" success message.
+async fn spec_blob_sha(
+    git_bin: &str,
+    repo_path: &str,
+    branch: &str,
+    spec_path: &str,
+    content: &str,
+) -> String {
+    match crate::spec_registry::get_blob_sha(git_bin, repo_path, branch, spec_path).await {
+        Some(sha) => sha,
+        None => {
+            use sha1::{Digest, Sha1};
+            let mut hasher = Sha1::new();
+            hasher.update(format!("blob {}\0", content.len()).as_bytes());
+            hasher.update(content.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+    }
 }
 
 /// POST /api/v1/repos/:id/specs/save
@@ -655,6 +981,51 @@ pub async fn save_spec(
             .await
             .map_err(ApiError::Internal)?;
 
+        // task-175 review F1: the SpecPendingApproval cards created by the
+        // first save carry that save's blob SHA in their body, and the Inbox
+        // approve action submits body.spec_sha — approve_spec only records
+        // the approval when it matches the ledger's post-merge current_sha.
+        // Leaving the first save's SHA in place would make every Approve
+        // click on this card record an approval for content that never
+        // becomes current: the card shows "Approved" while the spec stays
+        // Pending, permanently. Refresh the unresolved cards' body with the
+        // blob SHA of the content just appended (resolved cards keep their
+        // historical body — an audit record of what was actually acted on).
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        let blob_sha = spec_blob_sha(
+            &git_bin,
+            &repo.path,
+            &mr.source_branch,
+            &req.spec_path,
+            &req.content,
+        )
+        .await;
+        let refreshed_body = serde_json::json!({
+            "spec_path": req.spec_path,
+            "spec_sha": blob_sha,
+            "mr_id": mr.id.to_string(),
+            "mr_title": mr.title.clone(),
+            "branch": mr.source_branch.clone(),
+            "repo_id": repo.id.to_string(),
+        })
+        .to_string();
+        if let Err(e) = state
+            .notifications
+            .update_body_by_entity_ref(
+                mr.id.as_str(),
+                NotificationType::SpecApprovalRequested.as_str(),
+                &refreshed_body,
+            )
+            .await
+        {
+            // Non-fatal — the commit is already on the MR branch; the card
+            // body going stale is logged, not silently swallowed.
+            tracing::warn!(
+                mr_id = %mr.id,
+                "failed to refresh spec-pending-approval notification body: {e}"
+            );
+        }
+
         return Ok((
             StatusCode::OK,
             Json(SpecSaveResponse {
@@ -714,26 +1085,127 @@ pub async fn save_spec(
         _ => "unknown".to_string(),
     };
 
-    // Priority-2 "Spec approval requested" notification (user-management.md
-    // §Notification Entity + HSI §2/§8).
-    // user_id is "system" — real per-user fan-out requires workspace membership
-    // which is outside this task's scope.
-    let notif_id = new_id();
-    let mut notif = Notification::new(
-        notif_id,
-        repo.workspace_id.clone(),
-        Id::new("system"),
-        NotificationType::SpecApprovalRequested,
-        format!("Spec pending approval: {}", req.spec_path),
-        &tenant_id,
-        now as i64,
-    );
-    notif.source.entity_type = "mr".to_string();
-    notif.source.entity_id = mr_id.to_string();
-    notif.source.repo_id = Some(repo.id.clone());
-    // Non-fatal — MR is created even if notification fails.
-    if let Err(e) = state.notifications.create(&notif).await {
-        tracing::warn!(mr_id = %mr_id, "Failed to create spec-pending-approval notification: {e}");
+    // Priority-2 "Spec pending approval" notification (HSI §2 + §8 P2,
+    // user-management.md §Notification Entity).
+    //
+    // Fan out to every workspace Admin/Developer/Owner member — these are the
+    // roles allowed to approve (reject_spec allows Admin/Developer). When the
+    // workspace has no eligible members, fall back to "system" so the global
+    // admin token's Inbox still shows the pending approval.
+    //
+    // The body carries everything the Inbox inline actions need:
+    //   spec_path — for GET /specs/:path and the reject endpoint
+    //   spec_sha  — the git blob SHA of the spec content on the MR branch
+    //               (the version the human is approving; matches the ledger's
+    //               current_sha semantics from sync_spec_ledger)
+    //   mr_id / branch / repo_id — for the MR quick links
+    //
+    // The structured source (entity_type "mr", entity_id = MR id) carries the
+    // same source entity the legacy body fields describe, for the
+    // notification-entity deep-link surface.
+    //
+    // See spec_blob_sha for how the SHA is derived (git rev-parse with a
+    // content-derived fallback — never "", which is a fail-open).
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let blob_sha = spec_blob_sha(
+        &git_bin,
+        &repo.path,
+        &branch_name,
+        &req.spec_path,
+        &req.content,
+    )
+    .await;
+    let notif_body = serde_json::json!({
+        "spec_path": req.spec_path,
+        "spec_sha": blob_sha,
+        "mr_id": mr_id.to_string(),
+        "mr_title": mr.title.clone(),
+        "branch": branch_name.clone(),
+        "repo_id": repo.id.to_string(),
+    })
+    .to_string();
+
+    let members = state
+        .workspace_memberships
+        .list_by_workspace(&repo.workspace_id)
+        .await
+        .unwrap_or_default();
+    let mut recipients: Vec<Id> = members
+        .iter()
+        .filter(|m| {
+            use gyre_domain::WorkspaceRole;
+            matches!(
+                m.role,
+                WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+            )
+        })
+        .map(|m| m.user_id.clone())
+        .collect();
+
+    // Team routing (user-management.md §Team Management — "notify the
+    // platform team"): when the spec's registry manifest names a team in
+    // `human_approvers` (spec ownership, `team:slug`), that team's members
+    // are approval recipients too, resolved from the real team membership.
+    // Best-effort: an unreadable manifest adds no recipients (the
+    // role-based fan-out above already covers the approver-capable roles).
+    if let Some(manifest) = crate::spec_registry::read_manifest(&repo.path, "HEAD").await {
+        // Manifest paths are relative to `specs/` (e.g. "system/owned.md"),
+        // while `spec_path` arrives in the client-facing `specs/...` form —
+        // match both, the same normalization the conflict check above uses.
+        let stripped = req
+            .spec_path
+            .strip_prefix("specs/")
+            .unwrap_or(&req.spec_path)
+            .to_string();
+        let path_matches = |p: &str| p == req.spec_path || p == stripped;
+        if let Some(spec_entry) = manifest.specs.iter().find(|e| path_matches(&e.path)) {
+            if let Some(approval) = spec_entry.approval.as_ref() {
+                for approver in &approval.human_approvers {
+                    if crate::notifications::parse_team_ref(approver).is_some() {
+                        if let Some(team_members) = crate::notifications::resolve_team_members(
+                            state.as_ref(),
+                            &repo.workspace_id,
+                            approver,
+                        )
+                        .await
+                        {
+                            for uid in team_members {
+                                if !recipients.contains(&uid) {
+                                    recipients.push(uid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if recipients.is_empty() {
+        // No eligible members — deliver to the system account so the
+        // global-admin Inbox still surfaces the pending approval.
+        recipients.push(Id::new("system"));
+    }
+
+    for uid in recipients {
+        let notif_id = new_id();
+        let mut notif = Notification::new(
+            notif_id,
+            repo.workspace_id.clone(),
+            uid.clone(),
+            NotificationType::SpecApprovalRequested,
+            format!("Spec pending approval: {}", req.spec_path),
+            &tenant_id,
+            now as i64,
+        );
+        notif.body = Some(notif_body.clone());
+        notif.source.entity_type = "mr".to_string();
+        notif.source.entity_id = mr_id.to_string();
+        notif.source.repo_id = Some(repo.id.clone());
+        // Non-fatal — MR is created even if notification fails.
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(mr_id = %mr_id, user_id = %uid, "Failed to create spec-pending-approval notification: {e}");
+        }
     }
 
     Ok((
@@ -744,6 +1216,48 @@ pub async fn save_spec(
         }),
     )
         .into_response())
+}
+
+/// Validate that `prompt_path` is a safe relative file path strictly inside
+/// `specs/prompts/`.
+///
+/// The MR-review bypass in `save_prompt` (direct default-branch commit, no
+/// MR, no approval notification) is justified ONLY by spec-lifecycle's
+/// `ignored_paths` entry for `specs/prompts/`. An unvalidated caller-supplied
+/// path would extend that bypass to every tracked file (specs, scripts, CI
+/// config), so the handler must reject anything outside that directory.
+fn validate_prompt_path(path: &str) -> Result<(), ApiError> {
+    use std::path::{Component, Path};
+
+    let invalid = || {
+        ApiError::BadRequest(format!(
+            "prompt_path must be a relative file path under specs/prompts/, got {path:?}"
+        ))
+    };
+
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return Err(invalid());
+    }
+    let mut segs: Vec<&str> = Vec::new();
+    for comp in p.components() {
+        match comp {
+            // Only plain segments are accepted: this rejects `..` traversal,
+            // root, and prefix (e.g. `C:\`) components in a single branch.
+            // A leading `.` also arrives as CurDir and is rejected; `.` in the
+            // middle is normalized away by `components()` and is harmless.
+            Component::Normal(seg) => segs.push(seg.to_str().ok_or_else(invalid)?),
+            _ => return Err(invalid()),
+        }
+    }
+    // Strictly inside `specs/prompts/` — at least one file component beyond
+    // the directory pair itself, and the first two segments must match it.
+    // Backslash-separated or otherwise odd inputs collapse to a single
+    // component on Unix and fail this check.
+    if segs.len() < 3 || segs[0] != "specs" || segs[1] != "prompts" {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// POST /api/v1/repos/:id/prompts/save
@@ -761,6 +1275,10 @@ pub async fn save_prompt(
     Path(repo_id): Path<String>,
     Json(req): Json<PromptSaveRequest>,
 ) -> Result<(StatusCode, Json<PromptSaveResponse>), ApiError> {
+    // Constrain the review-gate bypass to specs/prompts/ before anything
+    // touches git — see `validate_prompt_path`.
+    validate_prompt_path(&req.prompt_path)?;
+
     let repo_id_typed = Id::new(&repo_id);
     let repo = state
         .repos
@@ -988,6 +1506,138 @@ mod tests {
             .expect("SpecApprovalRequested notification must be created");
         assert_eq!(spec_notif.priority_rank, 2);
         assert_eq!(spec_notif.source.entity_id.as_str(), mr_id);
+        // HSI §8 P2: the body must carry the structured fields the Inbox
+        // inline actions consume (approve SHA, MR diff fetch, quick links).
+        let body: serde_json::Value =
+            serde_json::from_str(spec_notif.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_path"], "specs/system/vision.md");
+        assert_eq!(body["mr_id"], mr_id);
+        assert_eq!(body["repo_id"], repo_id);
+        // HSI §8 P2 / task-175 F3: spec_sha must be the blob SHA of the exact
+        // content the human is approving — never "" (the old fail-open wrote
+        // an empty SHA when git was unavailable, pushing the Inbox approve
+        // action onto a legacy fallback that approves the pre-edit version).
+        // The expected value was produced by `git hash-object` over the exact
+        // saved content — an external anchor, not mirrored logic: a blob id
+        // is sha1("blob <len>\0<content>").
+        assert_eq!(body["spec_sha"], "8035a51635f85a1fa9452e01964fbbd9f01179d4");
+        // No workspace members in the test state — the system fallback
+        // recipient keeps the approval visible in the global-admin Inbox.
+        assert_eq!(spec_notif.user_id, Id::new("system"));
+    }
+
+    #[tokio::test]
+    async fn save_spec_fans_out_approval_notification_to_eligible_members() {
+        use gyre_domain::{Repository, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        // Repo record only — the notification fan-out runs after the MR is
+        // persisted but before any git-dependent assertion; git writes go
+        // through NoopGitOps so the branch/blob lookups are inert.
+        let ws_id = Id::new("ws-fanout");
+        let repo = Repository::new(
+            Id::new("repo-fanout"),
+            ws_id.clone(),
+            "fanout",
+            "/tmp/gyre-nonexistent-fanout-repo",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        // Two eligible members (Admin, Developer) and one ineligible (Viewer).
+        for (uid, role) in [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-dev", WorkspaceRole::Developer),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ] {
+            state
+                .workspace_memberships
+                .create(&WorkspaceMembership::new(
+                    Id::new(format!("membership-{uid}")),
+                    Id::new(uid),
+                    ws_id.clone(),
+                    role,
+                    Id::new("inviter"),
+                    0,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let caller = AuthenticatedAgent {
+            agent_id: "user-admin".to_string(),
+            user_id: Some(Id::new("user-admin")),
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        };
+        let req = SpecSaveRequest {
+            spec_path: "specs/system/fanout.md".to_string(),
+            content: "# Fanout\n".to_string(),
+            message: "edit".to_string(),
+            base_sha: None,
+            overwrite: false,
+        };
+        let resp = save_spec(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("repo-fanout".to_string()),
+            caller,
+            Json(req),
+        )
+        .await
+        .expect("save_spec should succeed");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Eligible members each get exactly one notification; the Viewer
+        // gets none; the system fallback is not used when members exist.
+        for uid in ["user-admin", "user-dev"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 100, 0)
+                .await
+                .unwrap();
+            let approvals: Vec<_> = notifs
+                .iter()
+                .filter(|n| n.notification_type == NotificationType::SpecApprovalRequested)
+                .collect();
+            assert_eq!(
+                approvals.len(),
+                1,
+                "user {uid} must get exactly one SpecApprovalRequested notification"
+            );
+            let body: serde_json::Value =
+                serde_json::from_str(approvals[0].body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["spec_path"], "specs/system/fanout.md");
+            assert_eq!(body["repo_id"], "repo-fanout");
+        }
+        let viewer_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-viewer"),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            viewer_notifs.is_empty(),
+            "Viewer must not receive approval notifications"
+        );
+        let system_notifs = state
+            .notifications
+            .list_for_user(&Id::new("system"), Some(&ws_id), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            system_notifs.is_empty(),
+            "system fallback must not be used when eligible members exist"
+        );
     }
 
     #[tokio::test]
@@ -1064,6 +1714,102 @@ mod tests {
         let json2 = body_json(resp2).await;
         assert_eq!(json2["branch"].as_str().unwrap(), branch1);
         assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id1);
+    }
+
+    #[tokio::test]
+    async fn save_spec_existing_mr_refreshes_notification_spec_sha() {
+        // task-175 review F1: the append-to-existing-MR path used to return
+        // early without refreshing the SpecPendingApproval card's body, so it
+        // kept the FIRST save's blob SHA. The Inbox approve action submits
+        // body.spec_sha and approve_spec only records the approval when it
+        // matches the ledger's post-merge current_sha — a stale SHA makes
+        // every Approve click record an approval for content that never
+        // becomes current (card shows "Approved", spec stays Pending).
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let create_body = serde_json::json!({
+            "name": "spec-edit-stale-sha",
+            "workspace_id": "ws-1",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let do_save = |content: &'static str| {
+            let body = serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": content,
+                "message": "edit",
+            });
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+        };
+
+        let resp1 = do_save("# Vision v1").await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let json1 = body_json(resp1).await;
+        let mr_id = json1["mr_id"].as_str().unwrap().to_string();
+
+        // First save's card carries the v1 blob SHA
+        // (`git hash-object` over "# Vision v1").
+        let notifs = state.notifications.list_recent(10).await.unwrap();
+        let card = notifs
+            .iter()
+            .find(|n| {
+                n.notification_type == NotificationType::SpecApprovalRequested
+                    && n.source.entity_id == mr_id.as_str()
+            })
+            .expect("SpecApprovalRequested card after first save");
+        let body: serde_json::Value = serde_json::from_str(card.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_sha"], "98537aa01f28c720793d8f199d221ebd97c3bff3");
+
+        // Second save appends to the same MR — the card must be refreshed in
+        // place (still exactly one card for this MR), carrying the v2 blob SHA
+        // (`git hash-object` over "# Vision v2"), not the stale v1 SHA.
+        let resp2 = do_save("# Vision v2").await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id);
+
+        let notifs = state.notifications.list_recent(10).await.unwrap();
+        let cards: Vec<&gyre_common::Notification> = notifs
+            .iter()
+            .filter(|n| {
+                n.notification_type == NotificationType::SpecApprovalRequested
+                    && n.source.entity_id == mr_id.as_str()
+            })
+            .collect();
+        assert_eq!(
+            cards.len(),
+            1,
+            "append must refresh the existing card, not create a duplicate"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(cards[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_sha"], "1a862bdc192b340de10c4e0cd259c1c60c4cca11");
+        assert_eq!(body["mr_id"], mr_id);
     }
 
     #[tokio::test]
@@ -1341,6 +2087,101 @@ mod tests {
         assert!(state.merge_requests.list_by_repo(&repo.id).await.unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn save_prompt_rejects_paths_outside_specs_prompts() {
+        let app = app();
+        let repo_id = create_repo(&app, "prompt-path-guard", "ws-1").await;
+
+        // Every path outside specs/prompts/ must be rejected with 400 — the
+        // direct-to-default-branch review bypass only covers specs/prompts/.
+        let bad_paths = [
+            // Tracked files the bypass must never reach.
+            "specs/system/vision.md",
+            "scripts/check-arch.sh",
+            ".github/workflows/ci.yml",
+            // Traversal, absolute, and home-relative forms.
+            "../../etc/passwd",
+            "specs/prompts/../../../etc/passwd",
+            "/etc/passwd",
+            "~/specs/prompts/x.md",
+            // Inside-adjacent but wrong directory / directory itself / empty.
+            "specs/prompt/x.md",
+            "specs/prompts",
+            "specs/prompts/",
+            "",
+        ];
+        for path in bad_paths {
+            let save_body = serde_json::json!({
+                "prompt_path": path,
+                "content": "# evil",
+                "message": "overwrite something sensitive",
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "prompt_path {path:?} must be rejected with 400"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn save_prompt_rejects_traversal_but_allows_normalized_subdirs() {
+        let app = app();
+        let repo_id = create_repo(&app, "prompt-path-guard-2", "ws-1").await;
+
+        // A traversal form of a legitimately-shaped path is still rejected:
+        // '..' components never reach write_file.
+        let save_body = serde_json::json!({
+            "prompt_path": "specs/prompts/../prompts/x.md",
+            "content": "# x",
+            "message": "traversal probe",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Nested subdirectories inside specs/prompts/ remain allowed.
+        let save_body = serde_json::json!({
+            "prompt_path": "specs/prompts/briefing/ask.md",
+            "content": "# ask",
+            "message": "add nested template",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
     #[test]
     fn spec_path_slug_no_collision() {
         let s1 = spec_path_slug("specs/system/payment-retry.md");
@@ -1369,10 +2210,15 @@ mod tests {
 
     /// Create a test app with a mock LLM that returns a fixed response string.
     fn app_with_llm_response(response: &str) -> Router {
+        app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::new(response)))
+    }
+
+    /// Create a test app with an arbitrary `MockLlmAdapter` — including the
+    /// error-injection constructors `failing()` and `stream_error_after()`,
+    /// which have no LLM-connection failure otherwise testable here.
+    fn app_with_llm_adapter(inner: Arc<gyre_adapters::MockLlmAdapter>) -> Router {
         let mut s = (*crate::mem::test_state()).clone();
-        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
-            inner: Arc::new(gyre_adapters::MockLlmAdapter::new(response)),
-        }));
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory { inner }));
         crate::api::api_router().with_state(Arc::new(s))
     }
 
@@ -1615,6 +2461,109 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("missing required"));
+    }
+
+    #[tokio::test]
+    async fn assist_spec_llm_connection_failure_sends_error_event() {
+        // ui-layout.md §2: an LLM connection failure is an SSE `error` event,
+        // not an HTTP 500 — and never a `complete` event. Regression for the
+        // silent-drop bug: the old code errored the whole request instead of
+        // streaming `event: error`.
+        let app = app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::failing(
+            "connection refused by mock",
+        )));
+        let repo_id = create_repo(&app, "assist-connfail-repo", "ws-assist-connfail").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(error_events.len(), 1, "should have one error event");
+        assert_eq!(
+            complete_events.len(),
+            0,
+            "a connection failure must never masquerade as a complete event"
+        );
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        let msg = error_data["error"].as_str().unwrap();
+        assert!(
+            msg.contains("connection refused by mock"),
+            "error event must carry the failure cause, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assist_spec_llm_mid_stream_failure_sends_error_event() {
+        // A connection that drops mid-generation: partial chunks arrive, then
+        // the stream errors. The truncated response must surface as
+        // `event: error` — never a `complete` event built from the partial
+        // text. Regression for the old `filter_map(|r| r.ok())` that silently
+        // dropped the stream error and completed on the truncated text.
+        let app =
+            app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::stream_error_after(
+                vec!["Good ".into(), "enough ".into(), "to look ".into()],
+                "dropped mid-generation by mock",
+            )));
+        let repo_id = create_repo(&app, "assist-midfail-repo", "ws-assist-midfail").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(error_events.len(), 1, "should have one error event");
+        assert_eq!(
+            complete_events.len(),
+            0,
+            "a truncated (mid-stream failed) response must never be completed"
+        );
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        let msg = error_data["error"].as_str().unwrap();
+        assert!(
+            msg.contains("dropped mid-generation by mock"),
+            "error event must carry the mid-stream failure cause, got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1985,5 +2934,717 @@ mod tests {
                 "submitted lines should appear as add ops in the persisted diff"
             );
         }
+    }
+
+    /// user-management.md §Team Management — notification routing ("notify
+    /// the platform team"): a manifest's `team:{slug}` human approvers are
+    /// SpecApprovalRequested recipients, resolved from real team
+    /// membership. The distinguishing recipient is a Viewer team member —
+    /// outside the role-based Admin/Developer/Owner fan-out — so this test
+    /// fails if team routing is dropped, reverted, or stubbed.
+    #[tokio::test]
+    async fn save_spec_notifies_team_members_from_manifest_approvers() {
+        use gyre_domain::{User, Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace + members: an Owner (role-based recipient) and a Viewer
+        // who is on the platform team (team-routed recipient only).
+        let now = 1_700_000_000u64;
+        let ws = Workspace {
+            id: Id::new("ws-team-route"),
+            tenant_id: Id::new("tenant-1"),
+            name: "Team Route WS".to_string(),
+            slug: "team-route-ws".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: now,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut owner = User::new(Id::new("user-tr-owner"), "ext-tr-owner", "tr-owner", now);
+        owner.tenant_id = Some(Id::new("tenant-1"));
+        state.users.create(&owner).await.unwrap();
+        let mut viewer = User::new(Id::new("user-tr-viewer"), "ext-tr-viewer", "tr-viewer", now);
+        viewer.tenant_id = Some(Id::new("tenant-1"));
+        state.users.create(&viewer).await.unwrap();
+
+        for (uid, role) in [
+            ("user-tr-owner", WorkspaceRole::Owner),
+            ("user-tr-viewer", WorkspaceRole::Viewer),
+        ] {
+            let m = WorkspaceMembership::new(
+                Id::new(format!("mem-{uid}")),
+                Id::new(uid),
+                ws.id.clone(),
+                role,
+                Id::new("system"),
+                now,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        // Team + membership through the real team API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-team-route/teams")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "Platform", "lead": "user-tr-owner"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team = body_json(resp).await;
+        assert_eq!(team["slug"], "platform");
+        let team_id = team["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/ws-team-route/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": "user-tr-viewer"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Repo with a manifest at HEAD naming team:platform as approver.
+        let repo_id = create_repo(&app, "team-route-repo", "ws-team-route").await;
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(repo_id.clone()))
+            .await
+            .unwrap()
+            .expect("repo record");
+
+        let manifest = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/owned.md
+    title: Owned
+    owner: team:platform
+    approval:
+      mode: human_only
+      human_approvers:
+        - team:platform
+"#;
+        commit_to_bare_repo_head(&repo.path, "main", manifest, "owned.md", "# Owned\n");
+
+        state
+            .spec_ledger
+            .save(&ledger_entry("system/owned.md", "sha-x", "ws-team-route"))
+            .await
+            .unwrap();
+
+        let save_body = serde_json::json!({
+            "spec_path": "specs/system/owned.md",
+            "content": "# Owned\n\nEdited.\n",
+            "message": "edit",
+            "base_sha": "sha-x",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The Viewer team member received the approval card — only team
+        // routing can address a Viewer here.
+        let viewer_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-tr-viewer"),
+                Some(&Id::new("ws-team-route")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            viewer_notifs.iter().any(
+                |n| n.notification_type == gyre_common::NotificationType::SpecApprovalRequested
+            ),
+            "the platform team's Viewer member must receive the SpecApprovalRequested card"
+        );
+
+        // The Owner still receives it through the role-based fan-out (guards
+        // against the notification block silently not running at all).
+        let owner_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-tr-owner"),
+                Some(&Id::new("ws-team-route")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            owner_notifs.iter().any(
+                |n| n.notification_type == gyre_common::NotificationType::SpecApprovalRequested
+            ),
+            "the workspace Owner must still receive the SpecApprovalRequested card"
+        );
+    }
+
+    /// Commit `specs/manifest.yaml` and `specs/system/<spec_file>` to the
+    /// HEAD branch of a bare git repo (plumbing only — no worktree), so
+    /// `read_manifest(repo_path, "HEAD")` resolves in tests.
+    ///
+    /// The API-created repo record points at a path that `NoopGitOps`
+    /// (test_state's git ops) never initialized on disk, so the bare repo
+    /// is created here — without it both this plumbing and the save flow's
+    /// `read_manifest` would fail against a nonexistent directory.
+    fn commit_to_bare_repo_head(
+        repo_path: &str,
+        branch: &str,
+        manifest: &str,
+        spec_file: &str,
+        spec_content: &str,
+    ) {
+        use std::io::Write;
+
+        if !std::path::Path::new(repo_path).exists() {
+            let out = std::process::Command::new("git")
+                .args(["init", "--bare", "-b", branch])
+                .arg(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git init --bare {repo_path} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let hash_object_stdin = |content: &str| -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["hash-object", "-w", "--stdin"])
+                .current_dir(repo_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(content.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let mktree = |entries: &str| -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["mktree"])
+                .current_dir(repo_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(entries.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "git mktree failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        let manifest_blob = hash_object_stdin(manifest);
+        let spec_blob = hash_object_stdin(spec_content);
+        let system_tree = mktree(&format!("100644 blob {spec_blob}\t{spec_file}"));
+        let specs_tree = mktree(&format!(
+            "100644 blob {manifest_blob}\tmanifest.yaml\n040000 tree {system_tree}\tsystem"
+        ));
+        let root_tree = mktree(&format!("040000 tree {specs_tree}\tspecs"));
+        // `git commit-tree` needs an author identity; the test environment
+        // has no global git config, so pass one explicitly (same identity
+        // `make_manifest_repo`-style tests set via local repo config).
+        let commit = {
+            let out = std::process::Command::new("git")
+                .args(["commit-tree", &root_tree, "-m", "manifest"])
+                .env("GIT_AUTHOR_NAME", "Gyre Test")
+                .env("GIT_AUTHOR_EMAIL", "test@gyre.dev")
+                .env("GIT_COMMITTER_NAME", "Gyre Test")
+                .env("GIT_COMMITTER_EMAIL", "test@gyre.dev")
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git commit-tree failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["update-ref", &format!("refs/heads/{branch}"), &commit]);
+    }
+
+    // ── POST /workspaces/:id/meta-specs/assist (§9 State 1 chat) ──────────
+
+    /// App with a fixed-response mock LLM, returning the state so tests can
+    /// seed meta-specs directly.
+    fn app_with_llm_response_and_state(
+        response: &str,
+    ) -> (Router, std::sync::Arc<crate::AppState>) {
+        let mut s = (*crate::mem::test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::new(response)),
+        }));
+        let state = Arc::new(s);
+        (crate::api::api_router().with_state(state.clone()), state)
+    }
+
+    async fn create_workspace(app: &Router, slug: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": slug,
+                            "slug": slug,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        json["id"].as_str().unwrap().to_string()
+    }
+
+    async fn seed_meta_spec(
+        state: &std::sync::Arc<crate::AppState>,
+        id: &str,
+        name: &str,
+        scope: gyre_domain::MetaSpecScope,
+        scope_id: Option<String>,
+        prompt: &str,
+    ) {
+        let ms = gyre_domain::MetaSpec {
+            id: Id::new(id),
+            kind: gyre_domain::MetaSpecKind::Persona,
+            name: name.to_string(),
+            scope,
+            scope_id,
+            prompt: prompt.to_string(),
+            version: 1,
+            content_hash: "h1".to_string(),
+            required: false,
+            approval_status: gyre_domain::MetaSpecApprovalStatus::Approved,
+            approved_by: None,
+            approved_content_hash: None,
+            approved_at: None,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.meta_specs.create(&ms).await.expect("seed meta-spec");
+    }
+
+    async fn post_meta_spec_assist(
+        app: &Router,
+        workspace_id: &str,
+        body: &serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{workspace_id}/meta-specs/assist"
+                    ))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_unknown_workspace_returns_404() {
+        let app = app();
+        let resp = post_meta_spec_assist(
+            &app,
+            "no-such-ws",
+            &serde_json::json!({
+                "instruction": "Make error handling more defensive",
+                "draft_content": "You are a backend developer…",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_requires_draft_or_meta_spec_id() {
+        let app = app();
+        let ws = create_workspace(&app, "ms-assist-req").await;
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({ "instruction": "improve the prompt" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_unknown_meta_spec_returns_404() {
+        let app = app();
+        let ws = create_workspace(&app, "ms-assist-unknown-ms").await;
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "improve",
+                "meta_spec_id": "no-such-ms",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_rejects_meta_spec_from_another_workspace() {
+        let (app, state) = app_with_llm_response_and_state("{}");
+        let ws_a = create_workspace(&app, "ms-assist-ws-a").await;
+        let ws_b = create_workspace(&app, "ms-assist-ws-b").await;
+        seed_meta_spec(
+            &state,
+            "ms-foreign",
+            "foreign-persona",
+            gyre_domain::MetaSpecScope::Workspace,
+            Some(ws_a),
+            "You are a backend developer.",
+        )
+        .await;
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws_b,
+            &serde_json::json!({
+                "instruction": "improve",
+                "meta_spec_id": "ms-foreign",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_with_draft_streams_sse_complete() {
+        let valid_response = serde_json::json!({
+            "diff": [
+                {"op": "add", "path": "## Error Handling", "content": "Handle all errors with Result<T, E>."}
+            ],
+            "explanation": "Added defensive error handling to the persona."
+        });
+        let (app, _state) = app_with_llm_response_and_state(&valid_response.to_string());
+        let ws = create_workspace(&app, "ms-assist-draft").await;
+
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "Make error handling more defensive",
+                "draft_content": "You are a backend developer…",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+        let partial_events: Vec<_> = events.iter().filter(|(t, _)| t == "partial").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert!(
+            !partial_events.is_empty(),
+            "should have partial events for explanation"
+        );
+        assert_eq!(complete_events.len(), 1, "exactly one complete event");
+        let complete_data: serde_json::Value = serde_json::from_str(&complete_events[0].1).unwrap();
+        let diff = complete_data["diff"].as_array().unwrap();
+        assert_eq!(diff[0]["op"], "add");
+        assert_eq!(
+            complete_data["explanation"].as_str().unwrap(),
+            "Added defensive error handling to the persona."
+        );
+    }
+
+    /// Test LLM factory that records every `stream_complete` system prompt
+    /// and returns a fixed valid `{diff, explanation}` response — lets tests
+    /// assert WHAT the LLM was actually given (stored prompt vs draft), not
+    /// just that the call succeeded.
+    struct RecordingLlmFactory {
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        response: String,
+    }
+
+    struct RecordingLlmPort {
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        response: String,
+    }
+
+    #[async_trait::async_trait]
+    impl gyre_ports::LlmPort for RecordingLlmPort {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<String> {
+            Ok(self.response.clone())
+        }
+        async fn predict_json(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<serde_json::Value> {
+            serde_json::from_str(&self.response).map_err(|e| anyhow::anyhow!("invalid JSON: {e}"))
+        }
+        async fn stream_complete(
+            &self,
+            system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<
+            std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<String>> + Send>>,
+        > {
+            self.prompts.lock().unwrap().push(system_prompt.to_string());
+            let text = self.response.clone();
+            Ok(Box::pin(futures_util::stream::iter(vec![Ok(text)])))
+        }
+        async fn complete_with_tools(
+            &self,
+            _system_prompt: &str,
+            _messages: &[gyre_ports::ConversationMessage],
+            _tools: &[gyre_ports::ToolDefinition],
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<gyre_ports::ToolCallingResponse> {
+            Ok(gyre_ports::ToolCallingResponse {
+                text: self.response.clone(),
+                tool_calls: vec![],
+                stop_reason: "end_turn".to_string(),
+            })
+        }
+    }
+
+    impl gyre_ports::LlmPortFactory for RecordingLlmFactory {
+        fn for_model(&self, _model_name: &str) -> Arc<dyn gyre_ports::LlmPort> {
+            Arc::new(RecordingLlmPort {
+                prompts: self.prompts.clone(),
+                response: self.response.clone(),
+            })
+        }
+    }
+
+    fn app_with_recording_llm(
+        response: &str,
+    ) -> (
+        Router,
+        std::sync::Arc<crate::AppState>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let mut s = (*crate::mem::test_state()).clone();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        s.llm = Some(Arc::new(RecordingLlmFactory {
+            prompts: prompts.clone(),
+            response: response.to_string(),
+        }));
+        let state = Arc::new(s);
+        (
+            crate::api::api_router().with_state(state.clone()),
+            state,
+            prompts,
+        )
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_loads_published_prompt_when_no_draft() {
+        // With only meta_spec_id, the LLM must receive the STORED registry
+        // prompt — asserted from the recorded system prompt, so a regression
+        // that drops the lookup (empty content) or swaps draft/published
+        // precedence fails here.
+        let valid_response = serde_json::json!({
+            "diff": [
+                {"op": "replace", "path": "## Overview", "content": "Tightened persona."}
+            ],
+            "explanation": "Tightened the persona."
+        });
+        let (app, state, prompts) = app_with_recording_llm(&valid_response.to_string());
+        let ws = create_workspace(&app, "ms-assist-published").await;
+        seed_meta_spec(
+            &state,
+            "ms-global-1",
+            "backend-dev",
+            gyre_domain::MetaSpecScope::Global,
+            None,
+            "You are a backend developer who writes defensive code.",
+        )
+        .await;
+
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "Tighten the persona",
+                "meta_spec_id": "ms-global-1",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+        assert!(
+            events.iter().any(|(t, _)| t == "complete"),
+            "stored-prompt assist should stream a complete event"
+        );
+
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1, "exactly one LLM call");
+        let sys = &prompts[0];
+        assert!(
+            sys.contains("You are a backend developer who writes defensive code."),
+            "system prompt must carry the stored registry prompt"
+        );
+        assert!(
+            sys.contains("backend-dev"),
+            "system prompt must name the meta-spec"
+        );
+        assert!(
+            sys.contains("meta:persona"),
+            "system prompt must carry the meta-spec kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_draft_overrides_published_prompt() {
+        // draft_content must take precedence over the stored prompt — the
+        // human is editing a draft in the §9 State 1 editor.
+        let valid_response = serde_json::json!({
+            "diff": [],
+            "explanation": "no-op"
+        });
+        let (app, state, prompts) = app_with_recording_llm(&valid_response.to_string());
+        let ws = create_workspace(&app, "ms-assist-draft-override").await;
+        seed_meta_spec(
+            &state,
+            "ms-global-2",
+            "backend-dev",
+            gyre_domain::MetaSpecScope::Global,
+            None,
+            "STORED PROMPT MARKER",
+        )
+        .await;
+
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "improve",
+                "meta_spec_id": "ms-global-2",
+                "draft_content": "DRAFT PROMPT MARKER",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains("DRAFT PROMPT MARKER"),
+            "draft_content must be the effective content"
+        );
+        assert!(
+            !prompts[0].contains("STORED PROMPT MARKER"),
+            "stored prompt must not leak into the prompt when a draft is given"
+        );
+    }
+
+    #[tokio::test]
+    async fn assist_meta_spec_returns_503_when_llm_unavailable() {
+        let app = app_no_llm();
+        let ws = create_workspace(&app, "ms-assist-503").await;
+        let resp = post_meta_spec_assist(
+            &app,
+            &ws,
+            &serde_json::json!({
+                "instruction": "improve",
+                "draft_content": "You are a backend developer.",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

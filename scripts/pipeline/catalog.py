@@ -47,6 +47,7 @@ def sync_checkout(store, checkout, revision=None):
              for p in (checkout / 'specs' / section).glob('*.md')}
     goal = (checkout / 'specs/GOAL.md').read_text()
     existing = {task['name']: task for task in store.tasks()}
+    from .requirements import snapshot, change, digest
     for path in sorted((checkout / 'specs/tasks').glob('task-*.md')):
         body = path.read_text()
         try:
@@ -54,12 +55,41 @@ def sync_checkout(store, checkout, revision=None):
         except ValueError:
             gen = hashlib.sha256((body + goal).encode()).hexdigest()
         old = existing.get(path.stem)
+        scoped = snapshot(checkout, body, contract, require_registry=bool(
+            old and (old['data'].get('requirements') or {}).get('version') == 2))
+        if scoped['version'] == 2:
+            prior = (old or {}).get('data', {}).get('requirements')
+            if old and (not prior or prior.get('version') != 2 or prior['fingerprint'] == scoped['fingerprint']):
+                # Fingerprint FORMAT changes do not change an execution epoch.
+                data = old['data'] | {'requirements': scoped, 'catalog_generation': gen,
+                                      'catalog_source': revision}
+                if not prior:
+                    data['legacy_catalog_source'] = old['data'].get('catalog_source')
+                if data != old['data'] or body != old['body']:
+                    store.put_task(path.stem, old['generation'], body, data, expected=old)
+                continue
+            data = safe_metadata(body) | {'requirements': scoped, 'catalog_generation': gen,
+                                         'catalog_source': revision}
+            # An epoch identifies a transition, not just content. Reverting a
+            # requirement must not resurrect succeeded work from a prior cycle.
+            epoch = digest({'requirements':scoped['fingerprint'],'previous':old['generation']}) if old else scoped['fingerprint']
+            if old:
+                previous = old['data']
+                data = previous | data | {'triaged': epoch, 'delivered': None, 'resolved': None,
+                    'review': None, 'verified': None, 'repair': None,
+                    'previous_delivery': previous.get('delivered') or previous.get('previous_delivery'),
+                    'assessment_pending': {'changes': change(prior or {}, scoped),
+                                           'previous_generation': old['generation']}}
+            elif data['progress'] == 'complete':
+                data['delivered'] = {'imported': True, 'generation': epoch, 'source': revision}
+            store.put_task(path.stem, epoch, body, data, expected=old)
+            continue
         # Operational outcomes survive catalog refresh. A changed contract
         # invalidates receipts; a changed progress label alone does not.
         if old and old['data'].get('catalog_generation') == gen:
             continue
         if old and old['generation'] == gen:
-            store.put_task(path.stem, gen, body, old['data'] | {'catalog_generation': gen})
+            store.put_task(path.stem, gen, body, old['data'] | {'catalog_generation': gen}, expected=old)
             continue
         data = safe_metadata(body) | {'catalog_generation': gen, 'catalog_source': revision}
         if data['progress'] == 'complete' and not old:
@@ -72,11 +102,12 @@ def sync_checkout(store, checkout, revision=None):
                         candidate_base=old['data'].get('candidate_base') or old['data'].get('catalog_source'),
                         repair={'category': 'requirements_changed', 'source': checkpoint,
                                 'id': gen, 'detail': 'Implement the current contract using the retained source checkpoint.'})
-        store.put_task(path.stem, gen, body, data)
+        store.put_task(path.stem, gen, body, data, expected=old)
 
 
 def discover(store, stage, base):
     from .repairs import cached, probe, resolution, satisfied
+    from .requirements import pending
     tasks = {task['name']: task for task in store.tasks()}
     graph = {name: task['data'].get('dependencies') or [] for name, task in tasks.items()}
     errors = contract.graph_errors(graph)
@@ -84,6 +115,22 @@ def discover(store, stage, base):
     for name, task in tasks.items():
         data = task['data']
         if satisfied(data):
+            continue
+        requirements = data.get('requirements') or {}
+        if requirements.get('errors'):
+            # Bad bindings are a triage condition, never a coding assignment.
+            if stage == 'triage':
+                selected.append(store.enqueue('triage',name,task['generation'],
+                    {'base':base,'binding_errors':requirements['errors']},priority=20000))
+            continue
+        assessment = pending(data)
+        if assessment:
+            if stage == 'assess':
+                selected.append(store.enqueue('assess',name,task['generation'],
+                    {'base':base, 'candidate':base if assessment.get('migration') or data.get('previous_delivery') else data.get('candidate'),
+                     'requirements':requirements['fingerprint'],
+                     'required_evidence':list(requirements.get('components',{})),
+                     'changes':assessment.get('changes',{})},priority=20000))
             continue
         if stage == 'observe':
             from .ci import publication
@@ -159,15 +206,25 @@ def discover(store, stage, base):
         elif stage == 'review' and triaged and deps_ready and candidate and not repair:
             if review.get('candidate') != candidate:
                 inputs = {'candidate': candidate, 'base': data['candidate_base']}
+                if (data.get('review_retry') or {}).get('candidate')==candidate:
+                    inputs['review_retry']=data['review_retry']
         elif stage == 'verify' and triaged and deps_ready and candidate and not repair:
             if review.get('candidate') == candidate and review.get('approved'):
-                if verified.get('candidate') != candidate or verified.get('base') != base:
+                if verified.get('candidate') != candidate or not verified.get('passed'):
                     from .ci import verification_ready
                     if verification_ready(store,task,base):
                         inputs = {'candidate': candidate, 'base': base}
         elif stage == 'publish' and deps_ready and candidate and not repair:
-            if verified.get('candidate') == candidate and (verified.get('base') == base or data.get('pr')):
-                inputs = {'candidate': candidate, 'base': base, 'verified': verified}
+            if verified.get('candidate') == candidate and verified.get('passed'):
+                ci=data.get('ci') or {}
+                published=data.get('pr') and data.get('published_head')==verified.get('head')
+                merge_ready=(ci.get('head')==verified.get('head') and (
+                    ci.get('status') in ('passed','merged','artifact_refresh') or
+                    ci.get('checks')=='green' and ci.get('merge_state')=='BEHIND'))
+                # One observer owns pending CI. A publisher runs only to push
+                # a new verified head, refresh a green base, merge, or confirm.
+                if not published or merge_ready:
+                    inputs = {'candidate': candidate, 'base': base, 'verified': verified}
         if inputs is not None:
             priority = 1000 if repair else 0
             selected.append(store.enqueue(stage, name, task['generation'], inputs, priority))
@@ -179,9 +236,18 @@ def discover(store, stage, base):
     return selected
 
 
-def generation_for(store, body):
+def generation_for(store, body, task_name=None):
     checkout = store.directory / 'source'
     specs = {str(path.relative_to(checkout)): path.read_text()
              for section in ('system', 'development')
              for path in (checkout / 'specs' / section).glob('*.md')}
+    from .requirements import snapshot
+    scoped = snapshot(checkout,body,contract, require_registry=bool(task_name and
+        (store.task(task_name)['data'].get('requirements') or {}).get('version') == 2))
+    if scoped['version'] == 2:
+        if task_name:
+            task = store.task(task_name)
+            if (task['data'].get('requirements') or {}).get('fingerprint') == scoped['fingerprint']:
+                return task['generation']
+        return scoped['fingerprint']
     return contract.generation(body, specs, (checkout / 'specs/GOAL.md').read_text())

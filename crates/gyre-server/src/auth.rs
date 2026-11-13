@@ -41,6 +41,20 @@ pub struct RemoteJwksEntry {
 /// TTL for cached remote JWKS (5 minutes).
 const REMOTE_JWKS_TTL_SECS: u64 = 300;
 
+// -- Gate-agent capability scopes (task-134, agent-gates.md) -------------------
+
+/// OIDC capability granted to an AgentReview gate's reviewer agent: it may
+/// read MR context and submit its verdict, nothing else (§Gate Agent
+/// Lifecycle: "read-only access", "identity-scoped").
+pub const REVIEW_SUBMIT_SCOPE: &str = "review:submit";
+
+/// OIDC capability granted to an AgentValidation gate's validator agent: it
+/// may read MR context to run its domain-specific check, nothing else. The
+/// validation contract is exit-code pass/fail, so this capability carries no
+/// review-submission rights — a validator must not be able to influence
+/// review-based approval surfaces.
+pub const VALIDATION_REPORT_SCOPE: &str = "validation:report";
+
 // -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
 
 /// Claims embedded in agent JWTs minted by Gyre's built-in OIDC provider.
@@ -79,7 +93,14 @@ pub struct AgentJwtClaims {
     /// Absent on worker JWTs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator_type: Option<String>,
-
+    /// Agent persona name (identity-security.md §Task-Scoped JWT Claims).
+    /// Absent when the agent was spawned without a persona assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Workload attestation level (identity-security.md): 1=raw subprocess,
+    /// 2=CLI-managed, 3=Gyre-managed container with attestation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_level: Option<u8>,
     // -- G10: Workload attestation claims -------------------------------------
     /// OS PID of the agent process (workload identity, G10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -274,6 +295,8 @@ impl AgentSigningKey {
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: None,
+            attestation_level: None,
             wl_pid,
             wl_hostname,
             wl_compute_target,
@@ -325,6 +348,7 @@ impl AgentSigningKey {
     /// `repo_id`. `task_id` carries the orchestrator's own agent id.
     /// Orchestrators are not bound to a task, but the claim is required on
     /// all agent JWTs for `gyre_agent_complete` compatibility.
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_orchestrator(
         &self,
         agent_id: &str,
@@ -334,6 +358,7 @@ impl AgentSigningKey {
         workspace_id: &str,
         repo_id: Option<&str>,
         orchestrator_type: &str,
+        persona: &str,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -351,6 +376,112 @@ impl AgentSigningKey {
             workspace_id: Some(workspace_id.to_string()),
             repo_id: repo_id.map(|r| r.to_string()),
             orchestrator_type: Some(orchestrator_type.to_string()),
+            persona: Some(persona.to_string()),
+            attestation_level: None,
+            wl_pid: None,
+            wl_hostname: None,
+            wl_compute_target: None,
+            wl_stack_hash: None,
+            wl_container_id: None,
+            wl_image_hash: None,
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
+    }
+
+    /// Mint a worker JWT scoped to the repo it was spawned against.
+    ///
+    /// Workers always carry `workspace_id` + `repo_id` claims so ABAC subject
+    /// attributes (`subject.repo_scope`, §Attributes "Agent OIDC claim") are
+    /// real for every request the agent makes. Unlike orchestrator JWTs there
+    /// is no `orchestrator_type` claim. `wl_image_hash` carries the resolved
+    /// image digest (agent-runtime.md §3, best-effort: `None` when the image
+    /// runtime could not resolve it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_worker_scoped(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        workspace_id: &str,
+        repo_id: &str,
+        persona: Option<&str>,
+        attestation_level: Option<u8>,
+        wl_image_hash: Option<String>,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = AgentJwtClaims {
+            sub: agent_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: "agent".to_string(),
+            jti: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            spawned_by: spawned_by.to_string(),
+            workspace_id: Some(workspace_id.to_string()),
+            repo_id: Some(repo_id.to_string()),
+            orchestrator_type: None,
+            persona: persona.map(|p| p.to_string()),
+            attestation_level,
+            wl_pid: None,
+            wl_hostname: None,
+            wl_compute_target: None,
+            wl_stack_hash: None,
+            wl_container_id: None,
+            wl_image_hash,
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
+    }
+
+    /// Mint a scoped agent JWT (task-134 gate-agent protocol).
+    ///
+    /// Gate agents are ephemeral, single-purpose identities. An AgentReview
+    /// gate's reviewer carries [`REVIEW_SUBMIT_SCOPE`] (submit verdict, read
+    /// MR context); an AgentValidation gate's validator carries
+    /// [`VALIDATION_REPORT_SCOPE`] (read MR context, no submission — its
+    /// contract is the process exit code). The capability string is enforced
+    /// exactly (no substring matching) by `git_http` (push denial), the ABAC
+    /// middleware (route allow-list), and `submit_review` (reviewer identity
+    /// binding). `task_id` carries the gate id so the token is traceable to
+    /// the gate run that minted it.
+    pub fn mint_scoped(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        scope: &str,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = AgentJwtClaims {
+            sub: agent_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: scope.to_string(),
+            jti: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            spawned_by: spawned_by.to_string(),
+            workspace_id: None,
+            repo_id: None,
+            orchestrator_type: None,
+            persona: None,
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
@@ -3341,6 +3472,8 @@ mod tests {
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: None,
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,

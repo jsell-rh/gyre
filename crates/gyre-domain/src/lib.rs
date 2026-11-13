@@ -37,13 +37,16 @@ pub mod policy;
 pub mod prompt_template;
 pub mod python_extractor;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rust_extractor;
+pub mod search_query;
 pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
 pub mod spec_lifecycle_config;
+pub mod spec_links;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -68,7 +71,7 @@ pub use attestation::{
     constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
 };
 pub use audit::{AuditEvent, AuditEventType, AuditOutcome};
-pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
+pub use budget::{BudgetCallRecord, BudgetConfig, BudgetEnforcementAction, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use compute_target::{ComputeTargetEntity, ComputeTargetType};
 pub use constraint_evaluator::{
@@ -104,6 +107,9 @@ pub use policy::{
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use python_extractor::PythonExtractor;
 pub use quality_gate::{GatePhase, GateResult, GateStatus, GateType, QualityGate};
+pub use repo_access::{
+    effective_repo_permissions, effective_repo_role, RepoAccessOverride, RepoPermission,
+};
 pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
@@ -116,7 +122,7 @@ pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
-pub use team::Team;
+pub use team::{Team, TeamMembership};
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
 pub use user::{
