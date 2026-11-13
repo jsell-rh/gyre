@@ -40,8 +40,8 @@ use axum::{
 };
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{
-    JudgmentType, Team, User, UserNotificationPreference, UserRole, UserToken, WorkspaceMembership,
-    WorkspaceRole,
+    JudgmentType, Team, TeamMembership, User, UserNotificationPreference, UserRole, UserToken,
+    WorkspaceMembership, WorkspaceRole,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1257,87 +1257,337 @@ pub struct TeamResponse {
     pub id: String,
     pub workspace_id: String,
     pub name: String,
+    pub slug: String,
     pub description: Option<String>,
+    pub lead: String,
     pub member_ids: Vec<String>,
     pub created_at: u64,
 }
 
-impl From<Team> for TeamResponse {
-    fn from(t: Team) -> Self {
-        Self {
+impl TeamResponse {
+    /// Build the response for a team, joining its memberships so
+    /// `member_ids` reflects the real `team_memberships` table.
+    async fn from_team(state: &AppState, t: Team) -> Result<Self, ApiError> {
+        let member_ids = state
+            .teams
+            .list_members(&t.id)
+            .await?
+            .into_iter()
+            .map(|m| m.user_id.to_string())
+            .collect();
+        Ok(Self {
             id: t.id.to_string(),
             workspace_id: t.workspace_id.to_string(),
             name: t.name,
+            slug: t.slug,
             description: t.description,
-            member_ids: t.member_ids.iter().map(|id| id.to_string()).collect(),
+            lead: t.lead.to_string(),
+            member_ids,
             created_at: t.created_at,
-        }
+        })
     }
 }
 
 #[derive(Deserialize)]
 pub struct CreateTeamRequest {
     pub name: String,
+    /// Optional explicit slug; derived from the name when omitted.
+    #[serde(default)]
+    pub slug: Option<String>,
     pub description: Option<String>,
+    /// User responsible for the team (a workspace member).
+    pub lead: String,
+}
+
+/// Resolve the slug for a create/update: an explicit slug must be URL-safe
+/// (rejected otherwise — never silently rewritten); an omitted slug is
+/// derived from the team name.
+fn resolve_team_slug(explicit: Option<&str>, name: &str) -> Result<String, ApiError> {
+    let slug = match explicit {
+        Some(s) => {
+            let s = s.trim();
+            Team::validate_slug(s)
+                .map_err(|e| ApiError::InvalidInput(format!("invalid team slug: {e}")))?;
+            s.to_string()
+        }
+        None => Team::sanitize_slug(name).ok_or_else(|| {
+            ApiError::InvalidInput(
+                "team name yields no URL-safe slug; provide an explicit 'slug' field".to_string(),
+            )
+        })?,
+    };
+    Ok(slug)
+}
+
+/// Validate that `lead` is a member of the workspace (user-management.md §
+/// Team Management: the lead is "User responsible for the team"; teams never
+/// grant permissions beyond workspace membership, so the lead must already
+/// be a workspace member).
+async fn validate_team_lead(
+    state: &AppState,
+    ws: &gyre_domain::Workspace,
+    lead: &str,
+) -> Result<Id, ApiError> {
+    let lead_id = Id::new(lead.to_string());
+    let membership = state
+        .workspace_memberships
+        .find_by_user_and_workspace(&lead_id, &ws.id)
+        .await?;
+    if membership.is_none() {
+        return Err(ApiError::InvalidInput(format!(
+            "team lead {lead} is not a member of workspace {}",
+            ws.id.as_str()
+        )));
+    }
+    Ok(lead_id)
+}
+
+/// Reject a slug that another team in the workspace already owns (the
+/// repository unique index is the race-safe backstop; this produces the
+/// clean 409).
+async fn reject_duplicate_slug(
+    state: &AppState,
+    ws_id: &Id,
+    slug: &str,
+    exclude_team: Option<&Id>,
+) -> Result<(), ApiError> {
+    if let Some(existing) = state.teams.find_by_slug(ws_id, slug).await? {
+        if Some(&existing.id) != exclude_team {
+            return Err(ApiError::Conflict(format!(
+                "team slug '{slug}' already exists in this workspace"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub async fn create_team(
+    auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTeamRequest>,
 ) -> Result<(StatusCode, Json<TeamResponse>), ApiError> {
-    let ws_id = Id::new(workspace_id);
-    let mut team = Team::new(new_id(), ws_id, req.name, now_secs());
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "teams can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
+
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "team name must not be empty".to_string(),
+        ));
+    }
+    let slug = resolve_team_slug(req.slug.as_deref(), &name)?;
+    reject_duplicate_slug(&state, &ws.id, &slug, None).await?;
+    let lead = validate_team_lead(&state, &ws, req.lead.trim()).await?;
+
+    let mut team = Team::new(new_id(), ws.id.clone(), name, slug, lead, now_secs());
     team.description = req.description;
     state.teams.create(&team).await?;
-    Ok((StatusCode::CREATED, Json(TeamResponse::from(team))))
+    Ok((
+        StatusCode::CREATED,
+        Json(TeamResponse::from_team(&state, team).await?),
+    ))
 }
 
 pub async fn list_teams(
+    auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let ws_id = Id::new(workspace_id);
-    let teams = state.teams.list_by_workspace(&ws_id).await?;
-    let items: Vec<TeamResponse> = teams.into_iter().map(Into::into).collect();
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    let teams = state.teams.list_by_workspace(&ws.id).await?;
+    let mut items = Vec::with_capacity(teams.len());
+    for team in teams {
+        items.push(TeamResponse::from_team(&state, team).await?);
+    }
     Ok(Json(serde_json::json!({"teams": items})))
 }
 
 #[derive(Deserialize)]
 pub struct UpdateTeamRequest {
     pub name: Option<String>,
+    pub slug: Option<String>,
     pub description: Option<String>,
+    pub lead: Option<String>,
 }
 
 pub async fn update_team(
+    auth: AuthenticatedAgent,
     Path((workspace_id, team_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateTeamRequest>,
 ) -> Result<Json<TeamResponse>, ApiError> {
-    let _ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "teams can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
     let tid = Id::new(team_id);
     let mut team = state
         .teams
         .find_by_id(&tid)
         .await?
         .ok_or(ApiError::NotFound("Team not found".to_string()))?;
+    // Per-handler scope check: the team must belong to the path's workspace
+    // (the path workspace is caller-scoped; a team from another workspace
+    // is a 404, not a cross-workspace write).
+    if team.workspace_id != ws.id {
+        return Err(ApiError::NotFound("Team not found".to_string()));
+    }
+
     if let Some(name) = req.name {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(ApiError::InvalidInput(
+                "team name must not be empty".to_string(),
+            ));
+        }
         team.name = name;
+    }
+    if let Some(slug) = req.slug {
+        let slug = resolve_team_slug(Some(slug.trim()), &team.name)?;
+        reject_duplicate_slug(&state, &ws.id, &slug, Some(&team.id)).await?;
+        team.slug = slug;
     }
     if let Some(desc) = req.description {
         team.description = Some(desc);
     }
+    if let Some(lead) = req.lead {
+        team.lead = validate_team_lead(&state, &ws, lead.trim()).await?;
+    }
+
     state.teams.update(&team).await?;
-    Ok(Json(TeamResponse::from(team)))
+    Ok(Json(TeamResponse::from_team(&state, team).await?))
 }
 
 pub async fn delete_team(
+    auth: AuthenticatedAgent,
     Path((workspace_id, team_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let _ws_id = Id::new(workspace_id);
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "teams can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
     let tid = Id::new(team_id);
+    let team = state
+        .teams
+        .find_by_id(&tid)
+        .await?
+        .ok_or(ApiError::NotFound("Team not found".to_string()))?;
+    if team.workspace_id != ws.id {
+        return Err(ApiError::NotFound("Team not found".to_string()));
+    }
     state.teams.delete(&tid).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct AddTeamMemberRequest {
+    pub user_id: String,
+}
+
+#[derive(Serialize)]
+pub struct TeamMembershipResponse {
+    pub team_id: String,
+    pub user_id: String,
+    pub added_at: u64,
+}
+
+/// POST /api/v1/workspaces/:id/teams/:team_id/members — add a member to a
+/// team (user-management.md §API > Teams). The user must already be a
+/// workspace member — teams are organizational and never expand access
+/// beyond workspace membership.
+pub async fn add_team_member(
+    auth: AuthenticatedAgent,
+    Path((workspace_id, team_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddTeamMemberRequest>,
+) -> Result<(StatusCode, Json<TeamMembershipResponse>), ApiError> {
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "team membership can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
+    let tid = Id::new(team_id);
+    let team = state
+        .teams
+        .find_by_id(&tid)
+        .await?
+        .ok_or(ApiError::NotFound("Team not found".to_string()))?;
+    if team.workspace_id != ws.id {
+        return Err(ApiError::NotFound("Team not found".to_string()));
+    }
+
+    let user_id = Id::new(req.user_id);
+    if state
+        .workspace_memberships
+        .find_by_user_and_workspace(&user_id, &ws.id)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::InvalidInput(format!(
+            "user {} is not a member of workspace {}; teams cannot expand access beyond \
+             workspace membership",
+            user_id.as_str(),
+            ws.id.as_str()
+        )));
+    }
+
+    let membership = TeamMembership::new(team.id.clone(), user_id.clone(), now_secs());
+    // Port contract: duplicate membership fails. Surface it as 409 here
+    // (mirroring `reject_duplicate_slug`) so the adapter's guard never
+    // bubbles up as an undifferentiated 500.
+    let existing_members = state.teams.list_members(&tid).await?;
+    if existing_members.iter().any(|m| m.user_id == user_id) {
+        return Err(ApiError::Conflict(format!(
+            "user {} is already a member of team {}",
+            user_id.as_str(),
+            tid.as_str()
+        )));
+    }
+    state.teams.add_member(&membership).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(TeamMembershipResponse {
+            team_id: membership.team_id.to_string(),
+            user_id: membership.user_id.to_string(),
+            added_at: membership.added_at,
+        }),
+    ))
+}
+
+/// DELETE /api/v1/workspaces/:id/teams/:team_id/members/:user_id — remove a
+/// member from a team (user-management.md §API > Teams). Idempotent.
+pub async fn remove_team_member(
+    auth: AuthenticatedAgent,
+    Path((workspace_id, team_id, user_id)): Path<(String, String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
+    if !can_manage_membership(&state, &auth, &ws).await? {
+        return Err(ApiError::Forbidden(
+            "team membership can only be managed by an Owner, Admin, or TenantAdmin".to_string(),
+        ));
+    }
+    let tid = Id::new(team_id);
+    let team = state
+        .teams
+        .find_by_id(&tid)
+        .await?
+        .ok_or(ApiError::NotFound("Team not found".to_string()))?;
+    if team.workspace_id != ws.id {
+        return Err(ApiError::NotFound("Team not found".to_string()));
+    }
+    state.teams.remove_member(&tid, &Id::new(user_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3542,5 +3792,552 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ─── Teams (user-management.md §Team Management) ─────────────────────────
+
+    /// Seed a Developer workspace member (tenant t-1) and return the user id.
+    async fn seed_workspace_developer(
+        state: &std::sync::Arc<crate::AppState>,
+        ws_id: &str,
+    ) -> String {
+        let now = 1_700_000_000u64;
+        let dev_id = uuid::Uuid::new_v4().to_string();
+        let mut dev = User::new(
+            Id::new(dev_id.clone()),
+            format!("dev-ext-{dev_id}"),
+            format!("dev-{dev_id}"),
+            now,
+        );
+        dev.tenant_id = Some(Id::new("t-1"));
+        state.users.create(&dev).await.unwrap();
+        let membership = WorkspaceMembership::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(dev_id.clone()),
+            Id::new(ws_id.to_string()),
+            WorkspaceRole::Developer,
+            Id::new("system"),
+            now,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+        dev_id
+    }
+
+    /// Seed a tenant user with NO workspace membership; returns the user id.
+    async fn seed_tenant_user_without_membership(
+        state: &std::sync::Arc<crate::AppState>,
+    ) -> String {
+        let now = 1_700_000_000u64;
+        let uid = uuid::Uuid::new_v4().to_string();
+        let mut user = User::new(
+            Id::new(uid.clone()),
+            format!("loner-ext-{uid}"),
+            format!("loner-{uid}"),
+            now,
+        );
+        user.tenant_id = Some(Id::new("t-1"));
+        state.users.create(&user).await.unwrap();
+        uid
+    }
+
+    async fn create_team_via_api(
+        app: &Router,
+        ws_id: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn team_crud_slug_lead_and_membership_flow() {
+        // user-management.md §Team Management + §API > Teams: create carries
+        // slug (derived from the name) + lead (a workspace member);
+        // membership add/remove endpoints carry added_at.
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let dev_id = seed_workspace_developer(&state, &ws_id).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform Team", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team = body_json(resp).await;
+        assert_eq!(team["slug"], "platform-team", "slug derives from the name");
+        assert_eq!(team["lead"], owner_id);
+        assert_eq!(team["member_ids"].as_array().unwrap().len(), 0);
+        let team_id = team["id"].as_str().unwrap().to_string();
+
+        // Add a member — the response carries the membership's added_at.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": dev_id}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let membership = body_json(resp).await;
+        assert_eq!(membership["team_id"], team_id);
+        assert_eq!(membership["user_id"], dev_id);
+        assert!(
+            membership["added_at"].as_u64().unwrap() > 0,
+            "membership must carry a real added_at timestamp"
+        );
+
+        // Duplicate membership → 409.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": dev_id}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // List reflects the real membership table.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let list = body_json(resp).await;
+        assert_eq!(list["teams"].as_array().unwrap().len(), 1);
+        assert_eq!(list["teams"][0]["member_ids"].as_array().unwrap().len(), 1);
+        assert_eq!(list["teams"][0]["member_ids"][0], dev_id);
+
+        // Update carries the new fields.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{team_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"description": "Owns the platform"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["description"], "Owns the platform");
+        assert_eq!(updated["slug"], "platform-team");
+
+        // Remove the member — idempotent.
+        for expected in [StatusCode::NO_CONTENT, StatusCode::NO_CONTENT] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!(
+                            "/api/v1/workspaces/{ws_id}/teams/{team_id}/members/{dev_id}"
+                        ))
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), expected);
+        }
+        let members = state
+            .teams
+            .list_members(&Id::new(team_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(members.len(), 0);
+
+        // Delete the team.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{team_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .teams
+            .find_by_id(&Id::new(team_id))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn team_slug_validation_and_uniqueness() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Explicit slugs must be URL-safe — never silently rewritten.
+        for bad_slug in [
+            "Bad Slug!",
+            "-platform",
+            "platform-",
+            "platform--team",
+            "Platform",
+        ] {
+            let resp = create_team_via_api(
+                &app,
+                &ws_id,
+                serde_json::json!({"name": "Platform", "slug": bad_slug, "lead": owner_id}),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "explicit slug {bad_slug:?} must be rejected"
+            );
+        }
+
+        // A name with no URL-safe derivation requires an explicit slug.
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "!!!", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Create two teams whose derived slugs collide → second is a 409
+        // (slug is unique within the workspace).
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform Team", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "platform team", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "duplicate slug within a workspace must be a 409"
+        );
+
+        // The same slug in a DIFFERENT workspace is fine.
+        let (ws2_id, owner2_id) = seed_workspace_with_owner(&state).await;
+        let resp = create_team_via_api(
+            &app,
+            &ws2_id,
+            serde_json::json!({"name": "Platform Team", "lead": owner2_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn team_lead_and_members_must_be_workspace_members() {
+        // "Teams don't grant additional permissions beyond workspace
+        // membership" — the lead and every member must already belong to the
+        // workspace.
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let loner = seed_tenant_user_without_membership(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Lead outside the workspace → 400.
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform", "lead": loner}),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a lead who is not a workspace member must be rejected"
+        );
+
+        // Member outside the workspace → 400.
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": loner}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a team member who is not a workspace member must be rejected"
+        );
+        // Nothing was written.
+        assert_eq!(
+            state
+                .teams
+                .list_members(&Id::new(team_id))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn team_routes_are_workspace_scoped() {
+        // A team from workspace B addressed through workspace A's path is a
+        // 404, not a cross-workspace read/write.
+        let state = test_state();
+        let (ws1_id, owner1) = seed_workspace_with_owner(&state).await;
+        let (ws2_id, owner2) = seed_workspace_with_owner(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = create_team_via_api(
+            &app,
+            &ws2_id,
+            serde_json::json!({"name": "Platform", "lead": owner2}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        for (method, uri) in [
+            (
+                "PUT",
+                format!("/api/v1/workspaces/{ws1_id}/teams/{team_id}"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/{ws1_id}/teams/{team_id}"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/{ws1_id}/teams/{team_id}/members"),
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/workspaces/{ws1_id}/teams/{team_id}/members/{owner1}"),
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri.clone())
+                        .header("Authorization", "Bearer test-token")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"user_id": owner1}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must be workspace-scoped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn team_update_validates_slug_conflict_and_lead() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let dev_id = seed_workspace_developer(&state, &ws_id).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "Platform", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let _t1 = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = create_team_via_api(
+            &app,
+            &ws_id,
+            serde_json::json!({"name": "SRE", "lead": owner_id}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let t2 = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        // Renaming t2 onto t1's slug → 409.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{t2}"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"slug": "platform"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Changing the lead to a non-member → 400.
+        let loner = seed_tenant_user_without_membership(&state).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{t2}"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::json!({"lead": loner}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // A valid update (lead swap to a real member) lands.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams/{t2}"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::json!({"lead": dev_id}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["lead"], dev_id);
+    }
+
+    #[tokio::test]
+    async fn team_management_requires_owner_admin_or_tenant_admin() {
+        // Team management is an Owner/Admin capability (user-management.md
+        // §UI Pages: "Team Management | Create/edit teams, manage
+        // membership"). A plain Developer member must get 403 from the
+        // handler — the same guard as membership management.
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let dev_id = seed_workspace_developer(&state, &ws_id).await;
+
+        // API key for the Developer so auth resolves through the real path.
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key("dev-key-teams"),
+                &Id::new(dev_id),
+                "test",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/teams"))
+                    .header("Authorization", "Bearer dev-key-teams")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "Platform", "lead": owner_id}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a Developer member must not be able to create teams"
+        );
+        assert_eq!(
+            state
+                .teams
+                .list_by_workspace(&Id::new(ws_id))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }

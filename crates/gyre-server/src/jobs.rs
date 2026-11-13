@@ -416,17 +416,20 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
-    // Register spawn budget reset job at midnight UTC
+    // Register the budget rolling-window job (agent-runtime.md §4 Budget
+    // Reset): hourly re-sync of the token/cost counters to the per-call
+    // records inside the last 24 hours (rolling window, not calendar day).
     registry
         .register(
             JobDefinition {
                 name: "spawn_budget_reset".to_string(),
-                description: "Resets daily spawn budget counters at midnight UTC".to_string(),
-                interval_secs: 86400,
+                description: "Applies the rolling 24h budget window: re-syncs token/cost                      counters from per-call records inside the window (hourly)"
+                    .to_string(),
+                interval_secs: 3600,
                 enabled: true,
-                run_at_utc_hour: Some(0),
+                run_at_utc_hour: None,
             },
-            |state| async move { crate::api::budget::reset_daily_counters(&state).await },
+            |state| async move { crate::api::budget::apply_rolling_24h_window(&state).await },
         )
         .await;
 
@@ -559,6 +562,22 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 run_at_utc_hour: None,
             },
             |state| async move { crate::dep_staleness::run_once(&state).await },
+        )
+        .await;
+
+    // Register code-search file indexing (search.md §Index Updates: file
+    // content is indexed asynchronously on push; also runs on a fixed interval
+    // so the index stays consistent after restarts without a manual reindex).
+    registry
+        .register(
+            JobDefinition {
+                name: "search_code_index".to_string(),
+                description: "Indexes repo file content for code search (search.md)".to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::search_indexer::run_code_index_job(&state).await },
         )
         .await;
 

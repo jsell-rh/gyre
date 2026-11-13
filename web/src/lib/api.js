@@ -325,6 +325,8 @@ export const api = {
   repoGates: (id) => request(`/repos/${id}/gates`),
   createRepoGate: (id, data) =>
     request(`/repos/${id}/gates`, { method: 'POST', body: JSON.stringify(data) }),
+  updateRepoGate: (id, gateId, data) =>
+    request(`/repos/${id}/gates/${gateId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteRepoGate: (id, gateId) =>
     request(`/repos/${id}/gates/${gateId}`, { method: 'DELETE' }),
   repoPushGates: (id) => request(`/repos/${id}/push-gates`),
@@ -587,12 +589,24 @@ export const api = {
   repoGraphModules: (id) => request(`/repos/${id}/graph/modules`),
   repoGraphRisks: (id) => request(`/repos/${id}/graph/risks`),
   getGraphConcept: (repoId, name) => request(`/repos/${repoId}/graph/concept/${encodeURIComponent(name)}`),
+  repoGraphConcepts: (repoId) => request(`/repos/${repoId}/graph/concepts`),
   repoGraphTimeline: (id, since, until) => {
     const params = new URLSearchParams();
     if (since != null) params.set('since', since);
     if (until != null) params.set('until', until);
     const qs = params.toString();
     return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
+  },
+  // Point-in-time knowledge graph (system-explorer.md §6 Architectural
+  // Timeline): `at` is unix epoch seconds or an RFC 3339 timestamp. The
+  // server reconstructs nodes/edges that existed at that instant,
+  // including ones soft-deleted since.
+  repoGraphAt: (id, at) => request(`/repos/${id}/graph?at=${encodeURIComponent(at)}`),
+  // Workspace message bus — GET lists messages, optionally filtered by
+  // kind (?kind=reconciliation_completed for timeline key moments).
+  workspaceMessages: (workspaceId, params) => {
+    const qs = params ? new URLSearchParams(params).toString() : '';
+    return request(`/workspaces/${workspaceId}/messages${qs ? '?' + qs : ''}`);
   },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
   // Meta-spec preview loop (S4.6)
@@ -767,6 +781,7 @@ export const api = {
   // Workspace-scope concept search
   workspaceGraphConcept: (wsId, name) =>
     request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),
+  workspaceGraphConcepts: (wsId) => request(`/workspaces/${wsId}/graph/concepts`),
   // API token management
   createApiToken: (data) =>
     request('/users/me/tokens', { method: 'POST', body: JSON.stringify(data) }),

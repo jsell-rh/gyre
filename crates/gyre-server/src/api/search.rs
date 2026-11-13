@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use gyre_ports::search::{FacetCounts, SearchQuery};
+use gyre_ports::search::{parse_query, FacetCounts, SearchQuery};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -68,6 +68,22 @@ pub async fn search_handler(
         }));
     }
     let limit = params.limit.min(100);
+    // §Query Language: parse `q` (terms, quoted phrases, facets) — the
+    // structured form is what the search port executes. The legacy
+    // entity_type / workspace_id params remain as backward-compatible
+    // shortcuts, but query-string facets take precedence: `type:` in `q`
+    // overrides entity_type, `workspace:` overrides workspace_id.
+    let parsed = parse_query(&q);
+    let entity_type = if parsed.facets.contains_key("type") {
+        None
+    } else {
+        params.entity_type
+    };
+    let workspace_id = if parsed.facets.contains_key("workspace") {
+        None
+    } else {
+        params.workspace_id
+    };
     // §Access Scoping: tenant/workspace/repo scope is derived from the
     // authenticated caller — never from client-supplied params. The
     // client's `workspace_id` stays a narrowing filter that the adapter
@@ -76,8 +92,9 @@ pub async fn search_handler(
     let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
     let port_query = SearchQuery {
         query: q.clone(),
-        entity_type: params.entity_type,
-        workspace_id: params.workspace_id,
+        parsed,
+        entity_type,
+        workspace_id,
         limit,
         tenant_id: scope.tenant_id,
         accessible_workspace_ids: scope.accessible_workspace_ids,
@@ -152,15 +169,17 @@ pub async fn suggest_handler(
     let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
     let suggestions = state
         .search
-        .suggest(SearchQuery {
-            query: q,
-            entity_type: None,
-            workspace_id: None,
-            limit,
-            tenant_id: scope.tenant_id,
-            accessible_workspace_ids: scope.accessible_workspace_ids,
-            accessible_repo_ids: scope.accessible_repo_ids,
-        })
+        .suggest(
+            SearchQuery::parse(q)
+                .with_entity_type(None)
+                .with_workspace_id(None)
+                .with_limit(limit)
+                .with_scope(
+                    scope.tenant_id,
+                    scope.accessible_workspace_ids,
+                    scope.accessible_repo_ids,
+                ),
+        )
         .await
         .map_err(ApiError::Internal)?;
     Ok(Json(SuggestResponse { suggestions }))
@@ -183,27 +202,24 @@ pub async fn facets_handler(
     let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
     let facets = state
         .search
-        .facet_counts(SearchQuery {
-            query: String::new(),
-            entity_type: None,
-            workspace_id: None,
-            limit: 0,
-            tenant_id: scope.tenant_id,
-            accessible_workspace_ids: scope.accessible_workspace_ids,
-            accessible_repo_ids: scope.accessible_repo_ids,
-        })
+        .facet_counts(SearchQuery::parse("").with_limit(0).with_scope(
+            scope.tenant_id,
+            scope.accessible_workspace_ids,
+            scope.accessible_repo_ids,
+        ))
         .await
         .map_err(ApiError::Internal)?;
     Ok(Json(FacetsResponse { facets }))
 }
 
-/// POST /api/v1/search/reindex — force full reindex (Admin only).
+/// POST /api/v1/admin/search/reindex — force full reindex (Admin only).
+/// Rebuilds the entire index from the domain repositories (specs, tasks, MRs,
+/// reviews, commits, agents, personas, activity events, audit events, files)
+/// and returns the true number of documents indexed.
 pub async fn reindex_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let count = state
-        .search
-        .reindex_all()
+    let count = crate::search_indexer::reindex_all(&state)
         .await
         .map_err(ApiError::Internal)?;
     Ok((

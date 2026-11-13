@@ -200,7 +200,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -223,7 +223,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -253,7 +253,7 @@ fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
             enabled: true,
             immutable: false,
             built_in: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: now,
             updated_at: now,
         },
@@ -414,8 +414,13 @@ pub(crate) async fn spawn_agent_core(
         return Err(ApiError::Forbidden(reason));
     }
 
-    // M22.2: Budget enforcement — check workspace concurrent-agent and daily limits.
-    super::budget::check_spawn_budget(&state, &repo.workspace_id.to_string())
+    // M22.2 / agent-runtime.md §4: Budget enforcement — check workspace
+    // concurrent-agent and daily limits, then the repo-level budget
+    // override (inherits the workspace limit when unset).
+    super::budget::check_spawn_budget(state, &repo.workspace_id.to_string())
+        .await
+        .map_err(ApiError::TooManyRequests)?;
+    super::budget::check_repo_spawn_budget(state, &repo)
         .await
         .map_err(ApiError::TooManyRequests)?;
 
@@ -646,30 +651,54 @@ pub(crate) async fn spawn_agent_core(
         _ => None,
     };
 
-    // Pre-mint a JWT so it can be injected into the container environment at
-    // spawn time.  After spawn we create the workload attestation record
-    // (stored in state.workload_attestations) which is queryable via
-    // GET /api/v1/agents/{id}/workload.
+    // Pre-mint a JWT carrying the worker's repo scope so `subject.repo_scope`
+    // (§Attributes, source "Agent OIDC claim") is real on every request the
+    // agent makes, plus the `wl_image_hash` workload attestation claim
+    // resolved above. Further workload claims are attached via the workload
+    // attestation record (state.workload_attestations, queryable via
+    // GET /api/v1/agents/{id}/workload).
     let token = state
         .agent_signing_key
-        .mint_with_workload(
+        .mint_worker_scoped(
             &agent.id.to_string(),
             &req.task_id,
             &auth.agent_id,
             &state.base_url,
             jwt_ttl,
+            &repo.workspace_id.to_string(),
+            &req.repo_id,
+            // No persona input exists on the spawn request; workers run
+            // persona-less until a persona assignment mechanism exists.
             None,
-            None,
-            None,
-            None,
-            None,
+            // identity-security.md attestation levels: 1=raw subprocess,
+            // 2=CLI-managed, 3=Gyre-managed container with attestation.
+            // Every spawn-minted JWT carries attestation_level (Task-Scoped
+            // JWT Claims reference): no target (None) is a plain local
+            // subprocess — level 1, not an absent claim. An absent claim
+            // leaves subject.attestation_level unset at ABAC evaluation, so
+            // Deny policies keyed on the least-attested class would
+            // silently miss raw-subprocess agents.
+            Some(
+                resolved_ct_entity
+                    .as_ref()
+                    .map_or(1u8, |ct| match ct.target_type {
+                        ComputeTargetType::Container => 3,
+                        ComputeTargetType::Ssh => 2,
+                        // Kubernetes falls back to 1 until the runtime
+                        // reports workload attestations for pods
+                        // (tracked by task-129).
+                        ComputeTargetType::Kubernetes => 1,
+                    }),
+            ),
             wl_image_hash,
         )
         .unwrap_or_else(|e| {
             tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
             uuid::Uuid::new_v4().to_string()
         });
-    // Store now so the container can authenticate immediately upon start.
+    // Register the token so the spawned agent can authenticate immediately
+    // upon start (auth.rs path 2: agent_tokens lookup; a JWT missing from
+    // this map is treated as revoked — 401 before any handler runs).
     let _ = state
         .kv_store
         .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
@@ -967,6 +996,15 @@ pub(crate) async fn spawn_agent_core(
                 set_sha: prompt_set.set_sha.clone(),
                 assembled_at: now,
                 meta_specs_used: prompt_set.sections.iter().map(|s| s.used.clone()).collect(),
+                // agent-runtime.md §5: the rendered meta-spec system prompt
+                // (the persona section) — recorded verbatim so the MCP
+                // `system://persona` prompt serves exactly what the agent
+                // received in `GYRE_META_SPEC_PROMPT` at spawn. The
+                // protocol section is system-managed and served separately
+                // via `system://protocol` (`GYRE_PROTOCOL_PROMPT`).
+                rendered_prompt: Some(crate::prompt_assembly::render_system_prompt(
+                    &prompt_set.sections,
+                )),
             },
         )
         .await;
@@ -1075,10 +1113,18 @@ pub(crate) async fn spawn_agent_core(
         new_id(),
         "agent.spawned",
         Some(agent.id.to_string()),
-        serde_json::json!({ "task_id": req.task_id }),
+        serde_json::json!({
+            "task_id": req.task_id,
+            // Scope facets (search.md §Searchable Entities: Activity Event
+            // is filterable by workspace/repo).
+            "workspace_id": repo.workspace_id.to_string(),
+            "repo_id": repo.id.to_string(),
+        }),
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
     super::budget::increment_active_agents(state, &repo.workspace_id.to_string()).await;
@@ -1304,6 +1350,14 @@ pub(crate) async fn launch_agent_process(
                 prompt_set.set_sha.clone(),
             );
         }
+        // agent-runtime.md §5 Agent Prompt Structure: the PROTOCOL section
+        // (Ralph loop rules, MCP tools, heartbeat, escalation, completion)
+        // is system-managed — injected at spawn and served on demand via
+        // the MCP `system://protocol` prompt.
+        container_env.insert(
+            "GYRE_PROTOCOL_PROMPT".to_string(),
+            crate::prompt_assembly::render_protocol_prompt(),
+        );
         container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
         container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.clone());
         container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.clone());
@@ -1316,9 +1370,13 @@ pub(crate) async fn launch_agent_process(
         // session knows which iteration it is running.
         container_env.insert("GYRE_ITERATION".to_string(), agent.iteration.to_string());
 
-        // platform-model.md §4.3: the system prompts are injected at spawn
-        // time — the agent does not need to fetch them. Content is identical
-        // to what the MCP `prompts/get` handlers serve.
+        // platform-model.md §4.3: the persona/protocol/context/constraints
+        // prompts are injected at spawn time so the agent does not need to
+        // fetch them. `GYRE_PROTOCOL_PROMPT` carries the same system-managed
+        // protocol text the MCP `system://protocol` prompt serves; the
+        // persona prompt is the bound persona's prompt (the MCP
+        // `system://persona` prompt serves the assembled meta-spec set per
+        // agent-runtime.md §5).
         if let Some(persona_prompt) = &prompt_persona {
             container_env.insert("GYRE_PROMPT_PERSONA".to_string(), persona_prompt.clone());
         }
@@ -1522,6 +1580,7 @@ pub(crate) async fn launch_agent_process(
                             let ctx = crate::container_audit::AuditCtx {
                                 audit: state.audit.as_ref(),
                                 broadcast_tx: &state.audit_broadcast_tx,
+                                search: state.search.as_ref(),
                             };
                             crate::container_audit::emit_started(
                                 &ctx,
@@ -1996,6 +2055,7 @@ async fn monitor_spawned_agent_exit(state: Arc<AppState>, agent_id: String) {
                 let ctx = crate::container_audit::AuditCtx {
                     audit: state.audit.as_ref(),
                     broadcast_tx: &state.audit_broadcast_tx,
+                    search: state.search.as_ref(),
                 };
                 let container_id_for_evt = audit_rec.map(|r| r.container_id).unwrap_or_default();
                 crate::container_audit::emit_stopped(
@@ -2307,25 +2367,45 @@ pub async fn complete_agent(
         new_id(),
         "agent.completed",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string() }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            // Scope facets (search.md §Searchable Entities: Activity Event
+            // is filterable by workspace/repo).
+            "workspace_id": mr.workspace_id.to_string(),
+            "repo_id": mr.repository_id.to_string(),
+        }),
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // Auto-track MR creation
     let ev = AnalyticsEvent::new(
         new_id(),
         "mr.created",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string(), "source_branch": mr.source_branch }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "source_branch": mr.source_branch,
+            // Scope facets (search.md §Searchable Entities: Activity Event
+            // is filterable by workspace/repo).
+            "workspace_id": mr.workspace_id.to_string(),
+            "repo_id": mr.repository_id.to_string(),
+        }),
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev)).await;
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
         super::budget::decrement_active_agents(&state, &repo.workspace_id.to_string()).await;
     }
+    // agent-runtime.md §4 What's Tracked: charge the agent's wall-clock
+    // compute time (spawn → complete) to the workspace, in minutes.
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     // Notify the spawning user that the agent completed and an MR is ready for review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
@@ -2424,6 +2504,25 @@ pub async fn record_agent_usage(
 
     state.agents.record_usage(&usage).await?;
 
+    // agent-runtime.md §4 Cascade: agent usage charges against the repo's
+    // budget. Worker agents link their repo via the task (repo orchestrators
+    // carry `agent.repo_id`), so resolve the repo from the current task when
+    // the agent record has no direct binding.
+    let repo_id = match agent.repo_id.clone() {
+        Some(r) => Some(r),
+        None => match agent.current_task_id.as_ref() {
+            Some(task_id) => state
+                .tasks
+                .find_by_id(task_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| t.repo_id)
+                .filter(|r| !r.to_string().is_empty()),
+            None => None,
+        },
+    };
+
     // Platform-model.md §Budget Tracking: every usage report appends one
     // per-call budget record and rolls into the workspace + tenant
     // tokens_used_today / cost_today counters (the input check_spawn_budget
@@ -2433,7 +2532,7 @@ pub async fn record_agent_usage(
         &super::budget::LlmCallUsage {
             tenant_id: workspace.tenant_id.clone(),
             workspace_id: agent.workspace_id.clone(),
-            repo_id: agent.repo_id.clone(),
+            repo_id,
             agent_id: Some(agent.id.clone()),
             task_id: agent.current_task_id.clone(),
             usage_type: "agent_run".to_string(),
@@ -2444,6 +2543,8 @@ pub async fn record_agent_usage(
                 .llm_model
                 .clone()
                 .unwrap_or_else(|| crate::llm_helpers::DEFAULT_LLM_MODEL.to_string()),
+            // Agent-initiated runs have no user-facing prompt template.
+            prompt_template_sha: None,
         },
     )
     .await;
@@ -2485,6 +2586,8 @@ pub async fn fail_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // agent-runtime.md §4: wall-clock compute time (spawn → fail).
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     // Platform Model §7: Failed is a terminal run-end (agent-runtime.md §1),
     // so the run's task-scoped ephemeral secrets must not outlive it —
@@ -2577,6 +2680,8 @@ pub async fn stop_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // agent-runtime.md §4: wall-clock compute time (spawn → stop).
+    super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     Ok(StatusCode::OK)
 }
@@ -2990,6 +3095,34 @@ mod tests {
         assert_eq!(json["branch"], "feat/build");
         // jj_change_id is present in the response (null when worktree doesn't exist on disk)
         assert!(json.get("jj_change_id").is_some());
+    }
+
+    /// identity-security.md §Task-Scoped JWT Claims: every JWT minted by
+    /// POST /api/v1/agents/spawn carries `attestation_level`. A spawn that
+    /// resolves no compute target is a plain local subprocess and must mint
+    /// level 1 — not omit the claim. An absent claim leaves
+    /// `subject.attestation_level` unset at ABAC evaluation, so Deny policies
+    /// keyed on the least-attested class (e.g. the spec's own
+    /// gate-approved-persona deny on attestation_level < 3) would silently
+    /// miss raw-subprocess agents (fail-open for those denies).
+    #[tokio::test]
+    async fn spawn_without_compute_target_mints_attestation_level_one() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "no-target spawn").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/no-target").await;
+
+        let token = json["token"].as_str().expect("spawn returns a token");
+        let claims = state
+            .agent_signing_key
+            .validate(token, &state.base_url)
+            .expect("spawn token is a valid agent JWT signed by this server");
+        assert_eq!(
+            claims.attestation_level,
+            Some(1),
+            "no-target (local subprocess) spawn must mint attestation_level 1"
+        );
     }
 
     #[tokio::test]
@@ -6586,6 +6719,114 @@ exit 1\n"
         assert!(
             env_prompt.contains(prompt_text),
             "rendered prompt must contain the seeded persona prompt text:\n{env_prompt}"
+        );
+
+        // agent-runtime.md §5: the system-managed PROTOCOL section is
+        // injected at spawn alongside the meta-spec system prompt.
+        let env_protocol = env
+            .get("GYRE_PROTOCOL_PROMPT")
+            .expect("pod manifest must carry GYRE_PROTOCOL_PROMPT");
+        assert!(
+            env_protocol.contains("Ralph loop rules"),
+            "protocol prompt must carry the Ralph loop rules:\n{env_protocol}"
+        );
+        assert!(
+            env_protocol.contains("agent.complete"),
+            "protocol prompt must carry completion signaling:\n{env_protocol}"
+        );
+    }
+
+    /// agent-runtime.md §5 (task-119 repair, F4): the MCP
+    /// `system://persona` prompt must serve the pinned meta-spec system
+    /// prompt ONLY — not the system-managed protocol section. The record
+    /// stored at spawn is what the prompt serves verbatim, so this test
+    /// fails if the spawn path concatenates the protocol into
+    /// `rendered_prompt` (a client asking for the persona would then also
+    /// receive the protocol text verbatim).
+    #[tokio::test]
+    async fn mcp_persona_prompt_serves_meta_spec_section_only() {
+        use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+        use sha2::Digest;
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // One required, approved, tenant-scoped persona — assembled into
+        // every spawn's prompt set.
+        let prompt_text = "You are the persona-delivery regression persona.";
+        let content_hash = {
+            let mut h = sha2::Sha256::new();
+            h.update(prompt_text.as_bytes());
+            hex::encode(h.finalize())
+        };
+        state
+            .meta_specs
+            .create(&gyre_domain::MetaSpec {
+                id: gyre_common::Id::new("ms-persona-delivery"),
+                kind: MetaSpecKind::Persona,
+                name: "persona-delivery-persona".to_string(),
+                scope: MetaSpecScope::Global,
+                scope_id: None,
+                prompt: prompt_text.to_string(),
+                version: 1,
+                content_hash,
+                required: true,
+                approval_status: MetaSpecApprovalStatus::Approved,
+                approved_by: Some("system".to_string()),
+                approved_content_hash: None,
+                approved_at: Some(1),
+                created_by: "system".to_string(),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .expect("seeding required meta-spec must succeed");
+
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Persona prompt delivery task").await;
+        let (_app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/persona-prompt").await;
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        // Fetch the persona prompt AS the spawned agent. `/mcp` is served by
+        // the full server router (`build_router`), not `api_router()` — the
+        // spawn/fixture calls above share the same `state`, so the agent
+        // spawned through the bare API router is visible here.
+        let resp = crate::build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {agent_token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 91,
+                            "method": "prompts/get",
+                            "params": { "name": "system://persona" }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let text = json["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("persona prompt text");
+
+        // The pinned meta-spec section is served verbatim.
+        assert!(
+            text.contains(prompt_text),
+            "system://persona must serve the pinned meta-spec prompt:\n{text}"
+        );
+        // ...and ONLY that: the protocol section is served via
+        // system://protocol, never bundled into the persona prompt.
+        assert!(
+            !text.contains("Ralph loop rules"),
+            "system://persona must not serve the protocol section:\n{text}"
         );
     }
 

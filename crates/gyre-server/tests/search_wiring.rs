@@ -83,6 +83,7 @@ fn doc(entity_type: &str, entity_id: &str, title: &str, body: &str) -> SearchDoc
         repo_id: None,
         tenant_id: None,
         facets: HashMap::new(),
+        updated_at: None,
     }
 }
 
@@ -164,14 +165,14 @@ async fn sqlite_url_wires_fts5_search_port() {
 
     // Unscoped-within-tenant query (Admin shape): tenant "default" matches
     // the doc whose tenant was derived from the workspace's scope row.
-    let admin_query = |q: &str| SearchQuery {
-        query: q.to_string(),
-        entity_type: None,
-        workspace_id: None,
-        limit: 10,
-        tenant_id: "default".to_string(),
-        accessible_workspace_ids: None,
-        accessible_repo_ids: None,
+    // Built via `SearchQuery::parse` so the raw query and its query-language
+    // parse stay consistent, then scoped.
+    let admin_query = |q: &str| {
+        SearchQuery::parse(q.to_string()).with_limit(10).with_scope(
+            "default".to_string(),
+            None,
+            None,
+        )
     };
 
     // Porter stemming: "running" stems to "run" and matches indexed "runs".
@@ -380,6 +381,181 @@ async fn sqlite_url_wires_fts5_search_port() {
         "search index is not durable across build_state — mem-backed regression"
     );
     assert_eq!(persisted[0].title, "Quokka census");
+
+    // ── §Query Language (task-154): quoted phrases, facets, time bounds ────
+    // Both docs carry the caller's tenant (the global test token is Admin,
+    // tenant "default"): §Access Scoping makes the tenant boundary
+    // fail-closed, so a doc indexed with no resolvable tenant is invisible
+    // to every scoped query — the same contract the MCP query-language test
+    // seeds against (1bb3c01b).
+    // A doc with both words but never adjacent: a phrase query must not match.
+    let mut scattered = doc(
+        "task",
+        "scattered",
+        "Quokka elsewhere",
+        "Count only the island quokkas every quarter.",
+    );
+    scattered.tenant_id = Some("default".to_string());
+    state.search.index(scattered).await.unwrap();
+    // A 40-day-old doc: since: must exclude it, absolute bounds must not.
+    let mut ancient = doc(
+        "task",
+        "ancient",
+        "Ancient survey",
+        "ancient relic keyword census",
+    );
+    ancient.tenant_id = Some("default".to_string());
+    ancient.updated_at = Some(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - 40 * 86_400,
+    );
+    state.search.index(ancient).await.unwrap();
+
+    // Quoted phrase: exact adjacency ("count quokkas" porter-stems to the
+    // adjacent token pair count~quokka in the census task's body only).
+    let resp = call(&app, "GET", "/api/v1/search?q=%22count%20quokkas%22", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let titles: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Quokka census"],
+        "phrase query must require adjacency, not both words: {body}"
+    );
+
+    // Unquoted, the same words are independent terms — both quokka docs match.
+    let resp = call(&app, "GET", "/api/v1/search?q=count%20quokkas", None).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(2), "{body}");
+
+    // Facet filter narrows: the API-created task carries status=backlog.
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=quokkas%20status:backlog",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["results"][0]["title"], "Quokka census");
+    // facet_counts aggregates the facet-filtered match set.
+    assert_eq!(body["facet_counts"]["status"]["backlog"].as_u64(), Some(1));
+
+    // Non-matching facet value: nothing, not everything.
+    let resp = call(&app, "GET", "/api/v1/search?q=quokkas%20status:open", None).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["total"].as_u64(), Some(0), "{body}");
+
+    // Facet-only query (no text) browses the filtered set.
+    let resp = call(&app, "GET", "/api/v1/search?q=status:backlog", None).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["results"][0]["title"], "Quokka census");
+
+    // Query-string facet takes precedence over the entity_type param
+    // (the param is a fallback shortcut, §Query Language).
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=quokkas%20type:task&entity_type=mr",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body["results"].as_array().map(Vec::len),
+        Some(2),
+        "type: facet must override the entity_type param: {body}"
+    );
+
+    // since: excludes the 40-day-old doc; absolute bounds do not.
+    let resp = call(&app, "GET", "/api/v1/search?q=census%20since:7d", None).await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let titles: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        ["Quokka census"],
+        "since:7d must exclude the old doc: {body}"
+    );
+
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=census%20since:2000-01-01",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["results"].as_array().map(Vec::len), Some(2), "{body}");
+
+    let resp = call(
+        &app,
+        "GET",
+        "/api/v1/search?q=census%20until:2000-01-01",
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["total"].as_u64(), Some(0), "{body}");
 }
 
 #[tokio::test]
@@ -538,6 +714,7 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
             "ws-a",
             Some("repo-1"),
             "repo_orchestrator",
+            "repo-orchestrator",
         )
         .unwrap();
     state
@@ -590,6 +767,7 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
             "ws-a",
             None,
             "workspace_orchestrator",
+            "workspace-orchestrator",
         )
         .unwrap();
     state

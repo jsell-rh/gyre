@@ -93,7 +93,14 @@ pub struct AgentJwtClaims {
     /// Absent on worker JWTs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator_type: Option<String>,
-
+    /// Agent persona name (identity-security.md §Task-Scoped JWT Claims).
+    /// Absent when the agent was spawned without a persona assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Workload attestation level (identity-security.md): 1=raw subprocess,
+    /// 2=CLI-managed, 3=Gyre-managed container with attestation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_level: Option<u8>,
     // -- G10: Workload attestation claims -------------------------------------
     /// OS PID of the agent process (workload identity, G10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -288,6 +295,8 @@ impl AgentSigningKey {
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: None,
+            attestation_level: None,
             wl_pid,
             wl_hostname,
             wl_compute_target,
@@ -339,6 +348,7 @@ impl AgentSigningKey {
     /// `repo_id`. `task_id` carries the orchestrator's own agent id.
     /// Orchestrators are not bound to a task, but the claim is required on
     /// all agent JWTs for `gyre_agent_complete` compatibility.
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_orchestrator(
         &self,
         agent_id: &str,
@@ -348,6 +358,7 @@ impl AgentSigningKey {
         workspace_id: &str,
         repo_id: Option<&str>,
         orchestrator_type: &str,
+        persona: &str,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -365,12 +376,67 @@ impl AgentSigningKey {
             workspace_id: Some(workspace_id.to_string()),
             repo_id: repo_id.map(|r| r.to_string()),
             orchestrator_type: Some(orchestrator_type.to_string()),
+            persona: Some(persona.to_string()),
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
             wl_stack_hash: None,
             wl_container_id: None,
             wl_image_hash: None,
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
+    }
+
+    /// Mint a worker JWT scoped to the repo it was spawned against.
+    ///
+    /// Workers always carry `workspace_id` + `repo_id` claims so ABAC subject
+    /// attributes (`subject.repo_scope`, §Attributes "Agent OIDC claim") are
+    /// real for every request the agent makes. Unlike orchestrator JWTs there
+    /// is no `orchestrator_type` claim. `wl_image_hash` carries the resolved
+    /// image digest (agent-runtime.md §3, best-effort: `None` when the image
+    /// runtime could not resolve it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_worker_scoped(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        workspace_id: &str,
+        repo_id: &str,
+        persona: Option<&str>,
+        attestation_level: Option<u8>,
+        wl_image_hash: Option<String>,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = AgentJwtClaims {
+            sub: agent_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: "agent".to_string(),
+            jti: uuid::Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            spawned_by: spawned_by.to_string(),
+            workspace_id: Some(workspace_id.to_string()),
+            repo_id: Some(repo_id.to_string()),
+            orchestrator_type: None,
+            persona: persona.map(|p| p.to_string()),
+            attestation_level,
+            wl_pid: None,
+            wl_hostname: None,
+            wl_compute_target: None,
+            wl_stack_hash: None,
+            wl_container_id: None,
+            wl_image_hash,
         };
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         header.kid = Some(self.kid.clone());
@@ -414,6 +480,8 @@ impl AgentSigningKey {
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: None,
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
@@ -426,7 +494,6 @@ impl AgentSigningKey {
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(|e| format!("JWT mint error: {e}"))
     }
-
     /// Mint an impersonation JWT (identity-security.md §Impersonation).
     ///
     /// `sub` is the **target** user (so permissions match theirs) while
@@ -3447,6 +3514,8 @@ mod tests {
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: None,
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,

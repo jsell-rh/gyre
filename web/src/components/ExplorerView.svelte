@@ -3,7 +3,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
-  import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { computeTimelineDeltaStats, computeTimelineGhostOverlays, createTimelineHistoryFetcher, resolveScrubTimestamp } from '../lib/timeline-utils.js';
   import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
   import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
@@ -21,7 +21,7 @@
   // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
   // workspace generate endpoint (read-only query translator).
   import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
-  import { viewSpecToViewQuery } from '../lib/generated-view.js';
+  import { viewSpecToViewQuery, viewDocumentToQuery } from '../lib/generated-view.js';
   import { FLOW_TEMPLATES, matchFlowTemplate, flowTemplateQuery, pickTraceMr } from '../lib/flow-templates.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -38,7 +38,7 @@
   // In-view filter panel (ui-navigation.md §3, task-178): category filters +
   // discovered concepts, toggled by the filter icon in the control bar.
   import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
-  import { hiddenNodeIds as computeHiddenNodeIds, CATEGORY_IDS } from '../lib/filter-categories.js';
+  import { hiddenNodeIds as computeHiddenNodeIds, conceptNodeIds as computeConceptNodeIds, CATEGORY_IDS } from '../lib/filter-categories.js';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
@@ -47,6 +47,10 @@
   // a repo node → scope changes to repo). Wired by App.svelte; absent in
   // standalone/test renders where the in-place drill fallback applies.
   const goToRepoCtx = getContext('goToRepo');
+  // App-level detail panel opener — used for agent provenance links in the
+  // moldable views (system-explorer.md §2: "Every agent reference is
+  // clickable → shows provenance"). Absent in standalone/test renders.
+  const openDetailPanelCtx = getContext('openDetailPanel') ?? null;
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
@@ -136,13 +140,129 @@
   let specApprovals = $state([]);
   let explorerSavedViews = $state([]);
 
-  // ── In-view filter panel (ui-navigation.md §3, task-178) ─────────────
-  // Collapsible 200px left panel inside the Architecture content area
-  // (NOT the app sidebar). Category checkboxes + concept selection toggle
-  // node visibility on the canvas via filter-categories.js.
+  // In-view filter panel (ui-navigation.md §3, task-178): filter icon in
+  // the control bar opens the collapsible 200px left panel inside the
+  // Architecture content area (not the app sidebar). Category checkboxes
+  // toggle node visibility; concept selection fades the canvas to the
+  // concept's elements (task-182, system-explorer.md §4).
   let filterPanelOpen = $state(false);
   let activeFilterCategories = $state({ boundaries: true, interfaces: true, data: true, specs: true });
   let activeFilterConcepts = $state([]);
+
+  // ── Concept views (system-explorer.md §4, task-182) ─────────────
+  // Predefined concepts from the repo's spec manifest (served by
+  // GET /repos/:id/graph/concepts); selecting one fetches its projection
+  // (GET /repos/:id/graph/concept/:name) and fades the canvas to the
+  // concept's nodes. Discovered concepts (activeFilterConcepts above)
+  // use the substring mechanism — both are supported per the spec's data
+  // source distinction.
+  let manifestConcepts = $state([]);
+  let manifestConceptsLoadedFor = $state('');
+  let activeManifestConcept = $state(null); // { name, nodeIds: Set|null }
+
+  // Fetch the manifest concept listing when the filter panel opens at
+  // repo scope (once per repo — the panel is the only consumer).
+  $effect(() => {
+    if (!filterPanelOpen || !selectedRepoId || explorerViewMode !== 'boundary') return;
+    if (manifestConceptsLoadedFor === selectedRepoId) return;
+    const repoId = selectedRepoId;
+    manifestConceptsLoadedFor = repoId;
+    api.repoGraphConcepts(repoId)
+      .then((res) => {
+        if (selectedRepoId !== repoId) return; // stale
+        manifestConcepts = Array.isArray(res?.concepts) ? res.concepts : [];
+      })
+      .catch(() => {
+        // No manifest / endpoint unavailable — no predefined concepts to
+        // list; allow a retry on the next panel open.
+        if (selectedRepoId === repoId) manifestConceptsLoadedFor = '';
+      });
+  });
+
+  /** Toggle a manifest concept view: fetching the projection resolves the
+   *  concept's node set (manifest-based — distinct from the substring
+   *  mechanism); toggling the active concept clears it. */
+  async function toggleManifestConcept(name) {
+    if (activeManifestConcept?.name === name) {
+      activeManifestConcept = null;
+      return;
+    }
+    activeManifestConcept = { name, nodeIds: null }; // projection loading
+    pushInteraction({ action: 'concept', detail: `manifest:${name}` });
+    try {
+      const result = await api.getGraphConcept(selectedRepoId, name);
+      if (activeManifestConcept?.name !== name) return; // stale toggle
+      const ids = new Set((result?.nodes ?? []).map((n) => n?.id).filter(Boolean));
+      activeManifestConcept = { name, nodeIds: ids };
+    } catch (e) {
+      if (activeManifestConcept?.name === name) activeManifestConcept = null;
+      showToast(`Concept "${name}" could not be loaded: ${e.message}`, { type: 'error' });
+    }
+  }
+
+  // ── Ad-hoc concept creation (system-explorer.md §4) ─────────────
+  // Multi-select on the canvas (Shift+Click) + "Create concept" (context
+  // menu or the selection bar) opens a naming dialog; saving persists the
+  // grouping as an explorer view (POST /workspaces/:id/explorer-views)
+  // whose ViewQuery concept scope seeds exactly the selected nodes.
+  let conceptDialog = $state(null); // { name, error, saving, nodes: [...] }
+
+  function openConceptDialog(nodeIds) {
+    const ids = Array.isArray(nodeIds) ? nodeIds : [...(nodeIds ?? [])];
+    const nodes = (effectiveGraph?.nodes ?? []).filter((n) => ids.includes(n.id));
+    if (nodes.length < 2) return;
+    conceptDialog = { name: '', error: '', saving: false, nodes };
+  }
+
+  function closeConceptDialog() {
+    conceptDialog = null;
+  }
+
+  async function saveConceptDialog() {
+    if (!conceptDialog) return;
+    const name = (conceptDialog.name ?? '').trim();
+    if (!name) {
+      conceptDialog = { ...conceptDialog, error: 'Name the concept before saving.' };
+      return;
+    }
+    const workspaceId = scope?.workspaceId;
+    if (!workspaceId) {
+      conceptDialog = { ...conceptDialog, error: 'No workspace scope — cannot save a view here.' };
+      return;
+    }
+    // ViewQuery grammar (view-query-grammar.md): a concept scope seeded
+    // with the selected nodes' qualified names. No edge expansion — the
+    // ad-hoc concept is exactly the grouped nodes.
+    const seedNodes = conceptDialog.nodes.map((n) => n.qualified_name ?? n.name);
+    const spec = {
+      scope: {
+        type: 'concept',
+        seed_nodes: seedNodes,
+        expand_edges: [],
+        expand_depth: 0,
+        expand_direction: 'both',
+      },
+      emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.15 },
+      zoom: 'fit',
+      annotation: {
+        title: `Concept: ${name}`,
+        description: `${seedNodes.length} grouped nodes`,
+      },
+    };
+    conceptDialog = { ...conceptDialog, saving: true, error: '' };
+    try {
+      await api.saveExplorerView(workspaceId, {
+        name,
+        description: `Ad-hoc concept grouping ${seedNodes.length} nodes`,
+        spec,
+      });
+      pushInteraction({ action: 'save_concept', detail: name });
+      showToast(`Concept "${name}" saved as an explorer view`, { type: 'success' });
+      conceptDialog = null;
+    } catch (e) {
+      conceptDialog = { ...conceptDialog, saving: false, error: e.message };
+    }
+  }
 
   // ── View spec editor (ui-navigation.md §3, task-178) ────────────────
   // "Edit view spec" opens a collapsible JSON editor for the view spec
@@ -1273,8 +1393,9 @@
   // dropdown opens; best-effort (a failed fetch keeps the current list).
   // Both scopes are merged by id, mirroring the socket's ListViews: the
   // repo-scoped records carry the stored ViewQuery directly, the
-  // workspace-scoped records carry a ViewSpec (translated via
-  // viewSpecToViewQuery).
+  // workspace-scoped records carry a stored document in EITHER grammar
+  // (ViewSpec — generated views; ViewQuery — ad-hoc concept groupings),
+  // translated via viewDocumentToQuery.
   let savedViewsRefreshing = false;
   async function refreshSavedViews() {
     if (savedViewsRefreshing) return;
@@ -1296,7 +1417,7 @@
         byId.set(r.id, {
           ...r,
           is_system: r.is_system ?? r.is_builtin ?? false,
-          query: r.query ?? (r.spec ? viewSpecToViewQuery(r.spec) : null),
+          query: r.query ?? (r.spec ? viewDocumentToQuery(r.spec) : null),
         });
       }
       explorerSavedViews = [...byId.values()];
@@ -1794,6 +1915,7 @@
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
       if (viewSelectOpen) { viewSelectOpen = false; return; }
+      if (conceptDialog) { conceptDialog = null; return; }
       if (viewMenu) { viewMenu = null; return; }
       if (viewTooltip) { viewTooltip = null; return; }
       if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
@@ -1880,10 +2002,68 @@
   let timelineScrubActive = $state(false);
   let timelineScrubIndex = $state(-1); // index into graphTimeline array, -1 = current
 
-  // When timeline scrub is active, compute filtered nodes/edges to show state at that point
+  // The timeline array the scrubber scrubs over: the full insights-panel
+  // timeline once loaded, else the liveness slice loaded at repo selection.
+  let timelineArray = $derived(Array.isArray(graphTimeline) ? graphTimeline : (Array.isArray(livenessTimeline) ? livenessTimeline : []));
+  // Scrub position as unix epoch seconds (null = present / unknown).
+  let timelineScrubTimestamp = $derived(resolveScrubTimestamp(timelineArray, timelineScrubIndex));
+
+  // Server point-in-time graph (GET /repos/:id/graph?at=) for the current
+  // scrub position: { at, graph }. Set by the debounced fetch effect below;
+  // null while pending, on failure, or when time travel is off — the
+  // client-side first_seen_at filter below is the instant fallback.
+  let timelineHistoricalGraph = $state(null);
+  let timelineHistoryFetcher = null;   // debounced ?at= fetcher (per repo)
+  let timelineHistoryFetcherFor = '';  // repoId the current fetcher is bound to
+
+  $effect(() => {
+    // The "Now" position (last index) is the present — no historical fetch.
+    if (
+      !timelineScrubActive ||
+      timelineScrubTimestamp == null ||
+      !selectedRepoId ||
+      timelineScrubIndex >= timelineArray.length - 1
+    ) {
+      timelineHistoricalGraph = null;
+      return;
+    }
+    const repoId = selectedRepoId;
+    const at = timelineScrubTimestamp;
+    if (timelineHistoryFetcherFor !== repoId) {
+      timelineHistoryFetcher?.cancel();
+      timelineHistoryFetcher = createTimelineHistoryFetcher((t) => api.repoGraphAt(repoId, t));
+      timelineHistoryFetcherFor = repoId;
+    }
+    const fetcher = timelineHistoryFetcher;
+    fetcher
+      .request(at)
+      .then((g) => {
+        // null = superseded by a newer position or cancelled — keep fallback.
+        // The position check keeps a late out-of-order response for an
+        // older position from clobbering the newer position's pinned
+        // graph (the fetcher already guarantees `g` is the graph for `at`).
+        if (g?.nodes && selectedRepoId === repoId && timelineScrubActive && at === timelineScrubTimestamp) {
+          timelineHistoricalGraph = { at, graph: g };
+        }
+      })
+      .catch(() => { /* fetch failed — keep the client-side filter */ });
+  });
+
+  // When timeline scrub is active, compute filtered nodes/edges to show state at that point.
+  // The server's ?at= reconstruction (which also resurrects nodes soft-deleted after the
+  // scrub time — invisible to the current graph) replaces the client-side filter once the
+  // debounced fetch lands for this exact position.
   let timelineFilteredGraph = $derived.by(() => {
-    if (!timelineScrubActive || timelineScrubIndex < 0 || !graphTimeline?.length || !graph?.nodes?.length) return null;
-    const delta = graphTimeline[timelineScrubIndex];
+    // The "Now" position (last index) shows the current graph — no ghosts.
+    if (!timelineScrubActive || timelineScrubIndex < 0 || timelineScrubIndex >= timelineArray.length - 1 || !timelineArray.length || !graph?.nodes?.length) return null;
+    if (
+      timelineHistoricalGraph &&
+      timelineHistoricalGraph.at === timelineScrubTimestamp &&
+      timelineHistoricalGraph.graph?.nodes
+    ) {
+      return timelineHistoricalGraph.graph;
+    }
+    const delta = timelineArray[timelineScrubIndex];
     if (!delta?.timestamp) return null;
     const cutoff = typeof delta.timestamp === 'number' ? delta.timestamp : Math.floor(new Date(delta.timestamp).getTime() / 1000);
     // Filter to nodes that existed at or before the cutoff time
@@ -1907,15 +2087,35 @@
 
   // ── In-view filter panel → canvas node visibility (task-178) ──────────
   // filter-categories.js owns the classification; the panel's category
-  // checkboxes and concept chips reduce to the set of node ids the canvas
-  // hides. null when no filter is active (no filtering cost on the draw loop).
+  // checkboxes reduce to the set of node ids the canvas hides (concept
+  // selection fades instead — see explorerConceptNodeIds below). null when
+  // no category is unchecked (no filtering cost on the draw loop).
   let explorerHiddenNodeIds = $derived.by(() => {
     const hiddenCategories = CATEGORY_IDS.filter((id) => !activeFilterCategories[id]);
-    if (hiddenCategories.length === 0 && activeFilterConcepts.length === 0) return null;
+    if (hiddenCategories.length === 0) return null;
     return computeHiddenNodeIds(effectiveGraph.nodes ?? [], {
       hiddenCategories,
-      concepts: activeFilterConcepts,
     });
+  });
+
+  // ── Concept view emphasis set (task-182, system-explorer.md §4) ──────
+  // Union of the manifest concept's projection node ids and the
+  // discovered-concept substring matches. The canvas fades every node
+  // outside this set to background (0.15) and highlights edges within it.
+  // null when no concept is active.
+  let explorerConceptNodeIds = $derived.by(() => {
+    const sets = [];
+    if (activeManifestConcept?.nodeIds && activeManifestConcept.nodeIds.size > 0) {
+      sets.push(activeManifestConcept.nodeIds);
+    }
+    if (activeFilterConcepts.length > 0) {
+      const discovered = computeConceptNodeIds(effectiveGraph.nodes ?? [], activeFilterConcepts);
+      if (discovered.size > 0) sets.push(discovered);
+    }
+    if (sets.length === 0) return null;
+    const union = new Set();
+    for (const s of sets) for (const id of s) union.add(id);
+    return union.size > 0 ? union : null;
   });
 
   // Unchecked category ids + selected concepts, BEFORE reduction to node
@@ -1999,7 +2199,7 @@
     return computeTimelineDeltaStats({
       graph,
       timelineFilteredGraph,
-      timeline: graphTimeline,
+      timeline: timelineArray,
       scrubIndex: timelineScrubIndex,
     });
   });
@@ -2013,7 +2213,7 @@
     return computeTimelineGhostOverlays({
       graph,
       timelineFilteredGraph,
-      timeline: graphTimeline,
+      timeline: timelineArray,
       scrubIndex: timelineScrubIndex,
     });
   });
@@ -2025,6 +2225,33 @@
       : ghostOverlays
   );
 
+  // ── Key moment narrative (system-explorer.md §6) ──────────────────────
+  // Clicking a key moment marker surfaces the delta's grounded narrative
+  // ("what changed and why") in a panel above the canvas.
+  let timelineMomentDetail = $state(null);
+
+  // ── Reconciliation key moments (system-explorer.md §6) ────────────────
+  // Workspace reconciliation_completed messages (persona v3 → v4 events),
+  // lazy-loaded the first time time travel is activated for a workspace
+  // (Vision Principle 2: don't fetch what the user hasn't asked to see).
+  let reconciliationEvents = $state([]);
+  let reconciliationEventsLoadedFor = '';
+  $effect(() => {
+    if (!timelineScrubActive) return;
+    const wsId = scope?.workspaceId;
+    if (!wsId || reconciliationEventsLoadedFor === wsId) return;
+    reconciliationEventsLoadedFor = wsId;
+    api.workspaceMessages(wsId, { kind: 'reconciliation_completed', limit: 100 })
+      .then((msgs) => {
+        if (scope?.workspaceId !== wsId) return; // stale
+        reconciliationEvents = Array.isArray(msgs) ? msgs : [];
+      })
+      .catch(() => {
+        // Endpoint unavailable — allow a retry on the next toggle.
+        if (scope?.workspaceId === wsId) reconciliationEventsLoadedFor = '';
+      });
+  });
+
   // Reset insights on repo change; lazy-load when panel expanded (Vision Principle 2:
   // "Right Context, Not More Context" — don't fetch data the user hasn't asked to see)
   $effect(() => {
@@ -2034,6 +2261,8 @@
     graphTypes = null;
     graphModules = null;
     graphTimeline = null;
+    timelineHistoricalGraph = null;
+    timelineMomentDetail = null;
   });
 
   // Lazy-load insights data only when the panel is expanded
@@ -2118,6 +2347,7 @@
             showScopeToggle={false}
             onNodeClick={showRepoDetail}
             onNodeDblClick={enterRepo}
+            onRefresh={loadWsDepGraph}
           />
         </div>
         {#if repoDetail}
@@ -2467,6 +2697,36 @@
           {/if}
         {/if}
         {/if}
+
+        <!-- Active concept filter chips (system-explorer.md §4, task-182):
+             the active concept view (manifest or discovered) shows as a chip
+             in the control bar — click ✕ to clear, restoring the full graph. -->
+        {#if explorerViewMode === 'boundary'}
+          {#if activeManifestConcept}
+            <span class="concept-chip concept-filter-chip" data-testid="concept-filter-chip">
+              Concept: {activeManifestConcept.name}
+              <button
+                class="chip-clear"
+                onclick={() => { activeManifestConcept = null; }}
+                aria-label="Clear concept filter"
+                data-testid="concept-filter-chip-clear"
+                type="button"
+              >✕</button>
+            </span>
+          {/if}
+          {#each activeFilterConcepts as c (c)}
+            <span class="concept-chip concept-filter-chip" data-testid="concept-filter-chip">
+              Concept: {c}
+              <button
+                class="chip-clear"
+                onclick={() => { activeFilterConcepts = activeFilterConcepts.filter((x) => x !== c); }}
+                aria-label="Clear concept filter"
+                data-testid="concept-filter-chip-clear"
+                type="button"
+              >✕</button>
+            </span>
+          {/each}
+        {/if}
       </div>
     {/if}
 
@@ -2533,6 +2793,33 @@
                   {/if}
                 </div>
               {/if}
+              {#if timelineScrubActive && timelineMomentDetail}
+                <!-- Key moment narrative (system-explorer.md §6): click a key
+                     moment → the delta panel shows what changed and why. -->
+                <div class="timeline-moment-narrative" role="status" aria-label="Key moment narrative">
+                  <div class="timeline-moment-header">
+                    <span class="timeline-moment-title">Key moment</span>
+                    {#if timelineMomentDetail.timestamp}
+                      <span class="timeline-moment-date">{new Date(typeof timelineMomentDetail.timestamp === 'number' ? timelineMomentDetail.timestamp * 1000 : timelineMomentDetail.timestamp).toLocaleDateString()}</span>
+                    {/if}
+                    {#if timelineMomentDetail.spec_ref}
+                      <code class="timeline-moment-ref">{timelineMomentDetail.spec_ref}</code>
+                    {/if}
+                    <button
+                      class="timeline-moment-close"
+                      onclick={() => { timelineMomentDetail = null; }}
+                      title="Dismiss"
+                      type="button"
+                      aria-label="Dismiss key moment narrative"
+                    >×</button>
+                  </div>
+                  {#if timelineMomentDetail.narrative}
+                    <p class="timeline-moment-text">{timelineMomentDetail.narrative}</p>
+                  {:else}
+                    <p class="timeline-moment-text timeline-moment-empty">No narrative recorded for this moment.</p>
+                  {/if}
+                </div>
+              {/if}
               {#if explorerViewMode === 'boundary'}
               <!-- In-view filter panel row (ui-navigation.md §3): collapsible
                    200px left panel INSIDE the Architecture content area —
@@ -2543,6 +2830,9 @@
                   nodes={effectiveGraph.nodes ?? []}
                   bind:activeCategories={activeFilterCategories}
                   bind:activeConcepts={activeFilterConcepts}
+                  manifestConcepts={manifestConcepts}
+                  activeManifestConcept={activeManifestConcept?.name ?? null}
+                  onToggleManifestConcept={toggleManifestConcept}
                   onClose={() => { filterPanelOpen = false; }}
                 />
               {/if}
@@ -2640,22 +2930,25 @@
                 {highlightedSpanId}
                 focusRequest={traceFocusRequest}
                 windowEscape={false}
-                timeline={graphTimeline ?? livenessTimeline ?? []}
+                timeline={timelineArray}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
+                timelineReconciliationEvents={reconciliationEvents}
                 {gateRecords}
                 riskByNode={explorerLens === 'evaluative' ? riskByNode : {}}
                 riskEntries={explorerLens === 'evaluative' ? riskEntries : []}
                 hiddenNodeIds={explorerHiddenNodeIds}
                 hiddenCategories={explorerHiddenCategories}
                 filterConcepts={activeFilterConcepts}
+                conceptNodeIds={explorerConceptNodeIds}
+                onCreateConcept={openConceptDialog}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
-                  if (!timelineScrubActive) timelineScrubIndex = -1;
-                  else if (graphTimeline?.length) timelineScrubIndex = graphTimeline.length - 1;
+                  if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
+                  else if (timelineArray.length) timelineScrubIndex = timelineArray.length - 1;
                 }}
                 onTimelineScrub={(idx) => { timelineScrubIndex = idx; }}
-                onTimelineMarkerClick={(_delta) => {}}
+                onTimelineMarkerClick={(delta) => { timelineMomentDetail = delta; }}
                 {timelineDeltaStats}
               />
               {/if}
@@ -2822,7 +3115,7 @@
                             class:active={timelineScrubActive}
                             onclick={() => {
                               timelineScrubActive = !timelineScrubActive;
-                              if (!timelineScrubActive) timelineScrubIndex = -1;
+                              if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
                               else timelineScrubIndex = graphTimeline.length - 1;
                             }}
                             type="button"
@@ -2907,6 +3200,14 @@
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
                   onSpanSelect={(span) => { highlightedSpanId = span?.span_id ?? null; }}
+                  repoId={selectedRepoId || null}
+                  onAgentProvenance={(agentId) => {
+                    // Agent references in the moldable views open the agent's
+                    // provenance (full agent detail: conversation SHA, MRs,
+                    // cost, provenance chain).
+                    if (openDetailPanelCtx) openDetailPanelCtx({ type: 'agent', id: agentId });
+                  }}
+                  onEditSpec={(specPath) => openSpecEditor(specPath)}
                 />
                 {#if detailNode.spec_path}
                   <div class="edit-spec-action">
@@ -3332,6 +3633,57 @@
   </div>
 {/if}
 
+<!-- ── Ad-hoc concept creation dialog (system-explorer.md §4, task-182) ──── -->
+{#if conceptDialog}
+  <div
+    class="concept-dialog-backdrop"
+    onclick={closeConceptDialog}
+    oncontextmenu={(e) => { e.preventDefault(); closeConceptDialog(); }}
+    role="presentation"
+  ></div>
+  <div
+    class="concept-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Create concept"
+    data-testid="concept-dialog"
+  >
+    <h3 class="concept-dialog-title">Create concept</h3>
+    <p class="concept-dialog-desc">
+      Group {conceptDialog.nodes.length} selected nodes into a named concept. Saving stores it
+      as an explorer view you can reload from the view selector.
+    </p>
+    <label class="concept-dialog-label" for="concept-dialog-name">Concept name</label>
+    <input
+      id="concept-dialog-name"
+      class="concept-dialog-input"
+      type="text"
+      bind:value={conceptDialog.name}
+      placeholder="e.g. Authentication"
+      data-testid="concept-dialog-name"
+      disabled={conceptDialog.saving}
+    />
+    {#if conceptDialog.error}
+      <p class="concept-dialog-error" role="alert">{conceptDialog.error}</p>
+    {/if}
+    <div class="concept-dialog-actions">
+      <button
+        class="concept-dialog-save"
+        onclick={saveConceptDialog}
+        disabled={conceptDialog.saving}
+        data-testid="concept-dialog-save"
+        type="button"
+      >{conceptDialog.saving ? 'Saving…' : 'Save concept'}</button>
+      <button
+        class="concept-dialog-cancel"
+        onclick={closeConceptDialog}
+        disabled={conceptDialog.saving}
+        type="button"
+      >Cancel</button>
+    </div>
+  </div>
+{/if}
+
 <!-- ── Uniform ViewEvent surfaces (ui-layout.md §10 Interaction Events) ────── -->
 <!-- Hover tooltip fed by ViewEvents from non-integrated emitters (SVG canvas,
      list rows, cards). ExplorerCanvas renders its own tooltip internally. -->
@@ -3723,6 +4075,42 @@
   .delta-remove { color: #f87171; font-weight: 600; }
   .delta-modify { color: #fbbf24; font-weight: 600; }
 
+  /* ── Key moment narrative panel (system-explorer.md §6) ─────────────── */
+  .timeline-moment-narrative {
+    display: flex; flex-direction: column; gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated, #16161f);
+    border: 1px solid var(--color-border, #334155);
+    border-left: 3px solid #a855f7;
+    border-radius: var(--radius, 8px);
+    margin-bottom: var(--space-2);
+  }
+  .timeline-moment-header {
+    display: flex; align-items: center; gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+  .timeline-moment-title {
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+    color: #a855f7; font-size: var(--text-xs);
+  }
+  .timeline-moment-date {
+    color: var(--color-text-muted); font-family: var(--font-mono);
+  }
+  .timeline-moment-ref {
+    font-family: var(--font-mono); font-size: var(--text-xs);
+    color: var(--color-text-secondary, #94a3b8);
+  }
+  .timeline-moment-close {
+    margin-left: auto; background: transparent; border: none; color: var(--color-text-muted);
+    font-size: 14px; cursor: pointer; padding: 0 var(--space-1); border-radius: var(--radius-sm);
+  }
+  .timeline-moment-close:hover { color: var(--color-text-primary, #e2e8f0); background: var(--color-surface, #1e293b); }
+  .timeline-moment-text {
+    margin: 0; font-size: var(--text-sm); line-height: 1.5;
+    color: var(--color-text-primary, #e2e8f0);
+  }
+  .timeline-moment-empty { color: var(--color-text-muted); font-style: italic; }
+
   /* ── Back to repos button (workspace scope) ───────────────────────── */
   .back-to-repos-btn {
     display: inline-flex;
@@ -4023,6 +4411,107 @@
 
   .chip-clear:hover { opacity: 1; }
   .chip-clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* Active concept filter chip (system-explorer.md §4) — distinct accent
+     from the search result chip: the concept view is a filter, not a
+     search result. */
+  .concept-filter-chip {
+    background: color-mix(in srgb, #a78bfa 12%, transparent);
+    border-color: color-mix(in srgb, #a78bfa 40%, transparent);
+    color: #c4b5fd;
+  }
+
+  /* ── Ad-hoc concept creation dialog (system-explorer.md §4) ─────── */
+  .concept-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.6);
+    z-index: 300;
+  }
+
+  .concept-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 301;
+    width: min(400px, calc(100vw - 48px));
+    padding: var(--space-5);
+    background: var(--color-bg-secondary, #0f172a);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius-lg, 10px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+
+  .concept-dialog-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text-primary, #e2e8f0);
+  }
+
+  .concept-dialog-desc {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted, #94a3b8);
+    line-height: 1.5;
+  }
+
+  .concept-dialog-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted, #94a3b8);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .concept-dialog-input {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-bg-primary, #0f0f1a);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius-md, 6px);
+    color: var(--color-text-primary, #e2e8f0);
+    font-size: var(--text-sm);
+  }
+  .concept-dialog-input:focus-visible {
+    outline: 2px solid var(--color-focus, #3b82f6);
+    outline-offset: 1px;
+  }
+
+  .concept-dialog-error {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-danger, #ef4444);
+  }
+
+  .concept-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .concept-dialog-save,
+  .concept-dialog-cancel {
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md, 6px);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .concept-dialog-save {
+    background: var(--color-focus, #3b82f6);
+    color: #fff;
+    border-color: var(--color-focus, #3b82f6);
+  }
+  .concept-dialog-save:disabled { opacity: 0.6; cursor: default; }
+  .concept-dialog-cancel {
+    background: transparent;
+    color: var(--color-text-muted, #94a3b8);
+    border-color: var(--color-border-strong, #334155);
+  }
 
   /* ── Workspace repo error ─────────────────────────────────────────────── */
   .error-banner {

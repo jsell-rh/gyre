@@ -824,9 +824,14 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
         // Backlog with the BudgetExhausted flag (a label on the task —
         // the observable marker the spec calls for), cleared on the
         // successful spawn of a later cycle.
-        if let Err(reason) =
-            crate::api::budget::check_spawn_budget(state, &repo.workspace_id.to_string()).await
-        {
+        let budget_check =
+            match crate::api::budget::check_spawn_budget(state, &repo.workspace_id.to_string())
+                .await
+            {
+                Ok(()) => crate::api::budget::check_repo_spawn_budget(state, &repo).await,
+                Err(reason) => Err(reason),
+            };
+        if let Err(reason) = budget_check {
             // Flag the FRESHEST row (same stale-snapshot defense as the
             // claim below): persisting the snapshot taken at
             // list_by_status could revert a concurrent status change
@@ -1834,9 +1839,13 @@ async fn decompose(
     );
     // Latency-bounded: a hung model must not hold the scheduler's cycle
     // lock and the per-repo mutex indefinitely (LLM_CALL_TIMEOUT).
+    // max_tokens=None: signal-chain decomposition is not one of the three
+    // token-capped LLM endpoints (ui-layout.md §2 caps explorer-generate /
+    // briefing-ask / specs-assist only), so no output cap is applied —
+    // same behavior as the pre-trait-signature call.
     let value = match tokio::time::timeout(
         LLM_CALL_TIMEOUT,
-        port.predict_json(&persona, &user_prompt),
+        port.predict_json(&persona, &user_prompt, None),
     )
     .await
     {
@@ -1931,10 +1940,11 @@ async fn coordinate(
     );
 
     // Latency-bounded like the decomposition call (LLM_CALL_TIMEOUT): a
-    // hung model must not stall the scheduler cycle.
+    // hung model must not stall the scheduler cycle. max_tokens=None —
+    // not a token-capped ui-layout.md §2 endpoint.
     let value = match tokio::time::timeout(
         LLM_CALL_TIMEOUT,
-        port.predict_json(&persona, &user_prompt),
+        port.predict_json(&persona, &user_prompt, None),
     )
     .await
     {
@@ -2154,6 +2164,9 @@ mod tests {
                 id: "link-1".to_string(),
                 source_path: "specs/system/api.md".to_string(),
                 source_repo_id: Some("r-2".to_string()),
+                // Blob SHA of the source spec at link-creation time
+                // (spec_links.source_sha, NOT NULL per spec).
+                source_sha: "src-sha-2".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
                 target_path: "specs/system/auth.md".to_string(),
                 target_repo_id: Some("r-1".to_string()),

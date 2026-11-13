@@ -945,6 +945,52 @@ pub async fn approve_spec(
     Ok((StatusCode::CREATED, Json(event.into())))
 }
 
+/// Expand `team:{slug}` entries in a manifest's `human_approvers` list into
+/// the approver-id strings those members' human approvals record
+/// (user-management.md §Team Management — spec ownership: "this spec is
+/// owned by team:platform"). Non-team entries pass through unchanged.
+///
+/// A human approval records `user:{agent_id}`, and every human auth path
+/// resolves `agent_id` from the approving user's stored identity, so each
+/// member contributes the identifier forms their approval can carry
+/// (display name, username, user id — a display-name rename between the
+/// approval and this resolution must not orphan the approval).
+///
+/// A team reference that does not resolve — no such team, or a team with
+/// no members — is kept verbatim in the approver list: no human approval
+/// ever records a `team:{slug}` approver id, so the §9 resolver can never
+/// match it and the approval stays Pending (fail-closed). Dropping it
+/// instead would leave an empty `human_approvers` list, which the resolver
+/// treats as "any human may approve" — a fail-open.
+async fn expand_team_approvers(
+    state: &crate::AppState,
+    workspace_id: &gyre_common::Id,
+    human_approvers: &[String],
+) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(human_approvers.len());
+    for approver in human_approvers {
+        if crate::notifications::parse_team_ref(approver).is_some() {
+            let resolved =
+                crate::notifications::resolve_team_members(state, workspace_id, approver).await;
+            match resolved {
+                Some(member_ids) if !member_ids.is_empty() => {
+                    for uid in member_ids {
+                        if let Ok(Some(user)) = state.users.find_by_id(&uid).await {
+                            expanded.push(format!("user:{}", user.display_name));
+                            expanded.push(format!("user:{}", user.username));
+                        }
+                        expanded.push(format!("user:{}", uid));
+                    }
+                }
+                _ => expanded.push(approver.clone()),
+            }
+        } else {
+            expanded.push(approver.clone());
+        }
+    }
+    expanded
+}
+
 /// Resolve the ledger `approval_status` for a spec from its manifest policy
 /// and recorded approval history (spec-registry.md §9).
 ///
@@ -976,7 +1022,11 @@ async fn resolve_new_approval_status(
         // same relative form (e.g. "system/design-principles.md") — the same
         // normalization `sync_spec_ledger` uses when keying the ledger.
         let spec_entry = manifest.specs.iter().find(|e| e.path == spec_path)?;
-        Some((spec_entry.clone(), manifest.defaults.clone()))
+        Some((
+            spec_entry.clone(),
+            manifest.defaults.clone(),
+            repo.workspace_id.clone(),
+        ))
     }
     .await;
 
@@ -986,7 +1036,7 @@ async fn resolve_new_approval_status(
         .await
         .unwrap_or_default();
 
-    let Some((manifest_entry, defaults)) = resolved else {
+    let Some((manifest_entry, defaults, workspace_id)) = resolved else {
         tracing::debug!(
             spec_path,
             "spec-approval: no manifest entry for spec — falling back to single-approval status"
@@ -1003,6 +1053,22 @@ async fn resolve_new_approval_status(
             ApprovalStatus::Pending
         };
     };
+
+    // Spec ownership via teams (user-management.md §Team Management): a
+    // `team:{slug}` entry in `human_approvers` counts every member of that
+    // team as an approver. Expanded before the pure §9 resolver so the
+    // resolver's membership check stays repository-free.
+    let mut manifest_entry = manifest_entry;
+    if let Some(approval) = manifest_entry.approval.as_mut() {
+        if approval
+            .human_approvers
+            .iter()
+            .any(|a| crate::notifications::parse_team_ref(a).is_some())
+        {
+            approval.human_approvers =
+                expand_team_approvers(state, &workspace_id, &approval.human_approvers).await;
+        }
+    }
 
     crate::spec_registry::resolve_approval_status(
         &manifest_entry,
@@ -2460,6 +2526,7 @@ mod tests {
             updated_at: 1_000_000,
             max_agents: None,
             max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo).await.unwrap();
 
@@ -3051,6 +3118,23 @@ specs:
     /// files. Returns (tempdir, map of spec path → blob SHA at HEAD).
     async fn make_manifest_repo() -> (tempfile::TempDir, std::collections::HashMap<String, String>)
     {
+        make_manifest_repo_with(
+            E2E_APPROVAL_MANIFEST,
+            &[
+                "system/both.md",
+                "system/agent-min.md",
+                "system/agent-pinned.md",
+            ],
+        )
+        .await
+    }
+
+    /// Parameterized manifest-repo builder — the E2E approval tests above
+    /// and the team-approver (spec ownership) tests below share it.
+    async fn make_manifest_repo_with(
+        manifest: &str,
+        specs: &[&str],
+    ) -> (tempfile::TempDir, std::collections::HashMap<String, String>) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path();
         let run = |args: &[&str]| {
@@ -3071,24 +3155,17 @@ specs:
         run(&["config", "user.name", "Test"]);
 
         std::fs::create_dir_all(path.join("specs/system")).unwrap();
-        std::fs::write(path.join("specs/manifest.yaml"), E2E_APPROVAL_MANIFEST).unwrap();
-        for spec in [
-            "system/both.md",
-            "system/agent-min.md",
-            "system/agent-pinned.md",
-        ] {
+        std::fs::write(path.join("specs/manifest.yaml"), manifest).unwrap();
+        for spec in specs {
             std::fs::write(path.join("specs").join(spec), format!("# {}\n", spec)).unwrap();
         }
+
         run(&["add", "."]);
         run(&["commit", "-m", "manifest + specs"]);
 
         // Blob SHA for each spec file at HEAD — the ledger's current_sha.
         let mut shas = std::collections::HashMap::new();
-        for spec in [
-            "system/both.md",
-            "system/agent-min.md",
-            "system/agent-pinned.md",
-        ] {
+        for spec in specs {
             let out = std::process::Command::new("git")
                 .args(["rev-parse", &format!("HEAD:specs/{spec}")])
                 .current_dir(path)
@@ -3269,16 +3346,23 @@ specs:
     /// API-key auth path and resolves to `user:jsell` — matching the
     /// manifest's `human_approvers` list. Returns the raw API key.
     async fn register_e2e_human(state: &crate::AppState) -> String {
+        register_e2e_human_as(state, "user-jsell", "jsell").await
+    }
+
+    /// Register a real human user (Admin) with an API key, bound to the
+    /// seeded specs' tenant. Parameterized so team-approver tests can
+    /// register several distinct humans.
+    async fn register_e2e_human_as(state: &crate::AppState, user_id: &str, name: &str) -> String {
         let mut user = gyre_domain::User::new(
-            gyre_common::Id::new("user-jsell"),
-            "local:jsell",
-            "jsell",
+            gyre_common::Id::new(user_id),
+            format!("local:{name}"),
+            name,
             0,
         );
         user.roles = vec![gyre_domain::UserRole::Admin];
         // API-key auth resolves the tenant scope from the user's stored
         // binding and fail-closes when it is absent (task-099 F1), so the
-        // fixture binds jsell to the seeded specs' tenant ("default", the
+        // fixture binds the user to the seeded specs' tenant ("default", the
         // tenant of ws-e2e) for the approval to authenticate.
         user.tenant_id = Some(gyre_common::Id::new("default"));
         state.users.create(&user).await.unwrap();
@@ -3294,6 +3378,143 @@ specs:
             .await
             .unwrap();
         raw_key
+    }
+
+    /// user-management.md §Team Management — spec ownership ("this spec is
+    /// owned by team:platform"): a `team:{slug}` entry in a manifest's
+    /// `human_approvers` counts every member of that team as an approver.
+    ///
+    /// Real git manifest repo, real ledger, real team + membership created
+    /// through the team API, real API-key human approvals. The negative
+    /// arms kill the fail-open classes: a non-member's approval must leave
+    /// the spec Pending, and an unresolvable team reference must fail
+    /// closed (Pending), never open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn team_slug_human_approvers_resolve_through_membership_e2e() {
+        let manifest = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/team-owned.md
+    title: Team Owned
+    owner: team:platform
+    approval:
+      mode: human_only
+      human_approvers:
+        - team:platform
+  - path: system/team-missing.md
+    title: Team Missing
+    owner: team:nonexistent
+    approval:
+      mode: human_only
+      human_approvers:
+        - team:nonexistent
+"#;
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo_with(
+            manifest,
+            &["system/team-owned.md", "system/team-missing.md"],
+        )
+        .await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Humans: the team lead (jsell, also the team's only approver
+        // source), a team member (asmith), and a non-member workspace
+        // member (bob).
+        let lead_key = register_e2e_human_as(&state, "user-jsell", "jsell").await;
+        let member_key = register_e2e_human_as(&state, "user-asmith", "asmith").await;
+        let outsider_key = register_e2e_human_as(&state, "user-bob", "bob").await;
+
+        // Give all three workspace membership in ws-e2e (teams never expand
+        // access beyond workspace membership — members must be workspace
+        // members first).
+        for uid in ["user-jsell", "user-asmith", "user-bob"] {
+            let m = gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new(format!("mem-{uid}")),
+                gyre_common::Id::new(uid),
+                gyre_common::Id::new("ws-e2e"),
+                gyre_domain::WorkspaceRole::Developer,
+                gyre_common::Id::new("system"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        // Create the team and add asmith — through the real team API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-e2e/teams")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "Platform", "lead": "user-jsell"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team = serde_json::from_slice::<serde_json::Value>(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(team["slug"], "platform");
+        let team_id = team["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/ws-e2e/teams/{team_id}/members"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": "user-asmith"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Negative: a non-member's (bob's) approval must NOT approve the
+        // team-owned spec.
+        let spec = "system/team-owned.md";
+        let resp = approve_via_api(&app, &outsider_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, spec).await,
+            ApprovalStatus::Pending,
+            "a non-team-member's approval must not approve a team-owned spec"
+        );
+
+        // Positive: a team member's (asmith's) approval approves it.
+        let resp = approve_via_api(&app, &member_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, spec).await,
+            ApprovalStatus::Approved,
+            "a team member's approval must approve a team-owned spec"
+        );
+
+        // Fail-closed: `team:nonexistent` does not resolve, so even the
+        // lead's approval cannot approve the spec.
+        let missing = "system/team-missing.md";
+        let resp = approve_via_api(&app, &lead_key, missing, &shas[missing], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, missing).await,
+            ApprovalStatus::Pending,
+            "an unresolvable team reference must fail closed"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3516,6 +3737,7 @@ specs:
             id: "child-implements-parent".to_string(),
             source_path: "system/child.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::Implements,
             target_path: "system/parent.md".to_string(),
             target_repo_id: None,
@@ -3571,6 +3793,7 @@ specs:
             id: "child-implements-parent".to_string(),
             source_path: "system/child.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::Implements,
             target_path: "system/parent.md".to_string(),
             target_repo_id: None,
@@ -3627,6 +3850,7 @@ specs:
             id: "new-conflicts-old".to_string(),
             source_path: "system/new.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::ConflictsWith,
             target_path: "system/old.md".to_string(),
             target_repo_id: None,
@@ -3676,6 +3900,7 @@ specs:
             id: "new-conflicts-old".to_string(),
             source_path: "system/new.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::ConflictsWith,
             target_path: "system/old.md".to_string(),
             target_repo_id: None,
@@ -3736,6 +3961,7 @@ specs:
             id: "dependent-depends-dependency".to_string(),
             source_path: "system/dependent.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::DependsOn,
             target_path: "system/dependency.md".to_string(),
             target_repo_id: None,
@@ -3792,6 +4018,7 @@ specs:
             id: "dependent-depends-dependency".to_string(),
             source_path: "system/dependent.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::DependsOn,
             target_path: "system/dependency.md".to_string(),
             target_repo_id: None,
@@ -3848,6 +4075,7 @@ specs:
             id: "new-supersedes-old".to_string(),
             source_path: "system/new-spec.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::Supersedes,
             target_path: "system/old-spec.md".to_string(),
             target_repo_id: None,
@@ -3930,6 +4158,7 @@ specs:
             id: "a-depends-b".to_string(),
             source_path: "system/a.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::DependsOn,
             target_path: "system/b.md".to_string(),
             target_repo_id: None,
@@ -3984,6 +4213,7 @@ specs:
             id: "b-implements-a".to_string(),
             source_path: "system/b.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::Implements,
             target_path: "system/a.md".to_string(),
             target_repo_id: None,
@@ -4029,7 +4259,7 @@ specs:
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
-        let ledger: crate::spec_registry::SpecLedger =
+        let ledger: Arc<tokio::sync::Mutex<std::collections::HashMap<String, SpecLedgerEntry>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
         let now = 1700000000u64;
@@ -4070,9 +4300,15 @@ specs:
             for entry in &manifest.specs {
                 for link in &entry.links {
                     new_links.push(crate::spec_registry::SpecLinkEntry {
-                        id: format!("{}-{}-{}", entry.path, link.link_type, link.target),
+                        id: gyre_domain::spec_links::spec_link_id(
+                            None,
+                            &entry.path,
+                            &link.link_type,
+                            &link.target,
+                        ),
                         source_path: entry.path.clone(),
                         source_repo_id: None,
+                        source_sha: "src-sha".to_string(),
                         link_type: link.link_type.clone(),
                         target_path: link.target.clone(),
                         target_repo_id: None,
@@ -5580,6 +5816,7 @@ specs:
                     id: "link-1".to_string(),
                     source_path: "system/auth.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::DependsOn,
                     target_path: "system/core.md".to_string(),
                     target_repo_id: None,
@@ -5594,6 +5831,7 @@ specs:
                     id: "link-2".to_string(),
                     source_path: "system/ui.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::Implements,
                     target_path: "system/core.md".to_string(),
                     target_repo_id: None,
@@ -5608,6 +5846,7 @@ specs:
                     id: "link-3".to_string(),
                     source_path: "system/core.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::ConflictsWith,
                     target_path: "system/ui.md".to_string(),
                     target_repo_id: None,
@@ -5622,6 +5861,7 @@ specs:
                     id: "link-4".to_string(),
                     source_path: "system/auth.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::Supersedes,
                     target_path: "system/old.md".to_string(),
                     target_repo_id: None,
@@ -5819,6 +6059,7 @@ specs:
                     id: "link-pending-conflict".to_string(),
                     source_path: "system/alpha.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: crate::spec_registry::SpecLinkType::ConflictsWith,
                     target_path: "system/beta.md".to_string(),
                     target_repo_id: None,
@@ -5940,6 +6181,7 @@ specs:
                     id: "supersedes-1".to_string(),
                     source_path: "system/new.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::Supersedes,
                     target_path: "system/old.md".to_string(),
                     target_repo_id: None,
@@ -6025,6 +6267,7 @@ specs:
                     id: "conflict-1".to_string(),
                     source_path: "system/spec-a.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::ConflictsWith,
                     target_path: "system/spec-b.md".to_string(),
                     target_repo_id: None,
@@ -6107,6 +6350,7 @@ specs:
                     id: "dep-1".to_string(),
                     source_path: "system/consumer.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::DependsOn,
                     target_path: "system/dependency.md".to_string(),
                     target_repo_id: None,
@@ -6207,6 +6451,7 @@ specs:
                     id: "conflict-reverse-1".to_string(),
                     source_path: "system/spec-a.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::ConflictsWith,
                     target_path: "system/spec-b.md".to_string(),
                     target_repo_id: None,
@@ -6266,6 +6511,7 @@ specs:
                 id: "patrol-dangling".to_string(),
                 source_path: "system/impl.md".to_string(),
                 source_repo_id: Some("repo1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::Implements,
                 target_path: "system/deleted.md".to_string(),
                 target_repo_id: None,

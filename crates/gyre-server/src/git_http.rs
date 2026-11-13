@@ -24,7 +24,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
@@ -291,6 +291,31 @@ pub async fn git_info_refs(
         Ok(r) => r,
         Err(r) => return r,
     };
+
+    // repo-lifecycle.md §4 step 5: archived repos are read-only. Reject the
+    // push at the service-advertisement stage with an `ERR` pkt-line — the
+    // git-smart-HTTP convention for service-level errors — so the client
+    // actually displays the reason ("fatal: remote error: ... "). A plain
+    // HTTP 403 here would hide the body from `git push` output entirely.
+    // The receive-pack POST handler keeps its own archived 403 as
+    // defense-in-depth for clients that skip the advertisement.
+    if subcommand == "receive-pack" && repo.is_archived() {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "info/refs receive-pack advertisement rejected: repository is archived"
+        );
+        let mut body = service_header(&service);
+        body.extend(pkt_line("ERR push rejected: repository is archived\n"));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", content_type)
+            .header("Cache-Control", "no-cache")
+            .body(Body::from(body))
+            .unwrap();
+    }
+
     if let Err(resp) = authorize_repo_access(&state, &auth, &repo, needed_perm).await {
         return *resp;
     }
@@ -608,6 +633,21 @@ pub async fn git_receive_pack(
         return (
             StatusCode::FORBIDDEN,
             "push rejected: repository is a read-only mirror".to_string(),
+        )
+            .into_response();
+    }
+    // repo-lifecycle.md §4 Archive step 5: archived repos are read-only —
+    // reject the push before the packfile is processed.
+    if resolved.is_archived() {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: repository is archived"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: repository is archived".to_string(),
         )
             .into_response();
     }
@@ -1190,6 +1230,7 @@ pub async fn git_receive_pack(
             crate::spec_registry::sync_spec_ledger(
                 &state_clone.spec_ledger,
                 &state_clone.spec_links_store,
+                &state_clone.spec_link_repo,
                 &repo_path_clone,
                 &update.new_sha,
                 now,
@@ -1199,6 +1240,17 @@ pub async fn git_receive_pack(
                 Some(&state_clone.repos),
                 workspace_tenant_id.as_ref(),
                 Some(&state_clone.tasks),
+            )
+            .await;
+            // search.md §Index Updates: "Spec pushed -> index updated (content
+            // extracted from git blob)". Runs after the ledger sync so
+            // approval_status/owner facets reflect this push.
+            crate::search_indexer::index_repo_specs(
+                &state_clone,
+                &repo_id_clone,
+                &repo_workspace_id_str,
+                &repo_path_clone,
+                &update.new_sha,
             )
             .await;
             // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
@@ -1277,6 +1329,26 @@ pub async fn git_receive_pack(
                 }),
             )
             .await;
+        }
+
+        // search.md §Index Updates: code search (file content) is indexed
+        // asynchronously on push via the background job registry — eventually
+        // consistent, never inline in the push path. The job walks the default
+        // branch, so only default-branch pushes need to trigger it.
+        if ref_updates
+            .iter()
+            .any(|u| u.refname == format!("refs/heads/{default_branch_clone}"))
+        {
+            let st = Arc::clone(&state_clone);
+            tokio::spawn(async move {
+                if let Err(e) = st
+                    .job_registry
+                    .trigger("search_code_index", Arc::clone(&st))
+                    .await
+                {
+                    tracing::warn!("search-index: code index job failed: {e}");
+                }
+            });
         }
     });
 
@@ -1536,6 +1608,18 @@ async fn record_pushed_commits(
             } else {
                 total_recorded += 1;
             }
+            // search.md §Index Updates: "Commit pushed -> commit messages
+            // indexed" — message and author are read from the git object store.
+            crate::search_indexer::index_pushed_commit(
+                state,
+                &repo.id.to_string(),
+                &repo.workspace_id.to_string(),
+                repo_path,
+                sha,
+                &update.refname,
+                agent_id,
+            )
+            .await;
         }
     }
     total_recorded
@@ -1899,24 +1983,11 @@ fn classify_spec_change(
 }
 
 /// Parse `git diff --name-status` output into (status_char, new_path, old_path)
-/// tuples, filtered by the repo's watched/ignored spec path prefixes.
-pub fn parse_spec_changes_with_config(
-    diff_output: &str,
-    config: &gyre_domain::SpecLifecycleConfig,
-) -> Vec<(char, String, Option<String>)> {
-    parse_name_status(diff_output)
-        .into_iter()
-        .filter(|(_, new_path, old_path)| {
-            let is_watched = config.is_watched(new_path);
-            let old_is_watched = old_path.as_ref().is_some_and(|p| config.is_watched(p));
-            is_watched || old_is_watched
-        })
-        .collect()
-}
-
-/// Parse `git diff --name-status` output into (status_char, new_path, old_path)
-/// tuples. Returns every entry, unfiltered — callers apply their own path
-/// filters (spec-lifecycle watched paths, persona files).
+/// tuples. Returns every entry, unfiltered — which entries actually trigger
+/// lifecycle work is decided downstream: the spec-manifest gate for task
+/// creation (spec-registry.md §15, `should_create_lifecycle_task`), the
+/// repo's `SpecLifecycleConfig` watched prefixes as the manifest-less
+/// fallback, and persona-file detection for the persona push hook.
 fn parse_name_status(diff_output: &str) -> Vec<(char, String, Option<String>)> {
     let mut changes = Vec::new();
 
@@ -1951,6 +2022,41 @@ fn parse_name_status(diff_output: &str) -> Vec<(char, String, Option<String>)> {
     }
 
     changes
+}
+
+/// Decide whether a changed spec file should create a lifecycle task
+/// (spec-registry.md §15 — manifest-driven, not path-prefix driven).
+///
+/// - `Some(manifest)` (a manifest exists at the pushed HEAD): the manifest is
+///   the single source of truth. A task is created only when the changed file
+///   has a manifest entry whose effective `auto_create_tasks` (per-entry
+///   override, else the `defaults:` section) is true. Files not registered in
+///   the manifest create no lifecycle task.
+/// - `None` (manifest-less repo): the repo's `SpecLifecycleConfig` watched /
+///   ignored path prefixes decide (spec-lifecycle.md §Configuration — the
+///   `[spec_lifecycle]` config block is superseded by the manifest only when
+///   a manifest exists), so existing repos keep working. A rename (or copy)
+///   triggers the fallback when **either** side of the rename sits under a
+///   watched prefix, matching the pre-manifest behavior.
+pub fn should_create_lifecycle_task(
+    manifest: Option<&crate::spec_registry::SpecManifest>,
+    config: &gyre_domain::SpecLifecycleConfig,
+    status_char: char,
+    path: &str,
+    old_path: Option<&str>,
+) -> bool {
+    // Change kinds that don't classify into a task never create one.
+    if classify_spec_change(status_char, path, old_path, config).is_none() {
+        return false;
+    }
+    match manifest {
+        // Manifest mode matches on the NEW path only (task-194 instruction:
+        // "For renames (R), match on the new path").
+        Some(m) => crate::spec_registry::manifest_entry_for_path(m, path)
+            .map(|e| e.effective_auto_create_tasks(&m.defaults))
+            .unwrap_or(false),
+        None => config.is_watched(path) || old_path.is_some_and(|p| config.is_watched(p)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2411,9 +2517,25 @@ async fn process_spec_lifecycle(
             }
         };
         let diff_text = String::from_utf8_lossy(&out.stdout);
-        let changes = parse_spec_changes_with_config(&diff_text, &config);
+        // Parse the diff unfiltered: task-creation eligibility is decided by
+        // the manifest gate (`should_create_lifecycle_task`), or by the
+        // config watched-prefix fallback in manifest-less repos — not here.
+        let changes = parse_name_status(&diff_text);
         if changes.is_empty() {
             continue;
+        }
+
+        // Manifest-driven lifecycle policy (spec-registry.md §15): the
+        // manifest at the pushed HEAD is the single source of truth for
+        // which spec files trigger lifecycle tasks and their priority.
+        // When the repo has no manifest, `should_create_lifecycle_task`
+        // falls back to the config's watched-prefix rules.
+        let manifest = crate::spec_registry::read_manifest(repo_path, &update.new_sha).await;
+        if manifest.is_none() {
+            debug!(
+                repo_path,
+                "spec-lifecycle: no specs/manifest.yaml at HEAD — using path-prefix fallback"
+            );
         }
 
         // Resolve the repo's workspace scope once per push. Events are scoped
@@ -2461,6 +2583,13 @@ async fn process_spec_lifecycle(
                         .unwrap_or_else(|| vec![path.as_str()]),
                     _ => vec![],
                 };
+                // Only `specs/…` files carry approval-ledger rows; the
+                // unfiltered diff also lists source and doc files, which
+                // have no approvals to invalidate.
+                let stale_paths: Vec<&str> = stale_paths
+                    .into_iter()
+                    .filter(|p| p.starts_with("specs/"))
+                    .collect();
 
                 if !stale_paths.is_empty() {
                     let reason = format!(
@@ -2496,6 +2625,20 @@ async fn process_spec_lifecycle(
                 }
             }
 
+            if !should_create_lifecycle_task(
+                manifest.as_ref(),
+                &config,
+                status_char,
+                &path,
+                old_path.as_deref(),
+            ) {
+                debug!(
+                    spec_path = %path,
+                    "spec-lifecycle: change excluded from task creation by manifest policy"
+                );
+                continue;
+            }
+
             let Some((title, labels, priority)) =
                 classify_spec_change(status_char, &path, old_path.as_deref(), &config)
             else {
@@ -2508,6 +2651,18 @@ async fn process_spec_lifecycle(
                 'R' => "renamed",
                 _ => "unknown",
             };
+
+            // Per-spec priority override (spec-registry.md §15): apply the
+            // manifest-declared priority when present, else keep the
+            // change-kind default from `classify_spec_change` (which itself
+            // honors the repo's SpecLifecycleConfig default priorities).
+            let priority = manifest
+                .as_ref()
+                .and_then(|m| {
+                    crate::spec_registry::manifest_entry_for_path(m, &path)
+                        .and_then(|e| e.effective_priority(&m.defaults))
+                })
+                .unwrap_or(priority);
 
             // Dedup: skip if a non-Done task with the same title already exists
             // (configurable, spec-lifecycle.md §Configuration).
@@ -4570,6 +4725,19 @@ pub(crate) fn verify_context_binding(
     }
 }
 
+/// Constraints accumulated from a verified chain (§4.3, §6.2 Phase 2).
+/// Named carrier (TASK-048 F1): the previous positional tuple was a
+/// field-swap hazard.
+pub(crate) struct ChainConstraints {
+    /// The root SignedInput of the chain, if it carries one.
+    pub root_input: Option<gyre_common::attestation::SignedInput>,
+    /// Explicit constraints from the root SignedInput plus additional
+    /// constraints from each DerivedInput (additive only).
+    pub explicit_constraints: Vec<gyre_common::attestation::OutputConstraint>,
+    /// Gate constraints from gate attestations on each node.
+    pub gate_constraints: Vec<gyre_common::attestation::GateConstraint>,
+}
+
 /// Accumulate all constraints from a verified chain (§4.3, §6.2 Phase 2).
 ///
 /// Walks the chain root→leaf, collecting:
@@ -4578,13 +4746,7 @@ pub(crate) fn verify_context_binding(
 /// 3. Gate constraints from gate attestations on each node
 ///
 /// Returns the full constraint set for evaluation.
-pub(crate) fn accumulate_chain_constraints(
-    chain: &[gyre_common::Attestation],
-) -> (
-    Option<gyre_common::attestation::SignedInput>,
-    Vec<gyre_common::attestation::OutputConstraint>,
-    Vec<gyre_common::attestation::GateConstraint>,
-) {
+pub(crate) fn accumulate_chain_constraints(chain: &[gyre_common::Attestation]) -> ChainConstraints {
     let mut explicit_constraints = Vec::new();
     let mut gate_constraints = Vec::new();
     let mut root_input = None;
@@ -4592,7 +4754,11 @@ pub(crate) fn accumulate_chain_constraints(
     for att in chain {
         match &att.input {
             gyre_common::AttestationInput::Signed(si) => {
-                root_input = Some(si.clone());
+                // Root-first chain ordering (see `verify_chain`): the first
+                // Signed input is the chain root.
+                if root_input.is_none() {
+                    root_input = Some(si.clone());
+                }
                 explicit_constraints.extend(si.output_constraints.iter().cloned());
             }
             gyre_common::AttestationInput::Derived(di) => {
@@ -4609,7 +4775,11 @@ pub(crate) fn accumulate_chain_constraints(
         }
     }
 
-    (root_input, explicit_constraints, gate_constraints)
+    ChainConstraints {
+        root_input,
+        explicit_constraints,
+        gate_constraints,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5055,6 +5225,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn info_refs_receive_pack_archived_repo_returns_err_pkt_line() {
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        // Archive the repo (repo-lifecycle.md §4 step 5).
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-receive-pack"
+                    ))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The advertisement is a valid 200 response whose pkt-line stream
+        // carries an ERR line — the git-smart-HTTP convention that makes
+        // `git push` print "fatal: remote error: push rejected: repository is
+        // archived" instead of a bare HTTP 403 whose body git never shows.
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/x-git-receive-pack-advertisement"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        // Exact pkt-line framing: the service header pkt-line (001f = 4 + 27
+        // bytes of "# service=git-receive-pack\n"), a flush-pkt, then the
+        // ERR pkt-line. Hardcoded so a framing regression in pkt_line()/
+        // service_header() fails here rather than being mirrored in.
+        assert!(
+            text.starts_with("001f# service=git-receive-pack\n0000"),
+            "advertisement must start with the service header pkt-line + flush-pkt, got: {text}"
+        );
+        assert!(
+            text.contains("ERR push rejected: repository is archived"),
+            "archived repo advertisement must carry the ERR pkt-line, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_refs_upload_pack_archived_repo_still_serves_clone_advertisement() {
+        // Archived repos are read-only, not invisible: clone/fetch
+        // (git-upload-pack) must keep working (repo-lifecycle.md §4 step 5).
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-upload-pack"
+                    ))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            !text.contains("ERR "),
+            "upload-pack advertisement must not be rejected for archived repo, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_pack_archived_repo_returns_403() {
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        // Archive the repo (repo-lifecycle.md §4 step 5).
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("archived"),
+            "rejection must explain the repo is archived, got: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn info_refs_unknown_service_returns_400() {
         let (app, _state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
         let resp = app
@@ -5250,15 +5547,15 @@ mod tests {
     // ── Spec lifecycle tests ─────────────────────────────────────────────────
 
     #[test]
-    fn parse_spec_changes_empty_input() {
-        let changes = super::parse_spec_changes_with_config("", &Default::default());
+    fn parse_name_status_empty_input() {
+        let changes = super::parse_name_status("");
         assert!(changes.is_empty());
     }
 
     #[test]
-    fn parse_spec_changes_added_spec() {
+    fn parse_name_status_added_spec() {
         let input = "A\tspecs/system/new-spec.md\n";
-        let changes = super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'A');
         assert_eq!(changes[0].1, "specs/system/new-spec.md");
@@ -5266,27 +5563,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_spec_changes_modified_spec() {
+    fn parse_name_status_modified_spec() {
         let input = "M\tspecs/development/architecture.md\n";
-        let changes = super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'M');
         assert_eq!(changes[0].1, "specs/development/architecture.md");
     }
 
     #[test]
-    fn parse_spec_changes_deleted_spec() {
+    fn parse_name_status_deleted_spec() {
         let input = "D\tspecs/system/old-spec.md\n";
-        let changes = super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'D');
         assert_eq!(changes[0].1, "specs/system/old-spec.md");
     }
 
     #[test]
-    fn parse_spec_changes_renamed_spec() {
+    fn parse_name_status_renamed_spec() {
         let input = "R090\tspecs/system/old.md\tspecs/system/new.md\n";
-        let changes = super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'R');
         assert_eq!(changes[0].1, "specs/system/new.md");
@@ -5294,18 +5591,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_spec_changes_ignores_non_watched_paths() {
-        // milestones and src changes should be ignored
-        let input = "M\tspecs/milestones/m1.md\nM\tsrc/main.rs\nA\tspecs/system/real.md\n";
-        let changes = super::parse_spec_changes_with_config(input, &Default::default());
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].1, "specs/system/real.md");
+    fn parse_name_status_returns_all_paths_unfiltered() {
+        // Parsing is path-agnostic: which entries create lifecycle tasks is
+        // decided by `should_create_lifecycle_task` (the manifest gate for
+        // manifest repos, the config watched prefixes otherwise) — specs/
+        // files outside the watched prefixes must reach that gate
+        // (spec-registry.md §15), and non-specs files are excluded there.
+        let input =
+            "M\tspecs/milestones/m1.md\nM\tsrc/main.rs\nM\tspecs/coverage/system/spec-registry.md\n";
+        let changes = super::parse_name_status(input);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[2].1, "specs/coverage/system/spec-registry.md");
     }
 
     #[test]
-    fn parse_spec_changes_development_path_watched() {
+    fn parse_name_status_development_path() {
         let input = "A\tspecs/development/database-migrations.md\n";
-        let changes = super::parse_spec_changes_with_config(input, &Default::default());
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/development/database-migrations.md");
     }
@@ -5396,29 +5698,52 @@ mod tests {
     }
 
     #[test]
-    fn parse_spec_changes_custom_watched_paths() {
-        // Custom watched paths replace the hardcoded prefixes entirely.
+    fn should_create_lifecycle_task_no_manifest_custom_watched_paths() {
+        // Custom watched paths replace the default prefixes entirely
+        // (spec-lifecycle.md §Configuration) — including paths outside
+        // specs/, which the unfiltered diff parser still delivers to the gate.
         let config = gyre_domain::SpecLifecycleConfig {
             watched_paths: vec!["docs/specs/".to_string()],
             ..Default::default()
         };
-        let input = "A\tdocs/specs/new.md\nM\tspecs/system/foo.md\n";
-        let changes = super::parse_spec_changes_with_config(input, &config);
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].1, "docs/specs/new.md");
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &config,
+            'A',
+            "docs/specs/new.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &config,
+            'M',
+            "specs/system/foo.md",
+            None
+        ));
     }
 
     #[test]
-    fn parse_spec_changes_ignored_overrides_watched() {
+    fn should_create_lifecycle_task_no_manifest_ignored_overrides_watched() {
+        // Ignored prefixes take precedence over watched ones.
         let config = gyre_domain::SpecLifecycleConfig {
             watched_paths: vec!["specs/".to_string()],
             ignored_paths: vec!["specs/milestones/".to_string()],
             ..Default::default()
         };
-        let input = "M\tspecs/system/a.md\nM\tspecs/milestones/b.md\n";
-        let changes = super::parse_spec_changes_with_config(input, &config);
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].1, "specs/system/a.md");
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &config,
+            'M',
+            "specs/system/a.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &config,
+            'M',
+            "specs/milestones/b.md",
+            None
+        ));
     }
 
     // ── process_spec_lifecycle: per-repo config end-to-end ────────────────
@@ -5682,6 +6007,528 @@ mod tests {
             .filter(|e| e.detail["task_id"].as_str().is_some())
             .collect();
         assert_eq!(with_task.len(), 1, "events: {events:?}");
+    }
+
+    // ── Manifest-driven lifecycle gating (spec-registry.md §15) ──────────
+
+    const GATE_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/spec-a.md
+    title: Spec A
+    owner: user:test
+    auto_create_tasks: false
+  - path: system/spec-b.md
+    title: Spec B
+    owner: user:test
+    auto_create_tasks: true
+  - path: coverage/coverage-matrix.md
+    title: Coverage Matrix
+    owner: user:test
+"#;
+
+    #[test]
+    fn should_create_lifecycle_task_manifest_gate() {
+        let m = crate::spec_registry::parse_manifest(GATE_MANIFEST).unwrap();
+        // Registered with auto_create_tasks: false → never spawns a task,
+        // regardless of change kind.
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/spec-a.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'A',
+            "specs/system/spec-a.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'D',
+            "specs/system/spec-a.md",
+            None
+        ));
+        // Registered with auto_create_tasks: true → task.
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/spec-b.md",
+            None
+        ));
+        // Unregistered specs/ file → no task (manifest is the source of truth).
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/unregistered.md",
+            None
+        ));
+        // Registered under a non-watched prefix: the manifest, not the path
+        // prefix, decides — defaults.auto_create_tasks is true here.
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/coverage/coverage-matrix.md",
+            None
+        ));
+        // Manifest-mode renames match on the NEW path only (task-194
+        // instruction): a rename whose old path is registered but whose new
+        // path is not registered creates no task.
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'R',
+            "specs/milestones/renamed-away.md",
+            Some("specs/system/spec-b.md")
+        ));
+        // …while a rename onto a registered path creates one.
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'R',
+            "specs/system/spec-b.md",
+            Some("specs/milestones/renamed-from.md")
+        ));
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_defaults_section_applies() {
+        // defaults.auto_create_tasks: false — per-entry override wins.
+        let yaml = "version: 1\ndefaults:\n  auto_create_tasks: false\nspecs:\n  - path: system/opt-in.md\n    title: Opt In\n    owner: user:test\n    auto_create_tasks: true\n  - path: system/opt-out.md\n    title: Opt Out\n    owner: user:test\n";
+        let m = crate::spec_registry::parse_manifest(yaml).unwrap();
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/opt-in.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/opt-out.md",
+            None
+        ));
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_no_manifest_falls_back_to_prefixes() {
+        // Manifest-less repo: legacy path-prefix watch rules keep working.
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'M',
+            "specs/system/foo.md",
+            None
+        ));
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'A',
+            "specs/development/bar.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'M',
+            "specs/milestones/m1.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'M',
+            "src/main.rs",
+            None
+        ));
+        // Unclassified change kinds never create tasks.
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'X',
+            "specs/system/foo.md",
+            None
+        ));
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_no_manifest_rename_either_side_watched() {
+        // Manifest-less repo, renames: the legacy prefix fallback admits a
+        // rename when EITHER side sits under a watched prefix (matching base
+        // pre-manifest `parse_spec_changes` + `classify_spec_change('R')`, which always
+        // created a task). Regression test for the task-194 review finding:
+        // the None arm previously checked only the new path.
+        // Old path watched, new path under specs/ but unwatched → task.
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "specs/milestones/a.md",
+            Some("specs/system/foo.md")
+        ));
+        // Old path watched, new path outside specs/ entirely → task.
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "docs/b.md",
+            Some("specs/system/foo.md")
+        ));
+        // New path watched, old path unwatched → task (already worked).
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "specs/system/new.md",
+            Some("specs/milestones/old.md")
+        ));
+        // Neither side watched → no task.
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "docs/b.md",
+            Some("specs/milestones/old.md")
+        ));
+        // Neither side watched, both outside specs/ → no task.
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "docs/b.md",
+            Some("docs/old.md")
+        ));
+    }
+
+    /// Build a real (non-bare) git repo in a temp dir with one commit per
+    /// entry; each commit is a list of (path, contents) files. Returns
+    /// (temp_dir, repo_path, commit_shas_in_order).
+    fn git_repo_with_commits(commits: &[Vec<(&str, String)>]) -> (TempDir, String, Vec<String>) {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        git(&["init", "-b", "main"]);
+
+        let mut shas = Vec::new();
+        for files in commits {
+            for (path, contents) in files {
+                let full = repo_path.join(path);
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                std::fs::write(&full, contents).unwrap();
+                git(&["add", "--", path]);
+            }
+            git(&["commit", "-m", "test commit"]);
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("rev-parse")
+                .arg("HEAD")
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            shas.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        }
+
+        (tmp, repo_path.to_str().unwrap().to_string(), shas)
+    }
+
+    /// A test state with a workspace (ws-test) and a repo (repo-1) whose
+    /// storage path points at the given git repo, so lifecycle task events
+    /// can resolve their workspace scope.
+    async fn state_with_registered_repo(repo_path: &str) -> Arc<crate::AppState> {
+        let state = test_state();
+        let ws = Workspace {
+            id: Id::new("ws-test"),
+            tenant_id: Id::new("default"),
+            name: "Test Workspace".to_string(),
+            slug: TEST_WS_SLUG.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = Repository::new(
+            Id::new("repo-1"),
+            Id::new("ws-test"),
+            TEST_REPO_NAME,
+            repo_path,
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        state
+    }
+
+    #[tokio::test]
+    async fn spec_lifecycle_manifest_gates_task_creation_e2e() {
+        // Manifest marks spec-a auto_create_tasks: false, spec-b true (with a
+        // priority override); spec-c is not registered at all.
+        let manifest = r#"
+version: 1
+specs:
+  - path: system/spec-a.md
+    title: Spec A
+    owner: user:test
+    auto_create_tasks: false
+  - path: system/spec-b.md
+    title: Spec B
+    owner: user:test
+    auto_create_tasks: true
+    priority: Critical
+"#
+        .to_string();
+
+        let (_tmp, repo_path, shas) = git_repo_with_commits(&[
+            vec![
+                ("specs/manifest.yaml", manifest),
+                ("specs/system/spec-a.md", "# A v1".to_string()),
+                ("specs/system/spec-b.md", "# B v1".to_string()),
+            ],
+            vec![
+                ("specs/system/spec-a.md", "# A v2".to_string()),
+                ("specs/system/spec-b.md", "# B v2".to_string()),
+                ("specs/system/spec-c.md", "# C v1".to_string()),
+            ],
+        ]);
+
+        let state = state_with_registered_repo(&repo_path).await;
+        let mut events = state.message_broadcast_tx.subscribe();
+
+        let update = super::RefUpdate {
+            old_sha: shas[0].clone(),
+            new_sha: shas[1].clone(),
+            refname: "refs/heads/main".to_string(),
+        };
+        super::process_spec_lifecycle(&state, "repo-1", &repo_path, "main", &[update]).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "expected exactly one lifecycle task, got: {titles:?}"
+        );
+        assert_eq!(tasks[0].title, "Review spec change: specs/system/spec-b.md");
+        assert_eq!(
+            tasks[0].spec_path.as_deref(),
+            Some("specs/system/spec-b.md")
+        );
+        // Per-spec priority override from the manifest (§15), not the
+        // change-kind default (High).
+        assert_eq!(tasks[0].priority, gyre_domain::TaskPriority::Critical);
+        // No task for spec-a (auto_create_tasks: false) or the unregistered
+        // spec-c — asserted by title AND by spec_path.
+        assert!(tasks.iter().all(|t| {
+            t.spec_path.as_deref() != Some("specs/system/spec-a.md")
+                && t.spec_path.as_deref() != Some("specs/system/spec-c.md")
+        }));
+        assert!(!titles.iter().any(|t| t.contains("spec-a")));
+        assert!(!titles.iter().any(|t| t.contains("spec-c")));
+
+        // Event tier: exactly one SpecChanged and one TaskCreated, both for
+        // spec-b — none for the excluded specs.
+        let mut spec_changed: Vec<serde_json::Value> = Vec::new();
+        let mut task_created = 0usize;
+        while let Ok(msg) = events.try_recv() {
+            use gyre_common::message::MessageKind;
+            match msg.kind {
+                MessageKind::SpecChanged => {
+                    spec_changed.push(msg.payload.unwrap_or_default());
+                }
+                MessageKind::TaskCreated => {
+                    task_created += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            spec_changed.len(),
+            1,
+            "SpecChanged events: {spec_changed:?}"
+        );
+        assert_eq!(
+            spec_changed[0]["spec_path"].as_str(),
+            Some("specs/system/spec-b.md")
+        );
+        assert_eq!(task_created, 1);
+    }
+
+    #[tokio::test]
+    async fn spec_lifecycle_without_manifest_uses_prefix_fallback_e2e() {
+        // No specs/manifest.yaml at HEAD: legacy path-prefix behavior must
+        // keep working (no regression for manifest-less repos).
+        let (_tmp, repo_path, shas) = git_repo_with_commits(&[
+            vec![
+                ("specs/system/watched.md", "# v1".to_string()),
+                ("specs/milestones/unwatched.md", "# v1".to_string()),
+            ],
+            vec![
+                ("specs/system/watched.md", "# v2".to_string()),
+                ("specs/milestones/unwatched.md", "# v2".to_string()),
+            ],
+        ]);
+
+        let state = state_with_registered_repo(&repo_path).await;
+        let update = super::RefUpdate {
+            old_sha: shas[0].clone(),
+            new_sha: shas[1].clone(),
+            refname: "refs/heads/main".to_string(),
+        };
+        super::process_spec_lifecycle(&state, "repo-1", &repo_path, "main", &[update]).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(tasks.len(), 1, "tasks: {titles:?}");
+        assert_eq!(
+            tasks[0].title,
+            "Review spec change: specs/system/watched.md"
+        );
+        // No manifest → no priority override: change-kind default (High).
+        assert_eq!(tasks[0].priority, gyre_domain::TaskPriority::High);
+        assert!(!titles.iter().any(|t| t.contains("unwatched")));
+    }
+
+    #[tokio::test]
+    async fn spec_lifecycle_without_manifest_rename_from_watched_prefix_e2e() {
+        // Manifest-less repo, renames whose OLD path sits under a watched
+        // prefix: the legacy fallback must still create the 'Update spec
+        // references' task (base fefde2946 behavior — AC3 'no regression').
+        // Regression test for the task-194 review finding: the manifest-less
+        // arm of `should_create_lifecycle_task` previously checked only the
+        // NEW path, dropping both of these cases.
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        git(&["init", "-b", "main"]);
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(repo_path.join("specs/system/foo.md"), "# v1\n").unwrap();
+        std::fs::write(repo_path.join("specs/system/bar.md"), "# v1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "c1"]);
+        let old_sha = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        let old_sha = String::from_utf8_lossy(&old_sha.stdout).trim().to_string();
+
+        // Rename one watched spec to an unwatched specs/ path, another out
+        // of specs/ entirely — both old paths are watched, so base created
+        // tasks for both.
+        std::fs::create_dir_all(repo_path.join("specs/milestones")).unwrap();
+        std::fs::create_dir_all(repo_path.join("docs")).unwrap();
+        git(&["mv", "specs/system/foo.md", "specs/milestones/a.md"]);
+        git(&["mv", "specs/system/bar.md", "docs/b.md"]);
+        git(&["commit", "-m", "c2"]);
+        let new_sha = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        let new_sha = String::from_utf8_lossy(&new_sha.stdout).trim().to_string();
+
+        // Sanity: the commit-to-commit diff must show these as renames (R),
+        // otherwise the test would not exercise the rename code path.
+        {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("diff")
+                .arg("--name-status")
+                .arg(format!("{old_sha}..{new_sha}"))
+                .output()
+                .unwrap();
+            let diff = String::from_utf8_lossy(&out.stdout).to_string();
+            assert!(
+                diff.contains("R100\tspecs/system/foo.md\tspecs/milestones/a.md"),
+                "diff: {diff}"
+            );
+            assert!(
+                diff.contains("R100\tspecs/system/bar.md\tdocs/b.md"),
+                "diff: {diff}"
+            );
+        }
+
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+        let state = state_with_registered_repo(&repo_path_str).await;
+        let update = super::RefUpdate {
+            old_sha,
+            new_sha,
+            refname: "refs/heads/main".to_string(),
+        };
+        super::process_spec_lifecycle(&state, "repo-1", &repo_path_str, "main", &[update]).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(tasks.len(), 2, "tasks: {titles:?}");
+        assert!(
+            titles
+                .contains(&"Update spec references: specs/system/foo.md -> specs/milestones/a.md"),
+            "tasks: {titles:?}"
+        );
+        assert!(
+            titles.contains(&"Update spec references: specs/system/bar.md -> docs/b.md"),
+            "tasks: {titles:?}"
+        );
     }
 
     // ── Audit-only verification tests (TASK-006) ─────────────────────────
@@ -6253,16 +7100,19 @@ mod tests {
         }
 
         let chain = vec![root, derived];
-        let (root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+        let acc = accumulate_chain_constraints(&chain);
 
-        assert!(root_si.is_some(), "should find root signed input");
+        assert!(acc.root_input.is_some(), "should find root signed input");
         // Root has 1 constraint + derived has 1 = 2 total.
         assert_eq!(
-            explicit.len(),
+            acc.explicit_constraints.len(),
             2,
             "should accumulate constraints additively"
         );
-        assert!(gate.is_empty(), "should have no gate constraints");
+        assert!(
+            acc.gate_constraints.is_empty(),
+            "should have no gate constraints"
+        );
     }
 
     #[test]
@@ -6304,11 +7154,19 @@ mod tests {
             });
 
         let chain = vec![root];
-        let (_root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+        let acc = accumulate_chain_constraints(&chain);
 
-        assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
-        assert_eq!(gate.len(), 1, "should have 1 gate constraint");
-        assert_eq!(gate[0].gate_name, "Code Review");
+        assert_eq!(
+            acc.explicit_constraints.len(),
+            1,
+            "should have 1 explicit constraint"
+        );
+        assert_eq!(
+            acc.gate_constraints.len(),
+            1,
+            "should have 1 gate constraint"
+        );
+        assert_eq!(acc.gate_constraints[0].gate_name, "Code Review");
     }
 
     /// Spec Approval Ledger regression (agent-gates.md §Spec Approval Ledger):

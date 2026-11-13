@@ -239,7 +239,7 @@ This policy is **immutable** — it exists at every trust level, including Custo
 
 The Custom trust editor grays out immutable policies with tooltip: "This policy cannot be removed or overridden." Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
 
-Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
+Budget warnings (High priority, rank 4 in the Inbox per the unified notification taxonomy in `user-management.md` §Notification Entity) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
 **Custom:** opens the ABAC policy editor within the **Admin** view at workspace scope (a new "Policies" tab alongside "Workspace settings, budget, trust level, teams"). The editor queries `GET /api/v1/policies?scope=Workspace&scope_id=<workspace_id>` to list policies for this workspace. The editor uses the Full-Width layout (per `ui-layout.md` §2) with three sections: (1) a policy list table grouped by prefix (`builtin:` / `trust:` / user-created), (2) a visual condition builder panel (form-based, not raw YAML) for creating/editing policies, (3) a dry-run simulator panel where users can test "would this request be allowed?" against the current policy set. Immutable policies are grayed out with tooltip. Layout details follow the standard Full-Width pattern — no custom layout needed.
 

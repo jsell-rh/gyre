@@ -374,6 +374,7 @@ pub async fn admin_kill_agent(
         let ctx = crate::container_audit::AuditCtx {
             audit: state.audit.as_ref(),
             broadcast_tx: &state.audit_broadcast_tx,
+            search: state.search.as_ref(),
         };
         crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, "force-killed by admin")
             .await;
@@ -405,6 +406,15 @@ pub async fn admin_kill_agent(
         killed_pid,
     )
     .await;
+
+    // The kill ended the run — release the workspace's active-agent budget
+    // slot and charge the wall-clock compute minutes (spawn → kill,
+    // agent-runtime.md §4 What's Tracked). `agent.status` still holds the
+    // pre-transition status: only an Active agent held a slot.
+    if agent.status == AgentStatus::Active {
+        crate::api::budget::decrement_active_agents(&state, &agent.workspace_id.to_string()).await;
+    }
+    crate::api::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -491,6 +491,17 @@ pub(crate) async fn launch_orchestrator_process(
     }
 }
 
+/// Persona name for an orchestrator tier — the meta-spec persona the
+/// orchestrator runs with (agent-runtime.md §2; the names validated by
+/// `validate_persona`).
+fn orchestrator_persona(tier: &OrchestratorType) -> &'static str {
+    match tier {
+        OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+        OrchestratorType::Worker => "worker",
+    }
+}
+
 /// Common tail: persist agent, mint scoped JWT, register it, bootstrap the
 /// signing keypair so the orchestrator can sign DerivedInputs for children,
 /// bump budgets, track analytics.
@@ -577,6 +588,7 @@ async fn spawn_orchestrator(
             &workspace_id.to_string(),
             repo_id.map(|r| r.to_string()).as_deref(),
             &orchestrator_type.to_string(),
+            orchestrator_persona(&orchestrator_type),
         )
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("orchestrator token mint: {e}")))?;
     let _ = state
@@ -600,7 +612,7 @@ async fn spawn_orchestrator(
         }),
         now,
     );
-    let _ = state.analytics.record(&ev).await;
+    record_and_index_activity(state, &ev).await;
 
     budget::increment_active_agents(state, &workspace_id.to_string()).await;
 
@@ -853,6 +865,19 @@ pub async fn spawn_repo_orchestrator(
             launch_detail: launch.launch_detail,
         }),
     ))
+}
+
+/// Record an analytics event and index it for search (search.md
+/// §Searchable Entities: activity events are indexed on write).
+///
+/// Defined at the bottom of the file, and called as a bare one-liner at the
+/// spawn site, deliberately: scripts/inert-enforcement-exemptions.txt pins
+/// the `validate_persona` call sites above (lines 187/283) by exact line
+/// number, so any code above them must stay line-count-neutral versus the
+/// exemption baseline. Grow this helper, never the call site.
+async fn record_and_index_activity(state: &AppState, ev: &AnalyticsEvent) {
+    let _ = state.analytics.record(ev).await;
+    crate::search_indexer::index(state, crate::search_indexer::activity_event_document(ev)).await;
 }
 
 #[cfg(test)]

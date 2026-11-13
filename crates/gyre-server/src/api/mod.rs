@@ -97,12 +97,12 @@ use impersonation::{
 };
 use std::sync::Arc;
 use users::{
-    accept_invitation, create_team, create_token, create_user, deactivate_user, delete_team,
-    delete_token, dismiss_notification, get_judgments, get_me, get_my_notifications,
+    accept_invitation, add_team_member, create_team, create_token, create_user, deactivate_user,
+    delete_team, delete_token, dismiss_notification, get_judgments, get_me, get_my_notifications,
     get_notification_count, get_notification_preferences, get_user_by_username, invite_member,
     list_invitations, list_members, list_teams, list_tokens, list_users, mark_notification_read,
-    mark_notification_unread, remove_member, resolve_notification, revoke_invitation, update_me,
-    update_member_role, update_notification_preferences, update_team,
+    mark_notification_unread, remove_member, remove_team_member, resolve_notification,
+    revoke_invitation, update_me, update_member_role, update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -191,7 +191,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/repos/:id/gates/:gate_id",
-            delete(gates::delete_gate),
+            put(gates::update_gate).delete(gates::delete_gate),
         )
         // Pre-accept push gates
         .route(
@@ -359,6 +359,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/merge-requests/:id/diff",
             get(merge_requests::get_diff),
+        )
+        .route(
+            "/api/v1/merge-requests/:id/spec",
+            get(merge_requests::get_spec),
         )
         .route(
             "/api/v1/merge-requests/:id/attestation",
@@ -687,6 +691,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(budget::get_workspace_budget).put(budget::set_workspace_budget),
         )
         .route("/api/v1/budget/summary", get(budget::budget_summary))
+        .route(
+            "/api/v1/workspaces/:id/budget/by-team",
+            get(budget::budget_by_team),
+        )
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
         .route("/api/v1/search/suggest", get(search::suggest_handler))
@@ -979,6 +987,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/teams/:team_id",
             put(update_team).delete(delete_team),
         )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id/members",
+            post(add_team_member),
+        )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id/members/:user_id",
+            delete(remove_team_member),
+        )
         // ── SCIM 2.0 Provisioning ─────────────────────────────────────────
         .route(
             "/scim/v2/Users",
@@ -1016,6 +1032,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::get_graph_concept),
         )
         .route(
+            "/api/v1/repos/:id/graph/concepts",
+            get(graph::list_graph_concepts),
+        )
+        .route(
             "/api/v1/repos/:id/graph/timeline",
             get(graph::get_graph_timeline),
         )
@@ -1049,6 +1069,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/graph/concept/:concept_name",
             get(graph::get_workspace_graph_concept),
+        )
+        .route(
+            "/api/v1/workspaces/:id/graph/concepts",
+            get(graph::list_workspace_graph_concepts),
         )
         .route(
             "/api/v1/workspaces/:id/briefing",

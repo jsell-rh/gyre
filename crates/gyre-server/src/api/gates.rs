@@ -42,6 +42,26 @@ pub struct CreateGateRequest {
     pub gate_phase: Option<GatePhase>,
     /// Command timeout in seconds. Defaults to the system default (300s).
     pub timeout_secs: Option<u64>,
+    /// Position in the gate chain (repo-lifecycle.md §3 Gates — drag to
+    /// reorder). Defaults to the end of the list.
+    pub position: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateGateRequest {
+    pub name: Option<String>,
+    /// Shell command (TestCommand / LintCommand).
+    pub command: Option<String>,
+    /// Minimum approvals (RequiredApprovals).
+    pub required_approvals: Option<u32>,
+    /// Persona path (AgentReview / AgentValidation).
+    pub persona: Option<String>,
+    /// Whether the gate is enabled (blocking) or disabled (advisory-only).
+    pub required: Option<bool>,
+    /// Command timeout in seconds.
+    pub timeout_secs: Option<u64>,
+    /// New position in the gate chain.
+    pub position: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -61,6 +81,8 @@ pub struct GateResponse {
     pub gate_phase: String,
     /// Command timeout in seconds (None = system default).
     pub timeout_secs: Option<u64>,
+    /// Position in the gate chain (lower runs first).
+    pub position: u32,
     pub created_at: u64,
 }
 
@@ -78,6 +100,7 @@ impl From<QualityGate> for GateResponse {
             required: g.required,
             gate_phase: g.gate_phase.as_str().to_string(),
             timeout_secs: g.timeout_secs,
+            position: g.position,
             created_at: g.created_at,
         }
     }
@@ -254,6 +277,16 @@ pub async fn create_gate(
         }
     }
 
+    // Default position: append to the end of the repo's gate chain
+    // (repo-lifecycle.md §3 Gates — ordering is explicit).
+    let position = match req.position {
+        Some(p) => p,
+        None => {
+            let existing = state.quality_gates.list_by_repo_id(&repo_id).await?;
+            existing.iter().map(|g| g.position).max().unwrap_or(0) + 1
+        }
+    };
+
     let gate = QualityGate {
         id: new_id(),
         repo_id: Id::new(repo_id),
@@ -267,6 +300,7 @@ pub async fn create_gate(
         gate_phase: req.gate_phase.unwrap_or_default(),
         timeout_secs: req.timeout_secs,
         created_at: now_secs(),
+        position,
     };
 
     state.quality_gates.save(&gate).await?;
@@ -286,7 +320,11 @@ pub async fn list_gates(
         .into_iter()
         .map(GateResponse::from)
         .collect();
-    result.sort_by_key(|g| g.created_at);
+    result.sort_by(|a, b| {
+        a.position
+            .cmp(&b.position)
+            .then(a.created_at.cmp(&b.created_at))
+    });
     Ok(Json(result))
 }
 
@@ -305,6 +343,90 @@ pub async fn delete_gate(
             Ok(StatusCode::NO_CONTENT)
         }
     }
+}
+
+/// PUT /api/v1/repos/:id/gates/:gate_id — update gate configuration.
+///
+/// Only fields present in the request body are changed. The gate type is
+/// immutable (agent-gates.md gate chains reference gates by type semantics;
+/// a type change is a delete + re-create).
+pub async fn update_gate(
+    State(state): State<Arc<AppState>>,
+    Path((repo_id, gate_id)): Path<(String, String)>,
+    Json(req): Json<UpdateGateRequest>,
+) -> Result<Json<GateResponse>, ApiError> {
+    let mut gate = match state.quality_gates.find_by_id(&gate_id).await? {
+        None => return Err(ApiError::NotFound(format!("gate {gate_id} not found"))),
+        Some(g) if g.repo_id.as_str() != repo_id => {
+            return Err(ApiError::NotFound(format!("gate {gate_id} not found")))
+        }
+        Some(g) => g,
+    };
+
+    if let Some(name) = req.name {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(ApiError::InvalidInput(
+                "gate name must be non-empty".to_string(),
+            ));
+        }
+        gate.name = name;
+    }
+    if let Some(command) = req.command {
+        let command = command.trim().to_string();
+        match gate.gate_type {
+            GateType::TestCommand | GateType::LintCommand => {
+                if command.is_empty() {
+                    return Err(ApiError::InvalidInput(
+                        "command is required for test_command / lint_command gates".to_string(),
+                    ));
+                }
+                gate.command = Some(command);
+            }
+            _ => {
+                return Err(ApiError::InvalidInput(format!(
+                    "command is not applicable to gate type {}",
+                    gate_type_str(&gate.gate_type)
+                )))
+            }
+        }
+    }
+    if let Some(required_approvals) = req.required_approvals {
+        match gate.gate_type {
+            GateType::RequiredApprovals => gate.required_approvals = Some(required_approvals),
+            _ => {
+                return Err(ApiError::InvalidInput(format!(
+                    "required_approvals is not applicable to gate type {}",
+                    gate_type_str(&gate.gate_type)
+                )))
+            }
+        }
+    }
+    if let Some(persona) = req.persona {
+        match gate.gate_type {
+            GateType::AgentReview | GateType::AgentValidation => {
+                gate.persona = Some(persona.trim().to_string())
+            }
+            _ => {
+                return Err(ApiError::InvalidInput(format!(
+                    "persona is not applicable to gate type {}",
+                    gate_type_str(&gate.gate_type)
+                )))
+            }
+        }
+    }
+    if let Some(required) = req.required {
+        gate.required = required;
+    }
+    if let Some(timeout_secs) = req.timeout_secs {
+        gate.timeout_secs = Some(timeout_secs);
+    }
+    if let Some(position) = req.position {
+        gate.position = position;
+    }
+
+    state.quality_gates.save(&gate).await?;
+    Ok(Json(GateResponse::from(gate)))
 }
 
 /// GET /api/v1/merge-requests/:id/gates — list gate results for an MR.
@@ -408,13 +530,61 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
     }
 }
 
+/// agent-gates.md §Forge Enforcement Policies, `require_signed_approval`:
+/// "Spec approvals must include Sigstore signature."
+///
+/// Same per-SHA ledger query as [`verify_spec_ref`], but the active approval
+/// must additionally carry a non-empty signature. Multiple approvals can
+/// exist for one spec version (different approvers); one signed active
+/// approval satisfies the policy.
+pub async fn verify_signed_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), String> {
+    // Parse "path@sha" format.
+    let (path, sha) = spec_ref
+        .rsplit_once('@')
+        .ok_or_else(|| format!("invalid spec_ref format '{spec_ref}': expected 'path@sha'"))?;
+
+    // Validate SHA is 40-char hex.
+    if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "spec_ref SHA '{sha}' is not a valid 40-char hex SHA"
+        ));
+    }
+
+    let for_sha = state
+        .spec_approvals
+        .find_by_spec_sha(path, sha)
+        .await
+        .unwrap_or_default();
+
+    let has_signed_active_approval = for_sha.iter().any(|a| {
+        a.is_active()
+            && a.signature
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+    });
+
+    if has_signed_active_approval {
+        Ok(())
+    } else if for_sha.iter().any(|a| a.is_active()) {
+        Err(format!(
+            "spec '{path}' at SHA '{sha}' has an active approval but it carries no \
+             Sigstore signature (require_signed_approval policy)"
+        ))
+    } else {
+        Err(format!(
+            "spec '{path}' at SHA '{sha}' has no active approval in the ledger"
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::verify_spec_ref;
+    use super::{verify_signed_spec_ref, verify_spec_ref};
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use gyre_domain::{Repository, SpecApproval};
@@ -655,6 +825,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_gates_orders_by_position() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        // Create unit-tests first with explicit position 1; lint and review
+        // get default positions appended after the current max (2, 3).
+        for (name, gate_type, command, position) in [
+            ("unit-tests", "test_command", Some("cargo test"), Some(1)),
+            ("lint", "lint_command", Some("cargo clippy"), None),
+            ("review", "agent_review", None, None),
+        ] {
+            let mut body = serde_json::json!({
+                "name": name,
+                "gate_type": gate_type,
+            });
+            if let Some(cmd) = command {
+                body["command"] = serde_json::json!(cmd);
+            }
+            if let Some(p) = position {
+                body["position"] = serde_json::json!(p);
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/repo-1/gates")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED, "gate {name} created");
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        // Explicit position 1 sorts first; lint/review defaults (2, 3)
+        // append after the existing max, preserving creation order.
+        assert_eq!(names, vec!["unit-tests", "lint", "review"]);
+
+        // Reorder via PUT: move review to the front.
+        let review_id = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == "review")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/repos/repo-1/gates/{review_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "position": 0 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["review", "unit-tests", "lint"]);
+    }
+
+    #[tokio::test]
     async fn delete_gate() {
         let state = test_state();
         create_repo(state.clone()).await;
@@ -692,6 +968,191 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn update_gate_toggles_required_and_updates_command() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        // Create a required test gate.
+        let body = serde_json::json!({
+            "name": "unit-tests",
+            "gate_type": "test_command",
+            "command": "cargo test"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let gate_id = json["id"].as_str().unwrap().to_string();
+
+        // Disable the gate (advisory-only) and change the command.
+        let update = serde_json::json!({
+            "required": false,
+            "command": "cargo test --all"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/repos/repo-1/gates/{gate_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["required"], false);
+        assert_eq!(json["command"], "cargo test --all");
+        assert_eq!(json["name"], "unit-tests");
+
+        // The update is persisted: a fresh list shows the new state.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let listed = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"].as_str() == Some(gate_id.as_str()))
+            .expect("updated gate should be listed");
+        assert_eq!(listed["required"], false);
+        assert_eq!(listed["command"], "cargo test --all");
+    }
+
+    #[tokio::test]
+    async fn update_gate_persona_on_agent_review_gate() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let body = serde_json::json!({
+            "name": "security-review",
+            "gate_type": "agent_review"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let gate_id = json["id"].as_str().unwrap().to_string();
+
+        // Configure the reviewer persona.
+        let update = serde_json::json!({ "persona": "personas/security.md" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/repos/repo-1/gates/{gate_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["persona"], "personas/security.md");
+    }
+
+    #[tokio::test]
+    async fn update_gate_command_on_non_command_gate_rejected() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let body = serde_json::json!({
+            "name": "reviews",
+            "gate_type": "agent_review"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let gate_id = json["id"].as_str().unwrap().to_string();
+
+        // command is not applicable to agent_review gates.
+        let update = serde_json::json!({ "command": "cargo test" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/repos/repo-1/gates/{gate_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_unknown_gate_returns_404() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let update = serde_json::json!({ "required": false });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/gates/no-such-gate")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1015,6 +1476,128 @@ mod tests {
                 .await
                 .is_err(),
             "Pending version must not verify even though a sibling SHA is approved"
+        );
+    }
+
+    /// agent-gates.md §Forge Enforcement Policies, `require_signed_approval`:
+    /// "Spec approvals must include Sigstore signature."
+    async fn seed_signed_ledger_entry(
+        state: &std::sync::Arc<crate::AppState>,
+        id: &str,
+        spec_path: &str,
+        spec_sha: &str,
+        signature: Option<&str>,
+    ) -> gyre_common::Id {
+        let approval_id = gyre_common::Id::new(id);
+        let mut entry =
+            gyre_domain::SpecApproval::new(approval_id.clone(), spec_path, spec_sha, "user:test");
+        entry.signature = signature.map(|s| s.to_string());
+        state.spec_approvals.create(&entry).await.unwrap();
+        approval_id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn signed_spec_ref_requires_signature_on_active_approval() {
+        let state = test_state();
+        let sha = "5".repeat(40);
+
+        // Approved + signed → verifies.
+        let signed = seed_signed_ledger_entry(
+            &state,
+            "apr-sig-1",
+            "system/signed.md",
+            &sha,
+            Some("sigstore:meow"),
+        )
+        .await;
+        state
+            .spec_approvals
+            .approve(&signed, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(
+            verify_signed_spec_ref(&state, &format!("system/signed.md@{sha}"))
+                .await
+                .is_ok(),
+            "approved + signed entry must satisfy require_signed_approval"
+        );
+
+        // Approved but unsigned → rejected with a reason naming the signature.
+        let sha2 = "6".repeat(40);
+        let unsigned =
+            seed_signed_ledger_entry(&state, "apr-sig-2", "system/unsigned.md", &sha2, None).await;
+        state
+            .spec_approvals
+            .approve(&unsigned, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        let err = verify_signed_spec_ref(&state, &format!("system/unsigned.md@{sha2}"))
+            .await
+            .expect_err("unsigned approval must fail require_signed_approval");
+        assert!(
+            err.contains("no Sigstore signature"),
+            "failure must name the missing signature, got: {err}"
+        );
+
+        // Approved with a whitespace-only signature → treated as unsigned.
+        let sha3 = "7".repeat(40);
+        let blank =
+            seed_signed_ledger_entry(&state, "apr-sig-3", "system/blank.md", &sha3, Some("   "))
+                .await;
+        state
+            .spec_approvals
+            .approve(&blank, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(
+            verify_signed_spec_ref(&state, &format!("system/blank.md@{sha3}"))
+                .await
+                .is_err(),
+            "blank signature must not satisfy require_signed_approval"
+        );
+
+        // No approval at all → rejected.
+        let sha4 = "8".repeat(40);
+        let err = verify_signed_spec_ref(&state, &format!("system/missing.md@{sha4}"))
+            .await
+            .expect_err("missing approval must fail require_signed_approval");
+        assert!(
+            err.contains("no active approval"),
+            "failure must name the missing approval, got: {err}"
+        );
+
+        // One signed active approval among several rows for the same version
+        // satisfies the policy (multiple approvals per version are allowed).
+        let sha5 = "9".repeat(40);
+        let a = seed_signed_ledger_entry(&state, "apr-sig-4", "system/multi.md", &sha5, None).await;
+        let b = seed_signed_ledger_entry(
+            &state,
+            "apr-sig-5",
+            "system/multi.md",
+            &sha5,
+            Some("sigstore:second"),
+        )
+        .await;
+        state
+            .spec_approvals
+            .approve(&a, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        state
+            .spec_approvals
+            .approve(&b, 1700000110)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(
+            verify_signed_spec_ref(&state, &format!("system/multi.md@{sha5}"))
+                .await
+                .is_ok(),
+            "one signed active approval among several must satisfy the policy"
         );
     }
 }
