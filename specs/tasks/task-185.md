@@ -5,7 +5,7 @@ depends_on: [task-172, task-171]
 progress: not-started
 coverage_sections:
   - "ui-layout.md §LLM-Assisted Spec Editing"
-commits: []
+commits: ["ee9c6c63d40be526373b24c50dea270a12f1223f"]
 ---
 
 ## Spec Excerpt
