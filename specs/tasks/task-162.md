@@ -54,21 +54,21 @@ Read `specs/system/message-bus.md` §"Relationship to Notifications" and §"Impl
 
 ## Shipped
 
-### Round 8 — contract restore, attribution gate re-run
+### Round 9 — contract restore, fresh verification
 
-The executor restored the assigned task contract (frontmatter/checkboxes
-reset) while the production fix stayed on the branch. This round
-re-verified head `3c345bf9`:
-`git diff --name-only 6d2c682f..3c345bf9` shows only
-`specs/tasks/task-162.md` — the task-162 server source is byte-identical
-to the round-7 verified head (production fix merged with assigned base
-`48b3d47e`), so the round-7 `cargo check` result applies unchanged;
-`main.rs` wiring (`spawn_message_consumer`, `spawn_message_expiry`) and
-`scripts/check-task-commit-attribution.sh` (exit 0) re-verified fresh at
-this head. Server test execution is deferred to the independent verifier
+The executor again restored the assigned task contract (frontmatter/
+checkboxes/commits reset) while the production fix stayed on the branch
+(working-tree diff touched only `specs/tasks/task-162.md`). This round
+re-verified head `614fecd9` fresh: `git diff --name-only 3c345bf9..HEAD`
+shows only the task doc — server source is byte-identical to the
+round-8 verified head, and `cargo check -p gyre-server` (SKIP_WEB_BUILD=1,
+exit 0, ~6m) and `scripts/check-task-commit-attribution.sh` (exit 0 after
+restoring the commits frontmatter) were re-run at this head; `main.rs`
+wiring re-confirmed (`spawn_message_consumer` + `spawn_message_expiry`).
+Server test execution remains deferred to the independent verifier
 (4 GiB budget rule): run `cargo test -p gyre-server message_dispatcher`,
 then the full `cargo test --all` acceptance gate. Evidence:
-`/tmp/stage/review-evidence/task-162-round8.txt`.
+`/tmp/stage/review-evidence/task-162-round9.txt`.
 
 ### Dispatcher (§Relationship to Notifications)
 
