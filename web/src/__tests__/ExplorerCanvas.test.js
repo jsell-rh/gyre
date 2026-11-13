@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 import { detectRiskAnomalies } from '../lib/risk-map.js';
+import { computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
 
 // Mock canvas context
 let mockCtx;
@@ -1143,6 +1144,132 @@ describe('ExplorerCanvas — timeline scrubber', () => {
     const btns = Array.from(container.querySelectorAll('.tb-btn'));
     const timelineBtn = btns.find(b => b.textContent.includes('Timeline'));
     expect(timelineBtn).toBeTruthy();
+  });
+});
+
+describe('ExplorerCanvas — timeline ghost rendering (system-explorer.md §6)', () => {
+  // Historical graph as the server ?at= reconstruction returns it: the
+  // soft-deleted node (removed since the scrub time) is present with its
+  // REAL id — the client-side filter cannot contain it because it is derived
+  // from the current graph.
+  const HIST_NODES = [
+    { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+    { id: 'fn1', node_type: 'function', name: 'create_user', qualified_name: 'api.create_user', file_path: 'api/handlers.py', line_start: 10, line_end: 30, visibility: 'public', spec_confidence: 'high', test_node: false },
+    { id: 'gs1', node_type: 'type', name: 'OldService', qualified_name: 'api.OldService', file_path: 'api/old_service.py', line_start: 1, line_end: 40, visibility: 'public', spec_confidence: 'none', test_node: false },
+  ];
+  const HIST_EDGES = [
+    { id: 'e1', source_id: 'pkg1', target_id: 'fn1', edge_type: 'contains' },
+    { id: 'e2', source_id: 'pkg1', target_id: 'gs1', edge_type: 'contains' },
+  ];
+  // Current graph: OldService is gone, get_user is new (forward ghost).
+  const CURRENT_NODES = [
+    HIST_NODES[0],
+    HIST_NODES[1],
+    { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+  ];
+  const CURRENT_EDGES = [
+    { id: 'e1', source_id: 'pkg1', target_id: 'fn1', edge_type: 'contains' },
+    { id: 'e3', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+  ];
+  const TIMELINE = [
+    { id: 'd0', timestamp: 500, delta_json: JSON.stringify({ nodes_added: [
+      { name: 'api', node_type: 'package', qualified_name: 'api' },
+      { name: 'create_user', node_type: 'function', qualified_name: 'api.create_user' },
+      { name: 'OldService', node_type: 'type', qualified_name: 'api.OldService' },
+    ] }) },
+    { id: 'd1', timestamp: 1000, delta_json: JSON.stringify({ nodes_added: [], nodes_removed: [] }) },
+    { id: 'd2', timestamp: 1500, delta_json: JSON.stringify({ nodes_added: [
+      { name: 'get_user', node_type: 'function', qualified_name: 'api.get_user' },
+    ], nodes_removed: ['api.OldService'] }) },
+  ];
+
+  it('draws the red-dotted strikethrough for backward ghosts (F1 regression)', () => {
+    // The exact overlay set computeTimelineGhostOverlays produces for the
+    // historical scrub position (scrubIndex 1; OldService removed in d2).
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    const removeGhost = overlays.find(o => o.action === 'remove');
+    expect(removeGhost).toBeTruthy();
+    // The ghost must carry the historical node's real id so the canvas's
+    // layoutNodeMap.get(ghost.id) resolves — the pre-fix synthetic
+    // `removed:<qn>` key never matched and the strikethrough never drew.
+    expect(removeGhost.id).toBe('gs1');
+
+    // The canvas draws the scrubbed-time graph (ExplorerView passes the
+    // timeline-filtered graph as `nodes` during time travel).
+    render(ExplorerCanvas, { // dead-test-code:ok — render triggers canvas draw, container not needed
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    // drawGhostRemoveNode is the ONLY code path that dashes [4, 4] (red
+    // dotted border) — its guard is layoutNodeMap.get(ghost.id) resolving.
+    expect(mockCtx.setLineDash).toHaveBeenCalledWith([4, 4]);
+  });
+
+  it('draws the backward ghost as a red-dotted outline followed by the red strikethrough', () => {
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    // Track the dash pattern at each stroke() — drawGhostRemoveNode draws
+    // the red dotted border ([4,4]) and then the solid-red strikethrough
+    // ([]) in that order. Asserting strokeStyle after render would only see
+    // the LAST assignment (tautological), and '#ef4444' alone is not unique
+    // to this path.
+    let dash = [];
+    const strokes = [];
+    mockCtx.setLineDash.mockImplementation((d) => { dash = d; });
+    mockCtx.stroke.mockImplementation(() => {
+      strokes.push({ style: mockCtx.strokeStyle, dash: [...dash] });
+    });
+    render(ExplorerCanvas, { // dead-test-code:ok — render triggers canvas draw, container not needed
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    const dottedIdx = strokes.findIndex((s) => s.style === '#ef4444' && s.dash[0] === 4 && s.dash[1] === 4);
+    expect(dottedIdx).toBeGreaterThanOrEqual(0); // red dotted outline
+    // The strikethrough: a solid-red stroke right after the dotted border
+    // (same drawGhostRemoveNode body, no early return between them).
+    const strike = strokes
+      .slice(dottedIdx + 1)
+      .find((s) => s.style === '#ef4444' && s.dash.length === 0);
+    expect(strike).toBeTruthy();
+  });
+
+  it('shows the ghost-mode banner counting the historical changes', () => {
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    const { container } = render(ExplorerCanvas, {
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    const banner = container.querySelector('.preview-mode-count');
+    expect(banner?.textContent).toContain('2 historical changes');
+    // The − Removed chip reflects the backward ghost
+    const chip = container.querySelector('.ghost-chip-remove');
+    expect(chip?.textContent).toContain('− Removed (1)');
   });
 });
 

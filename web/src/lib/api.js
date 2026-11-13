@@ -596,6 +596,17 @@ export const api = {
     const qs = params.toString();
     return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
   },
+  // Point-in-time knowledge graph (system-explorer.md §6 Architectural
+  // Timeline): `at` is unix epoch seconds or an RFC 3339 timestamp. The
+  // server reconstructs nodes/edges that existed at that instant,
+  // including ones soft-deleted since.
+  repoGraphAt: (id, at) => request(`/repos/${id}/graph?at=${encodeURIComponent(at)}`),
+  // Workspace message bus — GET lists messages, optionally filtered by
+  // kind (?kind=reconciliation_completed for timeline key moments).
+  workspaceMessages: (workspaceId, params) => {
+    const qs = params ? new URLSearchParams(params).toString() : '';
+    return request(`/workspaces/${workspaceId}/messages${qs ? '?' + qs : ''}`);
+  },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
   // Meta-spec preview loop (S4.6)
   previewPersona: (workspaceId, data) =>
