@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb", "ea366b15c9e482b9b8ad2d54ec3a43252a2ac1e6"]
 ---
 
 ## Spec Excerpt
@@ -100,81 +100,40 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**Repair round 13 (requirements changed): merge the new base
-`33cd786c2` into the retained task-110 checkpoint, merge commit
-`fcd66acf3` (parents `c5c927604` + `33cd786c2`).** The base carries
-the task-107/123/152/153 surface (Sigstore/Fulcio keyless commit
-signing, notification entity rework with structured
-`NotificationSource`, graph narrative, search facets). Two conflicts
-resolved: `mem.rs` (both sides appended new repository sections at
-the same location — kept the task-110 invitation repositories AND
-the base's `MemCommitSignatureRepository`) and
-`warn-continue-creation-exemptions.txt` (both sides had removed the
-same entries; merged the comments). Two base-driven repairs landed
-inside the merge commit: (1) the task-110 dedupe migration
-`2026-11-08-000059_invitation_pending_unique` was renumbered to
-`...-000061_...` — it collided with the base's
-`2026-11-08-000059_notification_entity_source` under Diesel version
-`20261108000059`, which would have silently dropped the base's
-migration on fresh databases (`check-migration-versions.sh` now
-green); (2) the workspace-invite handler's redundant
-`notif.entity_ref` assignment was removed because the base's
-notification rework replaced that field with `NotificationSource`,
-and `Notification::new` already sources workspace invitations at
-the workspace itself. No product behavior of the invitation flow
-changed.
+**Repair round 14 (review F1): the workspace-invite notification is now
+typed `InvitationReceived`.** `invite_to_workspace` had constructed the
+invitee's in-app notification as `NotificationType::TrustSuggestion`, so
+the invitee's Inbox (web `Inbox.svelte`) classified every workspace
+invitation as a trust-policy suggestion. Commit `ea366b15` constructs it
+with `NotificationType::InvitationReceived` (user-management.md
+§Notification Entity: "A user was invited to a workspace", matching the
+sibling `invite_member` handler) and extends
+`invite_notification_carries_accept_path` to assert `notification_type`
+is `InvitationReceived` and not `TrustSuggestion` — the old code fails
+that assertion, so the mis-typing cannot silently return. Type-checked
+with `cargo check -p gyre-server --lib --tests` (exit 0); the gyre-server
+test build exceeds this sandbox's 4 GiB budget and is recorded for the
+independent verifier:
+`cargo test -p gyre-server --lib api::invitations::tests::invite_notification_carries_accept_path`.
 
-### Shipped behavior (carried from prior rounds, re-verified at this head)
+### Shipped behavior (carried from prior rounds, unchanged this round)
 
-- **Tenant invitations:** domain entities
-  (`gyre-domain/src/invitation.rs`), ports
-  (`gyre-ports/src/invitation.rs`), SQLite/Postgres migrations +
-  adapters, and the five specced endpoints: single invite, bulk
-  invite, list with status filter, revoke, magic-link
-  accept/decline. Tokens are CSPRNG-generated and stored only as
-  SHA-256 hashes. Per-tenant `InvitationPolicy` endpoints configure
-  expiry; an hourly background job
-  (`GYRE_INVITE_EXPIRY_INTERVAL_SECS`) marks past-due `Pending`
-  invitations `Expired`.
-- **Workspace invitations:** invite (by `user_id`, `username`, or
-  `email`, per spec), list, revoke, token accept/decline, plus the
-  authenticated invitee surface: `GET /api/v1/users/me/invitations`,
-  `POST /api/v1/workspaces/{id}/invite/accept` and `/invite/decline`
-  (caller must be the invited user; no pending invitation → 404).
-  In-app notification to the invitee carries `kind:
-  workspace_invitation` with `accept_url`/`decline_url`.
-- **Expiry:** `InvitationPolicy` (tenant/workspace expiry days,
-  `max_pending_invitations`, `allow_re_invite`) persisted per tenant
-  via `GET/PUT /api/v1/tenant/invitations/policy`; corrupt policy row
-  fails closed. Background job uses the same conditional
-  `transition_status` claim as accept, so a racing accept is never
-  overwritten; expired tokens are rejected on accept (409 → Expired).
-
-### Test evidence (this head, merge commit `fcd66acf3`)
-
-- `cargo test -p gyre-server --lib api::invitations` — 26 passed / 0
-  failed (lifecycle, TenantAdmin guard, cross-tenant 403, token
-  CSPRNG+hash, cap, decline, expiry, SSO-link, username collisions).
-- `cargo test -p gyre-server --lib notification` — 37 passed / 0
-  failed; `commit_signature` — 9 passed / 0 (base surfaces
-  re-validated against the merged `mem.rs`).
-- `cargo test -p gyre-adapters invitation` — 5 passed / 0 failed
-  (roundtrips, pending-scope unique index, raced-duplicate dedupe
-  under the renumbered 000061 migration, transition_status
-  source-status guard).
-- `cargo test -p gyre-server --lib` — 1735 passed / 0 failed
-  (merge-validation: task-110 invitations coexist with the base's
-  commit-signature/notification/narrative/search surfaces).
-- `cargo test -p gyre-adapters` — 446 passed / 0 failed (6 ignored).
-- `cargo check --workspace --all-targets` — exit 0.
-- Mechanical guards all green: migration versions, ABAC route
-  registry, ABAC-exempt handlers, arch, mem port contracts, MCP write
-  tools, dead message kinds, scope literal defaults, fabricated scope
-  defaults, inert enforcement, lossy secret conversion, forwarded
-  header trust, in-memory state stores, unbounded external HTTP,
-  migration SQL portability, forged scope fields, task commit
-  attribution.
-- Evidence retained at
-  `/tmp/stage/review-evidence/task-110-rebase-round13.md`.
-- web/dist untouched (executor restores from assignment base; remote
-  rebuild owns publication).
+- **Domain & storage:** `TenantInvitation`/`WorkspaceInvitation`/
+  `InvitationStatus`/`InvitationPolicy` entities
+  (`gyre-domain/src/invitation.rs`), port traits
+  (`gyre-ports/src/invitation.rs`), SQLite + Postgres migrations and
+  adapters, mem adapters. Tokens are CSPRNG-generated and stored only as
+  SHA-256 hashes; the raw token appears solely in the invite response.
+- **Tenant invitations:** the five specced endpoints — single invite,
+  bulk invite, list with status filter, revoke, magic-link
+  accept/decline — with TenantAdmin-only authorization, per-tenant
+  `InvitationPolicy` expiry/max-pending caps, and SSO-account linking on
+  accept when the email already has an account.
+- **Workspace invitations:** invite → pending → accept/decline/expire
+  lifecycle with membership creation on accept, inviter-side listing,
+  invitee-facing `GET /api/v1/users/me/invitations`, and per-workspace
+  `max_pending_invitations` enforcement.
+- **Expiry:** background sweeper marks `Pending` invitations past
+  `expires_at` as `Expired` for both invitation kinds.
+- **Routes & ABAC:** all routes registered in `api/mod.rs` with ABAC
+  resolver mappings in `abac_middleware.rs`; no exemption-file entries.
