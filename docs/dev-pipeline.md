@@ -24,10 +24,11 @@ The stages are triage, implementation, independent review, verification,
 publication/merge, CI observation, and cleanup. Review and verification bind to an exact candidate
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
-Sandbox readiness uses the authorized model/verification timeout (four hours
-by default), instead of independent ten/thirty-minute cutoffs that churned
-pending allocations while backend capacity was unavailable. Readiness expiry
-is reported as provisioning failure, including to the stress guard.
+Verifier readiness and CLI creation use the authorized model/verification
+timeout (four hours by default). Pinned Fullsend 0.50.0 separately constrains
+its readiness polling window to 600 seconds; its harness stays within that
+supported bound. Readiness expiry is reported as provisioning failure,
+including to the stress guard.
 When the owned pod's latest scoped scheduler evidence confirms insufficient
 CPU/memory, provisioning failure instead becomes a backend-capacity retry.
 Its backoff grows from one to fifteen minutes across work identities and main
