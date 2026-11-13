@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61", "0c148e2827d70f449c22a30856cc610fbcb1e053", "9ba4dd4064ae81fd259628dc8e71620453984dbc"]
 ---
 
 ## Spec Excerpt
@@ -145,63 +145,88 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ## Shipped
 
-### This round: review repair (round-2 findings on the task-129 branch)
+### Round 3: system-full-access privilege escalation + dead-code bypass repair (commit `9ba4dd40`)
 
-Two findings from the independent review of the previous rounds' work,
-repaired in commit `0c148e28` on top of the existing engine/API/audit
-implementation:
+The engine, CRUD/dry-run/decisions/effective API, audit integration,
+builtin seeding, caching, and the round-1/round-2 repairs
+(agent-repo-scope containment, `?subject=` param binding) are in the
+earlier commits listed above. Round 3 repairs the two remaining review
+findings on the newly-seeded `system-full-access` builtin:
 
-**1. `agent-repo-scope` built-in was hollow.** The seeded row
-(`gyre-domain/src/policy.rs`) was `enabled: false` with an Exists-only
-condition, so the specced containment ("Agents can't access resources
-outside their scoped repo") was never enforced — the m34
-`agent-scoped-access` role Allow (priority 700) granted worker agents
-cross-repo access within the tenant, and no supported path could enable
-the row (the policies API refuses built-in updates; the startup drift
-refresh reverts direct DB edits). The seeded conditions also diverged
-from the spec: `subject.repo_scope Exists` would have denied repo-scoped
-agents EVERYTHING (worker tokens always carry a `repo_id` claim), since
-worker tokens always carry `repo_id`. The seed now matches the
-§Policy Examples semantics exactly: `subject.type == agent` AND
-`subject.repo_scope not_equals "$resource.repo_id"` (dynamic reference —
-in-scope access does not match, unscoped agents and non-repo-addressed
-resources fail the condition closed), `enabled: true`, priority 750 —
-above the role Allow at 700, because composition is
-"higher priority always wins" and a Deny at the example's priority 100
-would enforce nothing. Existing deployments receive the fix through the
-built-in drift refresh at startup (covered by
-`seed_refreshes_drifted_builtin_policy`). Git HTTP agent pushes are a
-separate enforcement path (repo access + gate chain) and are unchanged.
+**1. Privilege escalation via a spoofed reserved identity.** The policy
+matches `subject.id == "gyre-system-token"`, but the live middleware
+resolves `subject.id` from `auth.agent_id` — the user's display_name for
+JWT/API-key principals, caller-settable through PUT /api/v1/users/me,
+admin user creation, SCIM provisioning, and the SSO `preferred_username`
+claim. The identity is now **reserved** (`gyre_domain::SYSTEM_ABAC_IDENTITY`,
+next to the seed that uses it):
 
-**2. `/api/v1/policies/effective` param mismatch.** The §API table and
-`docs/api-reference.md` document `?subject={id}`; the handler bound
-`subject_id` only, so a caller following the docs hit the no-subject
-fallback (bare context → deny-everything). The handler now binds the
-documented `subject` param, with `subject_id` accepted as an alias.
+- PUT /api/v1/users/me rejects the string as display_name (400, nothing
+  applied — `put_me_rejects_reserved_system_display_name`);
+- admin POST /api/v1/users rejects it as a username (display_name derives
+  from it — `create_user_rejects_reserved_system_username`);
+- SCIM create/update reject it as displayName, including the
+  userName-fallback case (`scim_rejects_reserved_system_identity`);
+- SSO provisioning fails closed on `preferred_username` = the reserved
+  string, and re-login of a pre-existing user whose stored display_name is
+  the reserved string is rejected (401, no user row created —
+  `jwt_rejects_reserved_system_identity_provisioning`);
+- **evaluation-time containment**: the middleware denies (403, warn log,
+audited PolicyDecision) any NON-system principal whose agent_id is the
+reserved string — covers pre-existing rows and direct DB edits that no
+write-path validation can reach (`spoofed_system_identity_denied_before_evaluation`:
+an API-key user whose display_name is the reserved string gets 403 before
+any policy, including system-full-access, is evaluated).
+
+**2. Dead-code mitigation / unreachable policy.** The
+`ctx.set("subject.id", "gyre-system-token")` mapping was unreachable — the
+identical `is_system_principal()` predicate returned the request earlier
+(system token bypassed ABAC entirely), so the genuine global
+GYRE_AUTH_TOKEN never reached the policy that exists to allow it, and the
+seeded policy could only ever be matched by the spoofed identity above.
+The early bypass is **removed**: the system principal now flows through
+the normal evaluation flow — attribute extraction, immutable-Deny check,
+priority sort — and is allowed BY `system-full-access` at priority 1000
+(above tenant-isolation 950 and every role band; the only immutable Deny
+`builtin:require-human-spec-approval` keys on `subject.type != "user"` and
+does not match the system principal, whose Admin-role type derivation is
+"user", so spec-approval behavior is unchanged). The decision audit trail
+now proves the mechanism instead of a misleading rationale:
+`system_token_allowed_by_system_full_access_policy` (renamed from
+`system_token_bypasses_abac`) asserts the recorded decision has
+`matched_policy == builtin-system-access`, and
+`builtin_tenant_isolation_denies_cross_tenant_live` asserts the same for
+the global token's cross-tenant 200. Blast-radius analysis: api-module
+tests never layer the ABAC middleware (only `build_router` does); the
+only two global-token usages in middleware tests use builtin-seeded
+states; no seeded or test-created policy outranks (1000, tenant, allow).
+
+The spec (abac-policy-engine.md §Built-In Policies) and the coverage
+matrix row 11 were amended to document the reservation and the
+allowed-by-policy (no-bypass) mechanism.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --tests` — exit 0 (type-checks all new
-  test code).
+Run in this sandbox (gyre-server codegen is blocked by the build
+wrapper — server tests are deferred to the independent verifier):
+
+- `cargo check -p gyre-server --tests` — exit 0 (all new code, including
+  test code, type-checks).
 - `cargo test -p gyre-domain` — 507 + 8 passed, 0 failed.
-- `scripts/check-arch.sh`, `scripts/check-abac-route-registry.sh`,
-  `check-inert-enforcement`, `check-fail-open-ref-resolution`,
-  `check-fabricated-scope-defaults`, `check-mem-port-contracts` — all
-  pass.
-- New tests (gyre-server test builds are blocked by the sandbox build
-  wrapper — the independent verifier must run them):
-  `cargo test -p gyre-server --lib agent_repo_scope` covers
-  `agent_repo_scope_seed_matches_spec_example` (seed shape: enabled,
-  dynamic-reference conditions, priority > 700 — each assertion kills
-  one pre-fix defect),
-  `agent_repo_scope_enforced_over_role_allow` (engine-level, against the
-  REAL m34 seed set: in-scope allowed by the role Allow, out-of-scope
-  denied BY `builtin-agent-repo-scope`, non-repo-addressed
-  fall-through), and
-  `builtin_agent_repo_scope_denies_out_of_scope_agent_live` (live
-  middleware: minted worker JWT scoped to repo-scope-a reads its own
-  repo 200, reads repo-scope-b 403, and the recorded decision names
-  `builtin-agent-repo-scope` as the matched policy).
-  `cargo test -p gyre-server --lib effective_permissions_binds_documented_subject`
-  covers the documented `?subject=` spelling (real user attributes
-  loaded → allow) and the `subject_id` alias.
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-scope-literal-defaults.sh`, `check-fabricated-scope-defaults.sh`,
+  `check-inert-enforcement.sh`, `check-mem-port-contracts.sh`,
+  `check-fail-open-ref-resolution.sh`, `check-lossy-secret-conversion.sh`
+  — all pass.
+
+Verifier must run (focused, then full):
+
+- `cargo test -p gyre-server --lib system_token_allowed_by_system_full_access_policy`
+- `cargo test -p gyre-server --lib spoofed_system_identity_denied_before_evaluation`
+- `cargo test -p gyre-server --lib builtin_tenant_isolation_denies_cross_tenant_live`
+- `cargo test -p gyre-server --lib put_me_rejects_reserved_system_display_name`
+- `cargo test -p gyre-server --lib create_user_rejects_reserved_system_username`
+- `cargo test -p gyre-server --lib jwt_rejects_reserved_system_identity_provisioning`
+- `cargo test -p gyre-server --lib scim_rejects_reserved_system_identity`
+- full `cargo test --all` (prior rounds' suites unchanged:
+  agent_repo_scope, policies API, decisions audit, dry-run, effective)
