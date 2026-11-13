@@ -462,6 +462,96 @@ pub async fn get_workspace_presence(
     Ok(Json(entries))
 }
 
+// ---------------------------------------------------------------------------
+// Workspace merge policy (meta-spec-reconciliation.md §9)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct MergePolicyResponse {
+    pub require_current_meta_spec_set: bool,
+}
+
+impl From<crate::merge_policy::WorkspaceMergePolicy> for MergePolicyResponse {
+    fn from(p: crate::merge_policy::WorkspaceMergePolicy) -> Self {
+        Self {
+            require_current_meta_spec_set: p.require_current_meta_spec_set,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMergePolicyRequest {
+    pub require_current_meta_spec_set: Option<bool>,
+}
+
+/// GET /api/v1/workspaces/:id/merge-policy
+///
+/// Returns the workspace merge policy — the §9 strict-mode switch for the
+/// meta-spec drift merge gate. Default: warn only.
+pub async fn get_merge_policy(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<Json<MergePolicyResponse>, ApiError> {
+    let workspace_id = Id::new(&id);
+
+    // Verify workspace exists and the caller's tenant owns it.
+    let ws = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
+
+    let policy = crate::merge_policy::get_merge_policy(&state, &workspace_id).await?;
+    Ok(Json(policy.into()))
+}
+
+/// PUT /api/v1/workspaces/:id/merge-policy (Admin only)
+///
+/// Update the workspace merge policy (partial update). Admin-only: the
+/// strict-mode flag converts the §9 meta-spec drift warning into a hard
+/// merge block — a governance control that determines whether in-flight MRs
+/// can merge during reconciliation, so non-Admin callers (Developers,
+/// Agents) must not be able to flip it (same NEW-26 rule as the meta-spec-set
+/// binding).
+pub async fn set_merge_policy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    auth: AuthenticatedAgent,
+    Json(req): Json<UpdateMergePolicyRequest>,
+) -> Result<Json<MergePolicyResponse>, ApiError> {
+    // Admin-only: see doc comment above.
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace merge policy".to_string(),
+        ));
+    }
+
+    let workspace_id = Id::new(&id);
+
+    // Verify workspace exists and the caller's tenant owns it.
+    let ws = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
+
+    // Apply partial update.
+    let mut policy = crate::merge_policy::get_merge_policy(&state, &workspace_id).await?;
+    if let Some(require) = req.require_current_meta_spec_set {
+        policy.require_current_meta_spec_set = require;
+    }
+    crate::merge_policy::set_merge_policy(&state, &workspace_id, &policy).await?;
+
+    Ok(Json(policy.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;
@@ -1093,6 +1183,144 @@ mod tests {
             !policies.iter().any(|p| p.name.starts_with("trust:")),
             "Guided preset must not seed trust: policies"
         );
+    }
+
+    /// §9 workspace merge policy API: default is warn-only, a Developer-role
+    /// caller cannot flip the strict-mode flag, and an Admin can
+    /// (meta-spec-reconciliation.md §9, task-159).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_policy_default_admin_only_update_and_roundtrip() {
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        let _ = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        // Create a workspace with the admin static token.
+        let ws_resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"ws-mp","slug":"ws-mp"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        // Unknown workspace → 404.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/does-not-exist/merge-policy")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Default policy: warn only.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let policy = body_json(resp).await;
+        assert_eq!(policy["require_current_meta_spec_set"], false);
+
+        // A Developer-role JWT must not flip the strict-mode flag.
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"require_current_meta_spec_set": true}"#.to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The rejected update changed nothing.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policy = body_json(resp).await;
+        assert_eq!(policy["require_current_meta_spec_set"], false);
+
+        // Admin (static token) enables strict mode.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"require_current_meta_spec_set": true}"#.to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let policy = body_json(resp).await;
+        assert_eq!(policy["require_current_meta_spec_set"], true);
+
+        // GET reflects the persisted strict mode.
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let policy = body_json(resp).await;
+        assert_eq!(policy["require_current_meta_spec_set"], true);
     }
 
     // -- Compute target binding (agent-runtime.md §3) --------------------------
