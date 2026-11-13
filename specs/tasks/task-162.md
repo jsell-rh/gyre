@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["dd716a986330b7509a7e1e93469d94fdb457628f", "6d20863c02e07c0a51873fdbb735c61bef80af68", "5192ff750f58b79d2553a317e9d9b802292ad3e1", "51221dc02d235b9737d645d541650e771d3e89e5"]
+commits: ["51221dc02d235b9737d645d541650e771d3e89e5", "5192ff750f58b79d2553a317e9d9b802292ad3e1", "6d20863c02e07c0a51873fdbb735c61bef80af68", "dd716a986330b7509a7e1e93469d94fdb457628f"]
 ---
 
 ## Spec Excerpt
@@ -54,19 +54,20 @@ Read `specs/system/message-bus.md` §"Relationship to Notifications" and §"Impl
 
 ## Shipped
 
-### Round 6 — merged-head verification after contract restore
+### Round 7 — contract restore on merged head
 
-The executor restored the assigned task contract while the production fix
-stayed on the branch. This round re-verified the merged head `80dbfe00`
-(production fix merged with assigned base `48b3d47e`):
-`git diff --name-only 49858412..80dbfe00 -- crates/` shows **zero changes**
-— the task-162 server source is byte-identical to the previously verified
-checkpoint. On this head, `SKIP_WEB_BUILD=1 cargo check -p gyre-server`
-passes (exit 0, 6m13s) and `SKIP_WEB_BUILD=1 cargo check -p gyre-server
---tests` passes (exit 0, 2m55s). Server test execution is deferred to the
-independent verifier (4 GiB budget rule): run `cargo test -p gyre-server
-message_dispatcher`, then the full `cargo test --all` acceptance gate.
-Evidence: `/tmp/stage/review-evidence/task-162-round6.txt`.
+The executor restored the assigned task contract (frontmatter/checkboxes
+reset) while the production fix stayed on the branch. This round
+re-verified head `6d2c682f`:
+`git diff --name-only 80dbfe00..6d2c682f` shows only
+`specs/tasks/task-162.md` — the task-162 server source is byte-identical
+to the round-6 verified merged head (production fix merged with assigned
+base `48b3d47e`). On this head, `SKIP_WEB_BUILD=1 cargo check -p
+gyre-server --tests` passes (exit 0, 7m15s). Server test execution is
+deferred to the independent verifier (4 GiB budget rule): run
+`cargo test -p gyre-server message_dispatcher`, then the full
+`cargo test --all` acceptance gate. Evidence:
+`/tmp/stage/review-evidence/task-162-round7.txt`.
 
 ### Dispatcher (§Relationship to Notifications)
 
