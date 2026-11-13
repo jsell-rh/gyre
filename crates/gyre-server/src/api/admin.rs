@@ -382,7 +382,7 @@ pub(crate) async fn kill_agent(
                 // kill auto-block is a production transition.
                 if task.status != pre_block_status {
                     crate::api::analytics::record_task_status_changed(
-                        &state,
+                        state,
                         &task,
                         &pre_block_status,
                     )
