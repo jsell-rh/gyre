@@ -85,7 +85,11 @@ pub(crate) async fn record_task_status_changed(
         }),
         now_secs(),
     )
-    .with_scope(None, None, Some(&task.workspace_id), None);
+    // task-202/task-146 repair: the scope must carry the repo facet too —
+    // search.md §Searchable Entities makes activity events filterable by
+    // workspace AND repo, and Task.repo_id is non-optional (M34 hierarchy),
+    // so it is derived from the persisted entity, never caller-supplied.
+    .with_scope(None, None, Some(&task.workspace_id), Some(&task.repo_id));
     let _ = state.analytics.record(&ev).await;
 }
 
@@ -1837,8 +1841,16 @@ mod tests {
         assert_eq!(obj.get("mr.closed").and_then(|v| v.as_u64()), Some(7));
 
         // The grouped path honors the same filter parameters as the raw
-        // path: prefix event_name filter still yields the full total.
+        // path. "mr.m*" is a discriminating prefix (matches mr.merged,
+        // not mr.closed) and still yields the full 150 total.
         let json = get_events(&app, "group_by=event_name&event_name=mr.m*").await;
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 1, "mr.m* prefix must exclude mr.closed");
+        assert_eq!(obj.get("mr.merged").and_then(|v| v.as_u64()), Some(150));
+        // The broader "mr.*" prefix spans both event names; grouped
+        // totals remain the full filtered set, never the limit-truncated
+        // newest-100 list.
+        let json = get_events(&app, "group_by=event_name&event_name=mr.*").await;
         let obj = json.as_object().unwrap();
         assert_eq!(obj.len(), 2);
         assert_eq!(obj.get("mr.merged").and_then(|v| v.as_u64()), Some(150));
