@@ -5,7 +5,10 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-037.md
 coverage_sections: []
-commits: ["8321e71a32c10bba653336d07628e347f4977751"]
+commits: 
+  - e9b13077
+  - 35d45dac
+  - 8321e71a
 ---
 
 ## Spec Excerpt
@@ -92,7 +95,7 @@ When working on this task:
 
 ViewQuery TypeScript types and client-side validation for the explorer, plus the
 requirements-gap repair from review round 87facbcf (seed_match mirroring),
-preserved through the contract restoration of round 25ca67b7.
+preserved through the contract restoration of rounds 25ca67b7/0cc5a655.
 
 ### Types (`web/src/lib/types/view-query.ts`)
 
@@ -132,6 +135,9 @@ views; rounds e9b13077/8321e71a closed the types and validation gaps).
 `cd web && npx vitest run src/__tests__/view-query-validator.test.js` —
 58 passed (53 prior + 5 seed_match cases: valid `'exact'`, valid
 `'substring'`, default-absent, invalid `'regex'`, case-variant `'Exact'`),
-exit 0. Mutation-verified this round: removing the seed_match check from the
-validator fails the 2 invalid-value tests. Log retained at
-/tmp/stage/review-evidence/task-037-validator-tests.txt (exit 0).
+exit 0 (re-run this round on the restored contract checkout; log at
+/tmp/stage/review-evidence/task-037-validator-tests.txt). Mutation-verified
+this round: disabling the seed_match check in the validator fails the 2
+invalid-value tests (log at
+/tmp/stage/review-evidence/task-037-mutation-check.txt, exit 1); the source
+was restored byte-identical afterward.
