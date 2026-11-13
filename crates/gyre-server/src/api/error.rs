@@ -14,6 +14,8 @@ pub enum ApiError {
     /// Resource conflict (HTTP 409).
     Conflict(String),
     TooManyRequests(String),
+    /// Unsupported media type (HTTP 415).
+    UnsupportedMediaType(String),
     /// Rate limit exceeded; carries `retry_after` seconds for the `Retry-After` header.
     RateLimited(u64),
     /// LLM features are disabled (GYRE_VERTEX_PROJECT not configured).
@@ -58,6 +60,7 @@ impl IntoResponse for ApiError {
             }
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            ApiError::UnsupportedMediaType(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
             ApiError::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, msg),
             ApiError::Internal(err) => {
                 tracing::error!("internal error: {err:#}");
@@ -80,7 +83,8 @@ impl std::fmt::Display for ApiError {
             | ApiError::BadRequest(m)
             | ApiError::Forbidden(m)
             | ApiError::Conflict(m)
-            | ApiError::TooManyRequests(m) => f.write_str(m),
+            | ApiError::TooManyRequests(m)
+            | ApiError::UnsupportedMediaType(m) => f.write_str(m),
             ApiError::RateLimited(secs) => write!(f, "rate limit exceeded, retry after {secs}s"),
             ApiError::LlmUnavailable => f.write_str("llm unavailable"),
             ApiError::Internal(err) => write!(f, "internal error: {err:#}"),

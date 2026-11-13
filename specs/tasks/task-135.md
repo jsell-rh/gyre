@@ -3,11 +3,11 @@ title: "Implement gate chain configuration and gate agent lifecycle"
 spec_ref: "agent-gates.md §Gate Chains"
 depends_on:
   - task-134
-progress: not-started
+progress: complete
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: []
+commits: ["9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d"]
 ---
 
 ## Spec Excerpt
@@ -99,3 +99,83 @@ From §Gate Agent Lifecycle:
 ## Agent Instructions
 
 Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Existing merge processor: grep for `merge_processor\|merge_queue` in `gyre-server/src/`. Gate storage: `gyre-server/src/api/gates.rs`. Merge queue: `gyre-server/src/api/merge_queue.rs`. Agent spawn: `gyre-server/src/api/spawn.rs`. The key integration point is the merge processor's gate evaluation loop — find where it currently checks TestCommand/LintCommand gates and extend it to handle AgentReview gates. Check migration numbering: currently at 000049.
+
+## Shipped
+
+Both coverage sections are implemented in production code and were
+independently approved in prior rounds. This round resolved the merge
+conflict against current main (6f5a631c, task-195's manifest-driven
+gate selection), which evolved the same `gate_executor.rs` surfaces
+task-135 built.
+
+### Merge resolution (dbcd62f1)
+
+The single conflicting hunk was the `run_gate` dispatch. The resolution
+keeps **both** lines of evolution:
+
+- `RequiredApprovals` keeps task-135's live `run_required_approvals_gate`
+  (distinct-approval counting, stays `Running` until the minimum lands)
+  instead of main's delegation stub.
+- `AgentReview` takes main's constraints-aware signature so manifest-
+declared gates (spec-registry.md §16) enforce persona + attestation
+  constraints via `run_persona_review_gate`, while repo command gates
+  keep the subprocess path.
+- `check_gates_for_mr` keeps task-135's order-independent
+  `decide_gate_readiness` (required-gate failures precede waiting;
+  advisory gates never block) with live RequiredApprovals promotion —
+  this matters for manifest gates too, since materialized manifest
+  gates are unknown to `quality_gates` and default to required.
+- `submit_review` keeps both task-195's reviewer identity binding and
+  task-135's server-derived `reviewer_persona`/`gate_id` attribution.
+- Adopted main's deletion of the unrouted legacy inbox handlers
+  (`agent_messages.rs`, `messages.rs`), main's `web/dist`, and its
+  `spawn.rs` compute-target gate agent launch path (task-135's branch
+  had no divergent `spawn.rs` changes at the merge base).
+- Test call sites updated for the new `constraints` parameter; docs
+  describe both feature sets.
+
+### Behavior (from the attributed commits)
+
+- **Gate chains:** repos configure an ordered list of mixed gate types
+  (TestCommand, LintCommand, AgentReview, AgentValidation,
+  RequiredApprovals) with per-gate `required` flags and type-specific
+  config; `trigger_gates_for_mr` creates a Pending GateResult per gate
+  and spawns every gate's execution concurrently (tokio tasks), and the
+  merge processor waits until every required gate passes. Required-gate
+  failure blocks the MR and notifies the author agent with failure
+  details; `required = false` gates record results and attach advisory
+  comments without blocking. Per-MR gate status is tracked
+  Pending → Running → Passed/Failed in the `gate_results` store.
+- **Gate agent lifecycle:** review/validation agents are spawned per
+  gate run with a scoped OIDC token (`review:submit`/validation scope
+  only — no push, no task creation), attributed to their persona and
+  gate config (`reviewer_persona`/`gate_id` set from the token, never
+  from caller-supplied fields), torn down (token revoked) after the
+  verdict, and their full context window captured to the audit trail.
+
+### Test evidence (this round, on dbcd62f1)
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — clean
+  (lib + integration tests, including the merged `task134_review_probe`
+  and gate-executor suites).
+- `cargo test -p gyre-domain` — 515 passed; `cargo test -p gyre-adapters`
+  — 518 passed.
+- Merge-relevant mechanical lints pass: arch, ABAC route registry +
+  exempt handlers (routes changed with the inbox-handler deletion),
+  MCP write gates, migration numbering + portability, dead message
+  kinds, byte-slice truncation, relative path defaults, fail-open ref
+  resolution, task commit attribution, mem port contracts, fabricated
+  scope defaults (main's exemption-file changes accepted), lossy secret
+  conversion, scope literal defaults, inert enforcement, forwarded
+  header trust, in-memory state stores, unbounded external HTTP,
+  forged scope fields.
+
+### Verifier-required probes
+
+The sandbox build wrapper refuses gyre-server test compilation during
+implement (4 GiB budget). The independent verifier must run:
+
+- `cargo test -p gyre-server gate`
+- `cargo test -p gyre-server merge`
+- `cargo test --all`
