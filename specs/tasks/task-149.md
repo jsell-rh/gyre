@@ -3,11 +3,11 @@ title: "Implement analytics dashboard UI and data retention policy"
 spec_ref: "analytics.md §Analytics Dashboard (UI)"
 depends_on:
   - task-147
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "analytics.md §Analytics Dashboard (UI)"
   - "analytics.md §Data Retention"
-commits: ["7e0fbc2aa6d30a56ebc06212d638559b7f3dd617", "cc026cc601699cedb121b668d2c02e2523685c2c", "af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7", "c78037ad4b30f6a003b218b939d0d8773565e90d"]
+commits: ["c78037ad4b30f6a003b218b939d0d8773565e90d", "7e0fbc2aa6d30a56ebc06212d638559b7f3dd617", "cc026cc601699cedb121b668d2c02e2523685c2c", "af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7"]
 ---
 
 ## Spec Excerpt
@@ -167,10 +167,10 @@ the analytics-scoped retention configuration surface (§Data Retention).
     policy list: it updates only the `analytics_events` policy (>= 1
     validated; 0 would purge everything on the next nightly run), leaves
     every sibling policy untouched, and persists durably before the 204.
-    The enforcement itself was already real (business-continuity §5,
-    task-207): 365-day default for analytics events, nightly 02:00 UTC
-    cleanup job hard-deleting expired events via `delete_older_than` on
-    the SQLite/Postgres/mem adapters with per-run purge counts logged.
+    The enforcement itself is real (business-continuity §5, task-207):
+    365-day default for analytics events, nightly 02:00 UTC cleanup job
+    hard-deleting expired events via `delete_older_than` on the
+    SQLite/Postgres/mem adapters with per-run purge counts logged.
 - **Navigation** (ui-navigation.md two-mode model — the spec's sidebar no
   longer exists, Principle 5): top-bar chart button next to the workspace
   settings gear, `/workspaces/:slug/analytics` URL route (parse/urlFor,
@@ -181,24 +181,37 @@ the analytics-scoped retention configuration surface (§Data Retention).
 
 ### Test evidence
 
-- This round (merge repair: published head c0a040a2 rebased onto current
-  main @ 44cf25bf — task-132 ABAC policy UI — merge commit 32882eff):
-  - Conflicted paths were exclusively generated web/dist assets
-    (rename/rename on the hashed bundle filenames); resolved to the
-    assignment-base (main) version — `git diff 44cf25bf -- web/dist` is
-    empty for both index and worktree — since final integration rebuilds
-    and publishes those assets remotely from the merged source.
-  - Source overlap was a single file, `web/src/lib/api.js`; the
-    resolution drops task-149's duplicate `adminRetention` object key
-    (the identical binding already ships alongside the other admin
-    endpoints) and keeps `setAnalyticsRetention`. `node --check` exit 0.
-  - `npm ci` then `vitest run src/__tests__/AnalyticsView.test.js
-    src/__tests__/abac.test.js src/__tests__/PolicyManager.test.js` —
-    3 files / 53 tests passed, exercising both sides of the merge
-    through the shared api.js (task-149 dashboard 13 + task-132 ABAC).
-  - `cargo check -p gyre-server` — exit 0 (crates changes are
-    file-disjoint between the two sides; main touched only
-    api/policies.rs).
+- This round (CI repair on merged head b0e87da5 = PR head 6a2a7152 +
+  assignment base 9afd66c7; no source change was needed):
+  - CI run 43612637906 (PR #836, head 6a2a7152) failed its Development
+    controller job at `python3 -m unittest discover -s scripts -p
+    'test_dev*.py'` (job 132500792766, exit 1; no annotations with test
+    detail; run-level blob log fetch is blocked by the sandbox network
+    policy for remote verification).
+  - The failing step was reproduced locally as GREEN on the exact
+    CI-tested tree — a depth-1 checkout of 6a2a7152 (PR head already
+    contains the PR base 44cf25bf via merge 32882eff, so the
+    pull_request merge-ref tree equals the head tree) under
+    runner-matching python3.12.3 and git 2.43.0 with a clean
+    environment: 61/61 pass. Also green on the current merged head
+    b0e87da5 and on a full worktree of 6a2a7152. The PR changes no
+    scripts/, tools/, or CI files (product code only) and the suite is
+    fixture-based, so the failure was not content-derived.
+  - Re-ran the failed job via the API (rerun-failed-jobs): Development
+    controller attempt 2 (job 132509394830) completed success; full run
+    43612637906 now completed success (all jobs green). Evidence saved
+    under the attempt's review-evidence directory.
+  - `node --test scripts/dashboard/test/*.test.mjs` (7/7) and
+    `node --test scripts/test/*.test.mjs` (18/18) pass on the current
+    head — the steps the failed CI attempt had skipped.
+  - Local `test_pipeline*.py` shows 2 failures in this sandbox; both
+    reproduce identically on plain main 9afd66c7 here (process-kill
+    restrictions, "Operation not permitted") — sandbox artifacts, not
+    regressions, and CI passes that step on main and on this PR's rerun.
+  - Staged web/dist rebuild artifacts from a prior in-session turn were
+    dropped (uncommitted): final integration rebuilds and publishes
+    generated web/dist assets remotely; `git diff HEAD -- web/dist` is
+    empty.
 - Prior rounds' retained evidence: `cargo check/clippy/fmt -p
   gyre-server --all-targets` clean; `cargo test -p gyre-adapters --lib
   sqlite::analytics::tests` 17 passed; AnalyticsView component suite
@@ -221,15 +234,15 @@ the analytics-scoped retention configuration surface (§Data Retention).
   `default_policies_present` — 365-day analytics default), and
   `cargo test -p gyre-server --test api_integration --
   analytics_record_and_query admin_retention_list_and_update`.
-- Merge-resolution bookkeeping for coverage: this round's main-side
-  rows (task-132 abac-policy-engine coverage) combined cleanly with
-  this branch's analytics rows — no coverage-file conflicts.
 
 ### Sandbox limitations recorded
 
 - The build wrapper hard-blocks gyre-server test compilation (code
   generation exceeds the 4 GiB cgroup budget) — server test binaries
   are enumerated for the verifier above, not skipped silently;
-  `cargo check` (which fits) was run here instead.
-- No browser/listener probes were needed (component tests run in
-  jsdom).
+  `cargo check` (which fits) was run in prior rounds.
+- GitHub run-log blob hosts (results-receiver.actions.githubusercontent.com,
+  *.blob.core.windows.net) are TCP-blocked in this sandbox; job/step
+  conclusions and annotations were read via api.github.com instead.
+  This is a transport restriction recorded for remote verification, not
+  a code defect.
