@@ -107,6 +107,9 @@ When working on this task:
   to two `specs_assist.rs` test constructors only — no write-through product
   code touched (merge commit, listed for visibility only — the product-surface
   commit is `3488a06bf`)
+- `7cfc7023` — process(task-011): re-apply completion record after contract
+  restore (repair `7c7d2255`; doc-only — the product-surface commit is
+  `3488a06bf`)
 
 ## Shipped
 
