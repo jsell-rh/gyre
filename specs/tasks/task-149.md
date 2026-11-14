@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "analytics.md §Analytics Dashboard (UI)"
   - "analytics.md §Data Retention"
-commits: ["af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7"]
+commits: ["af587a17fcee2909f749dbe050f409d710d8b6db", "cc026cc60c33be54a41b01810a42534a2a34b0d6a", "f2d6db71f21c89feb052220e030f5faa754be5e7"]
 ---
 
 ## Spec Excerpt
@@ -181,57 +181,53 @@ the analytics-scoped retention configuration surface (§Data Retention).
 
 ### Test evidence
 
-- Review repair (af587a17) probes, run in this sandbox against the real
-  adapters (not mocks):
-  - `cargo check -p gyre-server -p gyre-adapters` — clean (exit 0).
-  - `cargo test -p gyre-adapters --lib sqlite::analytics::tests::analytics_aggregate_by_day`
-    — 2 tests pass, including the new
-    `analytics_aggregate_by_day_no_event_name_totals_across_names`
-    (seeds two distinct event names on one day; `None` must count both).
-  - New gyre-server test
-    `daily_events_bare_days_form_returns_total_volume` pins the exact
-    dashboard request: bare `?days=30` → 200 with totals across distinct
-    event names (would fail with 400 under the old required-param
-    contract and fail if the response were per-name), empty-value
-    `?event_name=&days=30` → same totals, explicit name still filters.
-    **gyre-server test compilation exceeds the in-sandbox 4 GiB budget —
-    the independent verifier must run:**
-    `cargo test -p gyre-server --lib analytics::tests` (covers the new
-    daily-form test plus all analytics handler, decide, top-agents, and
-    retention suites).
-- `web/src/__tests__/AnalyticsView.test.js` — 13 component tests, all
-  passing: five-section render from real API mocks, 30 zero-filled bars,
-  properties-JSON expansion, event-name filter reaching the API, cursor
-  pagination (`until` = oldest timestamp), decision evaluation with
-  edited context (and invalid-JSON rejection without an API call),
-  funnel drop-off math (100→50→25→10), custom funnel apply + malformed
-  rejection, top-agent rates/durations, retention display. Full web
-  suite: 114 files / 2321 tests pass.
-- Rust tests added (gyre-server): `top_agents_dimension_ranks_and_computes_rates`,
+- This round (merge of main @ 3f7871b + verification-finding repair
+  cc026cc6), run in this sandbox against the real adapters and the
+  serialized build wrapper:
+  - `cargo check -p gyre-server --all-targets` -- clean, exit 0. This
+    proves the repaired test imports: the previous verification round
+    failed with 8 errors (E0425 `new_id`/`now_secs`, E0433
+    `AnalyticsEvent`/`Id`) because the task-149 dashboard tests
+    referenced those names inside the tests module without importing
+    them; the tests module now imports them explicitly.
+  - `cargo clippy -p gyre-server --all-targets` -- no warnings in the
+    touched files; the flagged `clippy::unnecessary_sort_by` at the
+    /top ranking is now `sort_by_key(Reverse)`.
+  - `cargo fmt -p gyre-server -- --check` -- clean (the flagged changed
+    lines in api/analytics.rs and api/admin.rs are formatted).
+  - `cargo test -p gyre-adapters --lib sqlite::analytics::tests` --
+    17 passed, 0 failed (includes `aggregate_by_day` totals and the
+    property-filter paths the dashboard depends on).
+  - `npm ci` + `npx vitest run src/__tests__/AnalyticsView.test.js` --
+    13/13 pass (five-section render, 30 zero-filled bars, properties
+    expansion, filters, cursor pagination, decision evaluation,
+    funnel drop-off math, custom funnel, top-agent rates, retention
+    display).
+- Merge resolution: main's task-148 rows (gyre_analytics_decide MCP
+  tool, Ralph Loop pattern) combined with this branch's task-149 rows
+  in specs/coverage/system/analytics.md -- 12/12 implemented, audit
+  date kept at the later 2026-11-14.
+- **gyre-server test compilation is blocked by the in-sandbox 4 GiB
+  build wrapper -- the independent verifier must run:**
+  `cargo test -p gyre-server --lib analytics::tests` (all dashboard,
+  decide, top-agents, funnel-count, and retention handler suites,
+  including the previously-never-compiled top-agents tests:
+  `top_agents_dimension_ranks_and_computes_rates`,
   `top_agents_workspace_scope_validated_against_caller_tenant`,
-  `top_dimension_rejects_unknown`, `count_property_filter_matches_property_equality`,
+  `top_dimension_rejects_unknown`,
+  `count_property_filter_matches_property_equality`,
+  `daily_events_bare_days_form_returns_total_volume`,
   `admin_update_retention_analytics_form_updates_analytics_only`,
-  `admin_update_retention_rejects_invalid_analytics_form`, plus the
-  default-365 assertions strengthened in `admin_list_retention_returns_defaults`
-  and `default_policies_present`. **Not executed in this sandbox** — no
-  crates.io access and no vendored registry, so no Rust target can build
-  here. The independent verifier must run:
-  `cargo test -p gyre-server analytics` and `cargo test -p gyre-server retention`
-  (plus `cargo check -p gyre-server` / clippy, which are owned by
-  verification anyway). Retention cleanup job behavior (deletes expired,
-  preserves recent, nightly schedule) is covered by the pre-existing
-  task-207 test suite (`run_cleanup_purges_old_and_keeps_new`, which
-  asserts the analytics-events purge direction).
+  `admin_update_retention_rejects_invalid_analytics_form`).
+  Retention cleanup job behavior (deletes expired, preserves recent,
+  nightly schedule) is covered by the pre-existing task-207 suite
+  (`run_cleanup_purges_old_and_keeps_new`).
 
 ### Sandbox limitations recorded
 
-- Rust compilation impossible offline (no registry cache) — see above;
-  server-side tests are enumerated for the verifier, not skipped
-  silently.
-- Mechanical shell checks run clean on the changed files: arch, api-auth,
-  abac-route-registry, forged-scope-fields, inert-enforcement,
-  relative-path-defaults, fabricated/scope-literal-defaults,
-  lossy-secret-conversion, unbounded-external-http, unwired-port-methods.
-  `check-dead-components` reports 4 violations, all pre-existing at the
-  base commit (CanvasProbeStub, PipelineOverview, __accordion_*).
-- No browser/listener probes were needed (component tests run in jsdom).
+- The build wrapper hard-blocks gyre-server test compilation (code
+  generation exceeds the 4 GiB cgroup budget) -- server test binaries
+  are enumerated for the verifier above, not skipped silently;
+  `cargo check`/`clippy`/`fmt` (which fit) were run here instead.
+- No browser/listener probes were needed (component tests run in
+  jsdom).
