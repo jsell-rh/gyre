@@ -7,7 +7,7 @@ depends_on:
 progress: complete
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f", "f3f6d6182c2e06b82414518f9024d31333390ab8"]
 ---
 
 ## Spec Excerpt
