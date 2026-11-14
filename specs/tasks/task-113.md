@@ -94,124 +94,76 @@ Read `specs/system/user-management.md` §In-App Notification UI and §Email Noti
 
 ## Shipped
 
-Both coverage sections implemented on the task-112/task-125 backend
-(endpoints, dispatcher, outbox already existed from those tasks; this task
-built the UI surface and the email template/digest layer). Coverage rows 19
-and 20 (`user-management.md`) are `implemented`.
+Both coverage sections (`user-management.md` §In-App Notification UI, §Email
+Notifications) are implemented on the task-112/task-125 backend (endpoints,
+dispatcher, durable outbox from those tasks; this task built the UI surface
+and the email template/digest layer). Coverage rows 19 and 20 are
+`implemented`.
 
 ### In-App Notification UI
 
-- **Bell** (`web/src/components/NotificationBell.svelte`) in the topbar beside
-  the HSI §1.1 Decisions badge — intentionally a distinct surface: the
-  Decisions badge counts unresolved judgment items and navigates to the
-  Decisions section; the bell counts **unread** state across all
-  notifications (`GET /api/v1/notifications/unread-count`) and opens the
-  drawer. Badge caps at 99+, `aria-live` count for screen readers.
+- **Bell** (`web/src/components/NotificationBell.svelte`) in the topbar —
+  unread count from `GET /api/v1/notifications/unread-count`, badge capped
+  at 99+, `aria-live` count. Realtime badge bumps ride the app's single
+  authenticated `/ws` connection (`BroadcastingNotificationRepo` pushes
+  `WsMessage::NotificationPush` to the owner's live connections); the
+  specced SSE endpoint `GET /api/v1/notifications/stream` remains the HTTP
+  API (per-event user+tenant filtered, heartbeat keep-alive).
 - **Drawer** (`NotificationDrawer.svelte`): slide-out panel grouped by
-  `priority_level` (Urgent → Low), per-item title / type label / body
-  snippet / relative time, per-item mark read/unread
-  (`PUT /api/v1/notifications/{id}/read`, `POST .../unread`), bulk
-  `POST /api/v1/notifications/mark-all-read` (workspace-scoped when that
-  filter is active), filter bar (type / priority / workspace / repo — repo
-  options load for the selected workspace), live-connection dot, and a link
-  to the preferences page.
+  `priority_level` (Urgent → Low); per-item title / type label / body
+  snippet / relative time; per-item mark read/unread
+  (`PUT /api/v1/notifications/{id}/read`, `POST .../unread`); bulk
+  `POST /api/v1/notifications/mark-all-read`; filter bar (type / priority /
+  workspace / repo); link to preferences.
 - **Deep links**: clicking an item marks it read and navigates the
-  server-emitted `action_url` by pushing it and replaying the app's
-  popstate router (works from any mode).
-- **Real-time**: `web/src/lib/notifications.svelte.js` subscribes the bell
-  to the app's single authenticated `/ws` connection (wired in App.svelte,
-  shared with presence/liveness). The centralized
-  `AppState::create_notification` fan-out (`BroadcastingNotificationRepo`)
-  pushes `WsMessage::NotificationPush` to every live WS connection whose
-  server-verified identity is the notification's owner, bumping the badge
-  live; the drawer reloads on each pushed event.
-  `GET /api/v1/notifications/stream` remains the specced SSE HTTP API
-  (unchanged, per-event user+tenant filtered, heartbeat keep-alive).
+  server-emitted `action_url` through the app's popstate router.
 - **Preferences page** `/settings/notifications`
   (`NotificationSettings.svelte`, `notification_settings` app mode wired
-  through parseUrl/urlFor/pushState/popstate/title/user-menu): email
-  on/off, digest frequency (Immediate/Hourly/Daily/Off), minimum email
-  priority, per-type unsubscribe toggles, webhook (url/secret/min
-  priority), Slack (webhook URL/channel/min priority) — persisted via
-  `GET/PUT /api/v1/notifications/preferences` with `in_app` forced true.
+  through parseUrl/urlFor/pushState/popstate/user-menu): email on/off,
+  digest frequency, minimum email priority, per-type unsubscribe toggles,
+  webhook (url/secret/min priority), Slack (webhook URL/channel/min
+  priority) — persisted via `GET/PUT /api/v1/notifications/preferences`.
 
 ### Email Notifications (server)
 
-- `crates/gyre-server/src/email.rs`: per-type templates for **every**
+- `crates/gyre-server/src/email.rs`: per-type templates for every
   `NotificationType` variant (exhaustive match — a new variant without
-  copy fails to compile), HTML + plain-text fallback, per-type
-  unsubscribe link, locale catalog (`en` default, `de`; resolved from
-  `User::locale`, all prose through the catalog).
-- **Digest mode**: the `email_digest` background job (job registry +
-  main.rs, 60 s) drains the durable `email_outbox` per user — Immediate
-  sends individual emails, Hourly/Daily aggregate every pending entry
-  into ONE digest (window tracked in kv `email_digest_state`), failed
-  sends keep their entries for retry.
+  copy fails to compile), HTML + plain-text fallback, per-type unsubscribe
+  link, locale catalog (`en` default, `de`) resolved from `User::locale`.
+- **Digest mode**: `email_digest` background job drains the durable
+  `email_outbox` per user — Immediate sends individually, Hourly/Daily
+  aggregate into one digest email; failed sends keep entries for retry.
 - **Priority filter**: enforced at queue time (task-112) and re-checked at
-  drain time against the user's CURRENT config (raised thresholds /
-  unsubscribes take effect on already-queued entries).
+  drain time against the user's current preferences.
+- **Security hardening** (commits 5d008fb8, 5ff46667, 5eed7b03, 5b8d0974,
+  c945df27, 25f0bb2d from prior review rounds): SMTP header/command
+  injection blocked at the RFC 5322 builder and envelope gate
+  (`strip_header_controls`, `valid_address`) with regression tests
+  (`crlf_in_title_cannot_forge_header_lines`,
+  `addresses_with_controls_are_rejected_at_the_gate`); dot-stuffing and
+  reply-code parsing repairs.
 
-### Security repair (this round, commit 5d008fb8)
+### Rebase repair (this round, merge commit 14e0c825)
 
-Review finding (round 2): SMTP header injection in the RFC 5322 message
-builder — `encode_subject` passed ASCII subjects through with no CR/LF
-stripping, and `render_notification_email` embeds `notif.title` raw;
-titles carry user-controlled free text (display names via `PUT /users/me`,
-workspace names at creation), so a CRLF-laden ImpersonationRequest title
-forged a `Bcc:` header at the relay, copying the victim's approval-code
-email to the attacker.
+Merged assignment base 9bfab365 (task-149 analytics) into this branch.
+Conflicts resolved: `web/src/App.svelte` — union of the base's `analytics`
+mode and this branch's `notification_settings` mode in the nav-mode comment
+and popstate guard (all other integration points auto-merged; both modes
+verified present); `specs/coverage/SUMMARY.md` — regenerated mechanically
+via `scripts/update-coverage-summary.sh` from merged per-spec files.
 
-- `strip_header_controls` (CR/LF/NUL) applied inside `encode_subject`
-  before the ASCII/encoded-word branch.
-- `valid_address` gates `from`/`to` in `send_email` before any socket —
-  these values are interpolated into RFC 5322 headers AND raw SMTP
-  envelope commands (`MAIL FROM`/`RCPT TO`), so both header and command
-  injection are blocked; `build_message` control-strips them again as
-  defense in depth; `run_digest_once` drops queued entries for a user
-  whose stored address can never pass the gate (warn log) instead of
-  retrying forever.
-- Regression tests: `crlf_in_title_cannot_forge_header_lines` (renders
-  the exact attack title, asserts the header block stays exactly 5 lines
-  with no forged header and CRLF stripped from the subject) and
-  `addresses_with_controls_are_rejected_at_the_gate` (unit assertions +
-  `send_email` failing with the gate error before any connection).
+### Test evidence
 
-Validation this round (evidence under `/tmp/stage/review-evidence/`):
-
-- Standalone probe `header-injection-repair-probe.rs` (functions copied
-  verbatim from the repaired source; same methodology as the reviewer's
-  repro): exit 0, all checks pass — including the NEGATIVE CONTROL where
-  the pre-fix chain still exhibits the injected `Bcc:` header, proving
-  the new assertions kill the real bug.
-- `cargo check -p gyre-server` and `cargo check -p gyre-server --lib
-  --tests`: exit 0 (gyre-server test builds are deferred to the verifier
-  per the 4 GiB build budget).
-- Mechanical checks: `check-arch.sh`, `check-byte-slice-truncation.sh`,
-  `check-inert-enforcement.sh` all exit 0.
-
-### Realtime/CI repair (commit 08c58f63)
-
-The first published candidate failed CI with all 64 e2e tests timing out
-at `waitForLoadState('networkidle')`: the client held a per-tab
-fetch-streamed SSE connection to `/api/v1/notifications/stream`, and a
-never-ending HTTP response permanently blocks networkidle. Fix: the
-bell's realtime channel rides the app's existing single authenticated
-`/ws` WebSocket (`BroadcastingNotificationRepo::create` pushes
-`WsMessage::NotificationPush` to the owner's live connections); the
-specced SSE endpoint is unchanged. Verified empirically with headless
-Chromium (networkidle fires in ~1.5 s, zero SSE requests); `npm test`
-119 files, 2371 passed / 41 pre-existing skips.
-
-Server tests the independent verifier should run (deferred per the 4 GiB
-build budget):
-
-- `cargo test -p gyre-server --lib email::` (includes this round's two
-  header-injection regression tests plus the in-process relay digest
-  drain test)
-- `cargo test -p gyre-server notifications` (includes
-  `create_notification_pushes_to_owners_live_ws_connections_only`)
-- `cargo test -p gyre-server impersonation`
-- `cargo test -p gyre-server --test spec_enforcement`
-- `cargo test --all`
-- web e2e: `cd web && npx playwright test` (against a release server
-  build, GYRE_AUTH_TOKEN=e2e-test-token)
+- `cargo check -p gyre-server`: exit 0 on the merged tree (the merge
+  touched no notification/email/dispatcher Rust file).
+- `cd web && npm test -- --run` on NotificationBell, NotificationDrawer,
+  NotificationSettings, notifications-store, AnalyticsView, AppShell:
+  6 files, 104 tests, exit 0 (log under
+  `/tmp/stage/review-evidence/task-113-rebase-repair/`).
+- Server tests deferred to the verifier per the 4 GiB build budget:
+  `cargo test -p gyre-server --lib email::`,
+  `cargo test -p gyre-server notifications`,
+  `cargo test -p gyre-server impersonation`,
+  `cargo test -p gyre-server --test spec_enforcement`,
+  `cargo test --all`, and web e2e (`npx playwright test` against a release
+  server build, GYRE_AUTH_TOKEN=e2e-test-token).
