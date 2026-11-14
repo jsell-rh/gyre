@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["fd4351b9988673828b61a2b1379057db07548018", "97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["bdf1855d", "fd4351b9", "97ef01dd", "db116ab7", "ed6a9adc", "6a8d4a7c", "57f6d144", "f811501f", "4a71f98e", "a4e0eaf8", "6f20bcb2", "74749334", "5a0816fe", "0564d4e5", "5fc4fb1a", "30cb6ddd", "2e1d71a8", "66582a88", "1b6d9d2e", "f41c1d83", "4886ec07"]
 ---
 
 ## Spec Excerpt
@@ -70,16 +70,16 @@ Users can:
 
 ## Acceptance Criteria
 
-- [ ] `UserSession` domain entity in gyre-domain
-- [ ] `SessionRepository` port trait and SQLite implementation
-- [ ] DB migration creates `user_sessions` table
-- [ ] Sessions created on auth, `last_active_at` updated (throttled)
-- [ ] GET endpoint lists current user's active sessions
-- [ ] DELETE endpoint revokes individual session
-- [ ] POST revoke-all revokes all sessions for user
-- [ ] Revoked sessions rejected in auth middleware
-- [ ] Routes registered with ABAC mappings
-- [ ] `cargo test --all` passes
+- [x] `UserSession` domain entity in gyre-domain
+- [x] `SessionRepository` port trait and SQLite implementation
+- [x] DB migration creates `user_sessions` table
+- [x] Sessions created on auth, `last_active_at` updated (throttled)
+- [x] GET endpoint lists current user's active sessions
+- [x] DELETE endpoint revokes individual session
+- [x] POST revoke-all revokes all sessions for user
+- [x] Revoked sessions rejected in auth middleware
+- [x] Routes registered with ABAC mappings
+- [ ] `cargo test --all` passes (deferred to the independent verifier; see Shipped)
 
 ## Agent Instructions
 
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history (head of the implementation work: `ed6a9adc`; prior verification repairs through the task-112 base merge `52ad675e`). This round repairs the three findings from the last verification run, which merged the candidate onto the new assignment base `bfc36c9c` (task-146: analytics event schema).
+Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history. This round merges the new assignment base `32c4faef` (task-135 gate chain configuration and gate agent lifecycle, task-011 spec save git write-through) and repairs the four test failures that verification finding `4fb29ee2` (`cargo test --all`, exit 101) attributed to that merge.
 
 ### Implementation (unchanged this round)
 
@@ -97,25 +97,18 @@ Session management per `user-management.md` §Session Management is implemented 
 - **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with tenant-containment checks.
 - **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days.
 
-### This round's repair (`fd4351b9`, on merge `92ed0c5d` of base `bfc36c9c`)
+### This round's repair (`bdf1855d`, on merge `a52bc417` of base `32c4faef`)
 
-The base `bfc36c9c` (task-146) and this branch both descend from `1ee52c43`; git auto-merged them without textual conflicts, leaving three semantic failures that the verifier caught (10 compile errors, duplicate migration version, fabricated scope literals):
-
-1. **`MergeRequest::new` call sites (10 × E0061/E0277):** this branch's task-111 verification repair made the constructor take `workspace_id` as its 3rd parameter; task-146's new test hunks in `api/specs.rs` and `merge_processor.rs` still used the old 6-arg form with a post-hoc `mr.workspace_id` assignment. All five sites now pass `workspace_id` in the constructor (redundant assignments dropped, `mut` adjusted).
-2. **Migration version collision (20261008000063):** task-146's `analytics_scope_columns` (from the base) and task-111's `user_sessions` both claimed sequence 000063 — the alphabetically-later `user_sessions` would silently never run. Renumbered `user_sessions` to the next unused sequence **000064**; coverage-matrix references updated.
-3. **Fabricated `tenant_id: "default"` scope literals (4):** task-146's analytics edits moved the four construction literals in `sqlite/postgres analytics.rs` off their frozen exemption lines (115/225 → 154/427, 171/443). Fixed for real rather than re-pointing exemptions (explicitly forbidden): the analytics `record()`/`record_cost()` rows now carry the storage handle's resolved `self.tenant_id` — the same form as the merge_request/repository `create()` rows from the earlier task-111 repair. All six exemption entries deleted (four fixed analytics sites, two dead `activity.rs` lines referencing files removed by task-207) and `FROZEN_EXEMPTION_COUNT` lowered 6→0 in both the shell header and the Python body.
+The base `32c4faef` and this branch both descend from `bfc36c9c`; git auto-merged them without textual conflicts, but four tests the base brought in build the MR router from `test_state()` without seeding the `repo-1` fixture (`closing_mr_emits_analytics_event`, `merging_mr_emits_analytics_event_with_gate_count`, `scoped_gate_review_records_persona_attribution`, `unscoped_review_has_no_gate_attribution`). `create_mr` has refused unknown repositories since the M34 scope-fabrication repair (`74749334`), so `create_test_mr` got a 404 and panicked unwrapping `json["id"]` — the exact failure class repaired before in `db116ab7`. All four now use the same `seed_repo(&state).await` fixture every other test in the module already uses; no product code changed. The attribution test's mint-site comment was also refreshed to describe the seeded-repo workspace binding instead of the base's pre-merge bootstrap-workspace one.
 
 ### Test evidence
 
 In-sandbox this round (log: `/tmp/stage/review-evidence/task-111-repair-round.log`):
 
-- `SKIP_WEB_BUILD=1 cargo check --workspace --all-targets` — clean (reproduces and clears the verifier's 10 errors; server test *execution* deferred per the 4 GiB budget).
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` — 530 passed, 0 failed (includes the 9 session-repository tests and all 16 analytics tests exercising the re-scoped `record()`/`record_cost()` insert paths).
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain` — 510 + 8 passed, 0 failed.
-- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-ports -p gyre-adapters --all-targets` — no errors; only pre-existing async_trait `must_use` warnings (all in base's unchanged `gyre-ports/src/analytics.rs` trait), none in edited files.
-- All 19 mechanical gates pass, including the three that failed in verification: `check-migration-versions.sh`, `check-scope-literal-defaults.sh`, and the workspace compile; rustfmt clean on all changed files; `check-task-commit-attribution.sh` OK.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — clean (the merge plus the four fixture repairs type-check, including the base's new `mint_scoped` call sites and `Review` attribution fields).
+- All mechanical invariant gates pass on the merged tree: architecture/hierarchy lint, ABAC route registry + exempt-handler parity + context parity, MCP write-tool gating, migration versions and SQL portability, dead message kinds, byte-slice truncation, relative path defaults, fail-open ref resolution, mem port contracts, fabricated scope defaults (lookup and construction), lossy secret conversion, inert enforcement, forged scope fields, forwarded-header trust, in-memory state stores, unbounded external HTTP.
+- `cargo fmt --check` on the changed file — clean.
 
-Required in the independent verifier (large gyre-server test compilation deferred per the 4 GiB budget):
+Deferred to the independent verifier (gyre-server codegen exceeds the in-sandbox 4 GiB budget; the wrapper blocks it by design):
 
-- `cargo test -p gyre-server --lib merge_processor` and `cargo test -p gyre-server --lib api::specs` — in particular the five repaired tests: `reject_spec_records_mr_closed_analytics_events`, `gate_failure_during_selection_records_queue_processed_failed`, `spec_policy_block_records_queue_processed_failed`, `circuit_breaker_cancel_records_queue_processed_skipped`, `queue_merge_records_mr_merged_analytics_event`.
-- The task-111 session test suites already run green in prior rounds (`users` sessions, `auth` session tracking) and are unaffected by this round's changes.
+- `cargo test --all` — the authoritative rerun of finding `4fb29ee2`. Expected: the four repaired `api::merge_requests::tests` now pass; the remaining suite passed verbatim on this exact merged tree in that finding's run (2181 passed, only those 4 failed).
