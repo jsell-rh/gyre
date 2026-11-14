@@ -162,6 +162,22 @@ pub async fn update_policy(
             "policy '{id}' is immutable and cannot be modified"
         )));
     }
+    // Review round 6 (task-129): the reserved-prefix invariant is enforced
+    // on the STORED name, not just a newly supplied one. Trust-preset
+    // policies (`trust:...`) are built_in: false and immutable: false, so
+    // without this check a caller could disable or rewrite one BY ID —
+    // e.g. PUT {"enabled": false} on `trust:require-human-mr-review` —
+    // silently desyncing workspace.trust_level from the enforced policy
+    // set and bypassing the atomic, transition-validated
+    // apply_trust_transition path that owns these policies.
+    if policy.name.starts_with("trust:") || policy.name.starts_with("builtin:") {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{}' has a reserved prefix ('trust:' or 'builtin:') and is \
+             server-managed; it cannot be modified via the API — use trust-level \
+             transitions instead",
+            policy.name
+        )));
+    }
 
     if let Some(name) = req.name {
         if name.starts_with("trust:") || name.starts_with("builtin:") {
@@ -219,6 +235,18 @@ pub async fn delete_policy(
             "policy '{id}' is a built-in policy and cannot be deleted"
         )));
     }
+    // Review round 6 (task-129): same stored-name guard as update_policy —
+    // trust-preset policies are not built_in, so the flag alone let a
+    // caller delete `trust:require-human-mr-review` by id and silently
+    // desync workspace.trust_level from the enforced policy set.
+    if policy.name.starts_with("trust:") || policy.name.starts_with("builtin:") {
+        return Err(ApiError::InvalidInput(format!(
+            "policy '{}' has a reserved prefix ('trust:' or 'builtin:') and is \
+             server-managed; it cannot be deleted via the API — use trust-level \
+             transitions instead",
+            policy.name
+        )));
+    }
     state
         .policies
         .delete(&id)
@@ -265,6 +293,10 @@ pub struct ResourceAttrs {
     pub id: Option<String>,
     pub workspace_id: Option<String>,
     pub repo_id: Option<String>,
+    /// The resource's tenant — the third leg of the scope chain the
+    /// engine's canonical scope filter (`policy_engine::scope_applies`)
+    /// evaluates tenant-scoped policies against (review round 4).
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -328,6 +360,9 @@ pub async fn evaluate_policy(
     if let Some(repo) = &req.resource.repo_id {
         ctx.set("resource.repo_id", repo);
     }
+    if let Some(tid) = &req.resource.tenant_id {
+        ctx.set("resource.tenant_id", tid);
+    }
 
     let policies = state.policies.list().await?;
     let result = policy_engine::evaluate(policies, &ctx, &req.action, &req.resource.r#type);
@@ -376,8 +411,24 @@ pub async fn list_decisions(
 
 #[derive(Deserialize)]
 pub struct EffectiveQuery {
-    pub subject_id: Option<String>,
+    /// Subject id, named `subject` per the §API table
+    /// (`GET /api/v1/policies/effective?subject={id}&resource_type={type}`)
+    /// and docs/api-reference.md. `subject_id` is accepted as an alias so
+    /// callers using the decisions-endpoint spelling keep working — a
+    /// caller following the documented `?subject=` form must NOT fall
+    /// through to the bare-context (deny-everything) path.
+    #[serde(alias = "subject_id")]
+    pub subject: Option<String>,
     pub resource_type: Option<String>,
+    /// Optional resource scope the caller wants the answer scoped to
+    /// (review round 4): the engine's canonical scope filter
+    /// (`policy_engine::scope_applies`) evaluates Workspace/Repo/Tenant-
+    /// scoped policies against the resource scope chain, so without these
+    /// the endpoint can only answer for an unscoped resource — scoped
+    /// policies conservatively do not apply.
+    pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -395,10 +446,105 @@ pub async fn effective_permissions(
 ) -> Result<Json<Vec<EffectivePermission>>, ApiError> {
     let policies = state.policies.list().await?;
 
-    // Build a basic context from query params.
+    // Build the subject's attribute context from REAL stores (§API:
+    // "What can this user/agent do on this resource type?"). A bare
+    // subject.id cannot answer that — the builtin allows key on
+    // global_role / workspace_role / tenant, so before this the endpoint
+    // answered "deny everything" for every real user. Resolution order:
+    // user by id → user by external id (the JWT `sub`) → agent by id →
+    // fallback to just subject.id (unknown subject, conditions on other
+    // attributes fail closed).
     let mut ctx = AttributeContext::default();
-    if let Some(sid) = &q.subject_id {
+    if let Some(sid) = &q.subject {
         ctx.set("subject.id", sid);
+        let user = match state.users.find_by_id(&Id::new(sid.clone())).await {
+            Ok(u) => u,
+            Err(e) => {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "user lookup for effective permissions failed: {e}"
+                )))
+            }
+        };
+        let user = match user {
+            Some(u) => Some(u),
+            None => match state.users.find_by_external_id(sid).await {
+                Ok(u) => u,
+                Err(e) => {
+                    return Err(ApiError::Internal(anyhow::anyhow!(
+                        "user lookup for effective permissions failed: {e}"
+                    )))
+                }
+            },
+        };
+        if let Some(user) = user {
+            ctx.set("subject.type", "user");
+            // Role SET semantics — same as the middleware's extraction
+            // (review round 6, task-129): empty roles leave the attribute
+            // unset (fail closed), multi-role callers get a list the
+            // engine evaluates with membership semantics. An arbitrary
+            // `first()` pick would answer this query differently than the
+            // middleware answers the real request.
+            match user.roles.as_slice() {
+                [] => {}
+                [only] => ctx.set("subject.global_role", only.as_str()),
+                many => ctx.set_list(
+                    "subject.global_role",
+                    many.iter().map(|r| r.as_str().to_string()).collect(),
+                ),
+            }
+            if let Some(tid) = &user.tenant_id {
+                ctx.set("subject.tenant_id", tid.as_str());
+            }
+            // Memberships + teams, same sources as the middleware's
+            // extraction (§Attributes: "Memberships", "Team memberships").
+            match state.workspace_memberships.list_by_user(&user.id).await {
+                Ok(memberships) => {
+                    let workspace_ids: Vec<String> = memberships
+                        .iter()
+                        .map(|m| m.workspace_id.to_string())
+                        .collect();
+                    if !workspace_ids.is_empty() {
+                        ctx.set_list("subject.workspace_ids", workspace_ids);
+                    }
+                    let mut team_ids: Vec<String> = Vec::new();
+                    for m in &memberships {
+                        if let Ok(teams) =
+                            state.teams.list_for_user(&m.workspace_id, &user.id).await
+                        {
+                            for team in teams {
+                                team_ids.push(team.id.to_string());
+                            }
+                        }
+                    }
+                    if !team_ids.is_empty() {
+                        ctx.set_list("subject.team_ids", team_ids);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        subject_id = %sid,
+                        err = %e,
+                        "membership lookup failed for effective permissions"
+                    );
+                }
+            }
+        } else if let Ok(Some(_agent)) = state.agents.find_by_id(&Id::new(sid.clone())).await {
+            ctx.set("subject.type", "agent");
+        }
+    }
+
+    // Resource scope chain for the engine's canonical scope filter
+    // (review round 4): scoped policies apply only when the queried scope
+    // matches; without a scope the answer is for an unscoped resource and
+    // scoped policies conservatively do not apply.
+    if let Some(ws) = &q.workspace_id {
+        ctx.set("resource.workspace_id", ws);
+    }
+    if let Some(repo) = &q.repo_id {
+        ctx.set("resource.repo_id", repo);
+    }
+    if let Some(tid) = &q.tenant_id {
+        ctx.set("resource.tenant_id", tid);
     }
 
     // Sample action/resource_type pairs to test.
@@ -508,7 +654,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn list_policies_empty_initially() {
+    async fn list_policies_initially_only_builtins() {
+        // Production parity: `test_state` pre-seeds the built-in ABAC set
+        // (the same set `seed_builtin_policies` persists at startup), so a
+        // fresh deployment NEVER lists zero policies — the spec's
+        // `system-full-access` and its siblings are always present. What
+        // "empty" means here is "no operator-defined policies": every
+        // listed policy is built-in, and the spec-table builtins
+        // (system-full-access, tenant-isolation, default-deny) are all
+        // accounted for.
         let resp = app()
             .oneshot(
                 Request::builder()
@@ -521,7 +675,31 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(json.as_array().unwrap().is_empty());
+        let policies = json.as_array().unwrap();
+        assert!(
+            policies
+                .iter()
+                .all(|p| p["built_in"].as_bool().unwrap_or(false)),
+            "a fresh state must list only built-in policies, got {:?}",
+            policies
+                .iter()
+                .filter(|p| !p["built_in"].as_bool().unwrap_or(false))
+                .map(|p| p["name"].clone())
+                .collect::<Vec<_>>()
+        );
+        for expected in [
+            "system-full-access",
+            "tenant-isolation",
+            "workspace-membership-required",
+            "default-deny",
+        ] {
+            assert!(
+                policies
+                    .iter()
+                    .any(|p| p["name"].as_str() == Some(expected)),
+                "built-in policy {expected} must be seeded in a fresh state"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -642,6 +820,134 @@ mod tests {
         assert_eq!(json["decision"], "deny");
     }
 
+    /// Review round 4 (scope applicability): the dry-run endpoint must honor
+    /// the engine's canonical scope filter — a workspace-scoped policy does
+    /// not apply to a dry-run resource in a different workspace, and a
+    /// tenant-scoped policy does not apply across tenants (via the
+    /// resource.tenant_id scope-chain leg this round added to the request).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluate_respects_policy_scope() {
+        let app = app();
+
+        async fn create(app: &Router, body: serde_json::Value) -> String {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/policies")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let created = body_json(resp).await;
+            created["id"].as_str().unwrap().to_string()
+        }
+
+        async fn evaluate(app: &Router, resource: serde_json::Value) -> serde_json::Value {
+            let eval_body = serde_json::json!({
+                "subject": { "type": "user", "id": "user-1" },
+                "action": "write",
+                "resource": resource
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/policies/evaluate")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&eval_body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_json(resp).await
+        }
+
+        // Workspace-scoped Allow for ws-A only (the reviewer's repro shape).
+        let ws_id = create(
+            &app,
+            serde_json::json!({
+                "name": "ws-a-allow",
+                "scope": "workspace",
+                "scope_id": "ws-A",
+                "priority": 900,
+                "effect": "allow",
+                "conditions": [],
+                "actions": ["*"],
+                "resource_types": ["*"]
+            }),
+        )
+        .await;
+
+        // Out of scope (ws-B): default deny. The dry-run state carries the
+        // full startup builtin set (production parity), so the deny is
+        // ATTRIBUTED to the tenant-level `default-deny` catchall (priority
+        // 1, no conditions) — never to the out-of-scope ws-A Allow, which
+        // the engine's scope filter must exclude.
+        let json = evaluate(
+            &app,
+            serde_json::json!({ "type": "task", "workspace_id": "ws-B" }),
+        )
+        .await;
+        assert_eq!(
+            json["decision"], "deny",
+            "ws-A policy must not apply to ws-B"
+        );
+        assert_eq!(
+            json["matched_policy"], "builtin-default-deny",
+            "out-of-scope policy must not be the matched policy — only the \
+             default-deny catchall may decide an out-of-scope dry-run"
+        );
+
+        // In scope (ws-A): allowed by the scoped policy.
+        let json = evaluate(
+            &app,
+            serde_json::json!({ "type": "task", "workspace_id": "ws-A" }),
+        )
+        .await;
+        assert_eq!(json["decision"], "allow");
+        assert_eq!(json["matched_policy"], ws_id);
+
+        // Tenant-scoped Allow for t-1: applies via resource.tenant_id.
+        let t_id = create(
+            &app,
+            serde_json::json!({
+                "name": "t1-allow",
+                "scope": "tenant",
+                "scope_id": "t-1",
+                "priority": 890,
+                "effect": "allow",
+                "conditions": [],
+                "actions": ["*"],
+                "resource_types": ["*"]
+            }),
+        )
+        .await;
+
+        let json = evaluate(
+            &app,
+            serde_json::json!({ "type": "task", "tenant_id": "t-2" }),
+        )
+        .await;
+        assert_eq!(json["decision"], "deny", "t-1 policy must not apply to t-2");
+
+        let json = evaluate(
+            &app,
+            serde_json::json!({ "type": "task", "tenant_id": "t-1" }),
+        )
+        .await;
+        assert_eq!(json["decision"], "allow");
+        assert_eq!(json["matched_policy"], t_id);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_non_builtin_policy() {
         let app = app();
@@ -684,6 +990,90 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
+    /// Review round 6 (task-129): trust-preset policies are
+    /// `built_in: false` and `immutable: false`, so those flags alone let a
+    /// caller disable, rewrite, or delete one BY ID — silently desyncing
+    /// `workspace.trust_level` from the enforced policy set and bypassing
+    /// the atomic, transition-validated `apply_trust_transition` path.
+    /// The STORED name's reserved prefix must reject update and delete.
+    /// Killing direction: without the stored-name guard, the PUT returns
+    /// 200 and the policy comes back disabled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trust_preset_policy_cannot_be_updated_or_deleted_by_id() {
+        let state = test_state();
+        // Seed exactly what apply_trust_transition persists for a
+        // Supervised workspace (gyre-domain trust_policies_for_level):
+        // a trust:-prefixed Deny that is NOT built_in and NOT immutable —
+        // the flags must not be what protects it.
+        let trust = gyre_domain::policy::trust_policies_for_level(
+            &gyre_domain::TrustLevel::Supervised,
+            "ws-trust",
+            "test",
+        );
+        assert_eq!(trust.len(), 1);
+        let trust = trust.into_iter().next().unwrap();
+        assert!(
+            !trust.built_in && !trust.immutable,
+            "fixture shape: neither flag may protect the policy"
+        );
+        let id = trust.id.as_str().to_string();
+        state.policies.create(&trust).await.unwrap();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // PUT {"enabled": false} — the desync vector from the review
+        // finding: disabling the Supervised merge-hold Deny by id.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/policies/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"enabled": false})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "updating a trust: policy by id must be rejected"
+        );
+
+        // DELETE likewise.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/policies/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "deleting a trust: policy by id must be rejected"
+        );
+
+        // The policy is still there, still enabled — the enforced set
+        // still matches workspace.trust_level.
+        let still = state
+            .policies
+            .find_by_id(&id)
+            .await
+            .unwrap()
+            .expect("trust policy must survive the rejected mutations");
+        assert!(still.enabled, "the trust Deny must still be enforced");
+        assert_eq!(still.name, "trust:require-human-mr-review");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn list_decisions_empty_initially() {
         let resp = app()
@@ -717,8 +1107,127 @@ mod tests {
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
         assert!(!arr.is_empty());
-        // With no policies, everything should be deny.
+        // A bare (no-?subject) context carries no subject attributes, so no
+        // seeded builtin — every one keys on a subject attribute — can
+        // match: everything must be deny.
         assert!(arr.iter().all(|p| p["decision"] == "deny"));
+    }
+
+    /// The `?subject=` query spelling is the one the §API table and
+    /// docs/api-reference.md document
+    /// (`GET /api/v1/policies/effective?subject={id}&resource_type={type}`).
+    /// A caller following the docs must get the subject's REAL attributes
+    /// (resolved identity from the store) — not the no-subject fallback
+    /// (bare context → deny-everything). Killing case: a handler binding
+    /// only `subject_id` ignores `?subject=` entirely and this test fails
+    /// with read=deny. The `subject_id` alias must keep working too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn effective_permissions_binds_documented_subject_param() {
+        use gyre_common::Id;
+        use gyre_domain::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope, User,
+        };
+
+        let state = test_state();
+
+        // A real user whose identity the handler must load from the store.
+        // The custom Allow keys on `subject.id` at priority 2000 — above
+        // every seeded builtin (system-full-access is 1000) — because the
+        // seeded builtin role Allows (admin 900 / developer 800 / readonly
+        // 600) would otherwise shadow a role-keyed custom policy and the
+        // matched_policy assertion below could not pin THIS policy. The
+        // user carries no global role, so no builtin Allow matches: the
+        // only path to `read=allow` is the handler binding `?subject=`.
+        let mut user = User::new(
+            Id::new("eff-subject-user"),
+            "eff-sub-external",
+            "eff-user",
+            0,
+        );
+        user.tenant_id = Some(Id::new("default"));
+        state.users.create(&user).await.unwrap();
+
+        // An Allow keyed on the attribute only the real-subject path sets:
+        // with the bare-context fallback, subject.id is absent and the
+        // condition fails closed → deny.
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("eff-subject-read"),
+                name: "eff-subject-read".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 2000,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("eff-subject-user".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["repo".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // The documented spelling: ?subject={id}.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/policies/effective?subject=eff-subject-user&resource_type=repo")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let read = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["action"] == "read")
+            .expect("read must be sampled");
+        assert_eq!(
+            read["decision"], "allow",
+            "?subject= must bind the subject and load its real attributes \
+             (bare-context fallback would deny)"
+        );
+        assert_eq!(read["matched_policy"], "eff-subject-read");
+
+        // The alias spelling (?subject_id=) must keep working.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v1/policies/effective?subject_id=eff-subject-user&resource_type=repo",
+                    )
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let read = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["action"] == "read")
+            .expect("read must be sampled");
+        assert_eq!(read["decision"], "allow");
     }
 
     #[tokio::test(flavor = "multi_thread")]
