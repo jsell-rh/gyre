@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["c6cad385d11908daddf8a9b5e7f049237ebc2335", "c947d22f1aa9b66f30b26b913aeda2e6c506fb94", "bdf1855d12d8837e6142b7ab060b09ac3cb63e55", "fd4351b9988673828b61a2b1379057db07548018", "97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["c6cad385d11908daddf8a9b5e7f049237ebc2335", "c947d22f1aa9b66f30b26b913aeda2e6c506fb94", "bdf1855d12d8837e6142b7ab060b09ac3cb63e55", "fd4351b9988673828b61a2b1379057db07548018", "97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20b3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d", "44049f85797770c6c7c3887996a96ece006193d4"]
 ---
 
 ## Spec Excerpt
@@ -70,16 +70,16 @@ Users can:
 
 ## Acceptance Criteria
 
-- [ ] `UserSession` domain entity in gyre-domain
-- [ ] `SessionRepository` port trait and SQLite implementation
-- [ ] DB migration creates `user_sessions` table
-- [ ] Sessions created on auth, `last_active_at` updated (throttled)
-- [ ] GET endpoint lists current user's active sessions
-- [ ] DELETE endpoint revokes individual session
-- [ ] POST revoke-all revokes all sessions for user
-- [ ] Revoked sessions rejected in auth middleware
-- [ ] Routes registered with ABAC mappings
-- [ ] `cargo test --all` passes
+- [x] `UserSession` domain entity in gyre-domain
+- [x] `SessionRepository` port trait and SQLite implementation
+- [x] DB migration creates `user_sessions` table
+- [x] Sessions created on auth, `last_active_at` updated (throttled)
+- [x] GET endpoint lists current user's active sessions
+- [x] DELETE endpoint revokes individual session
+- [x] POST revoke-all revokes all sessions for user
+- [x] Revoked sessions rejected in auth middleware
+- [x] Routes registered with ABAC mappings
+- [ ] `cargo test --all` passes (deferred to the independent verifier — 4 GiB build wrapper)
 
 ## Agent Instructions
 
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round repaired the last verification finding (`0124f1f5`, `cargo test --all` exit 101) and changed no product code.
+Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round resolved the rebase repair against the task-124 base and changed no product behavior.
 
 ### Implementation
 
@@ -97,28 +97,28 @@ Session management per `user-management.md` §Session Management is implemented 
 - **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants (`/users/:user_id/sessions...`) with per-handler role checks and tenant containment. Session routes are ABAC-exempt by design with per-handler authorization (validated by `check-abac-exempt-handlers.sh`).
 - **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days (revoked rows kept as the durable sign-out record).
 
-### This round: verification repair (c6cad385)
+### This round: base merge repair (44049f85)
 
-Finding `0124f1f5` (`cargo test --all`, exit 101):
-`merge_queue_blocks_mr_with_pending_dependency` and
-`queue_graph_reflects_enqueued_mrs_and_deps` panicked unwrapping `json["id"]`
-after `POST /merge-requests`. Both tests built MR fixtures against literal
-repository ids (`dep-test-repo`, `graph-repo`) that were never created;
-`create_mr` has refused unknown repositories since this branch's M34
-scope-fabrication repair (`74749334`), so the handler correctly returned 404
-and the unwraps panicked. The fix seeds a real workspace + repository via the
-shared `create_repo` fixture (same repair class as `bdf1855d`/`db116ab7`);
-no product code changed.
+Repair finding `dd6ed4f1` (rebase of the task-111 branch onto base `5984177c`, task-124's head): the two branches implemented disjoint rows of `user-management.md` from common base `4b9220bc`. Two content conflicts, resolved in merge commit `44049f85`:
+
+- `crates/gyre-server/src/api/mod.rs` — the `use users::{...}` import list: union of both handler sets (task-111 session handlers + task-124 user-management/invitation handlers). Route registrations and ABAC resolver mappings for both sides auto-merged cleanly and were verified present.
+- `specs/coverage/system/user-management.md` — the "Last audited" recount: merged into one note covering both branches' rows. Row 26 (§API > User Management, task-124's "stays open until [the session endpoints] land") is closed by this merge — task-124's five endpoints plus task-111's three session endpoints are all live in this tree (row-28 precedent for cross-task completion). Mechanical recount on the merged table: 11 n/a, 0 not-started, 12 task-assigned, 13 implemented; `specs/coverage/SUMMARY.md` row updated to match (52%).
+
+No product code changed this round beyond git's auto-merge of the two parents (both independently type-checked and tested on their own branches).
 
 ### Test evidence
 
-Evidence log: `/tmp/stage/review-evidence/task-111-repair.md` (this round, head `c6cad385`):
+Evidence log: `/tmp/stage/review-evidence/task-111-merge.md` (this round, head `44049f85`):
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — exit 0, 9m15s (includes the `git_integration` test target).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — exit 0 (7m07s, includes domain/ports/adapters).
+- `cargo test -p gyre-adapters session` — 9/9 passed (create/roundtrip, duplicate-id contract, credential+device matching, newest-match, touch/sliding expiry, revoke scoping, revoke-all + delete-expired, retention never deleting revoked rows).
+- `cargo test -p gyre-domain --lib` — 535/535 passed.
 - `cargo fmt --check` — exit 0.
-- All 19 mechanical invariant gates passed in the prior verification round on this tree's ancestors (architecture, ABAC registry + exempt-handler parity, migration versions + SQL portability, scope-fabrication checks, etc.); this round changed only a test fixture file.
+- Mechanical gates on the merged tree: `check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh` (86 handlers), `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-forwarded-header-trust.sh`, `check-forged-scope-fields.sh`, `check-in-memory-state-stores.sh` — all exit 0.
+
+Pre-existing on the base (not introduced by this merge, not repaired here): the base's `2026-11-13-000063_user_deactivated_at` reuses 6-digit sequence 000063 already taken by `2026-10-08-000063_analytics_scope_columns`. The full Diesel versions differ (`2026-11-13-000063` ≠ `2026-10-08-000063`), so both migrations run and `check-migration-versions.sh` passes; recorded for the base branch's owner.
 
 ### Deferred to the independent verifier
 
 - `cargo test --all` on this exact head (the acceptance-criterion gate; gyre-server test codegen exceeds the in-sandbox 4 GiB budget, blocked by the build wrapper by design).
-- Focused repro of the repaired tests: `cargo test -p gyre-server --test git_integration`.
+- Focused server suites for the merged surfaces: `cargo test -p gyre-server --test git_integration` (prior round's repaired fixtures) and the task-111 session test module (WS auth path, active-session listing, throttle).
