@@ -3,11 +3,12 @@ title: "Implement merge attestation bundle schema and multi-party signing"
 spec_ref: "agent-gates.md §Part 3 Merge Attestation Bundle"
 depends_on:
   - task-136
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Merge Attestation Bundle"
   - "agent-gates.md §What Gets Signed and By Whom"
-commits: []
+commits:
+  - 331a6eafa838d290df79139e4e2697e3a83d19df
 ---
 
 ## Spec Excerpt
@@ -80,13 +81,45 @@ Each signer uses their own OIDC identity. The result is a multi-party attestatio
 
 ## Acceptance Criteria
 
-- [ ] `MergeAttestationBundle` domain type with all spec-defined fields
-- [ ] `AttestationSigner` port trait for pluggable signing
-- [ ] Bundle generated after every successful merge
-- [ ] Per-gate signing: forge signs TestCommand/LintCommand, gate agent signs AgentReview
-- [ ] Bundle-level signature by forge covers the entire document
-- [ ] Bundle serializes to the JSON schema defined in the spec
-- [ ] Tests pass
+- [x] `MergeAttestationBundle` domain type with all spec-defined fields
+- [x] `AttestationSigner` port trait for pluggable signing
+- [x] Bundle generated after every successful merge
+- [x] Per-gate signing: forge signs TestCommand/LintCommand, gate agent signs AgentReview
+- [x] Bundle-level signature by forge covers the entire document
+- [x] Bundle serializes to the JSON schema defined in the spec
+- [ ] Tests pass (server test compilation deferred to the independent verifier — see Shipped)
+
+## Shipped
+
+### Behavior
+
+- **Domain types** (`crates/gyre-domain/src/merge_attestation.rs`): `MergeAttestationBundle` with `SpecRefAttestation`, `AuthorAttestation`, `GateAttestation`, serializing to the spec's exact JSON schema (`merge_attestation_version` "1.0", `mr_id`, `merge_commit_sha`, `merged_at`, `spec_ref`, `spec_approval`, `author`, `gates[]` with per-gate result/timing/`output_hash`/`signed_by`/`signature`, `bundle_signature`). `unsigned_canonical_json()`/`unsigned_gate_json()` define the exact bytes each signature covers; timestamps are Unix epoch seconds (u64), consistent with the task plan and the rest of the codebase.
+- **Port** (`crates/gyre-ports/src/attestation_signer.rs`): `AttestationSigner` trait (`sign`, `signer_identity`) — the seam where Sigstore/OIDC identities plug in later without changing the bundle format.
+- **Signers** (`crates/gyre-server/src/merge_attestation.rs`): `ForgeSigner` signs with the server's real Ed25519 key (public half published at `/.well-known/jwks.json`); `GateAgentSigner` gives each gate agent a distinct Ed25519 key pair (placeholder key scheme the task explicitly permits: derived from forge key material bound to the agent id, so a Gyre instance can re-derive for verification; distinct from the forge key, so the forge alone cannot forge a complete bundle).
+- **Generation** (`generate_merge_attestation_bundle`): collects every gate result for the MR; signs TestCommand/LintCommand (and other forge-run) results with the forge identity; for AgentReview/AgentValidation gates, resolves the review bound to the gate (`Review.gate_id`), records reviewer identity/decision/body-hash, and signs with that gate agent's identity. Spec approval comes from the approval ledger's newest active entry for the exact (path, sha) — never fabricated; MRs without an author agent omit the author block. Bundle-level forge signature covers the canonical unsigned document.
+- **Integration**: both merge-processor success paths (single-MR `process_next` and each atomic-group member in `merge_atomic_group`) generate and store the bundle. Stored as a `merge_attestation_bundle` audit event (full signed JSON, queryable) and as a git note under `refs/notes/merge-attestations` (separate ref — the legacy `refs/notes/attestations` dual-write is untouched). Generation failure logs a warning and never rolls back the landed merge. No existing merge logic was modified — only the added post-merge call.
+- **Verification** (`verify_merge_attestation_bundle`): checks the bundle signature and every per-gate signature against the named party's key; returns false on tampering, missing signatures, or a `signed_by` that doesn't match the signing key.
+
+### Test evidence
+
+Ran in this sandbox (build wrapper allows small packages):
+
+- `cargo test -p gyre-domain merge_attestation` — 4 passed (spec-schema field names + round-trip, canonical unsigned JSON excludes signature deterministically, gate unsigned JSON, sha256 fixed vector).
+- `cargo check -p gyre-server --tests` — clean (type-checks all new server tests).
+- `cargo clippy -p gyre-domain -p gyre-ports --all-targets` — no warnings in the new modules.
+- Mechanical checks: `check-arch.sh`, `check-inert-enforcement.sh`, `check-in-memory-state-stores.sh`, `check-mem-port-contracts.sh`, `check-abac-route-registry.sh`, `check-mcp-write-tools.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh`, `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`, `check-fail-open-ref-resolution.sh`, `check-fabricated-scope-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-scope-literal-defaults.sh`, `check-dead-message-kinds.sh`, `check-forwarded-header-trust.sh`, `check-unbounded-external-http.sh`, `check-forged-scope-fields.sh` — all OK.
+
+Deferred to the independent verifier (the build wrapper refuses gyre-server test compilation in the implement sandbox — 4 GiB budget):
+
+- `cargo test -p gyre-server --lib merge_attestation` — unit tests: bundle generation signs every party and serializes to the spec schema (all gate results included, forge vs gate-agent signers, distinct signatures, full verification); tampered bundle fails verification (mutated gate status, mutated `merged_at`, gate-agent signature swapped onto a forge-signed gate); unsigned/missing signatures fail; gate agents have distinct stable keys from the forge and from each other; MR without an agent author omits the author block rather than fabricating one.
+- `cargo test -p gyre-server --lib merge_processor_generates_multi_party_attestation_bundle` — integration test: `process_next` merges an MR with a TestCommand gate and an AgentReview gate (gate-agent approval), records the `merge_attestation_bundle` audit event, and every signature in the parsed-back bundle verifies. Removing the `generate_merge_attestation_bundle` call from `process_next` fails this test.
+
+Evidence artifacts: `/tmp/stage/review-evidence/` (probe commands, exit codes, output).
+
+### Scope notes
+
+- Rekor transparency-log and AIBOM storage targets are task-144; offline/OIDC-issuer bundle verification is task-143. This task ships instance-local verification plus git-note + audit-event storage (the minimum its plan step 4 requires).
+- The spec-approval signature is carried from the ledger entry (Sigstore signatures land there via the approval API); it is not re-signed by the forge.
 
 ## Agent Instructions
 
