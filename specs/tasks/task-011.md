@@ -115,6 +115,11 @@ When working on this task:
 - `8a19603d` — process(task-011): re-apply completion record after contract
   restore (repair `4a17771f`; doc-only — the product-surface commit is
   `3488a06bf`)
+- `1607a409` — process(task-011): list contract-restore process commit in
+  task log (doc-only — the product-surface commit is `3488a06bf`)
+- `e3f70915` — process(task-011): re-apply completion record after contract
+  restore (repair `ecc55cd1`; doc-only — the product-surface commit is
+  `3488a06bf`)
 
 ## Shipped
 
