@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["3350817099f10cc5fde2e505f9cb4ad8bb5d129e", "38b3134feeaa28be0e443e2e29344980ea6db552", "60c86252706b2392866b1dddd66634ab4cb123d6", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "38b3134feeaa28be0e443e2e29344980ea6db552", "60c86252706b2392866b1dddd66634ab4cb123d6", "3350817099f10cc5fde2e505f9cb4ad8bb5d129e"]
 ---
 
 ## Spec Excerpt
@@ -68,13 +68,13 @@ From §API > Workspace Membership:
 
 ## Acceptance Criteria
 
-- [x] `GET /api/v1/users/{username}` returns public profile within tenant
-- [x] `GET /api/v1/users` lists users (TenantAdmin only, paginated)
-- [x] `PUT /api/v1/users/{id}/deactivate` deactivates user with cascade (TenantAdmin only)
-- [x] Workspace invitation list, accept, and revoke endpoints functional
-- [x] Role change endpoint supports ownership transfer validation
-- [x] All routes registered in `api/mod.rs` with ABAC route mappings
-- [ ] `cargo test --all` passes (deferred to the independent verifier per the sandbox memory budget; `cargo check -p gyre-server` exits 0 on the merged tree)
+- [ ] `GET /api/v1/users/{username}` returns public profile within tenant
+- [ ] `GET /api/v1/users` lists users (TenantAdmin only, paginated)
+- [ ] `PUT /api/v1/users/{id}/deactivate` deactivates user with cascade (TenantAdmin only)
+- [ ] Workspace invitation list, accept, and revoke endpoints functional
+- [ ] Role change endpoint supports ownership transfer validation
+- [ ] All routes registered in `api/mod.rs` with ABAC route mappings
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -135,24 +135,34 @@ global role can be an invitee). Pending invitations are unaccepted
 membership rows — the lifecycle is real storage state, not a parallel
 table.
 
-### This round (merge of base `c844ea52`, repair `dc996978`)
+### This round (contract repair `9b7fdf25`)
 
-The published head `0538bd1b` conflicted with main at
-`crates/gyre-server/src/auth.rs` (merge state DIRTY). Both branches had
-added a different fail-closed login guard inside
-`find_or_create_user`'s existing-user block since ancestor `32c4faef`:
-this branch's deactivated-account SSO rejection (task-124) and main's
-reserved `SYSTEM_ABAC_IDENTITY` display-name rejection (task-129
-review round 3). Resolved as the union in merge commit `5f86aede` —
-both guards kept, deactivation check first; no task-124 semantics
-changed and every other file auto-merged.
+The executor restored the assigned task document after the protected
+task text changed in the previous checkpoint (acceptance-criteria
+checkboxes were marked inside the protected body). The production fix
+is preserved unchanged from the retained branch: the implementation
+commits listed above, including the `c844ea52` base merge (`5f86aede`,
+which resolved the `auth.rs` DIRTY-merge finding `dc996978` by keeping
+both fail-closed login guards — task-124's deactivated-account SSO
+rejection and task-129's reserved system-identity rejection) and the
+rebase-restore commit `7582a481`. No product source changed this round;
+only this task document's progress metadata and shipped notes were
+rewritten, with the protected body left byte-identical to the assigned
+contract (checkboxes untouched — completion is recorded here, not by
+editing protected text).
 
-Probes on the merged tree (logs under `/tmp/stage/review-evidence`):
+Re-verification of the retained tree (logs under
+`/tmp/stage/review-evidence`):
 
 - `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — exit 0.
-- `scripts/check-abac-route-registry.sh`, `scripts/check-arch.sh`,
-  `scripts/check-abac-exempt-handlers.sh` — all exit 0.
-- No conflict markers remain under `crates/`.
+- All 19 mechanical invariant gates exit 0 (ABAC route registry, arch,
+  exempt handlers, MCP write tools, migration versions/portability,
+  byte-slice truncation, in-memory state stores, lossy secrets, scope
+  literal/fabricated defaults, inert enforcement, forwarded-header
+  trust, unbounded external HTTP, fail-open ref resolution, relative
+  path defaults, dead message kinds, forged scope fields, mem port
+  contracts).
+- No conflict markers under `crates/`.
 
 ### Server tests the verifier must execute
 
@@ -175,4 +185,4 @@ verifier per the sandbox memory budget:
   `resolver_rejects_deactivated_accounts_even_with_unended_session`.
 - `cargo test -p gyre-server auth::tests` — includes
   `jwt_rejects_reserved_system_identity_provisioning` (task-129 guard
-  sharing the block resolved this round).
+  sharing the block resolved in `5f86aede`).
