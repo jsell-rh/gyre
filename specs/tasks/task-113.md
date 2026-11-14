@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["5d008fb8b7b87b637a09f5ce9f341acbefaf159c", "f25b5d1856a7e39f29cbf63f4927ca7045b3bd15", "08c58f63cfd82da292a778bb208e0f4c801c8c4e", "ed9a85cb1424069b8aecc5ce00dc60a75b0ffbc4", "d5340ae6128a6333bf2f3415ee4afd0c8d62d18e", "5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: ["5d008fb8b7b87b637a09f5ce9f341acbefaf159c", "f25b5d1856a7e39f29cbf63f4927ca7045b3bd15", "08c58f63cfd82da292a778bb208e0f4c801c8c4e", "ed9a85cb1424069b8aecc5ce00dc60a75b0ffbc4", "d5340ae6128a6333bf2f3415ee4afd0c8d62d18e", "5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab", "b85772c5fed727886f9ce32a6e9c349585acfc8a"]
 ---
 
 ## Spec Excerpt
@@ -143,24 +143,27 @@ and the email template/digest layer). Coverage rows 19 and 20 are
   `addresses_with_controls_are_rejected_at_the_gate`); dot-stuffing and
   reply-code parsing repairs.
 
-### Rebase repair (this round, merge commit 14e0c825)
+### Verification repair (this round, commit b85772c5)
 
-Merged assignment base 9bfab365 (task-149 analytics) into this branch.
-Conflicts resolved: `web/src/App.svelte` — union of the base's `analytics`
-mode and this branch's `notification_settings` mode in the nav-mode comment
-and popstate guard (all other integration points auto-merged; both modes
-verified present); `specs/coverage/SUMMARY.md` — regenerated mechanically
-via `scripts/update-coverage-summary.sh` from merged per-spec files.
+Independent verification of the merged tree (base 2824d9b1 via merge
+7a742af6, which brought task-136 gate evaluation in) failed on exactly
+one gate: rustfmt reported changed lines needing formatting in
+`email.rs` (1095–1099, 1145–1151) and `notifications.rs` (1272) — test
+code added by earlier rounds of this task. Clippy, architecture, ABAC,
+and the web build were all green on the same tree. Fixed by running
+rustfmt over both files; `git diff --word-diff` confirms the change is
+line-wrapping only (identical tokens, no semantic change). Evidence
+under `/tmp/stage/review-evidence/task-113-verification-repair/`.
 
 ### Test evidence
 
-- `cargo check -p gyre-server`: exit 0 on the merged tree (the merge
-  touched no notification/email/dispatcher Rust file).
-- `cd web && npm test -- --run` on NotificationBell, NotificationDrawer,
-  NotificationSettings, notifications-store, AnalyticsView, AppShell:
-  6 files, 104 tests, exit 0 (log under
-  `/tmp/stage/review-evidence/task-113-rebase-repair/`).
-- Server tests deferred to the verifier per the 4 GiB build budget:
+- `rustfmt --edition 2021 --check`: exit 0 on both repaired files and
+  on every Rust file changed vs base 2824d9b1 (16 files).
+- The failing verification already compiled and linted this exact tree
+  (clippy changed-lines clean) and built the web bundle; the repair is
+  formatting-only, so no recompilation was needed inside the 4 GiB
+  assignment budget.
+- Server tests the verifier must execute:
   `cargo test -p gyre-server --lib email::`,
   `cargo test -p gyre-server notifications`,
   `cargo test -p gyre-server impersonation`,
