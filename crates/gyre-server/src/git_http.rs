@@ -595,28 +595,26 @@ pub async fn git_receive_pack(
     // push code (agent-gates.md §Gate Agent Lifecycle: "read-only access").
     // Caller-scoped capability, exact-match (review F3): checked before
     // workspace/repo resolution so the denial does not depend on (or leak
-    // the existence of) the target.
-    if let Some(scope) = auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
+    // the existence of) the target. §1 Token Scoping: the scope claim is a
+    // list; read it through the extractor-derived `auth.scope` (mirrored
+    // from signature-verified claims), never the raw JSON string form —
+    // an array claim read as a string silently fails open.
+    if auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE || s == crate::auth::VALIDATION_REPORT_SCOPE)
     {
-        if scope == crate::auth::REVIEW_SUBMIT_SCOPE
-            || scope == crate::auth::VALIDATION_REPORT_SCOPE
-        {
-            warn!(
-                agent_id = %auth.agent_id,
-                workspace_slug = %workspace_slug,
-                repo_name = %repo_name,
-                "git-receive-pack 403: scoped gate-agent token cannot push"
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                "push rejected: gate-agent scoped tokens are read-only".to_string(),
-            )
-                .into_response();
-        }
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: scoped gate-agent token cannot push"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: gate-agent scoped tokens are read-only".to_string(),
+        )
+            .into_response();
     }
 
     let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
@@ -1305,11 +1303,23 @@ pub async fn git_receive_pack(
             };
             // §API > Notifications: pass the broadcasting wrapper, not the
             // bare repo — push-scoped notifications must fan out to live
-            // /notifications/stream subscribers (task-125 review repair).
+            // /notifications/stream subscribers (task-125 review repair) —
+            // plus channel fan-out after in-app create (user-management.md
+            // §Delivery Channels). The closure clones the state Arc so the
+            // boxed future is 'static.
             let divergence_notifications = state_clone.broadcasting_notifications();
+            let fanout_state = std::sync::Arc::clone(&state_clone);
+            let on_created = move |notif: &gyre_common::Notification| {
+                let state = std::sync::Arc::clone(&fanout_state);
+                let notif = notif.clone();
+                futures_util::FutureExt::boxed(async move {
+                    crate::notification_dispatcher::dispatch_to_channels(&state, &notif).await;
+                })
+            };
             let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
                 notification_repo: &divergence_notifications,
                 membership_repo: state_clone.workspace_memberships.as_ref(),
+                on_created: Some(Box::new(on_created)),
             });
             // §9 spec-assertion notifications are scoped by the repo's
             // workspace — every push type notifies, not just agent pushes.
@@ -2450,6 +2460,11 @@ async fn process_persona_changes(
                             notif.source.repo_id = Some(repo.id.clone());
                             if let Err(e) = state.create_notification(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
+                            } else {
+                                // Channel fan-out per user-management.md
+                                // §Delivery Channels.
+                                crate::notification_dispatcher::dispatch_to_channels(state, &notif)
+                                    .await;
                             }
                         }
                     }
@@ -2800,8 +2815,6 @@ async fn notify_cross_workspace_dependents(
         return;
     }
 
-    let now = crate::api::now_secs();
-
     // Collect unique source repo IDs from inbound links.
     let mut notified_workspaces: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -2858,7 +2871,6 @@ async fn notify_cross_workspace_dependents(
                 continue;
             }
 
-            let notif_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
             let display = link.target_display.as_deref().unwrap_or(changed_spec_path);
             let title = format!("Cross-workspace spec changed: {display}");
             let source_repo_name = state
@@ -2868,27 +2880,26 @@ async fn notify_cross_workspace_dependents(
                 .ok()
                 .flatten()
                 .map(|r| r.name.clone())
-                .unwrap_or_else(|| source_repo_id[..8.min(source_repo_id.len())].to_string());
+                .unwrap_or_else(|| source_repo_id.chars().take(8).collect());
             let body = format!(
                 "{display} changed in repo {source_repo_name}. Your spec {} depends on it. Review for impact.",
                 link.source_path
             );
-            let mut notif = gyre_common::Notification::new(
-                notif_id,
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notifications::notify_rich(
+                state,
                 dep_repo.workspace_id.clone(),
                 member.user_id,
                 gyre_common::NotificationType::CrossWorkspaceSpecChange,
                 title,
                 dep_workspace.tenant_id.to_string(),
-                now as i64,
-            );
-            notif.body = Some(body);
-            notif.source.entity_type = "spec".to_string();
-            notif.source.entity_id = changed_spec_path.to_string();
-
-            if let Err(e) = state.create_notification(&notif).await {
-                tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
-            }
+                Some(body),
+                Some(changed_spec_path.to_string()),
+                None,
+                "spec",
+                None,
+            )
+            .await;
         }
     }
 }
@@ -8335,6 +8346,25 @@ specs:
         // through the inbox.
         let owner = gyre_domain::User::new(Id::new("user-1"), "ext-user-1", "user-1", 0);
         state.users.create(&owner).await.unwrap();
+        // Email channel configured (Immediate, all bands) — the emitter-path
+        // guard below asserts the push-hook notification fans out to it.
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-1"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
 
         // Seed an APPROVED repo-scoped persona whose prompt matches the git
         // state before the push.
@@ -8473,6 +8503,29 @@ specs:
         assert_eq!(notif.source.repo_id, Some(Id::new("repo-1")));
         assert_eq!(notif.workspace_id, Id::new("ws-test"));
         assert!(notif.body.as_deref().unwrap().contains("security"));
+
+        // Emitter-path guard (task-112 review F1): the persona-push hook's
+        // notification creation must go through the channel dispatcher —
+        // the configured email channel queued an outbox entry. Bounded
+        // poll: the dispatch runs in the post-receive task right after the
+        // record becomes visible.
+        let mut outbox_hit = false;
+        for _ in 0..40 {
+            let outbox = state
+                .kv_store
+                .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+                .await
+                .unwrap();
+            if outbox.iter().any(|(k, _)| k.starts_with("user-1:")) {
+                outbox_hit = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            outbox_hit,
+            "persona-push approval notification must reach the configured email channel"
+        );
     }
 
     /// End-to-end: pushing a NEW persona file registers a fresh

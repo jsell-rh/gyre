@@ -254,11 +254,23 @@ async fn ensure_workspace_orchestrator(
     if let Some(existing) = find_live_workspace_orchestrator(state, workspace_id).await? {
         return Ok(existing);
     }
+    // The signal chain is a server-originated (system) spawn — there is no
+    // authenticated caller whose tenant scope could be compared. Mirror the
+    // HTTP handler's system-principal bypass: resolve the REAL tenant of the
+    // workspace being spawned into (fail-closed when the row is missing —
+    // the same lookup the core repeats for containment) and pass it as the
+    // caller tenant, never a fabricated identity.
+    let ws = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} not found"))?;
     let (agent, _token, _launch) = crate::api::orchestrator::spawn_workspace_orchestrator_core(
         state,
         &workspace_id.to_string(),
         crate::api::orchestrator::SpawnOrchestratorRequest::default(),
         "system",
+        ws.tenant_id.as_str(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("workspace orchestrator spawn: {e:?}"))?;
@@ -539,6 +551,9 @@ async fn notify_cross_workspace_change(
                 user_id = %member.user_id,
                 "signal-chain: failed to create CrossWorkspaceSpecChange notification: {e}"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 }
@@ -1126,6 +1141,9 @@ fn scheduler_system_auth() -> crate::auth::AuthenticatedAgent {
         user_id: None,
         roles: vec![gyre_domain::UserRole::Admin],
         tenant_id: crate::auth::system_principal_tenant(),
+        workspace_id: None,
+        repo_id: None,
+        scope: Vec::new(),
         jwt_claims: None,
         bearer_token: None,
         deprecated_token_auth: false,
@@ -1432,11 +1450,35 @@ pub async fn ensure_repo_orchestrator_for_failure(
     if let Ok(Some(existing)) = find_live_repo_orchestrator(state, repo).await {
         return Some(existing);
     }
+    // §1/task-093 F3 containment: the spawn core compares the repo's
+    // workspace tenant against the caller's — resolve it here, fail closed
+    // (no orchestrator → caller falls back to workspace routing) when the
+    // workspace cannot be loaded; never fabricate a tenant identity.
+    let ws_tenant = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id,
+        Ok(None) => {
+            tracing::warn!(
+                repo_id = %repo.id,
+                "signal-chain: repo references missing workspace {}; tenant scope \
+                 for failure orchestrator cannot be determined",
+                repo.workspace_id
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                repo_id = %repo.id,
+                "signal-chain: workspace lookup failed: {e}"
+            );
+            return None;
+        }
+    };
     match crate::api::orchestrator::spawn_repo_orchestrator_core(
         state,
         &repo.id.to_string(),
         crate::api::orchestrator::SpawnOrchestratorRequest::default(),
         "system",
+        ws_tenant.as_str(),
     )
     .await
     {
@@ -1464,6 +1506,23 @@ async fn run_repo_orchestrator(
     // durable one-live check and the per-repo registry lock (held by the
     // caller) serializes concurrent signals.
     if find_live_repo_orchestrator(state, repo).await?.is_none() {
+        // Server-originated (system) spawn — no authenticated caller to
+        // compare against. Pass the REAL tenant of the repo's workspace
+        // (fail-closed on a dangling reference, mirroring the core's own
+        // containment lookup) so the comparison never sees a fabricated
+        // identity.
+        let ws_tenant = match state.workspaces.find_by_id(&repo.workspace_id).await {
+            Ok(Some(ws)) => ws.tenant_id,
+            Ok(None) => {
+                anyhow::bail!(
+                    "repo {} references workspace {} which does not exist — the tenant \
+                     scope for the orchestrator token cannot be determined",
+                    repo.id,
+                    repo.workspace_id
+                )
+            }
+            Err(e) => return Err(e),
+        };
         let (agent, _token, _launch) = crate::api::orchestrator::spawn_repo_orchestrator_core(
             state,
             &repo.id.to_string(),
@@ -1472,6 +1531,7 @@ async fn run_repo_orchestrator(
                 parent_id: task.assigned_to.as_ref().map(|a| a.to_string()),
             },
             "system",
+            ws_tenant.as_str(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("repo orchestrator spawn: {e:?}"))?;
@@ -2048,6 +2108,90 @@ mod tests {
 
     // Registry semantics: distinct locks per scope, stable identity across
     // calls, no cross-contamination between workspaces/repos.
+    #[tokio::test]
+    async fn cross_workspace_change_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: the cross-workspace spec-change notification
+        // creation must go through the channel dispatcher — a configured
+        // email channel queues an outbox entry for the dependent
+        // workspace's Admin.
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(Id::new("ws-dep"), Id::new("t1"), "Dep", "dep", 0);
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            Id::new("r-dep"),
+            Id::new("ws-dep"),
+            "r-dep",
+            "/tmp/gyre-test-r-dep",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let m = gyre_domain::WorkspaceMembership::new(
+            Id::new("mem-dep-chan"),
+            Id::new("user-dep-chan"),
+            Id::new("ws-dep"),
+            gyre_domain::WorkspaceRole::Admin,
+            Id::new("inviter"),
+            0,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-dep-chan"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        notify_cross_workspace_change(
+            &state,
+            &Id::new("ws-src"),
+            &repo,
+            "specs/system/auth.md",
+            "abc123",
+        )
+        .await;
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-dep-chan"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::CrossWorkspaceSpecChange),
+            "expected in-app CrossWorkspaceSpecChange notification"
+        );
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-dep-chan:")),
+            "cross-workspace change notification must reach the configured email channel"
+        );
+    }
+
     #[tokio::test]
     async fn registry_locks_are_per_scope_and_stable() {
         let reg = OrchestratorRegistry::new();

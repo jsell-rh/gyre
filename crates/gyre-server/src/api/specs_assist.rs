@@ -12,7 +12,7 @@ use axum::{
     Json,
 };
 use futures_util::stream;
-use gyre_common::{Id, Notification, NotificationType};
+use gyre_common::{Id, NotificationType};
 use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -262,7 +262,6 @@ async fn spec_conflict_response(
         }
     }
 
-    let now = now_secs();
     // Persist the full line diff (and summary) in the notification body so BOTH
     // editors get a diff view in their Inbox (HSI §7 item 3) — not just the
     // second editor who receives the transient 409 response. `to_value` borrows
@@ -279,22 +278,20 @@ async fn spec_conflict_response(
     .to_string();
 
     for uid in &recipients {
-        let mut notif = Notification::new(
-            new_id(),
+        crate::notifications::notify_rich(
+            state,
             repo.workspace_id.clone(),
-            Id::new(uid),
+            Id::new(uid.clone()),
             NotificationType::SpecConflict,
             format!("Spec edit conflict: {spec_path}"),
             &tenant_id,
-            now as i64,
-        );
-        notif.body = Some(body.clone());
-        notif.source.entity_type = "spec".to_string();
-        notif.source.entity_id = spec_path.to_string();
-        notif.source.repo_id = Some(repo.id.clone());
-        if let Err(e) = state.create_notification(&notif).await {
-            tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
-        }
+            Some(body.clone()),
+            Some(spec_path.to_string()),
+            Some(repo.id.to_string()),
+            "spec",
+            None,
+        )
+        .await;
     }
 
     (
@@ -1187,25 +1184,23 @@ pub async fn save_spec(
         recipients.push(Id::new("system"));
     }
 
+    // Delivery via notify_rich: in-app record + SSE broadcast + channel
+    // fan-out (user-management.md §Delivery Channels) in one path.
     for uid in recipients {
-        let notif_id = new_id();
-        let mut notif = Notification::new(
-            notif_id,
+        crate::notifications::notify_rich(
+            state.as_ref(),
             repo.workspace_id.clone(),
-            uid.clone(),
+            uid,
             NotificationType::SpecApprovalRequested,
             format!("Spec pending approval: {}", req.spec_path),
             &tenant_id,
-            now as i64,
-        );
-        notif.body = Some(notif_body.clone());
-        notif.source.entity_type = "mr".to_string();
-        notif.source.entity_id = mr_id.to_string();
-        notif.source.repo_id = Some(repo.id.clone());
-        // Non-fatal — MR is created even if notification fails.
-        if let Err(e) = state.create_notification(&notif).await {
-            tracing::warn!(mr_id = %mr_id, user_id = %uid, "Failed to create spec-pending-approval notification: {e}");
-        }
+            Some(notif_body.clone()),
+            Some(mr_id.to_string()),
+            Some(repo.id.to_string()),
+            "mr",
+            None,
+        )
+        .await;
     }
 
     Ok((
@@ -1567,6 +1562,9 @@ mod tests {
             user_id: Some(Id::new("user-admin")),
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -2653,6 +2651,9 @@ mod tests {
             user_id: Some(Id::new("user-a")),
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,

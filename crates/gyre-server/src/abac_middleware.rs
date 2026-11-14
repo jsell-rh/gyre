@@ -1980,53 +1980,55 @@ pub async fn abac_middleware(
     // widen a single-purpose gate agent into a general-purpose caller.
     // Capability comparison is exact-match: a substring check would let a
     // hypothetical `review:submit:admin` scope inherit the allow-list
-    // (review F3).
-    if let Some(scope) = auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
-    {
-        let is_reviewer = scope == crate::auth::REVIEW_SUBMIT_SCOPE;
-        let is_validator = scope == crate::auth::VALIDATION_REPORT_SCOPE;
-        if is_reviewer || is_validator {
-            // Read-only MR context for validators; reviewers additionally
-            // get review submission, comments, and gate state. No repo/admin
-            // route is reachable, so no policy can widen a single-purpose
-            // gate agent into a general-purpose caller.
-            let allowed = if is_reviewer {
-                REVIEWER_ALLOWED_ROUTES.contains(&pattern.as_str())
+    // (review F3). §1 Token Scoping: the scope claim is a list; read it
+    // through the extractor-derived `auth.scope` (mirrored from
+    // signature-verified claims), never the raw JSON string form — an
+    // array claim read as a string silently fails open.
+    let is_reviewer = auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE);
+    let is_validator = auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::VALIDATION_REPORT_SCOPE);
+    if is_reviewer || is_validator {
+        // Read-only MR context for validators; reviewers additionally
+        // get review submission, comments, and gate state. No repo/admin
+        // route is reachable, so no policy can widen a single-purpose
+        // gate agent into a general-purpose caller.
+        let allowed = if is_reviewer {
+            REVIEWER_ALLOWED_ROUTES.contains(&pattern.as_str())
+        } else {
+            VALIDATOR_ALLOWED_ROUTES.contains(&pattern.as_str())
+        };
+        if !allowed {
+            tracing::warn!(
+                subject_id = %auth.agent_id,
+                pattern = %pattern,
+                scope = ?auth.scope,
+                "ABAC denied request: scoped gate-agent token outside allow-list"
+            );
+            let decision = policy_engine::build_decision(
+                &policy_engine::EvalResult {
+                    effect: gyre_domain::PolicyEffect::Deny,
+                    matched_policy: None,
+                    evaluated_count: 0,
+                    evaluation_ms: 0.0,
+                },
+                &auth.agent_id,
+                "agent",
+                action,
+                resource_type,
+                &pattern,
+            );
+            let _ = state.policies.record_decision(&decision).await;
+            let error = if is_reviewer {
+                "review-scoped token is limited to review routes"
             } else {
-                VALIDATOR_ALLOWED_ROUTES.contains(&pattern.as_str())
+                "validation-scoped token is limited to read-only MR routes"
             };
-            if !allowed {
-                tracing::warn!(
-                    subject_id = %auth.agent_id,
-                    pattern = %pattern,
-                    scope = %scope,
-                    "ABAC denied request: scoped gate-agent token outside allow-list"
-                );
-                let decision = policy_engine::build_decision(
-                    &policy_engine::EvalResult {
-                        effect: gyre_domain::PolicyEffect::Deny,
-                        matched_policy: None,
-                        evaluated_count: 0,
-                        evaluation_ms: 0.0,
-                    },
-                    &auth.agent_id,
-                    "agent",
-                    action,
-                    resource_type,
-                    &pattern,
-                );
-                let _ = state.policies.record_decision(&decision).await;
-                let error = if is_reviewer {
-                    "review-scoped token is limited to review routes"
-                } else {
-                    "validation-scoped token is limited to read-only MR routes"
-                };
-                return (StatusCode::FORBIDDEN, Json(json!({"error": error}))).into_response();
-            }
+            return (StatusCode::FORBIDDEN, Json(json!({"error": error}))).into_response();
         }
     }
 
@@ -4900,7 +4902,12 @@ pub mod tests {
                 "spawner",
                 &state.base_url,
                 3600,
+                // §1: hierarchy claims (tenant, workspace, repo) so the
+                // fine-grained `repo:repo-7:write` scope list is minted from
+                // real context.
+                "default",
                 "ws-claims",
+                "repo-7",
                 "repo-7",
                 None,
                 None,
@@ -4993,7 +5000,8 @@ pub mod tests {
             h.block_on(seed_builtin_policies(&state)).expect("seed");
         });
 
-        // Mint with workload claims directly.
+        // Mint with workload claims directly (§1: hierarchy context included
+        // so the scope list is minted from real spawn-shaped context).
         let token = state
             .agent_signing_key
             .mint_with_workload(
@@ -5002,6 +5010,12 @@ pub mod tests {
                 "spawner",
                 &state.base_url,
                 3600,
+                "default",
+                "ws-claims",
+                "repo-7",
+                "repo-7",
+                None,
+                None,
                 Some(4242),
                 Some("host-1".to_string()),
                 Some("local".to_string()),
@@ -5125,7 +5139,9 @@ pub mod tests {
                 "spawner",
                 &state.base_url,
                 3600,
+                "default",
                 "ws-persona",
+                "repo-1",
                 "repo-1",
                 Some("repo-orchestrator"),
                 Some(3),
@@ -5140,7 +5156,9 @@ pub mod tests {
                 "spawner",
                 &state.base_url,
                 3600,
+                "default",
                 "ws-persona",
+                "repo-1",
                 "repo-1",
                 None,
                 Some(1),

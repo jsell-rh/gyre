@@ -215,6 +215,13 @@ async fn notify_tenant_admins(state: &Arc<AppState>, ws: &Workspace, since: u64)
         match state.create_notification(&notif).await {
             Ok(()) => {
                 created += 1;
+                // Channel fan-out per user-management.md §Delivery Channels.
+                // AppState::create_notification only persists + SSE-broadcasts;
+                // email/webhook/Slack fan-out is call-site responsibility
+                // (review F1: this was the last production creation path
+                // without it — a tenant admin with channels configured
+                // received no channel delivery).
+                crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
                 info!(
                     workspace_id = %ws.id,
                     tenant_admin = %user.id,
@@ -533,6 +540,71 @@ mod tests {
         let n = &ownerless_notifications(&state, "admin1", "ws1").await[0];
         assert_eq!(n.priority_rank, 2);
         assert_eq!(n.priority, NotificationPriority::Urgent);
+    }
+
+    /// Emitter-path guard (review F1): the ownerless flow's in-app record
+    /// must fan out to the recipient's configured channels — a tenant admin
+    /// with an email channel configured gets an outbox entry when the job
+    /// runs. Fails if notify_tenant_admins persists without
+    /// dispatch_to_channels (AppState::create_notification only
+    /// SSE-broadcasts; channel fan-out is call-site responsibility).
+    #[tokio::test]
+    async fn ownerless_notification_fans_out_to_configured_channels() {
+        let state = test_state();
+        let ws = make_workspace("ws-chan");
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .users
+            .create(&make_user("admin-chan", "t1", GlobalRole::TenantAdmin))
+            .await
+            .unwrap();
+        // The workspace's Owner left (membership row remains, user record
+        // gone) → ownerless by departure.
+        state
+            .workspace_memberships
+            .create(&make_membership("departed-owner", "ws-chan", Role::Owner))
+            .await
+            .unwrap();
+        // Email channel configured (Immediate, all bands).
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("admin-chan"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        run_once(&state).await.unwrap();
+
+        // In-app record exists …
+        assert_eq!(
+            ownerless_notifications(&state, "admin-chan", "ws-chan")
+                .await
+                .len(),
+            1,
+            "the tenant admin must get the in-app WorkspaceOwnerless record"
+        );
+        // … and the configured email channel fired (WorkspaceOwnerless is
+        // Urgent — above any threshold).
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("admin-chan:")),
+            "ownerless notification must fan out to the configured email channel"
+        );
     }
 
     #[tokio::test]

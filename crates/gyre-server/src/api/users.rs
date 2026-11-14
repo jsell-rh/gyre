@@ -209,16 +209,34 @@ pub async fn update_me(
     if let Some(avatar) = req.avatar_url {
         user.avatar_url = Some(avatar);
     }
+    let mut patched_channels: Option<gyre_domain::NotificationChannels> = None;
     if let Some(prefs_json) = req.preferences {
         // Partial-update semantics: omitted preference fields keep their
         // current value (matching the Option-based top-level fields). An
         // invalid value for a present field still fails the whole request.
         let patch: gyre_domain::UserPreferencesPatch = serde_json::from_value(prefs_json)
             .map_err(|e| ApiError::InvalidInput(format!("invalid preferences: {e}")))?;
+        // A `notification_channels` value carried by this endpoint is the
+        // SAME configuration the dedicated PUT /notifications/preferences
+        // accepts — validate it identically and remember it so the delivery
+        // store can be converged below (single effective config, review
+        // bf1e11be F1: previously this field persisted to users.preferences
+        // only, and delivery read user_channel_prefs only, so the config
+        // silently never fired).
+        if let Some(channels) = &patch.notification_channels {
+            validate_channel_config(channels)?;
+            patched_channels = Some(channels.clone());
+        }
         user.preferences.apply_patch(patch);
     }
     user.updated_at = now_secs();
     state.users.update(&user).await?;
+    if let Some(channels) = patched_channels {
+        // Converge the delivery store to the same value the profile store
+        // just persisted — a config set via PUT /users/me must reach the
+        // dispatcher (which reads user_channel_prefs).
+        state.user_channel_prefs.upsert(user_id, &channels).await?;
+    }
     Ok(Json(UserProfileResponse::from(user)))
 }
 
@@ -1065,7 +1083,7 @@ pub async fn invite_member(
     // side-effect, not a dependent record of the membership — its failure
     // must not fail the invite, and notify_rich logs-and-continues internally.
     crate::notifications::notify_rich(
-        &state,
+        state.as_ref(),
         membership.workspace_id.clone(),
         membership.user_id.clone(),
         NotificationType::InvitationReceived,
@@ -2076,7 +2094,12 @@ impl From<UserNotificationPreference> for NotifPrefResponse {
     }
 }
 
-/// GET /api/v1/users/me/notification-preferences
+/// GET /api/v1/notifications/preferences (spec path; also served at
+/// /api/v1/users/me/notification-preferences): the caller's per-type
+/// notification preferences AND delivery channel configuration
+/// (user-management.md §Delivery Channels). Per-handler auth
+/// (self-scope only): the handler reads exclusively the authenticated
+/// user's own rows, so no cross-scope decision is possible.
 pub async fn get_notification_preferences(
     auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
@@ -2087,7 +2110,10 @@ pub async fn get_notification_preferences(
         .list_for_user(&user_id)
         .await?;
     let items: Vec<NotifPrefResponse> = prefs.into_iter().map(Into::into).collect();
-    Ok(Json(serde_json::json!({ "preferences": items })))
+    let channels = crate::notification_dispatcher::resolve_channels(&state, &user_id).await;
+    Ok(Json(
+        serde_json::json!({ "preferences": items, "channels": channels }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2098,26 +2124,99 @@ pub struct NotifPrefItem {
 
 #[derive(Deserialize)]
 pub struct UpdateNotifPrefsRequest {
-    pub preferences: Vec<NotifPrefItem>,
+    /// Per-type enable/disable preferences (HSI §12). Optional: a request
+    /// may update only `channels`.
+    pub preferences: Option<Vec<NotifPrefItem>>,
+    /// Delivery channel configuration (user-management.md §Delivery
+    /// Channels). Optional: a request may update only `preferences`.
+    pub channels: Option<gyre_domain::NotificationChannels>,
 }
 
-/// PUT /api/v1/users/me/notification-preferences
+/// Shared validation for a `NotificationChannels` update, whichever endpoint
+/// carries it (PUT /notifications/preferences or the `notification_channels`
+/// field of PUT /users/me): `in_app` is forced true ("Always true (can't
+/// disable)") and configured endpoints must be absolute URLs.
+fn validate_channel_config(channels: &gyre_domain::NotificationChannels) -> Result<(), ApiError> {
+    if !channels.in_app {
+        return Err(ApiError::InvalidInput(
+            "in_app cannot be disabled (user-management.md §Delivery Channels)".to_string(),
+        ));
+    }
+    if let Some(hook) = &channels.webhook {
+        if reqwest::Url::parse(&hook.url).is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "webhook.url is not a valid absolute URL: {}",
+                hook.url
+            )));
+        }
+    }
+    if let Some(slack) = &channels.slack {
+        if reqwest::Url::parse(&slack.webhook_url).is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "slack.webhook_url is not a valid absolute URL: {}",
+                slack.webhook_url
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// PUT /api/v1/notifications/preferences (spec path; also served at
+/// /api/v1/users/me/notification-preferences): update the caller's per-type
+/// notification preferences and/or delivery channel configuration. The body
+/// may carry `preferences`, `channels`, or both; at least one is required.
+/// Per-handler auth (self-scope only).
+///
+/// A channel update is persisted to BOTH the dedicated `user_channel_prefs`
+/// store (what delivery reads) and the user's
+/// `users.preferences.notification_channels` (what GET /users/me echoes) —
+/// one effective configuration, no split-brain (review bf1e11be F1).
 pub async fn update_notification_preferences(
     auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateNotifPrefsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
-    let prefs: Vec<UserNotificationPreference> = req
-        .preferences
-        .into_iter()
-        .map(|item| {
-            UserNotificationPreference::new(user_id.clone(), item.notification_type, item.enabled)
-        })
-        .collect();
-    state.user_notification_prefs.upsert_batch(&prefs).await?;
-    let items: Vec<NotifPrefResponse> = prefs.into_iter().map(Into::into).collect();
-    Ok(Json(serde_json::json!({ "preferences": items })))
+    if req.preferences.is_none() && req.channels.is_none() {
+        return Err(ApiError::InvalidInput(
+            "body must set `preferences` and/or `channels`".to_string(),
+        ));
+    }
+
+    let mut items: Vec<NotifPrefResponse> = Vec::new();
+    if let Some(prefs) = req.preferences {
+        let prefs: Vec<UserNotificationPreference> = prefs
+            .into_iter()
+            .map(|item| {
+                UserNotificationPreference::new(
+                    user_id.clone(),
+                    item.notification_type,
+                    item.enabled,
+                )
+            })
+            .collect();
+        state.user_notification_prefs.upsert_batch(&prefs).await?;
+        items = prefs.into_iter().map(Into::into).collect();
+    }
+
+    let mut channels: Option<gyre_domain::NotificationChannels> = None;
+    if let Some(ch) = req.channels {
+        validate_channel_config(&ch)?;
+        state.user_channel_prefs.upsert(&user_id, &ch).await?;
+        // Mirror the same value into the user profile store so the
+        // preferences round-trip (GET /users/me → PUT /users/me) cannot
+        // silently revert delivery to a stale configuration.
+        if let Some(mut user) = state.users.find_by_id(&user_id).await? {
+            user.preferences.notification_channels = ch.clone();
+            user.updated_at = now_secs();
+            state.users.update(&user).await?;
+        }
+        channels = Some(ch);
+    }
+
+    Ok(Json(
+        serde_json::json!({ "preferences": items, "channels": channels }),
+    ))
 }
 
 // ─── HSI §12: Judgment Ledger ─────────────────────────────────────────────────
@@ -3147,6 +3246,294 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn get_channel_preferences_returns_defaults() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let channels = &json["channels"];
+        assert_eq!(channels["in_app"], true, "in_app defaults on");
+        assert_eq!(channels["email"]["enabled"], false, "email defaults off");
+        assert!(
+            channels["webhook"].is_null(),
+            "webhook defaults unconfigured"
+        );
+        assert!(channels["slack"].is_null(), "slack defaults unconfigured");
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_round_trips() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let payload = serde_json::json!({
+            "channels": {
+                "in_app": true,
+                "email": {
+                    "enabled": true,
+                    "digest": "Daily",
+                    "min_priority": "Medium"
+                },
+                "webhook": {
+                    "url": "https://hooks.example.test/gyre",
+                    "secret": "s3cret",
+                    "min_priority": "High"
+                },
+                "slack": {
+                    "webhook_url": "https://hooks.slack.test/T/B/X",
+                    "channel": "#ops",
+                    "min_priority": "Low"
+                }
+            }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid config must be accepted"
+        );
+
+        // A fresh router over the same state must read the persisted config
+        // (durable store, not in-handler memory).
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let channels = &json["channels"];
+        assert_eq!(channels["email"]["enabled"], true);
+        assert_eq!(channels["email"]["digest"], "Daily");
+        assert_eq!(
+            channels["webhook"]["url"],
+            "https://hooks.example.test/gyre"
+        );
+        assert_eq!(channels["webhook"]["min_priority"], "High");
+        assert_eq!(channels["slack"]["channel"], "#ops");
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_rejects_disabled_in_app() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"channels":{"in_app":false,"email":{"enabled":false,"digest":"Off","min_priority":"Low"},"webhook":null,"slack":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_app=false must be rejected — spec marks it can't-disable"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_rejects_relative_webhook_url() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"channels":{"in_app":true,"email":{"enabled":false,"digest":"Off","min_priority":"Low"},"webhook":{"url":"./local-hook","secret":"s","min_priority":"Low"},"slack":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "non-absolute webhook URL must be rejected"
+        );
+    }
+
+    /// Guard against the split-brain config defect (review bf1e11be F1):
+    /// a channel configuration set via `PUT /users/me`'s
+    /// `preferences.notification_channels` field must reach the delivery
+    /// store the dispatcher reads — email configured through the profile
+    /// endpoint has to queue in the durable outbox, exactly as it would
+    /// when configured through `PUT /notifications/preferences`.
+    #[tokio::test]
+    async fn put_me_notification_channels_reach_delivery_outbox() {
+        let (state, user_id, key) = bootstrap_user("put-me-channels").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"preferences":{"notification_channels":{"in_app":true,"email":{"enabled":true,"digest":"Immediate","min_priority":"Low"},"webhook":null,"slack":null}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "channel config via PUT /users/me must be accepted"
+        );
+
+        // Persist an in-app notification for this user and run the
+        // production fan-out path (notify: create + dispatch_to_channels).
+        let notif = Notification::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("ws-default"),
+            Id::new(user_id.clone()),
+            NotificationType::GateFailure, // High band
+            "gate failed",
+            "t-1",
+            1_700_000_000i64,
+        );
+        state.notifications.create(&notif).await.unwrap();
+        crate::notification_dispatcher::dispatch_to_channels(&state, &notif).await;
+
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert_eq!(
+            outbox.len(),
+            1,
+            "email configured via PUT /users/me must queue in the durable outbox"
+        );
+        let (k, v) = &outbox[0];
+        assert!(k.starts_with(&format!("{user_id}:")), "queued for the user");
+        let parsed: serde_json::Value = serde_json::from_str(v).unwrap();
+        assert_eq!(parsed["user_id"], user_id);
+    }
+
+    /// PUT /users/me must apply the SAME channel validation as the dedicated
+    /// endpoint — `in_app: false` and relative URLs cannot be smuggled in
+    /// through the profile preferences field.
+    #[tokio::test]
+    async fn put_me_notification_channels_rejects_invalid_config() {
+        let (state, _user_id, key) = bootstrap_user("put-me-channels-bad").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        for (label, payload) in [
+            (
+                "in_app false",
+                r#"{"preferences":{"notification_channels":{"in_app":false,"email":{"enabled":true,"digest":"Off","min_priority":"Low"},"webhook":null,"slack":null}}}"#,
+            ),
+            (
+                "relative webhook url",
+                r#"{"preferences":{"notification_channels":{"in_app":true,"email":{"enabled":false,"digest":"Off","min_priority":"Low"},"webhook":{"url":"./local","secret":"s","min_priority":"Low"},"slack":null}}}"#,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/users/me")
+                        .header("Authorization", format!("Bearer {key}"))
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(payload))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "invalid channel config ({label}) must be rejected by PUT /users/me"
+            );
+        }
+    }
+
+    /// The reverse direction of the single-effective-config invariant: a
+    /// config set via `PUT /notifications/preferences` must be echoed by
+    /// `GET /users/me`, so the preferences round-trip (GET then PUT the whole
+    /// object back) cannot silently revert delivery to a stale config.
+    #[tokio::test]
+    async fn put_channel_preferences_syncs_users_preferences() {
+        let (state, user_id, key) = bootstrap_user("notif-prefs-sync").await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"channels":{"in_app":true,"email":{"enabled":true,"digest":"Daily","min_priority":"High"},"webhook":null,"slack":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], user_id);
+        assert_eq!(
+            json["preferences"]["notification_channels"],
+            serde_json::json!({
+                "in_app": true,
+                "email": {"enabled": true, "digest": "Daily", "min_priority": "High"},
+                "webhook": null,
+                "slack": null
+            }),
+            "GET /users/me must echo the same effective config the dispatcher reads"
+        );
+    }
+
     /// Helper: bootstrap a user via POST /api/v1/users (Admin-only) and
     /// return (state, user_id, raw_api_key). The API key authenticates as
     /// the new user, exercising the same auth extractor path production
@@ -3258,9 +3645,16 @@ mod tests {
         // Partial preferences payload: omitted fields keep their current
         // value (merge, not replace-with-defaults). The PUT above omitted
         // notification_channels and default_workspace_id entirely.
+        // notification_channels now serializes in the nested §Delivery
+        // Channels shape (merged task-112 config: email/webhook/slack).
         assert_eq!(
             json2["preferences"]["notification_channels"],
-            serde_json::json!({"in_app": true, "email_enabled": false, "email_digest": "Off"}),
+            serde_json::json!({
+                "in_app": true,
+                "email": {"enabled": false, "digest": "Off", "min_priority": "Medium"},
+                "webhook": null,
+                "slack": null
+            }),
             "omitted notification_channels must keep the stored value, not reset to default"
         );
         assert_eq!(

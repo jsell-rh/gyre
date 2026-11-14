@@ -547,6 +547,8 @@ async fn notify_workspace_admins(
                 "secret_rotation: notification create failed: {e:#}"
             );
         } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
             info!(
                 workspace_id = %workspace_id,
                 user_id = %member.user_id,
@@ -684,6 +686,55 @@ mod tests {
             .await
             .unwrap();
         state
+    }
+
+    #[tokio::test]
+    async fn expiry_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: the secret-expiry scan's notification creation
+        // must go through the channel dispatcher — a configured email
+        // channel queues an outbox entry for the notified Admin.
+        let now = now_secs();
+        let state = seed(now).await;
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-admin"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let admin_notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-admin"), None, None, None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert!(
+            admin_notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::SecretExpiring),
+            "expected in-app SecretExpiring notification"
+        );
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-admin:")),
+            "secret-expiry notification must reach the configured email channel"
+        );
     }
 
     #[tokio::test]
