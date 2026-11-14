@@ -6149,7 +6149,14 @@ mod tests {
         let text = json["result"]["contents"][0]["text"].as_str().unwrap();
         let result: Value = serde_json::from_str(text).unwrap();
         assert_eq!(result["allowed"], false, "user B: {result}");
-        assert_eq!(result["matched_policy"], Value::Null);
+        // The denial is decided by the seeded default-deny catchall
+        // (priority 1, no conditions) — B matches no role Allow and not
+        // A's subject-keyed Allow. Same attribution convention as the
+        // REST policies/evaluate endpoint (api/policies.rs) and the
+        // decision audit trail: a default deny names the catchall, it is
+        // never unattributed and never attributed to another subject's
+        // policy.
+        assert_eq!(result["matched_policy"], "builtin-default-deny");
     }
 
     /// Missing query params are a usage error, not a silent deny — an
