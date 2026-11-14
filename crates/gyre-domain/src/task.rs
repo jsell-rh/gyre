@@ -90,7 +90,8 @@ pub struct Task {
 /// bootstrap workspace.
 ///
 /// This is the DOCUMENTED contract, not a fabricated fallback (same pattern
-/// as `Agent::new` / `MergeRequest::new`): hierarchy-enforcement.md §1
+/// as `Agent::new`; `MergeRequest::new` now requires the workspace as a
+/// constructor parameter): hierarchy-enforcement.md §1
 /// "Bootstrap Behavior" provisions a default workspace under the default
 /// tenant on first startup, and its migration strategy backfills tasks,
 /// agents, and merge requests into that workspace ("Same for tasks, agents,
