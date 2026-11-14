@@ -29,3 +29,52 @@
 
 - [-] **[process-revision-complete] F4: Tests do not verify notification creation (compound acceptance criterion partially satisfied)**
   Acceptance criteria state: *"A priority-2 'Spec pending approval' notification is created for workspace members"* and *"Tests cover all acceptance criteria."* The test `save_spec_creates_mr_for_existing_repo` (line 518) verifies the response (branch, mr_id) but never queries the notification repository to assert that a notification was created with `NotificationType::SpecPendingApproval`, priority 2, and `entity_ref` matching the MR ID. Given that the notification create call uses `let _ = ...` (line 306), silently swallowing errors, a regression in notification creation would be invisible to tests.
+
+---
+
+## R3 — candidate `ddd1a2c5` (base `6ffd6799`)
+
+**Reviewer:** Independent review agent
+**Round:** R3
+**Verdict:** `approved`
+
+**Scope:** base→candidate diff is +227 lines of end-to-end write-through tests in
+`crates/gyre-server/src/api/specs_assist.rs` (product commit `3488a06b`, recorded in
+the task frontmatter) plus the task-doc completion record. The production
+write-through implementation (GitOpsPort `write_file`/`create_branch`/`branch_exists`,
+git2 adapter, handler wiring) is already in the assigned base via earlier merges.
+
+**Evidence (see `/tmp/stage/review-evidence/round-ddd1a2c5-review-summary.md`):**
+
+- `cargo check -p gyre-server --tests` — exit 0, zero errors (all tests incl. the
+  three new e2e write-through tests type-check).
+- `cargo test -p gyre-adapters --lib git2_ops` — exit 0, 35/35 passed: real on-disk
+  bare repos, write_file commit/log round-trips, nested paths, overwrite, feature
+  branches, create_branch from ref (+ failure on invalid ref), branch_exists
+  true/false. The adapter layer the handlers depend on is real.
+- All three blob-SHA test anchors independently reproduced with `git hash-object`
+  (8035a516…, 98537aa0…, 1a862bdc…) — external anchors, not mirrored logic.
+- R2 findings F1–F4 verified fixed at the candidate: author check in existing-MR
+  matching, `author_agent_id` set on MR creation, stale "(stubbed)" doc removed,
+  notification side effects asserted (`priority_rank == 2`, `entity_id == mr_id`,
+  structured body fields, system-recipient fallback).
+- Invariant scripts pass: check-arch.sh, check-byte-slice-truncation.sh,
+  check-mem-port-contracts.sh. ABAC resolver entries present for both routes.
+- Acceptance criteria: all seven have real production behavior and meaningful
+  coverage (spec-edit branch + content on disk, MR targeting default branch,
+  priority-2 notification fan-out, append-to-existing-MR with exactly one new
+  commit and no second branch/MR, prompts/save direct default-branch commit with
+  returned SHA == new tip, slug format/collision, tests for each).
+
+**Verifier must execute (deferred per the 4 GiB build budget, not a code defect):**
+
+    cargo test -p gyre-server --lib api::specs_assist
+
+**Non-blocking notes:**
+
+- No dedicated test for the cross-user case of existing-MR matching (a second user
+  saving the same spec_path should get a new branch, not append to the first
+  user's MR). The author check is present in production code; the same-user append
+  path is covered end-to-end.
+- `web/dist/` untouched by this candidate; generated output is owned by the
+  deterministic verifier.
