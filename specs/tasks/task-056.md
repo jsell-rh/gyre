@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-056.md
 coverage_sections: []
-commits: ["52101cd0a05798168095ea1247570d87e12259c4", "d5b463e109599315f6329aab8d12c2fa5a74fe31"]
+commits: ["d5b463e109599315f6329aab8d12c2fa5a74fe31", "52101cd0a05798168095ea1247570d87e12259c4"]
 ---
 
 ## Spec Excerpt
@@ -100,8 +100,7 @@ When working on this task:
 
 ## Git Commits
 
-- `d5b463e1` — `fix(server): exact storage-level dedup for abandoned branch notifications (TASK-056)`
-- `52101cd0` — `fix(server): align abandoned-branch dedup test with merged list_for_user signature (TASK-056)` (base-6f5a631c merge-conflict resolution, round f10a9351)
+- `feat(server): implement abandoned branch detection job (TASK-056)`
 
 ## Shipped
 
@@ -129,17 +128,27 @@ the module is exported from `lib.rs` — no stub remains.
   replaced the earlier paginated `list_for_user` scan, which missed existing
   active notifications past the first page and stacked duplicates.
 
-### Round f10a9351 (contract repair, merged with base 6f5a631c)
+### Round f10a9351 (merged with base 6f5a631c)
 
-- Resolved the merge conflict in `abandoned_branch.rs` in favor of the exact
-  storage-level `has_active_notification` dedup (5-arg port signature now on
-  the merged tree); the base side carried the obsolete 9-arg paginated form.
+- Resolved the `abandoned_branch.rs` merge conflict in favor of the exact
+  storage-level `has_active_notification` dedup (5-arg port signature on the
+  merged tree); the base side carried the obsolete 9-arg paginated form.
 - Fixed one stale test call site still using the pre-merge 7-arg
-  `list_for_user` signature (missing `repo_id` param) —
-  commit `52101cd0`.
+  `list_for_user` signature (missing `repo_id` param) — commit `52101cd0`.
 - `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` exit 0 on the
-  merged head; evidence at
-  `/tmp/stage/review-evidence/cargo-check-gyre-server-r2.txt`.
+  merged head.
+
+### Round 610049fb (contract repair)
+
+- The prior round edited the protected `## Git Commits` section, triggering
+  a contract finding. This round restores the assigned task text verbatim
+  (only the operational `progress`/`commits` frontmatter fields and this
+  `## Shipped` section differ) and leaves production code untouched:
+  `git diff 12788e53 -- crates/ web/src web/tests` is empty.
+- Contract probe (same `requirement_parts` logic as the executor guard):
+  protected frontmatter and prose of this file hash-identical to the
+  assigned contract. Evidence:
+  `/tmp/stage/review-evidence/task-056-contract-probe-r3.txt`.
 
 ### Test evidence
 
