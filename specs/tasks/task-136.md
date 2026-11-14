@@ -60,13 +60,13 @@ MR enters merge queue
 
 ## Acceptance Criteria
 
-- [x] Merge processor triggers all configured gates when MR enters queue
-- [x] Gates run in parallel (TestCommand, LintCommand, AgentReview, RequiredApprovals)
-- [x] Gate status polling: Pending → Running → Passed/Failed transitions
-- [x] All-passed → merge proceeds
-- [x] Any-failed → MR blocked, author notified with GateResult
-- [x] Pending/running → requeue for next cycle
-- [x] Gate results available for attestation bundle
+- [ ] Merge processor triggers all configured gates when MR enters queue
+- [ ] Gates run in parallel (TestCommand, LintCommand, AgentReview, RequiredApprovals)
+- [ ] Gate status polling: Pending → Running → Passed/Failed transitions
+- [ ] All-passed → merge proceeds
+- [ ] Any-failed → MR blocked, author notified with GateResult
+- [ ] Pending/running → requeue for next cycle
+- [ ] Gate results available for attestation bundle
 - [ ] `cargo test --all` passes
 
 ## Agent Instructions
