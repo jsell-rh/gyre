@@ -4,10 +4,11 @@ mod config;
 mod tui;
 mod ws;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use gyre_common::WsMessage;
+use serde::Deserialize;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::info;
 
@@ -229,6 +230,14 @@ enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
+    /// ABAC policy engine operations (abac-policy-engine.md §CLI)
+    ///
+    /// List and create policies, dry-run evaluation, the decision audit
+    /// log, and the effective-permissions explorer.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
 }
 
 /// Scope selector shared by every `gyre secret` subcommand.
@@ -309,6 +318,107 @@ enum SecretCommands {
         /// New expiry as Unix epoch seconds (omit to keep the current expiry)
         #[arg(long)]
         expires_at: Option<u64>,
+    },
+}
+
+/// `gyre policy --scope` values. Clap renders these kebab-case
+/// (tenant/workspace/repo) — exactly the strings the server's
+/// GET /api/v1/policies?scope= filter and POST create body expect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum PolicyScopeArg {
+    Tenant,
+    Workspace,
+    Repo,
+}
+
+impl PolicyScopeArg {
+    fn as_str(&self) -> &'static str {
+        match self {
+            PolicyScopeArg::Tenant => "tenant",
+            PolicyScopeArg::Workspace => "workspace",
+            PolicyScopeArg::Repo => "repo",
+        }
+    }
+}
+
+/// `gyre policy decisions --decision` values ("allow"/"deny" — the
+/// serialized form of PolicyEffect in the audit log).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum DecisionOutcomeArg {
+    Allow,
+    Deny,
+}
+
+impl DecisionOutcomeArg {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DecisionOutcomeArg::Allow => "allow",
+            DecisionOutcomeArg::Deny => "deny",
+        }
+    }
+}
+
+/// `gyre policy` subcommands (abac-policy-engine.md §CLI).
+#[derive(Subcommand)]
+enum PolicyCommands {
+    /// List ABAC policies (id, name, scope, effect, priority, enabled)
+    List {
+        /// Filter by scope level
+        #[arg(long)]
+        scope: Option<PolicyScopeArg>,
+        /// Workspace id to filter by (requires --scope workspace)
+        #[arg(long, requires = "scope")]
+        workspace_id: Option<String>,
+    },
+    /// Create a policy from a YAML definition file (Admin only)
+    ///
+    /// The file mirrors the POST /api/v1/policies body: required fields
+    /// name, scope, priority, effect, actions, resource_types; optional
+    /// description, scope_id, conditions (attribute/operator/value),
+    /// enabled (default true).
+    Create {
+        /// Path to the YAML policy definition
+        #[arg(long)]
+        file: String,
+    },
+    /// Dry-run evaluation: would the current policy set allow this
+    /// subject/action/resource? (No request is audited.)
+    Evaluate {
+        /// Subject as {type}:{id}, e.g. user:jsell or agent:worker-42
+        #[arg(long)]
+        subject: String,
+        /// Action to test, e.g. approve, push, read
+        #[arg(long)]
+        action: String,
+        /// Resource as {type}:{id}, e.g. spec:identity
+        #[arg(long)]
+        resource: String,
+    },
+    /// Query the decision audit log (newest first)
+    Decisions {
+        /// Filter by subject as {type}:{id}, e.g. agent:worker-42
+        #[arg(long)]
+        subject: Option<String>,
+        /// Filter by outcome
+        #[arg(long)]
+        decision: Option<DecisionOutcomeArg>,
+        /// Only decisions newer than this duration, e.g. 1d, 12h, 30m
+        #[arg(long)]
+        since: Option<String>,
+        /// How many audit records to fetch before applying the
+        /// --decision/--since filters (the log is scanned newest first)
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Show a subject's effective permissions: the allowed actions for a
+    /// resource type, answered from the subject's real stored attributes
+    Effective {
+        /// Subject as {type}:{id}, e.g. user:jsell
+        #[arg(long)]
+        subject: String,
+        /// Resource type to answer for (default: all types)
+        #[arg(long)]
+        resource_type: Option<String>,
     },
 }
 
@@ -1955,6 +2065,13 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::Policy { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            run_policy_command(&api, command).await?;
+        }
     }
 
     Ok(())
@@ -2702,6 +2819,396 @@ fn print_secret_table(secrets: &[client::SecretResponse]) {
             fmt_secret_epoch(s.expires_at),
             fmt_secret_epoch(s.last_rotated_at),
             fmt_secret_epoch(Some(s.created_at))
+        );
+    }
+}
+
+// ── ABAC policy commands (abac-policy-engine.md §CLI) ─────────────────────────
+
+/// Parse a `{type}:{id}` CLI reference — the `--subject user:jsell` and
+/// `--resource spec:identity` forms. Both parts must be non-empty; the
+/// subject type feeds the dry-run subject attribute `subject.type` and the
+/// id feeds `subject.id` / the audit-log `subject_id` filter.
+fn parse_subject_ref(s: &str) -> anyhow::Result<(String, String)> {
+    let (r#type, id) = s.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid reference '{s}': expected the form {{type}}:{{id}} (e.g. user:jsell, spec:identity)"
+        )
+    })?;
+    if r#type.is_empty() || id.is_empty() {
+        anyhow::bail!(
+            "invalid reference '{s}': both the type and the id must be non-empty (e.g. user:jsell)"
+        );
+    }
+    Ok((r#type.to_string(), id.to_string()))
+}
+
+/// Parse a `--since` duration (e.g. `30m`, `1h`, `1d`) into seconds.
+/// Accepts s/m/h/d/w with their long spellings.
+fn parse_since_duration(s: &str) -> anyhow::Result<u64> {
+    // Split into leading number and trailing unit without byte-slicing:
+    // the first alphabetic char starts the unit (char_indices/chars-based,
+    // never a fixed byte index).
+    let mut num = String::new();
+    let mut unit = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphabetic() {
+            unit.push(c);
+        } else if unit.is_empty() {
+            num.push(c);
+        } else {
+            // Alphabetic unit already started (e.g. "1d5") — let the unit
+            // match below reject it.
+            unit.push(c);
+        }
+    }
+    if num.is_empty() || unit.is_empty() {
+        anyhow::bail!("invalid --since '{s}': expected a duration like 30m, 1h, 1d");
+    }
+    let n: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid --since '{s}': '{num}' is not a number"))?;
+    let mult: u64 = match unit.as_str() {
+        "s" | "sec" | "secs" | "second" | "seconds" => 1,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hour" | "hours" => 3_600,
+        "d" | "day" | "days" => 86_400,
+        "w" | "week" | "weeks" => 604_800,
+        _ => anyhow::bail!("invalid --since '{s}': unknown unit '{unit}' (use s, m, h, d, or w)"),
+    };
+    n.checked_mul(mult)
+        .ok_or_else(|| anyhow::anyhow!("invalid --since '{s}': duration overflows"))
+}
+
+/// YAML policy definition accepted by `gyre policy create --file`. Mirrors
+/// the POST /api/v1/policies body: name, scope, priority, effect, actions,
+/// and resource_types are required (they are on the server too);
+/// description, scope_id, conditions, and enabled are optional. The server
+/// assigns id/timestamps and rejects reserved `trust:`/`builtin:` names.
+#[derive(Deserialize, Debug)]
+struct PolicyYaml {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    /// tenant | workspace | repo
+    scope: String,
+    #[serde(default)]
+    scope_id: Option<String>,
+    priority: u32,
+    /// allow | deny
+    effect: String,
+    #[serde(default)]
+    conditions: Vec<PolicyConditionYaml>,
+    actions: Vec<String>,
+    resource_types: Vec<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+/// One condition of a PolicyYaml: `{attribute, operator, value}` where
+/// value is a YAML scalar, list, or null (converted to its JSON form for
+/// the request body).
+#[derive(Deserialize, Debug)]
+struct PolicyConditionYaml {
+    attribute: String,
+    operator: String,
+    value: serde_json::Value,
+}
+
+/// Load and validate a YAML policy definition file. Validation errors are
+/// reported before any network I/O so a malformed file never reaches the
+/// server.
+fn load_policy_yaml(path: &str) -> anyhow::Result<client::CreatePolicyRequest> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading policy definition {path}"))?;
+    let def: PolicyYaml = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parsing policy definition {path} (expected YAML)"))?;
+
+    match def.scope.as_str() {
+        "tenant" | "workspace" | "repo" => {}
+        other => {
+            anyhow::bail!("invalid scope '{other}' in {path}: expected tenant, workspace, or repo")
+        }
+    }
+    match def.effect.as_str() {
+        "allow" | "deny" => {}
+        other => anyhow::bail!("invalid effect '{other}' in {path}: expected allow or deny"),
+    }
+
+    Ok(client::CreatePolicyRequest {
+        name: def.name,
+        description: def.description,
+        scope: def.scope,
+        scope_id: def.scope_id,
+        priority: def.priority,
+        effect: def.effect,
+        conditions: def
+            .conditions
+            .into_iter()
+            .map(|c| client::PolicyConditionRequest {
+                attribute: c.attribute,
+                operator: c.operator,
+                value: c.value,
+            })
+            .collect(),
+        actions: def.actions,
+        resource_types: def.resource_types,
+        enabled: def.enabled,
+    })
+}
+
+/// Apply the `--decision`/`--since` audit-log filters to a newest-first
+/// page of decisions: keep only the requested outcome and only records
+/// evaluated within the last `since_secs` (a record with an evaluated_at in
+/// the future is kept — clock skew must not hide fresh audit records).
+fn filter_decisions(
+    decisions: Vec<client::PolicyDecisionResponse>,
+    outcome: Option<DecisionOutcomeArg>,
+    since_secs: Option<u64>,
+    now: u64,
+) -> Vec<client::PolicyDecisionResponse> {
+    let mut kept = decisions;
+    if let Some(outcome) = outcome {
+        kept.retain(|d| d.decision == outcome.as_str());
+    }
+    if let Some(secs) = since_secs {
+        let cutoff = now.saturating_sub(secs);
+        kept.retain(|d| d.evaluated_at >= cutoff);
+    }
+    kept
+}
+
+/// Execute a `gyre policy` subcommand. Split from main()'s dispatch so the
+/// command flow (endpoints, query params, request bodies, error
+/// propagation) is testable against a mock server without touching the
+/// user's config.
+async fn run_policy_command(
+    api: &client::GyreClient,
+    command: PolicyCommands,
+) -> anyhow::Result<()> {
+    match command {
+        PolicyCommands::List {
+            scope,
+            workspace_id,
+        } => {
+            // --workspace-id is only meaningful for the workspace scope
+            // filter (clap already requires --scope to be present).
+            if workspace_id.is_some() && scope != Some(PolicyScopeArg::Workspace) {
+                anyhow::bail!("--workspace-id requires --scope workspace");
+            }
+            let policies = api
+                .list_policies(scope.map(|s| s.as_str()), workspace_id.as_deref())
+                .await?;
+            print_policy_table(&policies);
+        }
+
+        PolicyCommands::Create { file } => {
+            let req = load_policy_yaml(&file)?;
+            let created = api.create_policy(&req).await?;
+            println!("Policy '{}' created", created.name);
+            println!("  ID:       {}", created.id);
+            if !created.description.is_empty() {
+                println!("  Description: {}", created.description);
+            }
+            println!(
+                "  Scope:    {}",
+                match &created.scope_id {
+                    Some(sid) => format!("{} ({sid})", created.scope),
+                    None => format!("{} (all)", created.scope),
+                }
+            );
+            println!("  Effect:   {}", created.effect);
+            println!("  Enabled:  {}", created.enabled);
+        }
+
+        PolicyCommands::Evaluate {
+            subject,
+            action,
+            resource,
+        } => {
+            let (subject_type, subject_id) = parse_subject_ref(&subject)?;
+            let (resource_type, resource_id) = parse_subject_ref(&resource)?;
+            let req = client::EvaluatePolicyRequest {
+                subject: client::EvaluateSubject {
+                    r#type: subject_type,
+                    id: subject_id,
+                },
+                action,
+                resource: client::EvaluateResource {
+                    r#type: resource_type,
+                    id: Some(resource_id),
+                },
+            };
+            let resp = api.evaluate_policy(&req).await?;
+            println!("Decision:          {}", resp.decision);
+            println!(
+                "Matched policy:    {}",
+                resp.matched_policy
+                    .as_deref()
+                    .unwrap_or("(none — default deny)")
+            );
+            println!("Evaluated policies: {}", resp.evaluated_policies);
+            println!("Evaluation time:    {:.3} ms", resp.evaluation_ms);
+        }
+
+        PolicyCommands::Decisions {
+            subject,
+            decision,
+            since,
+            limit,
+        } => {
+            // The subject filter matches the audit log's subject_id (the
+            // {type}: prefix is CLI syntax; the stored filter is the id).
+            let subject_id = match &subject {
+                Some(s) => Some(parse_subject_ref(s)?.1),
+                None => None,
+            };
+            let since_secs = match &since {
+                Some(s) => Some(parse_since_duration(s)?),
+                None => None,
+            };
+            let mut decisions = api
+                .list_policy_decisions(subject_id.as_deref(), None, limit)
+                .await?;
+            // Outcome and age filters run on the fetched (newest-first)
+            // window; raise --limit to scan deeper into the log.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            decisions = filter_decisions(decisions, decision, since_secs, now);
+            print_decision_table(&decisions);
+        }
+
+        PolicyCommands::Effective {
+            subject,
+            resource_type,
+        } => {
+            let (_subject_type, subject_id) = parse_subject_ref(&subject)?;
+            let perms = api
+                .effective_permissions(&subject_id, resource_type.as_deref())
+                .await?;
+            print_effective_matrix(&perms);
+        }
+    }
+    Ok(())
+}
+
+/// Print the `gyre policy list` table.
+fn print_policy_table(policies: &[client::PolicyResponse]) {
+    if policies.is_empty() {
+        println!("No policies found.");
+        return;
+    }
+    let id_w = policies
+        .iter()
+        .map(|p| p.id.len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let name_w = policies
+        .iter()
+        .map(|p| p.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let scope_id_w = policies
+        .iter()
+        .map(|p| p.scope_id.as_deref().map_or(5, |s| s.len()))
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    println!(
+        "{:<id_w$}  {:<name_w$}  {:<9}  {:<scope_id_w$}  {:<6}  {:<8}  {:<7}  BUILT-IN",
+        "ID", "NAME", "SCOPE", "SCOPE_ID", "EFFECT", "PRIORITY", "ENABLED"
+    );
+    for p in policies {
+        println!(
+            "{:<id_w$}  {:<name_w$}  {:<9}  {:<scope_id_w$}  {:<6}  {:<8}  {:<7}  {}",
+            p.id,
+            p.name,
+            p.scope,
+            p.scope_id.as_deref().unwrap_or("(all)"),
+            p.effect,
+            p.priority,
+            p.enabled,
+            if p.built_in { "yes" } else { "no" }
+        );
+    }
+}
+
+/// Print the `gyre policy decisions` audit table (newest first, as
+/// returned by the server).
+fn print_decision_table(decisions: &[client::PolicyDecisionResponse]) {
+    if decisions.is_empty() {
+        println!("No policy decisions found.");
+        return;
+    }
+    let subject_w = decisions
+        .iter()
+        .map(|d| d.subject_id.len() + d.subject_type.len() + 1)
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    let resource_w = decisions
+        .iter()
+        .map(|d| {
+            if d.resource_id.is_empty() {
+                d.resource_type.len()
+            } else {
+                d.resource_type.len() + d.resource_id.len() + 1
+            }
+        })
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    println!(
+        "{:<15}  {:<subject_w$}  {:<10}  {:<resource_w$}  {:<6}  POLICY",
+        "EVALUATED_AT", "SUBJECT", "ACTION", "RESOURCE", "DECISION"
+    );
+    for d in decisions {
+        let subject = format!("{}:{}", d.subject_type, d.subject_id);
+        let resource = if d.resource_id.is_empty() {
+            d.resource_type.clone()
+        } else {
+            format!("{}:{}", d.resource_type, d.resource_id)
+        };
+        println!(
+            "{:<15}  {:<subject_w$}  {:<10}  {:<resource_w$}  {:<6}  {}",
+            fmt_secret_epoch(Some(d.evaluated_at)),
+            subject,
+            d.action,
+            resource,
+            d.decision,
+            d.matched_policy.as_deref().unwrap_or("(default deny)")
+        );
+    }
+}
+
+/// Print the `gyre policy effective` permissions matrix: one row per
+/// sampled action on the queried resource type(s).
+fn print_effective_matrix(perms: &[client::EffectivePermissionResponse]) {
+    if perms.is_empty() {
+        println!("No effective permissions returned.");
+        return;
+    }
+    let rt_w = perms
+        .iter()
+        .map(|p| p.resource_type.len())
+        .max()
+        .unwrap_or(13)
+        .max(13);
+    println!(
+        "{:<10}  {:<rt_w$}  {:<8}  MATCHED POLICY",
+        "ACTION", "RESOURCE TYPE", "DECISION"
+    );
+    for p in perms {
+        println!(
+            "{:<10}  {:<rt_w$}  {:<8}  {}",
+            p.action,
+            p.resource_type,
+            p.decision,
+            p.matched_policy.as_deref().unwrap_or("(none)")
         );
     }
 }
@@ -6171,5 +6678,640 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains(r#"a\"b.md"#));
         assert!(output.contains(r#"Test \"quotes\""#));
+    }
+
+    // ── gyre policy (abac-policy-engine.md §CLI) ─────────────────────────
+
+    #[test]
+    fn cli_policy_list_parses_with_filters() {
+        let cli = Cli::try_parse_from([
+            "gyre",
+            "policy",
+            "list",
+            "--scope",
+            "workspace",
+            "--workspace-id",
+            "ws-1",
+        ])
+        .expect("valid invocation");
+        let Commands::Policy {
+            command:
+                PolicyCommands::List {
+                    scope,
+                    workspace_id,
+                },
+        } = cli.command
+        else {
+            panic!("expected Policy/List");
+        };
+        assert_eq!(scope, Some(PolicyScopeArg::Workspace));
+        assert_eq!(workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    #[test]
+    fn cli_policy_list_workspace_id_requires_scope_flag() {
+        // clap `requires`: --workspace-id without --scope cannot even parse.
+        let err = match Cli::try_parse_from(["gyre", "policy", "list", "--workspace-id", "ws-1"]) {
+            Err(e) => e,
+            Ok(_) => panic!("--workspace-id must require --scope"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("required arguments") && msg.contains("--scope"),
+            "expected a missing-required-argument error naming --scope, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cli_policy_list_rejects_unknown_scope_value() {
+        let err = match Cli::try_parse_from(["gyre", "policy", "list", "--scope", "galaxy"]) {
+            Err(e) => e,
+            Ok(_) => panic!("unknown scope must be rejected at parse time"),
+        };
+        assert!(err.to_string().contains("invalid value"));
+    }
+
+    #[test]
+    fn cli_policy_create_parses() {
+        let cli = Cli::try_parse_from(["gyre", "policy", "create", "--file", "policy.yaml"])
+            .expect("valid invocation");
+        let Commands::Policy {
+            command: PolicyCommands::Create { file },
+        } = cli.command
+        else {
+            panic!("expected Policy/Create");
+        };
+        assert_eq!(file, "policy.yaml");
+    }
+
+    #[test]
+    fn cli_policy_evaluate_parses() {
+        let cli = Cli::try_parse_from([
+            "gyre",
+            "policy",
+            "evaluate",
+            "--subject",
+            "user:jsell",
+            "--action",
+            "approve",
+            "--resource",
+            "spec:identity",
+        ])
+        .expect("valid invocation");
+        let Commands::Policy {
+            command:
+                PolicyCommands::Evaluate {
+                    subject,
+                    action,
+                    resource,
+                },
+        } = cli.command
+        else {
+            panic!("expected Policy/Evaluate");
+        };
+        assert_eq!(subject, "user:jsell");
+        assert_eq!(action, "approve");
+        assert_eq!(resource, "spec:identity");
+    }
+
+    #[test]
+    fn cli_policy_decisions_parses_with_defaults() {
+        let cli = Cli::try_parse_from([
+            "gyre",
+            "policy",
+            "decisions",
+            "--subject",
+            "agent:worker-42",
+        ])
+        .expect("valid invocation");
+        let Commands::Policy {
+            command:
+                PolicyCommands::Decisions {
+                    subject,
+                    decision,
+                    since,
+                    limit,
+                },
+        } = cli.command
+        else {
+            panic!("expected Policy/Decisions");
+        };
+        assert_eq!(subject.as_deref(), Some("agent:worker-42"));
+        assert_eq!(decision, None);
+        assert_eq!(since, None);
+        assert_eq!(limit, 100);
+    }
+
+    #[test]
+    fn cli_policy_decisions_parses_all_filters() {
+        let cli = Cli::try_parse_from([
+            "gyre",
+            "policy",
+            "decisions",
+            "--subject",
+            "agent:worker-42",
+            "--decision",
+            "deny",
+            "--since",
+            "1d",
+            "--limit",
+            "500",
+        ])
+        .expect("valid invocation");
+        let Commands::Policy {
+            command:
+                PolicyCommands::Decisions {
+                    decision,
+                    since,
+                    limit,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected Policy/Decisions");
+        };
+        assert_eq!(decision, Some(DecisionOutcomeArg::Deny));
+        assert_eq!(since.as_deref(), Some("1d"));
+        assert_eq!(limit, 500);
+    }
+
+    #[test]
+    fn cli_policy_effective_parses() {
+        let cli = Cli::try_parse_from([
+            "gyre",
+            "policy",
+            "effective",
+            "--subject",
+            "user:jsell",
+            "--resource-type",
+            "spec",
+        ])
+        .expect("valid invocation");
+        let Commands::Policy {
+            command:
+                PolicyCommands::Effective {
+                    subject,
+                    resource_type,
+                },
+        } = cli.command
+        else {
+            panic!("expected Policy/Effective");
+        };
+        assert_eq!(subject, "user:jsell");
+        assert_eq!(resource_type.as_deref(), Some("spec"));
+    }
+
+    #[test]
+    fn parse_subject_ref_accepts_type_id_forms() {
+        assert_eq!(
+            parse_subject_ref("user:jsell").unwrap(),
+            ("user".to_string(), "jsell".to_string())
+        );
+        assert_eq!(
+            parse_subject_ref("agent:worker-42").unwrap(),
+            ("agent".to_string(), "worker-42".to_string())
+        );
+        assert_eq!(
+            parse_subject_ref("spec:system/identity-security.md").unwrap(),
+            (
+                "spec".to_string(),
+                "system/identity-security.md".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_subject_ref_rejects_malformed_refs() {
+        // No colon.
+        assert!(parse_subject_ref("jsell").is_err());
+        // Empty type.
+        assert!(parse_subject_ref(":jsell").is_err());
+        // Empty id.
+        assert!(parse_subject_ref("user:").is_err());
+        // Bare colon.
+        assert!(parse_subject_ref(":").is_err());
+    }
+
+    #[test]
+    fn parse_since_duration_converts_units() {
+        assert_eq!(parse_since_duration("30m").unwrap(), 1_800);
+        assert_eq!(parse_since_duration("1h").unwrap(), 3_600);
+        assert_eq!(parse_since_duration("2d").unwrap(), 172_800);
+        assert_eq!(parse_since_duration("1w").unwrap(), 604_800);
+        assert_eq!(parse_since_duration("45s").unwrap(), 45);
+        assert_eq!(parse_since_duration("12hours").unwrap(), 43_200);
+    }
+
+    #[test]
+    fn parse_since_duration_rejects_malformed_values() {
+        // No number.
+        assert!(parse_since_duration("d").is_err());
+        // Bare word.
+        assert!(parse_since_duration("hour").is_err());
+        // Unknown unit.
+        assert!(parse_since_duration("5x").is_err());
+        // Empty.
+        assert!(parse_since_duration("").is_err());
+        // Overflowing.
+        assert!(parse_since_duration("99999999999999999999w").is_err());
+    }
+
+    fn policy_yaml_file(contents: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("policy.yaml"), contents).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_policy_yaml_parses_full_definition() {
+        let yaml = r#"
+name: workspace-developer-push
+description: Allow developers to push in this workspace
+scope: workspace
+scope_id: ws-1
+priority: 200
+effect: allow
+enabled: true
+conditions:
+  - attribute: subject.workspace_role
+    operator: equals
+    value: developer
+  - attribute: subject.global_role
+    operator: in
+    value: [admin, owner]
+  - attribute: subject.attestation_level
+    operator: greater_than
+    value: 2
+actions: [push, read]
+resource_types: [repo]
+"#;
+        let dir = policy_yaml_file(yaml);
+        let req = load_policy_yaml(dir.path().join("policy.yaml").to_str().unwrap()).unwrap();
+        assert_eq!(req.name, "workspace-developer-push");
+        assert_eq!(
+            req.description.as_deref(),
+            Some("Allow developers to push in this workspace")
+        );
+        assert_eq!(req.scope, "workspace");
+        assert_eq!(req.scope_id.as_deref(), Some("ws-1"));
+        assert_eq!(req.priority, 200);
+        assert_eq!(req.effect, "allow");
+        assert_eq!(req.enabled, Some(true));
+        assert_eq!(req.actions, vec!["push", "read"]);
+        assert_eq!(req.resource_types, vec!["repo"]);
+        assert_eq!(req.conditions.len(), 3);
+        assert_eq!(req.conditions[0].attribute, "subject.workspace_role");
+        assert_eq!(req.conditions[0].operator, "equals");
+        assert_eq!(req.conditions[0].value, serde_json::json!("developer"));
+        assert_eq!(
+            req.conditions[1].value,
+            serde_json::json!(["admin", "owner"])
+        );
+        assert_eq!(req.conditions[2].value, serde_json::json!(2));
+    }
+
+    #[test]
+    fn load_policy_yaml_defaults_optional_fields() {
+        // description/scope_id/conditions/enabled omitted: the request must
+        // carry the server's defaults (None/empty/None -> server true).
+        let yaml = "name: minimal\nscope: tenant\npriority: 10\neffect: deny\nactions: ['*']\nresource_types: ['*']\n";
+        let dir = policy_yaml_file(yaml);
+        let req = load_policy_yaml(dir.path().join("policy.yaml").to_str().unwrap()).unwrap();
+        assert_eq!(req.description, None);
+        assert_eq!(req.scope_id, None);
+        assert_eq!(req.enabled, None);
+        assert!(req.conditions.is_empty());
+    }
+
+    #[test]
+    fn load_policy_yaml_rejects_missing_required_fields() {
+        // priority is required by the server's create body; the CLI must
+        // reject the file before any request is sent.
+        let yaml = "name: no-priority\nscope: tenant\neffect: deny\nactions: ['*']\nresource_types: ['*']\n";
+        let dir = policy_yaml_file(yaml);
+        let err = load_policy_yaml(dir.path().join("policy.yaml").to_str().unwrap())
+            .expect_err("missing priority must fail");
+        // {:#} renders the full anyhow chain, including serde_yaml's
+        // field-level message.
+        assert!(format!("{err:#}").contains("priority"));
+    }
+
+    #[test]
+    fn load_policy_yaml_rejects_invalid_scope_and_effect() {
+        let yaml = "name: x\nscope: galaxy\npriority: 1\neffect: allow\nactions: ['*']\nresource_types: ['*']\n";
+        let dir = policy_yaml_file(yaml);
+        let err = load_policy_yaml(dir.path().join("policy.yaml").to_str().unwrap())
+            .expect_err("unknown scope must fail");
+        assert!(err.to_string().contains("galaxy"));
+
+        let yaml = "name: x\nscope: tenant\npriority: 1\neffect: maybe\nactions: ['*']\nresource_types: ['*']\n";
+        let dir = policy_yaml_file(yaml);
+        let err = load_policy_yaml(dir.path().join("policy.yaml").to_str().unwrap())
+            .expect_err("unknown effect must fail");
+        assert!(err.to_string().contains("maybe"));
+    }
+
+    #[test]
+    fn load_policy_yaml_rejects_missing_file() {
+        let err = load_policy_yaml("/nonexistent/policy.yaml").expect_err("missing file must fail");
+        assert!(err.to_string().contains("reading policy definition"));
+    }
+
+    #[test]
+    fn filter_decisions_applies_outcome_and_age_filters() {
+        let now = 1_000_000u64;
+        let mk = |decision: &str, evaluated_at: u64| client::PolicyDecisionResponse {
+            request_id: format!("r-{evaluated_at}"),
+            subject_id: "worker-42".into(),
+            subject_type: "agent".into(),
+            action: "push".into(),
+            resource_type: "repo".into(),
+            resource_id: "repo-1".into(),
+            decision: decision.into(),
+            matched_policy: None,
+            evaluated_policies: 3,
+            evaluation_ms: 0.1,
+            evaluated_at,
+        };
+        let decisions = vec![
+            mk("allow", now - 100),   // recent allow
+            mk("deny", now - 100),    // recent deny
+            mk("deny", now - 7_200),  // 2h-old deny
+            mk("allow", now - 7_200), // 2h-old allow
+        ];
+
+        // --decision deny only.
+        let kept = filter_decisions(decisions.clone(), Some(DecisionOutcomeArg::Deny), None, now);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|d| d.decision == "deny"));
+
+        // --since 1h only (age filter, both outcomes).
+        let kept = filter_decisions(decisions.clone(), None, Some(3_600), now);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|d| d.evaluated_at > now - 3_600));
+
+        // Both filters: only the recent deny survives.
+        let kept = filter_decisions(decisions, Some(DecisionOutcomeArg::Deny), Some(3_600), now);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].decision, "deny");
+        assert_eq!(kept[0].evaluated_at, now - 100);
+
+        // No filters: everything passes through.
+        let all = filter_decisions(vec![mk("allow", 1), mk("deny", 2)], None, None, now);
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn policy_list_flow_sends_scope_filters() {
+        let (base, rx) = client::test_http::spawn_mock_http_server("200 OK", r#"[]"#);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_policy_command(
+            &api,
+            PolicyCommands::List {
+                scope: Some(PolicyScopeArg::Workspace),
+                workspace_id: Some("ws-1".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            req.request_line,
+            "GET /api/v1/policies?scope=workspace&scope_id=ws-1 HTTP/1.1"
+        );
+        assert!(req
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
+    }
+
+    #[tokio::test]
+    async fn policy_list_flow_rejects_workspace_id_without_workspace_scope() {
+        // The runtime guard: --workspace-id with --scope tenant never sends
+        // a request (the mock server would panic on a second accept anyway;
+        // the assertion is on the error, and on no request arriving).
+        let (base, _rx) = client::test_http::spawn_mock_http_server("200 OK", "[]");
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_policy_command(
+            &api,
+            PolicyCommands::List {
+                scope: Some(PolicyScopeArg::Tenant),
+                workspace_id: Some("ws-1".to_string()),
+            },
+        )
+        .await
+        .expect_err("--workspace-id with --scope tenant must fail");
+        assert!(err
+            .to_string()
+            .contains("--workspace-id requires --scope workspace"));
+    }
+
+    #[tokio::test]
+    async fn policy_create_flow_posts_yaml_body() {
+        let yaml = r#"
+name: workspace-developer-push
+description: Allow developers to push
+scope: workspace
+scope_id: ws-1
+priority: 200
+effect: allow
+conditions:
+  - attribute: subject.workspace_role
+    operator: equals
+    value: developer
+actions: [push]
+resource_types: [repo]
+"#;
+        let dir = policy_yaml_file(yaml);
+        let (base, rx) = client::test_http::spawn_mock_http_server(
+            "201 Created",
+            r#"{"id":"pol-1","name":"workspace-developer-push","description":"Allow developers to push","scope":"workspace","scope_id":"ws-1","priority":200,"effect":"allow","enabled":true,"built_in":false}"#,
+        );
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_policy_command(
+            &api,
+            PolicyCommands::Create {
+                file: dir.path().join("policy.yaml").to_str().unwrap().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(req.request_line, "POST /api/v1/policies HTTP/1.1");
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        assert_eq!(body["name"], "workspace-developer-push");
+        assert_eq!(body["scope"], "workspace");
+        assert_eq!(body["scope_id"], "ws-1");
+        assert_eq!(body["priority"], 200);
+        assert_eq!(body["effect"], "allow");
+        assert_eq!(
+            body["conditions"][0],
+            serde_json::json!({
+                "attribute": "subject.workspace_role",
+                "operator": "equals",
+                "value": "developer"
+            })
+        );
+        assert_eq!(body["actions"], serde_json::json!(["push"]));
+        assert_eq!(body["resource_types"], serde_json::json!(["repo"]));
+    }
+
+    #[tokio::test]
+    async fn policy_create_flow_rejects_reserved_prefix_from_server() {
+        // The server owns the trust:/builtin: prefix guard (400); the CLI
+        // must surface the HTTP failure, not swallow it.
+        let yaml = "name: trust:evil\nscope: tenant\npriority: 1\neffect: allow\nactions: ['*']\nresource_types: ['*']\n";
+        let dir = policy_yaml_file(yaml);
+        let (base, rx) = client::test_http::spawn_mock_http_server(
+            "400 Bad Request",
+            "policy name 'trust:evil' uses a reserved prefix",
+        );
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_policy_command(
+            &api,
+            PolicyCommands::Create {
+                file: dir.path().join("policy.yaml").to_str().unwrap().to_string(),
+            },
+        )
+        .await
+        .expect_err("server 400 must propagate");
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(req.request_line, "POST /api/v1/policies HTTP/1.1");
+        assert!(err.to_string().contains("HTTP 400"));
+        assert!(err.to_string().contains("reserved prefix"));
+    }
+
+    #[tokio::test]
+    async fn policy_evaluate_flow_posts_dry_run_request() {
+        let (base, rx) = client::test_http::spawn_mock_http_server(
+            "200 OK",
+            r#"{"decision":"allow","matched_policy":"workspace-developer-push","evaluated_policies":7,"evaluation_ms":0.42}"#,
+        );
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_policy_command(
+            &api,
+            PolicyCommands::Evaluate {
+                subject: "user:jsell".to_string(),
+                action: "approve".to_string(),
+                resource: "spec:identity".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(req.request_line, "POST /api/v1/policies/evaluate HTTP/1.1");
+        // The CLI's {type}:{id} flags map onto the documented request body
+        // (subject.type/subject.id, resource.type/resource.id).
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "subject": {"type": "user", "id": "jsell"},
+                "action": "approve",
+                "resource": {"type": "spec", "id": "identity"}
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_evaluate_flow_rejects_malformed_subject_before_request() {
+        let (base, _rx) = client::test_http::spawn_mock_http_server("200 OK", "{}");
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_policy_command(
+            &api,
+            PolicyCommands::Evaluate {
+                subject: "jsell".to_string(),
+                action: "approve".to_string(),
+                resource: "spec:identity".to_string(),
+            },
+        )
+        .await
+        .expect_err("malformed --subject must fail");
+        assert!(err.to_string().contains("expected the form"));
+    }
+
+    #[tokio::test]
+    async fn policy_decisions_flow_sends_subject_filter() {
+        let (base, rx) = client::test_http::spawn_mock_http_server("200 OK", r#"[]"#);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_policy_command(
+            &api,
+            PolicyCommands::Decisions {
+                subject: Some("agent:worker-42".to_string()),
+                decision: Some(DecisionOutcomeArg::Deny),
+                since: Some("1d".to_string()),
+                limit: 250,
+            },
+        )
+        .await
+        .unwrap();
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            req.request_line,
+            "GET /api/v1/policies/decisions?limit=250&subject_id=worker-42 HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_decisions_flow_rejects_bad_since_before_request() {
+        let (base, _rx) = client::test_http::spawn_mock_http_server("200 OK", "[]");
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_policy_command(
+            &api,
+            PolicyCommands::Decisions {
+                subject: None,
+                decision: None,
+                since: Some("1z".to_string()),
+                limit: 100,
+            },
+        )
+        .await
+        .expect_err("malformed --since must fail");
+        assert!(err.to_string().contains("unknown unit"));
+    }
+
+    #[tokio::test]
+    async fn policy_effective_flow_queries_subject_and_resource_type() {
+        let (base, rx) = client::test_http::spawn_mock_http_server(
+            "200 OK",
+            r#"[
+                {"action":"read","resource_type":"spec","decision":"allow","matched_policy":"builtin"},
+                {"action":"write","resource_type":"spec","decision":"deny","matched_policy":null}
+            ]"#,
+        );
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_policy_command(
+            &api,
+            PolicyCommands::Effective {
+                subject: "user:jsell".to_string(),
+                resource_type: Some("spec".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            req.request_line,
+            "GET /api/v1/policies/effective?subject=jsell&resource_type=spec HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_list_flow_surfaces_auth_failure() {
+        // A 403 from the server (non-admin caller) must reach the user as
+        // an error naming the status, not a silent success.
+        let (base, _rx) =
+            client::test_http::spawn_mock_http_server("403 Forbidden", "ABAC denied request");
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_policy_command(
+            &api,
+            PolicyCommands::List {
+                scope: None,
+                workspace_id: None,
+            },
+        )
+        .await
+        .expect_err("HTTP 403 must propagate");
+        assert!(err.to_string().contains("HTTP 403"));
     }
 }
