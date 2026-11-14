@@ -65,13 +65,13 @@ The `specs/save` handler (`crates/gyre-server/src/api/specs_assist.rs`) exists b
 
 ## Acceptance Criteria
 
-- [x] `POST /api/v1/repos/:repo_id/specs/save` creates a real `spec-edit/*` branch with the spec content
-- [x] An MR is auto-created targeting the default branch
-- [x] A priority-2 "Spec pending approval" notification is created for workspace members
-- [x] Saving to an existing open spec-edit MR appends a commit instead of creating a new branch
-- [x] `POST /api/v1/repos/:repo_id/prompts/save` commits directly to the default branch
-- [x] Slug generation follows the spec: path → lowercase, `/` → `-`, strip `.md`, append 4-char hash
-- [x] Tests cover all acceptance criteria
+- [ ] `POST /api/v1/repos/:repo_id/specs/save` creates a real `spec-edit/*` branch with the spec content
+- [ ] An MR is auto-created targeting the default branch
+- [ ] A priority-2 "Spec pending approval" notification is created for workspace members
+- [ ] Saving to an existing open spec-edit MR appends a commit instead of creating a new branch
+- [ ] `POST /api/v1/repos/:repo_id/prompts/save` commits directly to the default branch
+- [ ] Slug generation follows the spec: path → lowercase, `/` → `-`, strip `.md`, append 4-char hash
+- [ ] Tests cover all acceptance criteria
 
 ## Agent Instructions
 
