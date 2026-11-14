@@ -1827,6 +1827,7 @@ mod tests {
         // manifest gates' min_attestation_level / stack_hash constraints
         // (spec-registry.md §Agent Approver / Gate Schema).
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Forge test").await;
 
@@ -1909,6 +1910,7 @@ mod tests {
         // named agent; nothing records the submitting human. A non-admin
         // human may record a review only under its own verified identity.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Human forge test").await;
 
@@ -1988,6 +1990,7 @@ mod tests {
         // The on-behalf escape hatch is reserved for Admin principals —
         // the same trust level that can merge directly.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Admin on-behalf test").await;
 
@@ -2118,6 +2121,7 @@ mod tests {
         use crate::attestation::{sign_attestation, MergeAttestation};
 
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Merged MR").await;
 
