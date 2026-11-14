@@ -570,17 +570,21 @@ fn build_message(cfg: &SmtpConfig, to: &str, email: &RenderedEmail) -> String {
 }
 
 /// Dot-stuff a DATA payload per RFC 5321 §4.5.2 (a line starting with '.'
-/// is transmitted as '..').
+/// is transmitted as '..'). Preserves the input's line structure exactly:
+/// a trailing CRLF stays a single CRLF (the caller writes the terminating
+/// `.` line itself), and no CRLF is appended when the body does not end in
+/// one.
 fn dot_stuff(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
-    for line in body.split("\r\n") {
-        if line.starts_with('.') {
-            out.push('.');
-        }
-        out.push_str(line);
-        out.push_str("\r\n");
-    }
-    out
+    body.split("\r\n")
+        .map(|line| {
+            if line.starts_with('.') {
+                format!(".{line}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
 }
 
 /// Read one SMTP reply (possibly multi-line `250-...` continuation) and
@@ -996,6 +1000,9 @@ mod tests {
         );
         let stuffed = dot_stuff("line one\r\n.hidden\r\n");
         assert_eq!(stuffed, "line one\r\n..hidden\r\n");
+        // No CRLF is appended when the body does not end in one — the
+        // caller writes the terminating `.` line itself.
+        assert_eq!(dot_stuff("a\r\n.b"), "a\r\n..b");
     }
 
     /// Gating: a per-type unsubscribe drops the entry even when the global
