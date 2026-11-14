@@ -4,10 +4,10 @@ spec_ref: "abac-policy-engine.md §UI"
 depends_on:
   - task-128
   - task-129
-progress: not-started
+progress: complete
 coverage_sections:
   - "abac-policy-engine.md §UI"
-commits: []
+commits: ["5ba1bdf35f564d19b0e8c1a12a72c46d23781d3d", "11b0a02f6cb47e3197c2455edf384a08568c3adf"]
 ---
 
 ## Spec Excerpt
@@ -81,3 +81,38 @@ From `abac-policy-engine.md` §UI:
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §UI for the full spec. Frontend: `web/src/`. Existing settings components: `web/src/lib/components/` — look at TenantSettings.svelte, WorkspaceSettings.svelte for integration patterns. API client: check how other components call the REST API. API endpoints: `GET /api/v1/policies`, `POST /api/v1/policies`, `PUT /api/v1/policies/{id}`, `DELETE /api/v1/policies/{id}`, `POST /api/v1/policies/evaluate`, `GET /api/v1/policies/decisions`, `GET /api/v1/policies/effective` — all at global scope with `?scope=` query params. Svelte 5 patterns: check existing components for $state, $derived usage. Do NOT use workspace-prefixed policy URLs.
+
+## Shipped
+
+The full `abac-policy-engine.md` §UI surface ships as real production frontend code (commit `11b0a02f`), plus a verification repair (commit `5ba1bdf3`).
+
+### Components (`web/src/components/abac/`)
+
+- **`PolicyManager.svelte`** — management page: scope selector (Tenant / Workspace / Repo) + scope_id input, policy table (name, scope, effect, priority, enabled) with create / edit / delete, and the four §UI views behind a tab bar (Policies / Dry-Run Simulator / Decision Log / Effective Permissions). Edit/delete disabled for server-managed policies (`built_in`, `immutable`, `trust:`/`builtin:` prefixes), mirroring the server's guards. Conflict detection: rows in a detected conflict pair get a warning class + badge; a panel explains each pair.
+- **`PolicyEditor.svelte`** — modal form (name, description, scope, scope_id, priority, effect, actions, resource_types, enabled) with the visual condition builder: add/remove condition rows, attribute autocomplete from the §Attributes catalog (Subject / Resource / Environment datalists), all 8 operators, typed value serialization (`in`/`not_in` → string arrays, `greater_than`/`less_than` → numbers, `exists` → null). Create → `POST /api/v1/policies`; update → `PUT /api/v1/policies/{id}`.
+- **`PolicySimulator.svelte`** — dry-run: subject (type + id + optional workspace role), action, resource (type + id + workspace/repo/tenant scope chain) → `POST /api/v1/policies/evaluate`; displays decision (Allow/Deny), matched policy, evaluated policy count, evaluation time.
+- **`PolicyDecisionLog.svelte`** — decision audit table (subject, action, resource, decision, timestamp, matched policy) with server-side `subject_id`/`resource_type` filters and client-side decision (allow/deny) + date-range filters → `GET /api/v1/policies/decisions`.
+- **`EffectivePermissions.svelte`** — subject input → `GET /api/v1/policies/effective?subject={id}` per known resource type; renders resource types × sampled actions with decision and matched policy.
+- **`web/src/lib/abac.js`** — §Attributes autocomplete catalog, operator/action/resource-type lists, and `detectPolicyConflicts()`: flags enabled policy pairs with overlapping scope + resource_type + action coverage and conflicting effects, mirroring the engine's `scope_applies` and §Policy Composition winner rules for the explanation text.
+
+### URL pattern
+
+All policy calls use the **global** `/api/v1/policies` endpoints with `?scope=` query parameters (capitalized spelling per the spec's `?scope=Workspace&scope_id=` example); no workspace-prefixed policy URLs. One server fix honors that spec text: `parse_scope` in `crates/gyre-server/src/api/policies.rs` is now case-insensitive (the documented capitalized query form previously 400'd), with `list_policies_scope_query_is_case_insensitive` as the killing test.
+
+### Integration
+
+- **TenantSettings** — Policies tab embeds `PolicyManager` at tenant scope (admin's tenant id prefilled from `me()`).
+- **WorkspaceSettings** — Policies tab embeds `PolicyManager` locked to workspace scope (existing trust-grouped summary view and its HSI §2a behavior/testids preserved).
+- **RepoSettings** — Policies tab embeds `PolicyManager` locked to repo scope.
+
+### Verification repair (round 2)
+
+The previous verification run (dev-check.sh, exit 1) failed the `check-rustfmt-diff.py` gate: the two trailing `assert!` blocks of `list_policies_scope_query_is_case_insensitive` were not rustfmt-clean (changed lines 1154–1159, 1174–1179). The web build and all other gates passed — the failure was formatting only. Commit `5ba1bdf3` reformats those two asserts to rustfmt's output with no logic change; `check-rustfmt-diff.py` now passes on the full base..HEAD diff.
+
+### Test evidence
+
+- `web/src/__tests__/abac.test.js` — 21 unit tests (catalog + conflict detector, killing cases for each non-overlap dimension and winner rule).
+- `web/src/__tests__/PolicyManager.test.js` — 19 component tests (scope query params, CRUD payloads on global endpoints, condition-builder serialization, conflict highlighting, simulator, decision-log filters, effective permissions).
+- Integration assertions in the three settings suites (tenant / workspace / repo embedding + scope params).
+- Full `web` `npm test` in this round: **115 files, 2351 passed, 41 skipped** (evidence in `/tmp/stage/review-evidence/`).
+- `cargo check -p gyre-server --tests` clean; `cargo clippy -p gyre-server --all-targets --all-features` clean for the changed file; rustfmt gate passes. The verifier should run `cargo test -p gyre-server policies::` (server test compilation exceeds the in-sandbox 4 GiB budget), which covers the case-insensitivity test plus all task-128/129 policy API tests.

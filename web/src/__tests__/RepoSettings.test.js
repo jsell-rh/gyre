@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent } from '@testing-library/svelte';
+import { render, fireEvent, waitFor } from '@testing-library/svelte';
 
 vi.mock('../lib/api.js', () => ({
   api: {
@@ -36,6 +36,15 @@ vi.mock('../lib/api.js', () => ({
     secretCreate: vi.fn().mockResolvedValue({}),
     secretDelete: vi.fn().mockResolvedValue(null),
     secretRotate: vi.fn().mockResolvedValue({}),
+    // ABAC policy management surface (task-132) — PolicyManager on the
+    // Policies tab calls the global /policies endpoints on mount.
+    policies: vi.fn().mockResolvedValue([]),
+    createPolicy: vi.fn().mockResolvedValue({}),
+    updatePolicy: vi.fn().mockResolvedValue({}),
+    deletePolicy: vi.fn().mockResolvedValue(null),
+    policyDecisions: vi.fn().mockResolvedValue([]),
+    evaluatePolicy: vi.fn().mockResolvedValue({}),
+    effectivePermissions: vi.fn().mockResolvedValue([]),
   },
   setAuthToken: vi.fn(),
 }));
@@ -337,6 +346,20 @@ describe('RepoSettings', () => {
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openPoliciesTab(container);
       expect(api.repoSpecPolicy).toHaveBeenCalledWith('repo-1');
+    });
+
+    // ── ABAC policy management integration (abac-policy-engine.md §UI, task-132) ──
+    it('embeds the PolicyManager scoped to the repo via global ?scope= query params', async () => {
+      api.policies.mockResolvedValue([]);
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openPoliciesTab(container);
+      expect(container.querySelector('[data-testid="policy-manager"]')).toBeTruthy();
+      // The §UI URL pattern: GLOBAL /api/v1/policies with
+      // ?scope=Repo&scope_id=<repo id> — a query filter on the global
+      // CRUD, not a repo-prefixed resource hierarchy.
+      await waitFor(() => {
+        expect(api.policies).toHaveBeenCalledWith({ scope: 'Repo', scope_id: 'repo-1' });
+      });
     });
 
     it('renders policy toggles when policy data exists', async () => {
