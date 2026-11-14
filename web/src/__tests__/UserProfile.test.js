@@ -231,6 +231,66 @@ describe('UserProfile', () => {
     expect(await findByText(/No activity recorded/)).toBeTruthy();
   });
 
+  it('ledger type filter re-fetches with the server ?type= param', async () => {
+    const { findByText, container } = r();
+    const ledgerTab = await findByText('Judgment Ledger');
+    await fireEvent.click(ledgerTab);
+    await findByText('specs/auth.md');
+    const typeSelect = container.querySelector('.ledger-select[aria-label="Filter judgments by type"]');
+    expect(typeSelect).toBeTruthy();
+    await fireEvent.change(typeSelect, { target: { value: 'gate' } });
+    await waitFor(() => {
+      const last = api.myJudgments.mock.calls[api.myJudgments.mock.calls.length - 1][0];
+      expect(last.type).toBe('gate');
+      expect(last.offset).toBe(0);
+    });
+  });
+
+  it('ledger workspace filter re-fetches with the server ?workspace_id= param', async () => {
+    const { findByText, container } = r();
+    const ledgerTab = await findByText('Judgment Ledger');
+    await fireEvent.click(ledgerTab);
+    await findByText('specs/auth.md');
+    const wsSelect = container.querySelector('.ledger-select[aria-label="Filter judgments by workspace"]');
+    expect(wsSelect).toBeTruthy();
+    await fireEvent.change(wsSelect, { target: { value: 'ws-1' } });
+    await waitFor(() => {
+      const last = api.myJudgments.mock.calls[api.myJudgments.mock.calls.length - 1][0];
+      expect(last.workspace_id).toBe('ws-1');
+      expect(last.offset).toBe(0);
+    });
+  });
+
+  it('ledger paginates past the first page via Load More and offset', async () => {
+    // First page: a full 50-item page (page size) so "Load more" appears;
+    // second page: a single item, which ends pagination.
+    const page1 = Array.from({ length: 50 }, (_, i) => ({
+      judgment_type: 'approval',
+      entity_ref: `specs/p1-${i}.md`,
+      workspace_id: 'ws-1',
+      timestamp: NOW - 60 - i,
+      detail: null,
+    }));
+    const page2 = [
+      { judgment_type: 'trust', entity_ref: 'ws-1', workspace_id: 'ws-1', timestamp: NOW - 5000, detail: null },
+    ];
+    api.myJudgments.mockResolvedValueOnce({ judgments: page1 }).mockResolvedValueOnce({ judgments: page2 });
+    const { findByText, findAllByText } = r();
+    const ledgerTab = await findByText('Judgment Ledger');
+    await fireEvent.click(ledgerTab);
+    await findAllByText('specs/p1-0.md');
+    const moreBtn = await findByText('Load more');
+    await fireEvent.click(moreBtn);
+    await waitFor(() => {
+      expect(api.myJudgments).toHaveBeenCalledTimes(2);
+    });
+    expect(api.myJudgments.mock.calls[1][0].offset).toBe(50);
+    expect(api.myJudgments.mock.calls[1][0].limit).toBe(50);
+    // Appended, not replaced: both pages' entries render.
+    expect(await findAllByText('specs/p1-0.md')).toBeTruthy();
+    expect(await findByText('ws-1', { selector: '.ledger-target' })).toBeTruthy();
+  });
+
   it('shows a toggle for every canonical NotificationType', async () => {
     const { findByText, container } = r();
     const prefsTab = await findByText('Notification Preferences');

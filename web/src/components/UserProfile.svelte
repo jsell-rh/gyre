@@ -137,6 +137,43 @@
     { id: 'notifications', label: $t('user_profile.tabs.notifications') },
   ]);
 
+  // ── Judgment Ledger: server-side filtering + pagination ──────────────────
+  // GET /users/me/judgments implements ?type=/?workspace_id=/?limit=/
+  // ?offset=; the Profile ledger tab must expose them or judgments beyond
+  // the first page (default limit 50) are unreachable from the UI.
+  const LEDGER_PAGE_SIZE = 50;
+  const JUDGMENT_TYPE_FILTERS = [
+    { id: '', label: 'All types' },
+    { id: 'approval', label: 'Spec approvals' },
+    { id: 'rejection', label: 'Rejections & withdrawals' },
+    { id: 'gate', label: 'Gate overrides' },
+    { id: 'trust', label: 'Trust changes' },
+    { id: 'meta-spec', label: 'Meta-spec publishes' },
+  ];
+  let ledgerType = $state('');
+  let ledgerWorkspace = $state('');
+  let ledgerHasMore = $state(false);
+  let ledgerLoading = $state(false);
+
+  async function loadJudgments({ reset = false } = {}) {
+    ledgerLoading = true;
+    try {
+      const params = { limit: LEDGER_PAGE_SIZE, offset: reset ? 0 : judgments.length };
+      if (ledgerType) params.type = ledgerType;
+      if (ledgerWorkspace) params.workspace_id = ledgerWorkspace;
+      const raw = await api.myJudgments(params);
+      const page = Array.isArray(raw?.judgments) ? raw.judgments : Array.isArray(raw?.items) ? raw.items : Array.isArray(raw) ? raw : [];
+      judgments = reset ? page : [...judgments, ...page];
+      // A full page means more entries may exist past this offset.
+      ledgerHasMore = page.length === LEDGER_PAGE_SIZE;
+    } catch {
+      if (reset) judgments = [];
+      ledgerHasMore = false;
+    } finally {
+      ledgerLoading = false;
+    }
+  }
+
   $effect(() => { loadAll(); });
 
   // Load API tokens when tab is selected
@@ -149,10 +186,9 @@
   async function loadAll() {
     loading = true;
     try {
-      const [meR, ntR, jdR, wsR] = await Promise.allSettled([
+      const [meR, ntR, wsR] = await Promise.allSettled([
         api.me(),
         api.myNotifications(),
-        api.myJudgments(),
         api.workspaces(),
       ]);
       if (meR.status === 'fulfilled') {
@@ -175,10 +211,9 @@
       } catch {
         unread = 0;
       }
-      if (jdR.status === 'fulfilled') {
-        const raw = jdR.value;
-        judgments = Array.isArray(raw?.judgments) ? raw.judgments : Array.isArray(raw?.items) ? raw.items : Array.isArray(raw) ? raw : [];
-      }
+      // Judgment ledger: server-side filter + pagination (HSI §12 endpoint
+      // query params) rather than a single unparameterized first page.
+      loadJudgments({ reset: true });
       if (wsR.status === 'fulfilled') {
         const raw = wsR.value;
         workspaces = Array.isArray(raw?.workspaces) ? raw.workspaces : Array.isArray(raw) ? raw : [];
@@ -434,8 +469,37 @@
 
     {:else if activeTab === 'ledger'}
       <!-- Judgment Ledger: chronological log of human judgment decisions -->
-      <!-- Sourced from GET /api/v1/users/me/judgments -->
-      {#if judgments.length === 0}
+      <!-- Sourced from GET /api/v1/users/me/judgments (?type=/?workspace_id=/?limit=/?offset=) -->
+      <div class="ledger-controls">
+        <label class="ledger-filter">
+          <span class="ledger-filter-label muted">Type</span>
+          <select
+            class="ledger-select"
+            bind:value={ledgerType}
+            onchange={() => loadJudgments({ reset: true })}
+            aria-label="Filter judgments by type"
+          >
+            {#each JUDGMENT_TYPE_FILTERS as jtf}
+              <option value={jtf.id}>{jtf.label}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="ledger-filter">
+          <span class="ledger-filter-label muted">Workspace</span>
+          <select
+            class="ledger-select"
+            bind:value={ledgerWorkspace}
+            onchange={() => loadJudgments({ reset: true })}
+            aria-label="Filter judgments by workspace"
+          >
+            <option value="">All workspaces</option>
+            {#each workspaces as ws}
+              <option value={ws.id}>{ws.name ?? ws.slug ?? ws.id}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+      {#if judgments.length === 0 && !ledgerLoading}
         <EmptyState title={$t('user_profile.no_activity')} description={$t('user_profile.no_activity_desc')} />
       {:else}
         <div class="ledger-list">
@@ -457,6 +521,11 @@
             </div>
           {/each}
         </div>
+        {#if ledgerHasMore}
+          <button class="btn-secondary ledger-more" onclick={() => loadJudgments()} disabled={ledgerLoading}>
+            {ledgerLoading ? 'Loading…' : 'Load more'}
+          </button>
+        {/if}
       {/if}
 
     {:else if activeTab === 'notif-prefs'}
@@ -703,6 +772,20 @@
   .btn-switch:hover { border-color: var(--color-link); color: var(--color-link); }
 
   /* Judgment Ledger */
+  .ledger-controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
+  .ledger-filter { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-xs); }
+  .ledger-filter-label { font-weight: 500; }
+  .ledger-select {
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+  }
+  .ledger-select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .ledger-more { align-self: flex-start; margin-top: var(--space-2); padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
   .ledger-list { display: flex; flex-direction: column; gap: var(--space-2); }
   .ledger-item {
     background: var(--color-surface-elevated);
