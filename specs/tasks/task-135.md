@@ -86,15 +86,15 @@ From §Gate Agent Lifecycle:
 
 ## Acceptance Criteria
 
-- [x] Gate chains support ordered list of mixed gate types
-- [x] All gates execute in parallel when MR enters merge queue
-- [x] Merge processor tracks per-MR gate status (Pending/Running/Passed/Failed)
-- [x] All required gates must pass before merge proceeds
-- [x] Failed required gate blocks merge and notifies author
-- [x] Optional gates (`required = false`) don't block merging
-- [x] Gate agent lifecycle: ephemeral, read-only, scoped, attributed
-- [x] Gate agent context windows captured for audit
-- [ ] `cargo test --all` passes (deferred to independent verifier; see below)
+- [ ] Gate chains support ordered list of mixed gate types
+- [ ] All gates execute in parallel when MR enters merge queue
+- [ ] Merge processor tracks per-MR gate status (Pending/Running/Passed/Failed)
+- [ ] All required gates must pass before merge proceeds
+- [ ] Failed required gate blocks merge and notifies author
+- [ ] Optional gates (`required = false`) don't block merging
+- [ ] Gate agent lifecycle: ephemeral, read-only, scoped, attributed
+- [ ] Gate agent context windows captured for audit
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -103,67 +103,54 @@ Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Exi
 ## Shipped
 
 Both coverage sections are implemented in production code and were
-independently approved in prior rounds. This round repaired the CI Clippy
-failure (run 43535816551) introduced by merging base 6ffd6799 (task-130's
-§1 token-scoping claims) into the branch.
+independently approved in prior rounds. This round is a contract repair:
+the prior checkpoint amended protected task text (the last acceptance
+criterion's wording), which the contract guard rejects; this commit
+restores the assigned contract verbatim, records the branch's
+product-surface commits, and sets ready-for-review. No production code
+changed this round — the tree is identical to the verified 25a6f463
+(the doc-only commits after it touch only this file).
 
-### CI repair (25a6f463)
+### Behavior (attributed commits)
 
-The merge left two task-135-side sites on the pre-§1 contract:
+- **Gate chains (§Gate Chains):** repos configure an ordered list of
+  mixed gate types (TestCommand, LintCommand, AgentReview,
+  AgentValidation, RequiredApprovals) with per-gate `required` flags
+  and type-specific config. `trigger_gates_for_mr`
+  (crates/gyre-server/src/gate_executor.rs) creates a Pending
+  GateResult per gate and spawns every gate's execution concurrently
+  (tokio tasks); the merge processor waits until every required gate
+  passes. Required-gate failure blocks the MR and notifies the author
+  agent with failure details; `required = false` gates record results
+  and attach advisory comments without blocking. Per-MR gate status is
+  tracked Pending → Running → Passed/Failed in the `gate_results`
+  store.
+- **Gate agent lifecycle (§Gate Agent Lifecycle):** review/validation
+  agents are spawned per gate run with a scoped OIDC token
+  (`review:submit` / `validation:report` only — no push, no task
+  creation), attributed to their persona and gate config
+  (`reviewer_persona`/`gate_id` derived server-side from the token's
+  `task_id` claim, never from caller-supplied fields), torn down
+  (token revoked) after the verdict, and their full context window
+  captured to the audit trail.
 
-- The `scoped_gate_review_records_persona_attribution` test still called
-  the old 6-arg `mint_scoped` — E0061 compile error in the lib test
-  target, which is what failed the Clippy check. Updated to the 8-arg
-  form, minting exactly as the gate executor does: MR → workspace →
-  tenant resolved fail-closed (workspace row seeded idempotently, same
-  pattern as `ensure_workspace_row` / `ensure_probe_workspace`), persona
-  slug from the gate persona reference.
-- `submit_review`'s gate-agent attribution gate still read the scope
-  claim as a raw JSON string; with the claim now a `Vec<String>` that
-  read is always `None`, so the attribution block never fired and every
-  gate-agent review silently lost its persona/gate binding (§Gate Agent
-  Lifecycle "Attributed") — the array-read-as-string fail-open class
-  task-130's ship note warns about. Switched to the extractor-derived
-  `auth.scope`, identical to the identity binding above it, `git_http.rs`
-  and `abac_middleware.rs`. A tree-wide sweep confirmed no other
-  string-form scope reader remains.
+### CI repair already landed (25a6f463)
 
-### Behavior (from the attributed commits)
-
-- **Gate chains:** repos configure an ordered list of mixed gate types
-  (TestCommand, LintCommand, AgentReview, AgentValidation,
-  RequiredApprovals) with per-gate `required` flags and type-specific
-  config; `trigger_gates_for_mr` creates a Pending GateResult per gate
-  and spawns every gate's execution concurrently (tokio tasks), and the
-  merge processor waits until every required gate passes. Required-gate
-  failure blocks the MR and notifies the author agent with failure
-  details; `required = false` gates record results and attach advisory
-  comments without blocking. Per-MR gate status is tracked
-  Pending → Running → Passed/Failed in the `gate_results` store.
-- **Gate agent lifecycle:** review/validation agents are spawned per
-  gate run with a scoped OIDC token (`review:submit` /
-  `validation:report` only — no push, no task creation), attributed to
-  their persona and gate config (`reviewer_persona`/`gate_id` derived
-  server-side from the token's `task_id` claim, never from
-  caller-supplied fields), torn down (token revoked) after the verdict,
-  and their full context window captured to the audit trail.
-
-### Test evidence (this round, at 25a6f463)
-
-- `SKIP_WEB_BUILD=1 python3 scripts/check-clippy-diff.py 6f5a631c` (the
-  failing CI condition: clippy --all-targets --all-features vs main) —
-  exit 0, changed lines clean; the same check vs assigned base 6ffd6799
-  — exit 0. The --all-targets run proves the lib test target compiles
-  (E0061 gone).
-- `cargo fmt -p gyre-server --check` — clean.
-- All mechanical lints pass (arch, hierarchy, ABAC route registry +
-  exempt handlers, MCP write gates, migration numbering + portability,
-  dead message kinds, byte-slice truncation, relative path defaults,
-  fail-open ref resolution, mem port contracts, fabricated/scope-literal
-  defaults, lossy secret conversion, inert enforcement, forwarded header
-  trust, in-memory state stores, unbounded external HTTP, forged scope
-  fields, unwritten store fields, unwired port methods, sandbox sweep).
-- Logs under `/tmp/stage/review-evidence/`.
+The merge of base 6ffd6799 (task-130 §1 token-scoping claims) left two
+task-135-side sites on the pre-§1 contract: the
+`scoped_gate_review_records_persona_attribution` test called the old
+6-arg `mint_scoped` (E0061 in the lib test target — the Clippy failure,
+run 43535816551), and `submit_review`'s attribution gate read the scope
+claim as a raw JSON string, which with the claim now a `Vec<String>` is
+always `None`, silently dropping persona/gate attribution. Both were
+repaired: the test mints exactly as the gate executor does (MR →
+workspace → tenant resolved fail-closed, persona slug from the gate
+persona reference), and the attribution gate reads the
+extractor-derived `auth.scope`, identical to the identity binding above
+it. A tree-wide sweep confirmed no other string-form scope reader
+remains. Clippy-diff vs main and vs assigned base both exited 0 at
+25a6f463; all mechanical lints passed (logs retained under
+/tmp/stage/review-evidence/).
 
 ### Verifier-required probes
 
@@ -173,8 +160,6 @@ implement (4 GiB budget). The independent verifier must run
 gyre-server slices:
 
 - `api::merge_requests::tests::scoped_gate_review_records_persona_attribution`
-  (the repaired test — asserts persona/gate attribution fires through
-  the fixed `auth.scope` gate)
 - `api::merge_requests::tests::unscoped_review_has_no_gate_attribution`
 - `api::merge_requests::tests::submit_review_binds_agent_token_caller_to_own_identity`
 - `--test task134_review_probe` (scoped-token enforcement suite)
