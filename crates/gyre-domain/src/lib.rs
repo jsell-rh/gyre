@@ -102,7 +102,7 @@ pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
 pub use policy::{
     builtin_policies, trust_policies_for_level, Condition, ConditionOp, ConditionValue, Policy,
-    PolicyDecision, PolicyEffect, PolicyScope,
+    PolicyDecision, PolicyEffect, PolicyScope, SYSTEM_ABAC_IDENTITY,
 };
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use python_extractor::PythonExtractor;

@@ -661,8 +661,9 @@ pub(crate) async fn relaunch_agent_session(
     let branch = wt.branch.clone();
     let work_dir = wt.path.clone();
 
-    // Fresh JWT (the completion path revoked the previous one) — minted
-    // with the same workload claims as the first spawn.
+    // Resolve the workspace compute target (same as the first spawn) —
+    // used both for the JWT's workload/attestation claims and the launch
+    // context below.
     let resolved_ct_entity = match workspace.as_ref() {
         Some(ws) => resolve_workspace_target(state, ws).await?,
         None => None,
@@ -718,12 +719,19 @@ pub(crate) async fn relaunch_agent_session(
         None => None,
     };
 
-    // Fresh JWT (§1 Token Scoping): minted with the same hierarchy context
-    // as the first spawn — tenant from the repo's workspace (fail-closed: an
-    // unresolvable workspace means the tenant scope cannot be determined,
-    // never a fabricated identity), the fine-grained `repo:{name}:write`
-    // scope list, the persona slug bound to the agent row, and the
-    // identity-security.md attestation level implied by the compute target.
+    // Fresh JWT (§1 Token Scoping + task-129 review round 6): minted with
+    // the SAME worker scope claims as the first spawn
+    // (`mint_worker_scoped`: tenant, `workspace_id`, `repo_id`, and the
+    // fine-grained `repo:{name}:write` scope list) so the ABAC subject
+    // attribute `subject.repo_scope` (§Attributes, source "Agent OIDC
+    // claim") is real on every request the re-spawned session makes —
+    // without it the `builtin-agent-repo-scope` containment Deny fails
+    // its condition and the agent gains tenant-wide access. Tenant comes
+    // from the repo's workspace, resolved fail-closed: an unresolvable
+    // workspace means the tenant scope cannot be determined, never a
+    // fabricated identity. The persona slug bound to the agent row and
+    // the identity-security.md attestation level implied by the compute
+    // target mirror the first-spawn mint.
     let ws_tenant = match &workspace {
         Some(ws) => ws.tenant_id.to_string(),
         None => anyhow::bail!(
@@ -735,7 +743,7 @@ pub(crate) async fn relaunch_agent_session(
     };
     let token = state
         .agent_signing_key
-        .mint_with_workload(
+        .mint_worker_scoped(
             agent.id.as_str(),
             task.id.as_str(),
             agent.spawned_by.as_deref().unwrap_or("system"),
@@ -752,17 +760,12 @@ pub(crate) async fn relaunch_agent_session(
             Some(
                 resolved_ct_entity
                     .as_ref()
-                    .map_or(1u32, |ct| match ct.target_type {
+                    .map_or(1u8, |ct| match ct.target_type {
                         gyre_domain::ComputeTargetType::Container => 3,
                         gyre_domain::ComputeTargetType::Ssh => 2,
                         gyre_domain::ComputeTargetType::Kubernetes => 1,
                     }),
             ),
-            None,
-            None,
-            None,
-            None,
-            None,
             wl_image_hash,
         )
         .map_err(|e| anyhow::anyhow!("re-spawn JWT mint: {e}"))?;
@@ -1181,6 +1184,61 @@ mod tests {
         assert_eq!(ev.properties["old_status"], "Review");
         assert_eq!(ev.properties["new_status"], "InProgress");
         assert_eq!(ev.properties["assigned_to"], "agent-1");
+    }
+
+    /// Review round 6 (task-129, §Built-In Policies agent-repo-scope): the
+    /// re-spawn JWT must carry the SAME worker scope claims as the first
+    /// spawn (`mint_worker_scoped`: workspace_id + repo_id). The previous
+    /// mint (`mint_with_workload`) hardcoded `repo_id: None`, so a
+    /// re-spawned agent's requests had NO `subject.repo_scope` — the
+    /// builtin-agent-repo-scope containment Deny (750) failed its
+    /// condition and builtin-agent-scoped-access (700) granted
+    /// tenant-wide access. Killing direction: with the claim-less mint,
+    /// both assertions below fail (claims are None).
+    #[tokio::test]
+    async fn respawn_jwt_carries_worker_scope_claims() {
+        struct EnvVarRemove(&'static str);
+        impl Drop for EnvVarRemove {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _env_guard = EnvVarRemove("GYRE_AGENT_COMMAND");
+        std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
+        let state = loop_state(None).await; // default ceiling: 10
+
+        on_gates_failed(&state, &Id::new("mr-1"), &Id::new("agent-1")).await;
+
+        let agent = state
+            .agents
+            .find_by_id(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.status, AgentStatus::Active, "agent re-spawned");
+
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", "agent-1")
+            .await
+            .unwrap()
+            .expect("re-spawned agent has a fresh token");
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("re-spawn JWT must validate against the signing key");
+        assert_eq!(
+            claims.repo_id.as_deref(),
+            Some("r-1"),
+            "the re-spawn JWT must carry the task's repo scope — without it, \
+             agent-repo-scope containment is not enforced for re-spawned sessions"
+        );
+        assert_eq!(
+            claims.workspace_id.as_deref(),
+            Some("ws-1"),
+            "the re-spawn JWT must carry the repo's workspace scope, like the \
+             first-spawn JWT"
+        );
     }
 
     /// Phase 7 spawn-failure policy on the RE-SPAWN path (review F1,
