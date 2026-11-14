@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["8f66d5a436ac2926fa8b12714abc34540a81d1fb", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "ea366b150438e6b185edcf812cab5c5b1384b77a", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "5df8f2b136b1ad5792b58269cb4dc778ec301b05"]
 ---
 
 ## Spec Excerpt
@@ -100,67 +100,55 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**This round: repair of review finding d6b8a97** (commit
-`5df8f2b1`) — local-mode invitation acceptance issued no credential, so
-the created account could never authenticate. The invitation flow itself
-(entities, ports, SQLite/mem adapters, migrations, 5 tenant endpoints,
-workspace lifecycle, CSPRNG+SHA-256 tokens, expiry job, bulk invite, ABAC
-mappings) is unchanged production code carried from the prior accepted
-rounds through merge `a061aed9`.
+**This round: re-verification of the carried implementation on the new
+base** after the prior candidate's "Development controller" CI check
+failed with logs unavailable (durable finding fcdfa81a). No product code
+changed this round — the invitation flow is the independently approved
+implementation from the prior rounds (entities, ports,
+SQLite/Postgres/mem adapters, migrations 2026-11-13-000063/64/65, the
+five tenant endpoints, workspace invitation lifecycle, CSPRNG + SHA-256
+tokens, per-tenant `InvitationPolicy`, bulk invite, background expiry
+job, ABAC mappings), now merged with base 6ffd6799 (task-130 token
+scoping, which rewrote 400 lines of `auth.rs`).
 
-### Repair: credential delivery at local-mode acceptance
+### CI finding investigation
 
-`POST /api/v1/invite/{token}/accept` now mints the account's **first API
-key in the accept response** (the reviewer's closure option 1, mirroring
-the `POST /api/v1/users` bootstrap pattern — the platform's local
-credential is the API key; there is no password-login path anywhere, and
-the only other unauthenticated mint creates a *new* user, so without this
-the accepted invitee was permanently unable to log in in the spec's
-air-gapped/no-IdP scenario):
+The Development controller job runs only tooling tests
+(`tools/fullsend-dispatcher` Go tests, `scripts/test_dev*.py`,
+`scripts/test_pipeline*.py`, two node suites) — none of which read the
+task-110 diff, and the diff touches no `tools/` or `scripts/` file. Locally:
+node suites pass (7/7, 18/18); the two pipeline-test failures and three
+dev-test failures that occur in this sandbox reproduce **identically on
+a clean worktree of base 6ffd6799** (sandbox cargo-wrapper and
+signal/process artifacts — see `/tmp/stage/review-evidence/`). With logs
+unavailable and nothing reproducible from repo content, the recorded
+failure is consistent with a transient run (the job has a 10-minute
+timeout and timing-sensitive signal tests); re-running it on a fresh
+candidate is the remote-verification step.
 
-- Raw key `gyre_{uuid v4}` (CSPRNG), returned exactly once; only the
-  SHA-256 hash is persisted, in `state.api_keys` — the store the auth
-  extractor consults — so the key authenticates through the real routing
-  chain immediately.
-- Minted only after every side effect succeeded (memberships activated,
-  status Accepted); on mint failure the invitation rolls back to Pending
-  and a retry mints again (the account dedups via the namespace lookup).
-- **Minted only for accounts that exist because of invitation acceptance
-  to that email**: a fresh local-mode create, or the
-  `tenant:{tenant}:email:{email}`-namespaced local account found on
-  re-invite/retry (whose earlier key, if any, never reached the client).
-  A linked **pre-existing** account (SSO Keycloak subject, SCIM,
-  bootstrap `local:{username}`) returns `api_key: null` — token
-  possession must not mint a credential that bypasses the account's
-  existing auth factor. An SSO-claimed local account (external_id
-  re-pointed at the Keycloak subject) also falls in the no-mint arm.
+### Merge-integrity and gate evidence (this head)
 
-Docs (`docs/api-reference.md` accept-row) and coverage row 5 updated to
-record the credential-delivery behavior.
+- `cargo check --all` passes — the task-110 auth additions (local-account
+  auth, invitation acceptance, API-key mint) and task-130's
+  `AgentJwtClaims` rewrite coexist type-safely.
+- CI-diff gates against base 6ffd6799: rustfmt-diff clean, clippy-diff
+  clean (21 Rust files, 0 new warnings).
+- All mechanical checks pass: arch, ABAC route registry, migration
+  versions (incl. SQL portability), hierarchy, dead message kinds, and
+  the full advisory battery (the 3 dead-parameter findings are
+  pre-existing on the base, untouched by this diff).
+- Focused tests: `cargo test -p gyre-adapters` 522 passed / 0 failed
+  (includes the SQLite invitation repositories and mem-port contract
+  tests); `-p gyre-domain -p gyre-ports` compile+run clean.
+- gyre-server test compilation is blocked by this sandbox's 4 GiB build
+  wrapper (environment restriction, not a defect): the independent
+  verifier must run `cargo nextest run --all` — in particular the 26
+  `api::invitations` tests (tenant lifecycle, revocation blocks accept,
+  expiry job marks expired, bulk invite, non-admin 403, local-mode accept
+  mints an authenticating API key, re-invite fresh key, SSO link,
+  workspace lifecycle, cross-tenant containment, `max_pending`
+  cap, `allow_re_invite`).
 
-### Test evidence
-
-New/extended tests in `api::invitations` (all distinguish the repaired
-behavior from the real defect — without the mint, the accept response has
-no key and the tests fail):
-
-- `local_mode_accept_mints_authenticating_api_key` — unauthenticated
-  accept returns `api_key.key` (`gyre_…`, name `invitation`); the key
-  authenticates through `GET /api/v1/users/me` as the new user (id,
-  username, display name, tenant binding), and resolves in
-  `state.api_keys` via its hash only.
-- `reinvite_acceptance_mints_fresh_key_for_existing_local_account` — a
-  second invitation to the same tenant+email delivers a **fresh** key
-  authenticating as the **same** user (no parallel account).
-- `accept_links_existing_sso_user_instead_of_parallel_account`
-  (extended) — linked SSO acceptance returns `api_key: null`.
-
-Sandbox probes (exit 0, source SHAs and logs in
-`/tmp/stage/review-evidence/task-110-repair.md`): `cargo check -p
-gyre-server --tests` (type-checks the new tests), `cargo clippy -p
-gyre-server` (zero findings in invitations.rs), `rustfmt --check` on the
-touched file, `check-arch.sh`, `check-abac-route-registry.sh`,
-`check-mem-port-contracts.sh`. **gyre-server test execution is deferred to
-the independent verifier** (sandbox 4 GiB build cap): run `cargo test -p
-gyre-server --lib api::invitations::` and the full server suite at head
-`5df8f2b1`.
+Coverage rows 5, 6, 7, and 25 in
+`specs/coverage/system/user-management.md` remain `implemented` and
+describe the merged tree accurately.
