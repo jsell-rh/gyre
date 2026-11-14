@@ -9135,7 +9135,7 @@ mod tests {
                 .any(|e| e.properties["mr_id"] == "mr-post-merge-r21"
                     && e.properties["gate_type"] == "TestCommand"
                     && e.properties["duration_secs"].is_u64()
-                    && e.repo_id.as_ref().map(|r| r.as_str()) == Some("repo-gate-r21")),
+                    && e.repo_id.as_deref() == Some("repo-gate-r21")),
             "post-merge gate pass must record gate.passed: {passed:?}"
         );
         let failed = state
