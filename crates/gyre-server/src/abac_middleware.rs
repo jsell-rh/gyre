@@ -739,6 +739,24 @@ impl ResourceResolver {
             .map(|r| r.pattern)
             .collect()
     }
+
+    /// The distinct non-exempt resource types in the registry — the
+    /// canonical ABAC resource-type vocabulary (every type a live request
+    /// can be evaluated against). Used by the MCP `permissions://me`
+    /// resource (abac-policy-engine.md §MCP Integration) to enumerate the
+    /// resource types it probes, so the probe set can never drift from the
+    /// registry the middleware actually enforces with.
+    pub fn distinct_resource_types(&self) -> Vec<&'static str> {
+        let mut types: Vec<&'static str> = self
+            .routes
+            .iter()
+            .filter(|r| !r.exempt)
+            .map(|r| r.resource_type)
+            .collect();
+        types.sort_unstable();
+        types.dedup();
+        types
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1836,6 +1854,17 @@ pub fn init_resolver() {
     RESOURCE_RESOLVER.get_or_init(ResourceResolver::new);
 }
 
+/// The canonical ABAC resource-type vocabulary (distinct non-exempt route
+/// registry resource types; see
+/// [`ResourceResolver::distinct_resource_types`]). Initialises the resolver
+/// on first use so the vocabulary is available on every surface, not only
+/// after [`init_resolver`] ran.
+pub fn all_resource_types() -> Vec<&'static str> {
+    RESOURCE_RESOLVER
+        .get_or_init(ResourceResolver::new)
+        .distinct_resource_types()
+}
+
 /// Identity-security.md §Impersonation: attribute calls made under an
 /// impersonation token even when they bypass policy evaluation — ABAC-exempt
 /// routes and unresolved patterns (previously these returned before the
@@ -1921,7 +1950,10 @@ async fn record_impersonated_passthrough(
 /// overwrites an attribute already present in the context (guarded below
 /// with `contains_key`, matching the insert-only `merge_agent_jwt_claims`
 /// that runs immediately before it on the same claims object).
-fn normalize_agent_jwt_attributes(ctx: &mut AttributeContext, claims: &serde_json::Value) {
+pub(crate) fn normalize_agent_jwt_attributes(
+    ctx: &mut AttributeContext,
+    claims: &serde_json::Value,
+) {
     let obj = match claims.as_object() {
         Some(o) => o,
         None => return,
@@ -1949,7 +1981,7 @@ fn normalize_agent_jwt_attributes(ctx: &mut AttributeContext, claims: &serde_jso
 /// `None` when no per-day token cap is configured — the budget system imposes
 /// no bound, so no value is fabricated (a policy conditioning on the
 /// attribute fails closed instead of matching an invented number).
-fn budget_tokens_remaining(
+pub(crate) fn budget_tokens_remaining(
     config: Option<&gyre_domain::BudgetConfig>,
     usage: Option<&gyre_domain::BudgetUsage>,
 ) -> Option<i64> {
