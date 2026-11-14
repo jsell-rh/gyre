@@ -7,6 +7,7 @@
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
+  import AnalyticsView from './components/AnalyticsView.svelte';
   import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import PublicUserProfile from './components/PublicUserProfile.svelte';
@@ -25,7 +26,7 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'workspace_settings' | 'repo' | 'profile' |
+  // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' |
   // 'public_profile' (@username) | 'invite_accept' (/invite/:id)
   let mode = $state('workspace_home');
 
@@ -316,6 +317,11 @@
         return { mode: 'workspace_settings', slug, repoName: null, tab: null, entityType: null, entityId: null };
       }
 
+      // /workspaces/:slug/analytics (analytics.md §Analytics Dashboard)
+      if (raw[2] === 'analytics') {
+        return { mode: 'analytics', slug, repoName: null, tab: null, entityType: null, entityId: null };
+      }
+
       // /workspaces/:slug/agent-rules
       if (raw[2] === 'agent-rules') {
         return { mode: 'agent_rules', slug, repoName: null, tab: null, entityType: null, entityId: null };
@@ -340,6 +346,7 @@
     if (!slug) return '/';
     if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
     if (m === 'workspace_settings') return `/workspaces/${encodeURIComponent(slug)}/settings`;
+    if (m === 'analytics') return `/workspaces/${encodeURIComponent(slug)}/analytics`;
     if (m === 'agent_rules') return `/workspaces/${encodeURIComponent(slug)}/agent-rules`;
     if (m === 'repo') {
       const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
@@ -571,6 +578,15 @@
     repoTab = 'specs';
     fadeContent();
     pushState({ mode: 'workspace_settings', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
+  }
+
+  function goToAnalytics() {
+    if (!currentWorkspace) return;
+    mode = 'analytics';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    pushState({ mode: 'analytics', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
   }
 
   function goToAgentRules() {
@@ -849,7 +865,7 @@
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
       if (mode === 'repo' && entityDetail) { window.history.back(); gKeyPending = false; return; }
       if (mode === 'repo') { goToWorkspaceHome(currentWorkspace); gKeyPending = false; return; }
-      if (mode === 'workspace_settings' || mode === 'agent_rules') { window.history.back(); gKeyPending = false; return; }
+      if (mode === 'workspace_settings' || mode === 'agent_rules' || mode === 'analytics') { window.history.back(); gKeyPending = false; return; }
       if (mode === 'cross_workspace' && crossWorkspaceTab) { window.history.back(); gKeyPending = false; return; }
       gKeyPending = false;
       return;
@@ -1209,6 +1225,8 @@
           } catch { /* keep name-only ref */ }
         } else if (parsed.mode === 'workspace_settings') {
           mode = 'workspace_settings';
+        } else if (parsed.mode === 'analytics') {
+          mode = 'analytics';
         } else if (parsed.mode === 'agent_rules') {
           mode = 'agent_rules';
         } else {
@@ -1299,7 +1317,7 @@
       }
       if (e.state?.mode) {
         const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: pUsername, inviteId: pInviteId } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'public_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules')
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'public_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'analytics')
           ? m : 'workspace_home';
         if (m === 'public_profile') publicUsername = pUsername ?? parseUrl(window.location.pathname)?.username ?? '';
         if (m === 'invite_accept') inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
@@ -1360,7 +1378,7 @@
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'public_profile' || p.mode === 'invite_accept')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'public_profile' || p.mode === 'invite_accept' || p.mode === 'analytics')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -1438,7 +1456,7 @@
       </button>
 
       <!-- Left side: workspace selector or back arrow + breadcrumb -->
-      {#if mode === 'agent_rules' || mode === 'workspace_settings'}
+      {#if mode === 'agent_rules' || mode === 'workspace_settings' || mode === 'analytics'}
         <!-- Sub-page mode: back arrow + WorkspaceName / Page Name -->
         <div class="topbar-left repo-context">
           <button
@@ -1460,7 +1478,7 @@
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
             <span class="breadcrumb-sep" aria-hidden="true">/</span>
-            <span class="breadcrumb-repo" aria-current="page">{mode === 'workspace_settings' ? $t('topbar.workspace_settings') : $t('topbar.agent_rules_label')}</span>
+            <span class="breadcrumb-repo" aria-current="page">{mode === 'workspace_settings' ? $t('topbar.workspace_settings') : mode === 'analytics' ? 'Analytics' : $t('topbar.agent_rules_label')}</span>
           </nav>
         </div>
       {:else if mode === 'repo'}
@@ -1551,6 +1569,18 @@
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
                   <path d="M6 9l6 6 6-6"/>
+                </svg>
+              </button>
+              <button
+                class="ws-gear-btn"
+                onclick={() => goToAnalytics()}
+                aria-label="Analytics"
+                title="Analytics"
+                data-testid="ws-analytics-btn"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
+                  <path d="M3 3v18h18"/>
+                  <path d="M7 15l4-6 3 4 5-8"/>
                 </svg>
               </button>
               <button
@@ -1819,6 +1849,16 @@
               >{item.label}</button>
             </li>
           {/each}
+          {#if currentWorkspace}
+            <li>
+              <button
+                class="drawer-link"
+                class:active={mode === 'analytics'}
+                onclick={() => { mobileDrawerOpen = false; goToAnalytics(); }}
+                data-testid="drawer-item-analytics"
+              >Analytics</button>
+            </li>
+          {/if}
         </ul>
       </nav>
     {/if}
@@ -1850,6 +1890,11 @@
           />
         {:else if mode === 'workspace_settings'}
           <WorkspaceSettings
+            workspace={currentWorkspace}
+            onBack={() => goToWorkspaceHome(currentWorkspace)}
+          />
+        {:else if mode === 'analytics'}
+          <AnalyticsView
             workspace={currentWorkspace}
             onBack={() => goToWorkspaceHome(currentWorkspace)}
           />
