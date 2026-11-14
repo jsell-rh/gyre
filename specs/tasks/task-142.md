@@ -80,13 +80,13 @@ Each signer uses their own OIDC identity. The result is a multi-party attestatio
 
 ## Acceptance Criteria
 
-- [x] `MergeAttestationBundle` domain type with all spec-defined fields
-- [x] `AttestationSigner` port trait for pluggable signing
-- [x] Bundle generated after every successful merge
-- [x] Per-gate signing: forge signs TestCommand/LintCommand, gate agent signs AgentReview
-- [x] Bundle-level signature by forge covers the entire document
-- [x] Bundle serializes to the JSON schema defined in the spec
-- [ ] Tests pass (server test execution deferred to the independent verifier — see Shipped)
+- [ ] `MergeAttestationBundle` domain type with all spec-defined fields
+- [ ] `AttestationSigner` port trait for pluggable signing
+- [ ] Bundle generated after every successful merge
+- [ ] Per-gate signing: forge signs TestCommand/LintCommand, gate agent signs AgentReview
+- [ ] Bundle-level signature by forge covers the entire document
+- [ ] Bundle serializes to the JSON schema defined in the spec
+- [ ] Tests pass
 
 ## Agent Instructions
 
@@ -110,11 +110,10 @@ Each signer uses their own OIDC identity. The result is a multi-party attestatio
 
 ### Test evidence
 
-Ran in this sandbox (build wrapper allows small packages):
+Ran in this sandbox (build wrapper allows small packages), re-verified this round after the executor restored the assigned task document (contract repair `d5199bae`; source unchanged from commit `331a6eaf`):
 
 - `cargo test -p gyre-domain merge_attestation` — 4 passed (spec-schema field names + round-trip, canonical unsigned JSON excludes signature deterministically, gate unsigned JSON, sha256 fixed vector).
 - `cargo check -p gyre-server` and `cargo check -p gyre-server --tests` — clean (type-checks the lib and all new server tests).
-- `cargo clippy -p gyre-domain -p gyre-ports --all-targets` — zero warnings in the new modules (all reported warnings are pre-existing in other files).
 - `bash scripts/check-arch.sh` — hexagonal boundary passes (domain has no forbidden deps/I/O).
 - Evidence artifacts: `/tmp/stage/review-evidence/` (probe commands, exit codes, output).
 
@@ -126,4 +125,4 @@ Deferred to the independent verifier (the build wrapper refuses gyre-server test
 ### Scope notes
 
 - Rekor transparency-log and AIBOM storage targets are task-144; offline/OIDC-issuer bundle verification is task-143. This task ships instance-local verification plus git-note + audit-event storage (the minimum its plan step 4 requires).
-- This round re-verified the unchanged implementation from commit `331a6eaf` after the executor restored the assigned task document (contract repair `8531fbc3`): source, both merge-processor integration points, and all tests are intact; no code changes were needed.
+- Acceptance-criteria checkboxes in the protected task text are left as assigned (unchecked) per the contract-repair instruction; satisfaction evidence lives in this Shipped section. No code changes were made this round — the round only re-verified the intact implementation and restored progress bookkeeping.
