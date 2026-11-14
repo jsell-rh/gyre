@@ -53,6 +53,58 @@ impl UserToken {
     }
 }
 
+// ─── User Sessions ───────────────────────────────────────────────────────────
+
+/// A single authenticated session for a user (user-management.md §Session Management).
+///
+/// Created on successful auth with an API key. Only the SHA-256 hash of the
+/// session token is stored — the plaintext is returned once at creation and
+/// never persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSession {
+    pub id: Id,
+    pub user_id: Id,
+    /// SHA-256 of the session token (never store plaintext).
+    pub token_hash: String,
+    /// Socket peer address (or configured forwarded hop) at session creation.
+    pub ip_address: String,
+    /// User-Agent header at session creation.
+    pub user_agent: String,
+    pub created_at: u64,
+    pub last_active_at: u64,
+    pub expires_at: u64,
+    pub revoked: bool,
+}
+
+impl UserSession {
+    pub fn new(
+        id: Id,
+        user_id: Id,
+        token_hash: impl Into<String>,
+        ip_address: impl Into<String>,
+        user_agent: impl Into<String>,
+        created_at: u64,
+        expires_at: u64,
+    ) -> Self {
+        Self {
+            id,
+            user_id,
+            token_hash: token_hash.into(),
+            ip_address: ip_address.into(),
+            user_agent: user_agent.into(),
+            created_at,
+            last_active_at: created_at,
+            expires_at,
+            revoked: false,
+        }
+    }
+
+    /// A session is active when it is neither revoked nor expired.
+    pub fn is_active(&self, now: u64) -> bool {
+        !self.revoked && self.expires_at > now
+    }
+}
+
 // ─── Judgment Ledger ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
