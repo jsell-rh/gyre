@@ -21,7 +21,7 @@ There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5)
 - **Workspace selector** (`Payments ▾`): Clicking the name navigates to Workspace Home; the arrow opens the workspace switcher dropdown.
 - **Search** (`⌘K`): Global command palette — specs, types, agents, repos, concepts.
 - **Decisions badge** (`🔔 3`): Count of unresolved items requiring human judgment. Clicking navigates to Workspace Home with the Decisions section expanded.
-- **User avatar**: Profile (notification prefs, API tokens, judgment ledger) and sign-out.
+- **User avatar**: Profile (notification prefs, API tokens, active sessions with revoke, judgment ledger) and sign-out.
 
 **In Repo Mode**, the top bar adds context:
 

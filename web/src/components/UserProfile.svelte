@@ -233,6 +233,66 @@
     }
   }
 
+  // ── Active sessions (user-management.md §UI Pages > Session
+  // Management; endpoints from task-111) — devices with an active
+  // session for the calling user, with per-session revoke and
+  // "sign out everywhere". ──────────────────────────────────────────────
+  let sessions = $state([]);
+  let sessionsLoading = $state(false);
+  let sessionBusyId = $state(null);
+  let revokingAllSessions = $state(false);
+
+  async function loadSessions() {
+    sessionsLoading = true;
+    try {
+      const raw = await api.listMySessions();
+      sessions = Array.isArray(raw?.sessions) ? raw.sessions : [];
+    } catch {
+      sessions = [];
+    } finally {
+      sessionsLoading = false;
+    }
+  }
+
+  async function revokeSession(id) {
+    if (sessionBusyId) return;
+    sessionBusyId = id;
+    try {
+      await api.revokeMySession(id);
+      sessions = sessions.filter(s => s.id !== id);
+      showToast($t('user_profile.session_revoked'), { type: 'success' });
+    } catch (e) {
+      showToast($t('user_profile.session_revoke_failed') + (e?.message ? ': ' + e.message : ''), { type: 'error' });
+    } finally {
+      sessionBusyId = null;
+    }
+  }
+
+  async function revokeAllSessions() {
+    if (revokingAllSessions) return;
+    revokingAllSessions = true;
+    try {
+      await api.revokeAllMySessions();
+      sessions = [];
+      showToast($t('user_profile.sessions_signed_out'), { type: 'success' });
+    } catch (e) {
+      showToast($t('user_profile.session_revoke_failed') + (e?.message ? ': ' + e.message : ''), { type: 'error' });
+    } finally {
+      revokingAllSessions = false;
+    }
+  }
+
+  // task-111 timestamps are epoch seconds; WS-minted sessions carry no
+  // User-Agent (no request headers on that path).
+  function sessionTime(sec) {
+    if (!Number.isFinite(sec) || sec <= 0) return '—';
+    return new Date(sec * 1000).toLocaleString();
+  }
+
+  function sessionDevice(s) {
+    return s?.user_agent?.trim() || $t('user_profile.session_ws_device');
+  }
+
   // ── API Tokens ─────────────────────────────────────────────────────────
   let apiTokens = $state([]);
   let tokensLoading = $state(false);
@@ -282,6 +342,7 @@
   const tabs = $derived([
     { id: 'info',        label: $t('user_profile.tabs.info') },
     { id: 'tokens',      label: 'API Tokens' },
+    { id: 'sessions',    label: $t('user_profile.tabs.sessions') },
     { id: 'memberships', label: $t('user_profile.tabs.memberships') },
     { id: 'invitations', label: $t('user_profile.tabs.invitations') },
     { id: 'ledger',      label: $t('user_profile.tabs.ledger') },
@@ -309,6 +370,20 @@
   $effect(() => {
     if (activeTab === 'tokens' && apiTokens.length === 0 && !tokensLoading) {
       loadTokens();
+    }
+  });
+
+  let sessionsLoaded = $state(false);
+
+  // Load active sessions when the tab is first selected (untrack'ed guard:
+  // loading-state writes must not re-trigger the effect, same pattern as
+  // the invitations tab).
+  $effect(() => {
+    if (activeTab === 'sessions') {
+      if (untrack(() => !sessionsLoaded)) {
+        sessionsLoaded = true;
+        loadSessions();
+      }
     }
   });
 
@@ -570,6 +645,52 @@
                   {/if}
                 </div>
                 <button class="token-revoke-btn" onclick={() => revokeToken(token.id)} title="Revoke this token">Revoke</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+    {:else if activeTab === 'sessions'}
+      <!-- Active sessions (user-management.md §UI Pages > Session Management,
+           endpoints from task-111) -->
+      <div class="sessions-section">
+        <p class="sessions-desc">{$t('user_profile.sessions_desc')}</p>
+
+        <div class="sessions-actions">
+          <button
+            class="sessions-revoke-all-btn"
+            data-testid="sessions-revoke-all"
+            onclick={revokeAllSessions}
+            disabled={revokingAllSessions || sessionsLoading || sessions.length === 0}
+            title={$t('user_profile.sessions_revoke_all_title')}
+          >
+            {revokingAllSessions ? $t('user_profile.sessions_signing_out') : $t('user_profile.sessions_revoke_all')}
+          </button>
+        </div>
+
+        {#if sessionsLoading}
+          <Skeleton width="100%" height="2rem" />
+        {:else if sessions.length === 0}
+          <p class="sessions-empty">{$t('user_profile.no_sessions')}</p>
+        {:else}
+          <div class="sessions-list">
+            {#each sessions as s (s.id)}
+              <div class="session-item" data-testid={`session-${s.id}`}>
+                <div class="session-item-info">
+                  <span class="session-item-device">{sessionDevice(s)}</span>
+                  <span class="session-item-meta">{s.ip_address || '—'} · {$t('user_profile.session_last_active')} {sessionTime(s.last_active_at)}</span>
+                  <span class="session-item-meta">{$t('user_profile.session_started')} {sessionTime(s.created_at)} · {$t('user_profile.session_expires')} {sessionTime(s.expires_at)}</span>
+                </div>
+                <button
+                  class="session-revoke-btn"
+                  data-testid={`session-revoke-${s.id}`}
+                  onclick={() => revokeSession(s.id)}
+                  disabled={sessionBusyId === s.id}
+                  title={$t('user_profile.session_revoke_title')}
+                >
+                  {sessionBusyId === s.id ? $t('user_profile.session_revoking') : $t('user_profile.session_revoke')}
+                </button>
               </div>
             {/each}
           </div>
@@ -940,6 +1061,21 @@
   /* Workspace memberships */
   /* ── API Tokens ───────────────────────────────────────────────────────── */
   .tokens-section { display: flex; flex-direction: column; gap: var(--space-3); }
+  .sessions-section { display: flex; flex-direction: column; gap: var(--space-3); }
+  .sessions-desc { margin: 0; font-size: var(--text-sm); color: var(--color-text-muted); }
+  .sessions-actions { display: flex; justify-content: flex-end; }
+  .sessions-revoke-all-btn { background: transparent; border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border)); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-3); font-size: var(--text-sm); cursor: pointer; color: var(--color-danger); font-family: var(--font-body); font-weight: 600; }
+  .sessions-revoke-all-btn:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .sessions-revoke-all-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .sessions-empty { font-size: var(--text-sm); color: var(--color-text-muted); font-style: italic; text-align: center; padding: var(--space-4) 0; }
+  .sessions-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .session-item { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); }
+  .session-item-info { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+  .session-item-device { font-weight: 600; font-size: var(--text-sm); color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-item-meta { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .session-revoke-btn { background: transparent; border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border)); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); cursor: pointer; color: var(--color-danger); font-family: var(--font-body); font-weight: 600; white-space: nowrap; }
+  .session-revoke-btn:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .session-revoke-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .tokens-desc { margin: 0; font-size: var(--text-sm); color: var(--color-text-muted); }
   .token-created-banner { background: color-mix(in srgb, var(--color-success) 8%, var(--color-surface)); border: 1px solid color-mix(in srgb, var(--color-success) 30%, var(--color-border)); border-radius: var(--radius); padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
   .token-created-title { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--color-success); }

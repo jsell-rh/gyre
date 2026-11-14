@@ -598,6 +598,15 @@ export const api = {
     request(`/users/${id}/deactivate`, { method: 'PUT', body: JSON.stringify({ reason }) }),
   provisionUser: (data) =>
     request('/users', { method: 'POST', body: JSON.stringify(data) }),
+  // Active sessions (user-management.md §UI Pages > Session Management;
+  // endpoints from task-111 §Session Management): list is active-only and
+  // never exposes token hashes; revoke-all is "sign out everywhere" —
+  // every session revoked also invalidates the API key itself.
+  listMySessions: () => request('/users/me/sessions'),
+  revokeMySession: (id) =>
+    request(`/users/me/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  revokeAllMySessions: () =>
+    request('/users/me/sessions/revoke-all', { method: 'POST' }),
   myNotifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/users/me/notifications${qs ? '?' + qs : ''}`);
