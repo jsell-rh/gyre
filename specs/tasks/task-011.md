@@ -2,7 +2,7 @@
 title: "Spec Save Git Write-Through"
 spec_ref: "ui-layout.md §3 (LLM-Assisted Spec Editing, Save workflow), human-system-interface.md §3 (Explorer: Inline Spec Editing)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-011.md
 coverage_sections: []
 commits: ["97ae5fa923b479420710a28839be49189220e428", "3488a06bf40471867a51c08bd899888c66ac8b09"]
