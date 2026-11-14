@@ -3,11 +3,11 @@ title: "Implement in-app notification UI & email templates"
 spec_ref: "user-management.md §In-App Notification UI"
 depends_on:
   - task-112
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["d5340ae6128a6333bf2f3415ee4afd0c8d62d18e", "5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab", "ed9a85cb1424069b8aecc5ce00dc60a75b0ffbc4"]
+commits: ["d5340ae6128a6333bf2f3415ee4afd0c8d62d18e", "5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab", "ed9a85cb1424069b8aecc5ce00dc60a75b0ffbc4", "08c58f63cfd82da292a778bb208e0f4c801c8c4e"]
 ---
 
 ## Spec Excerpt
@@ -94,10 +94,10 @@ Read `specs/system/user-management.md` §In-App Notification UI and §Email Noti
 
 ## Shipped
 
-Both coverage sections implemented on the task-112/task-125 backend (endpoints,
-dispatcher, outbox already existed from those tasks; this task built the UI
-surface and the email template/digest layer). Coverage rows 19 and 20
-(`user-management.md`) are `implemented`.
+Both coverage sections implemented on the task-112/task-125 backend
+(endpoints, dispatcher, outbox already existed from those tasks; this task
+built the UI surface and the email template/digest layer). Coverage rows 19
+and 20 (`user-management.md`) are `implemented`.
 
 ### In-App Notification UI
 
@@ -118,11 +118,15 @@ surface and the email template/digest layer). Coverage rows 19 and 20
 - **Deep links**: clicking an item marks it read and navigates the
   server-emitted `action_url` by pushing it and replaying the app's
   popstate router (works from any mode).
-- **Real-time SSE**: `web/src/lib/notifications.svelte.js` subscribes to
-  `GET /api/v1/notifications/stream` via fetch-streaming (EventSource
-  cannot send the Authorization header), incrementally parsing SSE frames
-  (split-frame safe, heartbeats skipped) to bump the bell badge live;
-  the drawer reloads on each streamed event.
+- **Real-time**: `web/src/lib/notifications.svelte.js` subscribes the bell
+  to the app's single authenticated `/ws` connection (wired in App.svelte,
+  shared with presence/liveness). The centralized
+  `AppState::create_notification` fan-out (`BroadcastingNotificationRepo`)
+  pushes `WsMessage::NotificationPush` to every live WS connection whose
+  server-verified identity is the notification's owner, bumping the badge
+  live; the drawer reloads on each pushed event.
+  `GET /api/v1/notifications/stream` remains the specced SSE HTTP API
+  (unchanged, per-event user+tenant filtered, heartbeat keep-alive).
 - **Preferences page** `/settings/notifications`
   (`NotificationSettings.svelte`, `notification_settings` app mode wired
   through parseUrl/urlFor/pushState/popstate/title/user-menu): email
@@ -147,15 +151,49 @@ surface and the email template/digest layer). Coverage rows 19 and 20
   drain time against the user's CURRENT config (raised thresholds /
   unsubscribes take effect on already-queued entries).
 
-### This round (rebase repair)
+### CI repair (this round, commit 08c58f63)
 
-The published candidate (ec5d0534) conflicted with current main. Resolved
-the merge of assignment base 44cf25bf into the candidate branch (commit
-6603d0d0), preserving the full task-113 implementation above and adopting
-main-side work (ABAC policy UI, spec enforcement tests, notifications
-list-order test hardening). Evidence: `cargo check -p gyre-server` exit 0
-on the resolved tree; `vitest run` on the four notification suites
-(Bell/Drawer/Settings/store) — 20/20 passed. Server test suites
-(`cargo test -p gyre-server notifications`, `email`, `--test
-spec_enforcement`, `cargo test --all`, `npm test`) deferred to the
-independent verifier per the 4 GiB build budget.
+The published candidate failed CI with all 64 e2e tests timing out at
+`waitForLoadState('networkidle')` (run 43612463147). Root cause: the
+client held a per-tab fetch-streamed SSE connection to
+`/api/v1/notifications/stream`; a never-ending HTTP response — fetch-
+streamed OR EventSource — permanently blocks networkidle. Verified
+empirically with headless Chromium against a minimal SSE server (evidence
+in `/tmp/stage/review-evidence/task-113/`): pages holding either a
+streaming fetch or an EventSource never reach networkidle; a plain page
+reaches it in ~580 ms.
+
+Fix: the bell's realtime channel rides the app's existing single
+authenticated `/ws` WebSocket (already open per tab for presence/liveness;
+WebSockets do not block networkidle). `BroadcastingNotificationRepo::create`
+now pushes `WsMessage::NotificationPush` to the owner's live connections in
+addition to the SSE broadcast; the redundant explicit impersonation push
+was removed (the centralized fan-out covers it, and no longer pushes on
+the persist-failure path). The SSE endpoint and its per-event
+user+tenant filtering are unchanged.
+
+Validation this round (evidence + commands under
+`/tmp/stage/review-evidence/task-113/`):
+
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`:
+  exit 0.
+- `npm test` (full vitest suite): 119 files, 2371 passed / 41 skipped
+  (pre-existing skips). Notification suites rewritten for the WS
+  subscription: unread-only counting, status mapping, detach/re-attach
+  idempotence; plus a server test proving owner-only WS push (one push to
+  the owner's connection, none to another user's, no duplicate).
+- End-to-end probe with the built SPA + stub API in headless Chromium:
+  networkidle fires in ~1.5 s, the bell renders, the badge shows the
+  fetched unread count, and zero requests are made to the SSE stream —
+  the exact CI failure mode is gone without touching any e2e test.
+
+Server tests the independent verifier should run (deferred per the 4 GiB
+build budget):
+
+- `cargo test -p gyre-server notifications` (includes the new
+  `create_notification_pushes_to_owners_live_ws_connections_only`)
+- `cargo test -p gyre-server impersonation`
+- `cargo test -p gyre-server --test spec_enforcement`
+- `cargo test --all`
+- web e2e: `cd web && npx playwright test` (against a release server
+  build, GYRE_AUTH_TOKEN=e2e-test-token)
