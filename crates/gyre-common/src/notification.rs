@@ -204,7 +204,7 @@ impl NotificationType {
             "PersonaApprovalRequested" => Some(Self::PersonaApprovalRequested),
             "AgentEscalation" => Some(Self::AgentEscalation),
             "AgentBudgetWarning" | "BudgetWarning" => Some(Self::AgentBudgetWarning),
-            "AgentBudgetExhausted" => Some(Self::AgentBudgetExhausted),
+            "AgentBudgetExhausted" | "BudgetExhausted" => Some(Self::AgentBudgetExhausted),
             "AgentFailed" => Some(Self::AgentFailed),
             "GateFailure" => Some(Self::GateFailure),
             "GatePassed" => Some(Self::GatePassed),
@@ -479,7 +479,7 @@ impl Notification {
         }
     }
 
-    /// Returns true if this notification is active (not resolved or dismissed).
+    /// Returns true when this notification is active (not resolved or dismissed).
     pub fn is_active(&self) -> bool {
         self.resolved_at.is_none() && self.dismissed_at.is_none()
     }
@@ -732,6 +732,9 @@ mod tests {
             NotificationType::AtomicGroupFailure,
             NotificationType::SpecConflict,
             NotificationType::MergeQueueEscalation,
+            NotificationType::PersonaApprovalRequested,
+            NotificationType::MergeQueuePaused,
+            NotificationType::SecurityFinding,
             NotificationType::SecretExpiring,
             NotificationType::PersonaChangePendingApproval,
         ];
