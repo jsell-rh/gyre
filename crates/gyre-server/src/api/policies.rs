@@ -574,7 +574,11 @@ pub async fn effective_permissions(
 // ---------------------------------------------------------------------------
 
 fn parse_scope(s: &str) -> Result<PolicyScope, ApiError> {
-    match s {
+    // Case-insensitive: the §UI URL pattern documents the filter as
+    // `?scope=Workspace&scope_id=<id>` (capitalized) while policy JSON
+    // serializes scopes snake_case ("workspace") — both spellings must
+    // resolve to the same scope, or the documented query form 400s.
+    match s.to_lowercase().as_str() {
         "tenant" => Ok(PolicyScope::Tenant),
         "workspace" => Ok(PolicyScope::Workspace),
         "repo" => Ok(PolicyScope::Repo),
@@ -1072,6 +1076,107 @@ mod tests {
             .expect("trust policy must survive the rejected mutations");
         assert!(still.enabled, "the trust Deny must still be enforced");
         assert_eq!(still.name, "trust:require-human-mr-review");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_policies_scope_query_is_case_insensitive() {
+        // The §UI URL pattern documents the workspace filter as
+        // `?scope=Workspace&scope_id=<id>` (capitalized) while the policy
+        // JSON serializes scopes snake_case. Both spellings must resolve
+        // to the same scope: the task-132 UI (and the pre-existing
+        // `workspaceAbacPolicies` client call) send the capitalized form —
+        // a case-sensitive parse_scope 400s the documented query.
+        let app = app();
+        let body = serde_json::json!({
+            "name": "ws-case-allow",
+            "scope": "workspace",
+            "scope_id": "ws-CASE",
+            "priority": 10,
+            "effect": "allow",
+            "conditions": [],
+            "actions": ["read"],
+            "resource_types": ["repo"]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Capitalized spelling (spec §UI): must list the ws-CASE policy.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/policies?scope=Workspace&scope_id=ws-CASE")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"ws-case-allow"),
+            "capitalized ?scope=Workspace must filter like lowercase: got {names:?}"
+        );
+
+        // Lowercase spelling must keep working (policy JSON wire form).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/policies?scope=workspace&scope_id=ws-CASE")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(
+            json.as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["name"].as_str() == Some("ws-case-allow"))
+        );
+
+        // A different workspace's scope_id must not match.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/policies?scope=Workspace&scope_id=ws-OTHER")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(
+            !json.as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["name"].as_str() == Some("ws-case-allow"))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
