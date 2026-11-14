@@ -707,6 +707,7 @@ impl NotificationRepository for BroadcastingNotificationRepo {
         max_priority: Option<u8>,
         notification_type: Option<&str>,
         repo_id: Option<&Id>,
+        exclude_types: &[&str],
         limit: u32,
         offset: u32,
     ) -> anyhow::Result<Vec<Notification>> {
@@ -718,6 +719,7 @@ impl NotificationRepository for BroadcastingNotificationRepo {
                 max_priority,
                 notification_type,
                 repo_id,
+                exclude_types,
                 limit,
                 offset,
             )
@@ -756,8 +758,11 @@ impl NotificationRepository for BroadcastingNotificationRepo {
         &self,
         user_id: &Id,
         workspace_id: Option<&Id>,
+        exclude_types: &[&str],
     ) -> anyhow::Result<u64> {
-        self.inner.count_unresolved(user_id, workspace_id).await
+        self.inner
+            .count_unresolved(user_id, workspace_id, exclude_types)
+            .await
     }
 
     async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> anyhow::Result<u64> {
@@ -865,7 +870,7 @@ mod tests {
     async fn notifs_for(state: &crate::AppState, user: &str) -> Vec<gyre_common::Notification> {
         state
             .notifications
-            .list_for_user(&Id::new(user), None, None, None, None, None, 50, 0)
+            .list_for_user(&Id::new(user), None, None, None, None, None, &[], 50, 0)
             .await
             .unwrap()
     }

@@ -177,6 +177,7 @@ async fn notify_tenant_admins(state: &Arc<AppState>, ws: &Workspace, since: u64)
                 None,
                 Some(NotificationType::WorkspaceOwnerless.as_str()),
                 None,
+                &[],
                 20,
                 0,
             )
@@ -468,6 +469,7 @@ mod tests {
                 None,
                 Some(NotificationType::WorkspaceOwnerless.as_str()),
                 None,
+                &[],
                 50,
                 0,
             )

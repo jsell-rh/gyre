@@ -782,6 +782,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
             10,
             0,
         )
@@ -814,6 +815,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
             10,
             0,
         )
@@ -831,6 +833,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
             10,
             0,
         )

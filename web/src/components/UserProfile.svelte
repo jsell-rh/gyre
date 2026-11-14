@@ -7,6 +7,7 @@
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
   import { shortId } from '../lib/entityNames.svelte.js';
+  import { NOTIF_TYPE_IDS } from '../lib/notification-types.js';
   import { getContext } from 'svelte';
 
   const navigate = getContext('navigate');
@@ -24,14 +25,14 @@
   let activeTab = $state('info');
   let unread = $state(0);
 
-  // Notification preferences — per-type toggles.
-  // Per HSI §12, stored in user_notification_preferences table (backend).
-  // Using localStorage as fallback until backend endpoint is wired.
-  const NOTIF_TYPE_IDS = [
-    'SpecApproval', 'GateOverride', 'TrustChange', 'MetaSpecEdit',
-    'MergeRequestReview', 'MergeRequestMerged', 'AgentFailure',
-    'TrustSuggestion', 'SpecDrift', 'AgentNeedsClarification',
-  ];
+  // Notification preferences: per-type toggles (HSI §12).
+  // NOTIF_TYPE_IDS (lib/notification-types.js) is the canonical
+  // `NotificationType::as_str()` name list the backend stores in
+  // user_notification_preferences.notification_type; PUT rejects any other
+  // spelling, and the inbox filter only matches these names, so legacy parse
+  // aliases like 'SpecPendingApproval'/'BudgetWarning' must not appear there.
+  // scripts/check-notification-toggle-coverage.sh keeps it in lockstep with
+  // gyre-common's NotificationType enum and the locale labels.
   // Build NOTIF_TYPES array with localized labels for compatibility with defaultPrefs()
   const NOTIF_TYPES = NOTIF_TYPE_IDS.map(id => ({ id, labelKey: `user_profile.notif_types.${id}` }));
 
@@ -45,16 +46,19 @@
 
   async function loadPrefs() {
     try {
-      const serverPrefs = await api.getNotificationPreferences();
-      if (serverPrefs && typeof serverPrefs === 'object' && !Array.isArray(serverPrefs)) {
-        const defaults = defaultPrefs();
-        for (const t of NOTIF_TYPES) {
-          if (typeof serverPrefs[t.id] === 'boolean') defaults[t.id] = serverPrefs[t.id];
+      const resp = await api.getNotificationPreferences();
+      // GET /users/me/notification-preferences →
+      //   { preferences: [{ notification_type, enabled }] }
+      const rows = Array.isArray(resp?.preferences) ? resp.preferences : [];
+      const defaults = defaultPrefs();
+      for (const row of rows) {
+        if (typeof row?.notification_type === 'string' && typeof row.enabled === 'boolean') {
+          defaults[row.notification_type] = row.enabled;
         }
-        notifPrefs = defaults;
       }
+      notifPrefs = defaults;
     } catch {
-      // Server may not support this yet — fall back to defaults
+      // Server unreachable — fall back to defaults
     }
     prefsLoaded = true;
   }
@@ -62,7 +66,15 @@
   async function savePrefs() {
     prefsSaving = true;
     try {
-      await api.updateNotificationPreferences(notifPrefs);
+      // PUT /users/me/notification-preferences expects
+      //   { preferences: [{ notification_type, enabled }] }
+      // with canonical NotificationType names (400 otherwise).
+      await api.updateNotificationPreferences({
+        preferences: NOTIF_TYPES.map(t => ({
+          notification_type: t.id,
+          enabled: notifPrefs[t.id] ?? true,
+        })),
+      });
       showToast($t('user_profile.prefs_saved'), { type: 'success' });
     } catch {
       showToast($t('user_profile.prefs_failed'), { type: 'error' });
@@ -125,6 +137,43 @@
     { id: 'notifications', label: $t('user_profile.tabs.notifications') },
   ]);
 
+  // ── Judgment Ledger: server-side filtering + pagination ──────────────────
+  // GET /users/me/judgments implements ?type=/?workspace_id=/?limit=/
+  // ?offset=; the Profile ledger tab must expose them or judgments beyond
+  // the first page (default limit 50) are unreachable from the UI.
+  const LEDGER_PAGE_SIZE = 50;
+  const JUDGMENT_TYPE_FILTERS = [
+    { id: '', label: 'All types' },
+    { id: 'approval', label: 'Spec approvals' },
+    { id: 'rejection', label: 'Rejections & withdrawals' },
+    { id: 'gate', label: 'Gate overrides' },
+    { id: 'trust', label: 'Trust changes' },
+    { id: 'meta-spec', label: 'Meta-spec publishes' },
+  ];
+  let ledgerType = $state('');
+  let ledgerWorkspace = $state('');
+  let ledgerHasMore = $state(false);
+  let ledgerLoading = $state(false);
+
+  async function loadJudgments({ reset = false } = {}) {
+    ledgerLoading = true;
+    try {
+      const params = { limit: LEDGER_PAGE_SIZE, offset: reset ? 0 : judgments.length };
+      if (ledgerType) params.type = ledgerType;
+      if (ledgerWorkspace) params.workspace_id = ledgerWorkspace;
+      const raw = await api.myJudgments(params);
+      const page = Array.isArray(raw?.judgments) ? raw.judgments : Array.isArray(raw?.items) ? raw.items : Array.isArray(raw) ? raw : [];
+      judgments = reset ? page : [...judgments, ...page];
+      // A full page means more entries may exist past this offset.
+      ledgerHasMore = page.length === LEDGER_PAGE_SIZE;
+    } catch {
+      if (reset) judgments = [];
+      ledgerHasMore = false;
+    } finally {
+      ledgerLoading = false;
+    }
+  }
+
   $effect(() => { loadAll(); });
 
   // Load API tokens when tab is selected
@@ -137,10 +186,9 @@
   async function loadAll() {
     loading = true;
     try {
-      const [meR, ntR, jdR, wsR] = await Promise.allSettled([
+      const [meR, ntR, wsR] = await Promise.allSettled([
         api.me(),
         api.myNotifications(),
-        api.myJudgments(),
         api.workspaces(),
       ]);
       if (meR.status === 'fulfilled') {
@@ -154,12 +202,18 @@
       if (ntR.status === 'fulfilled') {
         const raw = ntR.value;
         notifications = Array.isArray(raw?.notifications) ? raw.notifications : Array.isArray(raw) ? raw : [];
-        unread = notifications.filter(n => !n.read).length;
       }
-      if (jdR.status === 'fulfilled') {
-        const raw = jdR.value;
-        judgments = Array.isArray(raw?.judgments) ? raw.judgments : Array.isArray(raw?.items) ? raw.items : Array.isArray(raw) ? raw : [];
+      // Badge = the server-side count of active notifications (resolved_at and
+      // dismissed_at both NULL), filtered by the same disabled-type exclusion
+      // the inbox list applies — NOT a client-side count of the current page.
+      try {
+        unread = await api.notificationCount();
+      } catch {
+        unread = 0;
       }
+      // Judgment ledger: server-side filter + pagination (HSI §12 endpoint
+      // query params) rather than a single unparameterized first page.
+      loadJudgments({ reset: true });
       if (wsR.status === 'fulfilled') {
         const raw = wsR.value;
         workspaces = Array.isArray(raw?.workspaces) ? raw.workspaces : Array.isArray(raw) ? raw : [];
@@ -185,45 +239,54 @@
     }
   }
 
+  // A notification is "read" once resolved or dismissed (HSI §2: badge count
+  // is resolved_at IS NULL AND dismissed_at IS NULL).
+  function isNotifRead(n) {
+    return Boolean(n?.resolved_at ?? n?.dismissed_at);
+  }
+
   async function markRead(id) {
     try {
       await api.markNotificationRead(id);
-      notifications = notifications.map(n => n.id === id ? { ...n, read: true } : n);
-      unread = notifications.filter(n => !n.read).length;
+      notifications = notifications.map(n => n.id === id ? { ...n, dismissed_at: Math.floor(Date.now() / 1000) } : n);
+      unread = Math.max(0, unread - 1);
     } catch {
       showToast('Failed to mark notification as read', { type: 'error' });
     }
   }
-
   function judgmentEventColor(ev) {
     if (!ev) return 'default';
     const e = ev.toLowerCase();
     if (e.includes('approv')) return 'success';
-    if (e.includes('revok') || e.includes('reject') || e.includes('invalidat')) return 'danger';
-    if (e.includes('override') || e.includes('trust')) return 'warning';
-    if (e.includes('meta') || e.includes('edit') || e.includes('publish')) return 'info';
+    if (e.includes('reject') || e.includes('revok')) return 'danger';
+    if (e.includes('gate')) return 'warning';
+    if (e.includes('trust')) return 'warning';
+    if (e.includes('meta')) return 'info';
     return 'neutral';
   }
 
+  // Judgment entries are JudgmentEntryResponse:
+  //   { judgment_type, entity_ref, workspace_id, timestamp, detail }
   function judgmentLabel(j) {
-    return j.event_type ?? j.event ?? j.action ?? j.type ?? 'event';
+    return j.judgment_type ?? 'event';
   }
 
   function judgmentTarget(j) {
-    return j.spec_path ?? j.path ?? j.resource_id ?? j.mr_id ?? j.resource ?? '—';
+    return j.entity_ref ?? '—';
   }
 
   function judgmentWorkspace(j) {
-    return j.workspace_name ?? j.workspace_slug ?? j.workspace_id ?? null;
+    return j.workspace_id ?? null;
   }
 
   function notifColor(type) {
     const t = (type ?? '').toLowerCase();
-    if (t.includes('failure') || t.includes('conflict') || t.includes('drift')) return 'danger';
+    if (t.includes('failure') || t.includes('conflict') || t.includes('drift') || t.includes('violation') || t.includes('escalation')) return 'danger';
     if (t.includes('merged') || t.includes('complete') || t.includes('approval')) return 'success';
     if (t.includes('review') || t.includes('clarification')) return 'info';
     return 'default';
   }
+
 
   function rel(ts) {
     if (!ts) return '—';
@@ -233,6 +296,15 @@
     if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
     if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
     return `${Math.floor(secs/86400)}d ago`;
+  }
+
+  // Auth provider info is read-only (HSI §12): rendered as the recorded
+  // wall-clock timestamp, not a relative age — "Last Login" is a fact about
+  // the account, not feed recency.
+  function fmtLogin(ts) {
+    if (!ts) return '—';
+    const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
+    return d.toLocaleString();
   }
 
   function switchWorkspace(ws) {
@@ -301,7 +373,7 @@
     {:else if activeTab === 'info'}
       {#if me}
         <div class="info-grid">
-          {#each [[$t('user_profile.fields.username'), me.username],[$t('user_profile.fields.email'), me.email],[$t('user_profile.fields.display_name'), me.display_name],[$t('user_profile.fields.timezone'), me.timezone],[$t('user_profile.fields.locale'), me.locale],[$t('user_profile.fields.role'), me.global_role],[$t('user_profile.fields.auth_provider'), me.oidc_issuer]] as [label, val]}
+          {#each [[$t('user_profile.fields.username'), me.username],[$t('user_profile.fields.email'), me.email],[$t('user_profile.fields.display_name'), me.display_name],[$t('user_profile.fields.timezone'), me.timezone],[$t('user_profile.fields.locale'), me.locale],[$t('user_profile.fields.role'), me.global_role],[$t('user_profile.fields.auth_provider'), me.oidc_issuer],[$t('user_profile.fields.last_login'), fmtLogin(me.last_login_at)]] as [label, val]}
             {#if val}
               <div class="info-row">
                 <span class="info-label">{label}</span>
@@ -397,8 +469,37 @@
 
     {:else if activeTab === 'ledger'}
       <!-- Judgment Ledger: chronological log of human judgment decisions -->
-      <!-- Sourced from GET /api/v1/users/me/judgments -->
-      {#if judgments.length === 0}
+      <!-- Sourced from GET /api/v1/users/me/judgments (?type=/?workspace_id=/?limit=/?offset=) -->
+      <div class="ledger-controls">
+        <label class="ledger-filter">
+          <span class="ledger-filter-label muted">Type</span>
+          <select
+            class="ledger-select"
+            bind:value={ledgerType}
+            onchange={() => loadJudgments({ reset: true })}
+            aria-label="Filter judgments by type"
+          >
+            {#each JUDGMENT_TYPE_FILTERS as jtf}
+              <option value={jtf.id}>{jtf.label}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="ledger-filter">
+          <span class="ledger-filter-label muted">Workspace</span>
+          <select
+            class="ledger-select"
+            bind:value={ledgerWorkspace}
+            onchange={() => loadJudgments({ reset: true })}
+            aria-label="Filter judgments by workspace"
+          >
+            <option value="">All workspaces</option>
+            {#each workspaces as ws}
+              <option value={ws.id}>{ws.name ?? ws.slug ?? ws.id}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+      {#if judgments.length === 0 && !ledgerLoading}
         <EmptyState title={$t('user_profile.no_activity')} description={$t('user_profile.no_activity_desc')} />
       {:else}
         <div class="ledger-list">
@@ -413,13 +514,18 @@
                 {#if judgmentWorkspace(j)}
                   <span class="ledger-ws muted">{judgmentWorkspace(j)}</span>
                 {/if}
-                {#if j.sha || j.spec_sha}
-                  <span class="ledger-sha mono muted">{(j.sha ?? j.spec_sha).slice(0, 7)}</span>
+                {#if j.detail}
+                  <span class="ledger-sha muted">{j.detail}</span>
                 {/if}
               </div>
             </div>
           {/each}
         </div>
+        {#if ledgerHasMore}
+          <button class="btn-secondary ledger-more" onclick={() => loadJudgments()} disabled={ledgerLoading}>
+            {ledgerLoading ? 'Loading…' : 'Load more'}
+          </button>
+        {/if}
       {/if}
 
     {:else if activeTab === 'notif-prefs'}
@@ -433,7 +539,7 @@
                 type="checkbox"
                 class="pref-checkbox"
                 bind:checked={notifPrefs[nt.id]}
-                aria-label={$t('user_profile.enable_notification', { values: { label: nt.label } })}
+                aria-label={$t('user_profile.enable_notification', { values: { label: $t(nt.labelKey) } })}
               />
               <span class="pref-label">{$t(nt.labelKey)}</span>
             </label>
@@ -452,11 +558,11 @@
       {:else}
         <div class="notif-list">
           {#each notifications as notif}
-            <div class="notif-item" class:unread={!notif.read}>
+            <div class="notif-item" class:unread={!isNotifRead(notif)}>
               <div class="notif-top">
                 <Badge variant={notifColor(notif.notification_type)} value={notif.notification_type ?? 'info'} />
                 <span class="notif-time muted">{rel(notif.created_at)}</span>
-                {#if !notif.read}
+                {#if !isNotifRead(notif)}
                   <button class="mark-read-btn" onclick={() => markRead(notif.id)} aria-label={$t('user_profile.mark_as_read')}>
                     <span aria-hidden="true">✓</span>
                   </button>
@@ -666,6 +772,20 @@
   .btn-switch:hover { border-color: var(--color-link); color: var(--color-link); }
 
   /* Judgment Ledger */
+  .ledger-controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
+  .ledger-filter { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-xs); }
+  .ledger-filter-label { font-weight: 500; }
+  .ledger-select {
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+  }
+  .ledger-select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .ledger-more { align-self: flex-start; margin-top: var(--space-2); padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
   .ledger-list { display: flex; flex-direction: column; gap: var(--space-2); }
   .ledger-item {
     background: var(--color-surface-elevated);
