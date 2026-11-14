@@ -84,8 +84,6 @@ struct Strings {
     subject_prefix: &'static str,
     /// "View in Gyre" button label.
     view_button: &'static str,
-    /// Label above the notification body.
-    details_label: &'static str,
     /// Priority label.
     priority_label: &'static str,
     /// Timestamp label.
@@ -110,7 +108,6 @@ fn strings(locale: Locale) -> Strings {
         Locale::En => Strings {
             subject_prefix: "[Gyre]",
             view_button: "View in Gyre",
-            details_label: "Details",
             priority_label: "Priority",
             time_label: "Time",
             digest_heading: "Your Gyre digest",
@@ -125,7 +122,6 @@ fn strings(locale: Locale) -> Strings {
         Locale::De => Strings {
             subject_prefix: "[Gyre]",
             view_button: "In Gyre öffnen",
-            details_label: "Details",
             priority_label: "Priorität",
             time_label: "Zeitpunkt",
             digest_heading: "Ihr Gyre-Digest",
