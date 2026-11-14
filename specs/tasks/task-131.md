@@ -4,7 +4,7 @@ spec_ref: "abac-policy-engine.md §CLI"
 depends_on:
   - task-128
   - task-129
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "abac-policy-engine.md §CLI"
 commits: ["05549afd91dfda702b701cd828359c6c93cae8be"]
