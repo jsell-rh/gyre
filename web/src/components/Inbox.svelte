@@ -175,6 +175,7 @@
         MergeQueueEscalation: 'merge_queue_escalation',
         // Legacy/defensive entries kept for older rows
         MrNeedsReview: 'mr_needs_review',
+        BudgetExhausted: 'budget_exhausted',
       };
       data = data.map(n => ({
         ...n,
