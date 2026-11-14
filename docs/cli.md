@@ -210,6 +210,66 @@ Notes:
 
 ---
 
+## Policies (abac-policy-engine.md §CLI)
+
+```bash
+# List all policies (id, name, scope, effect, priority, enabled, built-in)
+gyre policy list
+
+# Workspace-scoped policies for one workspace
+gyre policy list --scope workspace --workspace-id ws-1
+
+# Create a policy from a YAML definition (Admin only server-side)
+gyre policy create --file policy.yaml
+
+# Dry-run: would the current policy set allow this? (nothing is audited)
+gyre policy evaluate --subject user:jsell --action approve --resource spec:identity
+
+# Decision audit log with filters (newest first)
+gyre policy decisions --subject agent:worker-42 --decision deny --since 1d
+
+# "What can jsell do with specs?" — answered from the subject's real
+# stored attributes (roles, memberships, teams)
+gyre policy effective --subject user:jsell --resource-type spec
+```
+
+The `policy.yaml` file for `create` mirrors the `POST /api/v1/policies`
+body — required fields `name`, `scope` (tenant/workspace/repo), `priority`,
+`effect` (allow/deny), `actions`, `resource_types`; optional `description`,
+`scope_id`, `conditions`, `enabled` (default true):
+
+```yaml
+name: workspace-developer-push
+description: Allow developers to push in this workspace
+scope: workspace
+scope_id: ws-1
+priority: 200
+effect: allow
+conditions:
+  - attribute: subject.workspace_role
+    operator: equals
+    value: developer
+actions: [push, read]
+resource_types: [repo]
+```
+
+Notes:
+
+- Calls the real policy API (`GET/POST /api/v1/policies`,
+  `POST /api/v1/policies/evaluate`, `GET /api/v1/policies/decisions`,
+  `GET /api/v1/policies/effective`); create requires the Admin role
+  server-side (the seeded `builtin:policy-admin-only` policy).
+- `--subject`/`--resource` take the `{type}:{id}` form (`user:jsell`,
+  `spec:identity`); for `decisions` and `effective` the type prefix is CLI
+  syntax — the audit log and the effective explorer key on the subject id.
+- `decisions` applies the `--decision`/`--since` filters to the fetched
+  newest-first page (default 100 records; raise with `--limit` to scan
+  deeper into the log). `--since` accepts `s`/`m`/`h`/`d`/`w` durations.
+- Server-side failures (auth 403, validation 400, not-found 404) are
+  reported with the HTTP status and the server's message.
+
+---
+
 ## Search
 
 ```bash
