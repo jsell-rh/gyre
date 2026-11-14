@@ -199,6 +199,30 @@ impl UserRepository for PgStorage {
         .await?
     }
 
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        let pool = Arc::clone(&self.pool);
+        let email = email.to_lowercase();
+        tokio::task::spawn_blocking(move || -> Result<Vec<User>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Case-insensitive match via lower() (portable across SQLite
+            // and PostgreSQL): invitation emails are normalized to
+            // lowercase, but SSO-provisioned accounts store the IdP's raw
+            // casing. Email is not unique (same person, multiple
+            // tenants), so every match is returned; callers scope by
+            // tenant. Ordered by creation for a deterministic pick.
+            let rows = users::table
+                .filter(
+                    diesel::dsl::sql::<diesel::sql_types::Bool>("lower(users.email) = ")
+                        .bind::<diesel::sql_types::Text, _>(email),
+                )
+                .order(users::created_at.asc())
+                .load::<UserRow>(&mut *conn)
+                .context("find users by email")?;
+            Ok(rows.into_iter().map(User::from).collect())
+        })
+        .await?
+    }
+
     async fn find_by_external_id(&self, external_id: &str) -> Result<Option<User>> {
         let pool = Arc::clone(&self.pool);
         let ext_id = external_id.to_string();
@@ -273,6 +297,39 @@ impl UserRepository for PgStorage {
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let user_id = user_id.clone();
+        let new_external_id = new_external_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Port contract: fail if another user already owns the new
+            // external_id, or the target user does not exist.
+            let dup: Option<String> = users::table
+                .filter(
+                    users::external_id
+                        .eq(new_external_id.as_str())
+                        .and(users::id.ne(user_id.as_str())),
+                )
+                .select(users::id)
+                .first::<String>(&mut *conn)
+                .optional()
+                .context("check external_id owner")?;
+            if let Some(owner) = dup {
+                anyhow::bail!("external_id already owned by user {owner}");
+            }
+            let updated = diesel::update(users::table.find(user_id.as_str()))
+                .set(users::external_id.eq(new_external_id.as_str()))
+                .execute(&mut *conn)
+                .context("claim external_id")?;
+            if updated == 0 {
+                anyhow::bail!("cannot claim external_id for user {user_id}: not found");
+            }
             Ok(())
         })
         .await?
