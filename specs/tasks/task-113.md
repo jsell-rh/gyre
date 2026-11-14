@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: ["c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
 ---
 
 ## Spec Excerpt
@@ -184,6 +184,29 @@ surface and the email template/digest layer).
   instead of panicking. `read_reply` generalized over
   `AsyncRead + Unpin` so the new tests drive it via `tokio::io::duplex`.
   No behavior change for well-formed replies.
+
+### Verification-repair round (c945df27)
+
+- Independent verification of candidate `8f98d5f4` failed four checks
+  (findings.log): rustfmt on changed lines in `email.rs` and
+  `notification_dispatcher.rs`, `clippy::needless_borrow` at
+  `email.rs:484`, and `E0063` — the task-113 `EmailConfig::type_overrides`
+  domain field (8cc35749) had broken the pre-existing task-138 test
+  initializer in `sqlite/user_profile.rs`.
+- Fixes: `cargo fmt -p gyre-server` (semantics unchanged, verified via
+  `git diff -w`), `text.push_str(s.unsubscribe_note)` (the `&` made a
+  `&&str` off an `&'static str` field), and the initializer completed
+  with a real unsubscribe entry
+  (`type_overrides: [("AgentFailed".to_string(), true)]`) so the JSON
+  roundtrip assertion proves the field persists through the adapter.
+- Probes (in-sandbox, evidence:
+  `/tmp/stage/review-evidence/09-verification-repair/`):
+  `cargo fmt -p gyre-server -- --check` exit 0; `cargo clippy -p
+  gyre-server --lib` — zero warnings in `email.rs` (remaining
+  repo warnings in `api/specs.rs`/`explorer_ws.rs` are pre-existing on
+  assignment base `32c4faef`); `cargo clippy -p gyre-adapters
+  --all-targets` compiles; `cargo test -p gyre-adapters --lib
+  sqlite::user_profile` — 5 passed incl. the roundtrip.
 
 ### Test evidence
 
