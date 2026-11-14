@@ -19,8 +19,8 @@ describe('NotificationBell', () => {
     notificationState.unread = 0;
     notificationState.streamStatus = 'closed';
     notificationState.lastEventAt = 0;
-    // The bell starts the SSE stream on mount — neutralize it.
-    global.fetch = vi.fn().mockResolvedValue({ ok: false, body: null });
+    // The bell refreshes the unread count on mount — neutralize its fetch.
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, json: () => Promise.resolve({}) });
   });
 
   it('shows no badge when there is nothing unread', async () => {

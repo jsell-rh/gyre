@@ -1,13 +1,17 @@
-// Notification bell state + real-time SSE subscription
+// Notification bell state + real-time subscription
 // (user-management.md §In-App Notification UI).
 //
 // Single shared store: the bell badge, the drawer, and the preferences page
-// all read `notificationState`. The SSE stream
-// (GET /api/v1/notifications/stream) is consumed with fetch + ReadableStream
-// (NOT EventSource — the endpoint requires the Authorization header, which
-// EventSource cannot send). Every delivered notification bumps the unread
-// count; a read/unread action anywhere refreshes it from the server so the
-// count never drifts.
+// all read `notificationState`. Real-time delivery rides the app's ONE
+// authenticated /ws WebSocket connection (created in App.svelte and shared
+// with presence/liveness): the server pushes every notification the moment
+// it is persisted as a `NotificationPush` message, targeted at connections
+// whose verified identity is the notification's owner.
+//
+// GET /api/v1/notifications/stream remains the specced SSE HTTP API; the
+// SPA deliberately does not hold a second always-open HTTP stream per tab —
+// one realtime channel per tab, and a read/unread action anywhere refreshes
+// the count from the server so it never drifts.
 
 const AUTH_TOKEN_KEY = 'gyre_auth_token';
 const API_BASE = '/api/v1';
@@ -18,15 +22,16 @@ function getAuthToken() {
 
 export const notificationState = $state({
   unread: 0,
-  // 'connecting' | 'open' | 'closed' — surfaced so the drawer can show a
-  // live-connection indicator.
+  // 'open' | 'closed' — 'open' while the shared /ws connection is
+  // authenticated; surfaced so the drawer can show a live-connection
+  // indicator.
   streamStatus: 'closed',
-  // Last notification delivered by the stream (consumed by the drawer for a
+  // Last notification delivered in real time (consumed by the drawer for a
   // "new" flash; kept minimal — the drawer reloads its list on change).
   lastEventAt: 0,
 });
 
-let streamController = null;
+let detachStream = null;
 
 export async function refreshUnreadCount(workspaceId = null) {
   try {
@@ -43,85 +48,41 @@ export async function refreshUnreadCount(workspaceId = null) {
 }
 
 /**
- * Parse one SSE frame (a block of lines terminated by a blank line) into
- * { event, data }. Exposed for tests.
+ * Subscribe the shared store to a ws-store connection
+ * (web/src/lib/ws.js). Every `NotificationPush` delivered on the socket
+ * bumps the unread count (unread notifications only); the connection
+ * status drives `streamStatus`. Idempotent — attaching while already
+ * attached is a no-op. Returns a detach function.
  */
-export function parseSseFrame(frame) {
-  let event = 'message';
-  let data = '';
-  for (const line of frame.split('\n')) {
-    if (line.startsWith('event:')) event = line.slice(6).trim();
-    else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).trim();
-  }
-  return { event, data };
+export function attachNotificationStream(store) {
+  if (detachStream) return detachStream;
+
+  const offMessage = store.onMessage((msg) => {
+    if (!msg || msg.type !== 'NotificationPush' || !msg.notification) return;
+    const notif = msg.notification;
+    // The server targets connections by verified user identity, so this
+    // is the caller's own notification. Unread here means "not read yet" —
+    // the bell counts unread.
+    if (!notif.read) notificationState.unread += 1;
+    notificationState.lastEventAt = Date.now();
+  });
+
+  const offStatus = store.onStatus((s) => {
+    // ws-store statuses: 'connected' | 'disconnected' | 'auth-failed' |
+    // 'error'. Only an authenticated connection receives pushes.
+    notificationState.streamStatus = s === 'connected' ? 'open' : 'closed';
+  });
+
+  detachStream = () => {
+    offMessage();
+    offStatus();
+    detachStream = null;
+    notificationState.streamStatus = 'closed';
+  };
+  return detachStream;
 }
 
-/**
- * Start the real-time notification stream. Idempotent — a second call while
- * connected is a no-op. Returns a stop() function.
- */
-export function startNotificationStream() {
-  if (streamController) return () => stopNotificationStream();
-  streamController = new AbortController();
-  const controller = streamController;
-  notificationState.streamStatus = 'connecting';
-
-  (async () => {
-    try {
-      const res = await fetch(`${API_BASE}/notifications/stream`, {
-        headers: { Authorization: `Bearer ${getAuthToken()}` },
-        signal: controller.signal,
-      });
-      if (!res.ok || !res.body) {
-        notificationState.streamStatus = 'closed';
-        return;
-      }
-      notificationState.streamStatus = 'open';
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        // Frames are separated by a blank line. The buffer may hold several
-        // complete frames plus a partial tail.
-        let sep;
-        while ((sep = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          if (!frame.trim() || frame.startsWith(':')) continue; // heartbeat comment
-          const { event, data } = parseSseFrame(frame);
-          if (event === 'notification' && data) {
-            try {
-              const notif = JSON.parse(data);
-              // The server filters to the caller's user + tenant; unread
-              // here means "not read yet" — the bell counts unread.
-              if (notif && !notif.read) notificationState.unread += 1;
-              notificationState.lastEventAt = Date.now();
-            } catch {
-              // Malformed payload — ignore, never kill the stream.
-            }
-          }
-        }
-      }
-    } catch {
-      // Aborted or network failure — fall back to polling semantics (the
-      // count is refreshed on drawer open and navigation).
-    } finally {
-      if (!controller.signal.aborted) notificationState.streamStatus = 'closed';
-    }
-  })();
-
-  return () => stopNotificationStream();
-}
-
-export function stopNotificationStream() {
-  if (streamController) {
-    streamController.abort();
-    streamController = null;
-  }
-  notificationState.streamStatus = 'closed';
+/** Detach the real-time subscription (App teardown). */
+export function detachNotificationStream() {
+  if (detachStream) detachStream();
 }

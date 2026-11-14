@@ -4,6 +4,7 @@
   import { createWsStore } from './lib/ws.js';
   import { createPresenceHeartbeat } from './lib/presence.js';
   import { createLivenessTracker } from './lib/liveness.svelte.js';
+  import { attachNotificationStream } from './lib/notifications.svelte.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
@@ -74,6 +75,11 @@
     const store = createWsStore();
     wsStore = store;
     const unsub = store.onStatus((s) => (wsStatus = s));
+    // Notification bell realtime (user-management.md §In-App Notification
+    // UI): NotificationPush messages on this connection bump the unread
+    // badge live. Rides the same socket as presence/liveness — the SPA
+    // holds one realtime channel per tab.
+    const detachNotifications = attachNotificationStream(store);
     // Presence heartbeat (HSI §1): send-on-connect, 30s timer, view-change
     // re-send (5s debounce), and disconnect on beforeunload. Without it the
     // server idle-evicts this tab after 60s and other users lose the
@@ -91,6 +97,7 @@
     });
     return () => {
       unsub();
+      detachNotifications();
       presenceHeartbeat.destroy();
       presenceHeartbeat = null;
       livenessTracker.destroy();

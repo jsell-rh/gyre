@@ -73,7 +73,7 @@
   }
 
   // Reload when the drawer opens, when any filter changes, and whenever a
-  // new notification arrives on the live stream (§SSE integration).
+  // new notification arrives on the realtime push (§real-time stream).
   $effect(() => {
     // Tracking the filter values makes this effect re-run on any change.
     void filterType; void filterPriority; void filterWorkspace; void filterRepo;

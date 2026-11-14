@@ -1,17 +1,14 @@
 <script>
   import { t } from 'svelte-i18n';
   import { onMount } from 'svelte';
-  import {
-    notificationState,
-    refreshUnreadCount,
-    startNotificationStream,
-  } from '../lib/notifications.svelte.js';
+  import { notificationState, refreshUnreadCount } from '../lib/notifications.svelte.js';
   import NotificationDrawer from './NotificationDrawer.svelte';
 
   // NotificationBell (user-management.md §In-App Notification UI): bell in
   // the top nav with an unread-count badge. The count comes from
-  // GET /api/v1/notifications/unread-count and is kept live by the SSE
-  // notification stream (§Email/§API Notifications: real-time push).
+  // GET /api/v1/notifications/unread-count and is kept live by the
+  // NotificationPush messages on the app's shared /ws connection
+  // (§API > Notifications: real-time push — wired in App.svelte).
   // Clicking opens the notification drawer.
 
   let { workspaces = [], currentWorkspaceId = null } = $props();
@@ -20,8 +17,6 @@
 
   onMount(() => {
     void refreshUnreadCount(null);
-    const stop = startNotificationStream();
-    return () => stop();
   });
 
   // Refresh the badge when the drawer closes (reads/unread changes inside).
