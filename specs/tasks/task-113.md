@@ -3,11 +3,11 @@ title: "Implement in-app notification UI & email templates"
 spec_ref: "user-management.md §In-App Notification UI"
 depends_on:
   - task-112
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["d5340ae6128a6333bf2f3415ee4afd0c8d62d18e", "5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -91,71 +91,3 @@ From §Email Notifications:
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §In-App Notification UI and §Email Notifications. Existing notification endpoints: grep for `notifications` in `gyre-server/src/api/mod.rs`. The top nav is in `web/src/components/` — look for the app shell or layout component. Svelte 5 is used — use `$state` runes, not stores. SSE can use axum's `Sse` extractor. For email templates, check if any email infrastructure exists (grep for `lettre` or `smtp` in Cargo.toml).
-
-## Shipped
-
-Both coverage sections implemented on the task-112/task-125 backend (endpoints,
-dispatcher, outbox already existed from those tasks; this task built the UI
-surface and the email template/digest layer). Coverage rows 19 and 20
-(`user-management.md`) are `implemented`.
-
-### In-App Notification UI
-
-- **Bell** (`web/src/components/NotificationBell.svelte`) in the topbar beside
-  the HSI §1.1 Decisions badge — intentionally a distinct surface: the
-  Decisions badge counts unresolved judgment items and navigates to the
-  Decisions section; the bell counts **unread** state across all
-  notifications (`GET /api/v1/notifications/unread-count`) and opens the
-  drawer. Badge caps at 99+, `aria-live` count for screen readers.
-- **Drawer** (`NotificationDrawer.svelte`): slide-out panel grouped by
-  `priority_level` (Urgent → Low), per-item title / type label / body
-  snippet / relative time, per-item mark read/unread
-  (`PUT /api/v1/notifications/{id}/read`, `POST .../unread`), bulk
-  `POST /api/v1/notifications/mark-all-read` (workspace-scoped when that
-  filter is active), filter bar (type / priority / workspace / repo — repo
-  options load for the selected workspace), live-connection dot, and a link
-  to the preferences page.
-- **Deep links**: clicking an item marks it read and navigates the
-  server-emitted `action_url` by pushing it and replaying the app's
-  popstate router (works from any mode).
-- **Real-time SSE**: `web/src/lib/notifications.svelte.js` subscribes to
-  `GET /api/v1/notifications/stream` via fetch-streaming (EventSource
-  cannot send the Authorization header), incrementally parsing SSE frames
-  (split-frame safe, heartbeats skipped) to bump the bell badge live;
-  the drawer reloads on each streamed event.
-- **Preferences page** `/settings/notifications`
-  (`NotificationSettings.svelte`, `notification_settings` app mode wired
-  through parseUrl/urlFor/pushState/popstate/title/user-menu): email
-  on/off, digest frequency (Immediate/Hourly/Daily/Off), minimum email
-  priority, per-type unsubscribe toggles, webhook (url/secret/min
-  priority), Slack (webhook URL/channel/min priority) — persisted via
-  `GET/PUT /api/v1/notifications/preferences` with `in_app` forced true.
-
-### Email Notifications (server)
-
-- `crates/gyre-server/src/email.rs`: per-type templates for **every**
-  `NotificationType` variant (exhaustive match — a new variant without
-  copy fails to compile), HTML + plain-text fallback, per-type
-  unsubscribe link, locale catalog (`en` default, `de`; resolved from
-  `User::locale`, all prose through the catalog).
-- **Digest mode**: the `email_digest` background job (job registry +
-  main.rs, 60 s) drains the durable `email_outbox` per user — Immediate
-  sends individual emails, Hourly/Daily aggregate every pending entry
-  into ONE digest (window tracked in kv `email_digest_state`), failed
-  sends keep their entries for retry.
-- **Priority filter**: enforced at queue time (task-112) and re-checked at
-  drain time against the user's CURRENT config (raised thresholds /
-  unsubscribes take effect on already-queued entries).
-
-### This round (rebase repair)
-
-The published candidate (ec5d0534) conflicted with current main. Resolved
-the merge of assignment base 44cf25bf into the candidate branch (commit
-6603d0d0), preserving the full task-113 implementation above and adopting
-main-side work (ABAC policy UI, spec enforcement tests, notifications
-list-order test hardening). Evidence: `cargo check -p gyre-server` exit 0
-on the resolved tree; `vitest run` on the four notification suites
-(Bell/Drawer/Settings/store) — 20/20 passed. Server test suites
-(`cargo test -p gyre-server notifications`, `email`, `--test
-spec_enforcement`, `cargo test --all`, `npm test`) deferred to the
-independent verifier per the 4 GiB build budget.
