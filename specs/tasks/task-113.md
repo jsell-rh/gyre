@@ -3,11 +3,11 @@ title: "Implement in-app notification UI & email templates"
 spec_ref: "user-management.md §In-App Notification UI"
 depends_on:
   - task-112
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["5d008fb8b7b87b637a09f5ce9f341acbefaf159c", "f25b5d1856a7e39f29cbf63f4927ca7045b3bd15", "08c58f63cfd82da292a778bb208e0f4c801c8c4e", "ed9a85cb1424069b8aecc5ce00dc60a75b0ffbc4", "d5340ae6128a6333bf2f3415ee4afd0c8d62d18e", "5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -91,79 +91,3 @@ From §Email Notifications:
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §In-App Notification UI and §Email Notifications. Existing notification endpoints: grep for `notifications` in `gyre-server/src/api/mod.rs`. The top nav is in `web/src/components/` — look for the app shell or layout component. Svelte 5 is used — use `$state` runes, not stores. SSE can use axum's `Sse` extractor. For email templates, check if any email infrastructure exists (grep for `lettre` or `smtp` in Cargo.toml).
-
-## Shipped
-
-Both coverage sections (`user-management.md` §In-App Notification UI, §Email
-Notifications) are implemented on the task-112/task-125 backend (endpoints,
-dispatcher, durable outbox from those tasks; this task built the UI surface
-and the email template/digest layer). Coverage rows 19 and 20 are
-`implemented`.
-
-### In-App Notification UI
-
-- **Bell** (`web/src/components/NotificationBell.svelte`) in the topbar —
-  unread count from `GET /api/v1/notifications/unread-count`, badge capped
-  at 99+, `aria-live` count. Realtime badge bumps ride the app's single
-  authenticated `/ws` connection (`BroadcastingNotificationRepo` pushes
-  `WsMessage::NotificationPush` to the owner's live connections); the
-  specced SSE endpoint `GET /api/v1/notifications/stream` remains the HTTP
-  API (per-event user+tenant filtered, heartbeat keep-alive).
-- **Drawer** (`NotificationDrawer.svelte`): slide-out panel grouped by
-  `priority_level` (Urgent → Low); per-item title / type label / body
-  snippet / relative time; per-item mark read/unread
-  (`PUT /api/v1/notifications/{id}/read`, `POST .../unread`); bulk
-  `POST /api/v1/notifications/mark-all-read`; filter bar (type / priority /
-  workspace / repo); link to preferences.
-- **Deep links**: clicking an item marks it read and navigates the
-  server-emitted `action_url` through the app's popstate router.
-- **Preferences page** `/settings/notifications`
-  (`NotificationSettings.svelte`, `notification_settings` app mode wired
-  through parseUrl/urlFor/pushState/popstate/user-menu): email on/off,
-  digest frequency, minimum email priority, per-type unsubscribe toggles,
-  webhook (url/secret/min priority), Slack (webhook URL/channel/min
-  priority) — persisted via `GET/PUT /api/v1/notifications/preferences`.
-
-### Email Notifications (server)
-
-- `crates/gyre-server/src/email.rs`: per-type templates for every
-  `NotificationType` variant (exhaustive match — a new variant without
-  copy fails to compile), HTML + plain-text fallback, per-type unsubscribe
-  link, locale catalog (`en` default, `de`) resolved from `User::locale`.
-- **Digest mode**: `email_digest` background job drains the durable
-  `email_outbox` per user — Immediate sends individually, Hourly/Daily
-  aggregate into one digest email; failed sends keep entries for retry.
-- **Priority filter**: enforced at queue time (task-112) and re-checked at
-  drain time against the user's current preferences.
-- **Security hardening** (commits 5d008fb8, 5ff46667, 5eed7b03, 5b8d0974,
-  c945df27, 25f0bb2d from prior review rounds): SMTP header/command
-  injection blocked at the RFC 5322 builder and envelope gate
-  (`strip_header_controls`, `valid_address`) with regression tests
-  (`crlf_in_title_cannot_forge_header_lines`,
-  `addresses_with_controls_are_rejected_at_the_gate`); dot-stuffing and
-  reply-code parsing repairs.
-
-### Rebase repair (this round, merge commit 14e0c825)
-
-Merged assignment base 9bfab365 (task-149 analytics) into this branch.
-Conflicts resolved: `web/src/App.svelte` — union of the base's `analytics`
-mode and this branch's `notification_settings` mode in the nav-mode comment
-and popstate guard (all other integration points auto-merged; both modes
-verified present); `specs/coverage/SUMMARY.md` — regenerated mechanically
-via `scripts/update-coverage-summary.sh` from merged per-spec files.
-
-### Test evidence
-
-- `cargo check -p gyre-server`: exit 0 on the merged tree (the merge
-  touched no notification/email/dispatcher Rust file).
-- `cd web && npm test -- --run` on NotificationBell, NotificationDrawer,
-  NotificationSettings, notifications-store, AnalyticsView, AppShell:
-  6 files, 104 tests, exit 0 (log under
-  `/tmp/stage/review-evidence/task-113-rebase-repair/`).
-- Server tests deferred to the verifier per the 4 GiB build budget:
-  `cargo test -p gyre-server --lib email::`,
-  `cargo test -p gyre-server notifications`,
-  `cargo test -p gyre-server impersonation`,
-  `cargo test -p gyre-server --test spec_enforcement`,
-  `cargo test --all`, and web e2e (`npx playwright test` against a release
-  server build, GYRE_AUTH_TOKEN=e2e-test-token).
