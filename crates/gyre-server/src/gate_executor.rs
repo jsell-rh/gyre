@@ -652,10 +652,111 @@ async fn teardown_gate_agent(state: &Arc<AppState>, agent_id: &Id) {
     }
 }
 
+/// KV namespace for the per-(MR, gate) attempt counters. Key =
+/// `{mr_id}:{gate_id}`, value = the number of times the gate has been
+/// armed for that MR (the attempt number reported in gate-failure
+/// feedback — agent-gates.md §Gate Failure Feedback: `"attempt": 2`).
+const GATE_ATTEMPTS_NS: &str = "gate_attempts";
+
+/// Arm one gate run for an MR: replace any prior gate-result rows for
+/// (MR, gate) with a fresh Pending row. Returns the new result id.
+///
+/// Each enqueue of an MR is one gate attempt, and the prior attempt's
+/// rows must not survive into the new one: the merge processor's gate
+/// check (`check_gates_for_mr` → `list_by_mr_id`) is not attempt-scoped,
+/// so a stale `Failed` row would veto every re-enqueued MR forever — the
+/// Ralph-loop retry path ("addresses the feedback, re-pushes, and gates
+/// re-run") would be dead on arrival. Replacing the rows (not appending)
+/// also keeps exactly one row per gate, so the MR timeline and the merge
+/// attestation bundle reflect the attempt that actually ran.
+async fn arm_gate_result(state: &AppState, mr_id: &Id, gate_id: &Id) -> Id {
+    if let Err(e) = state
+        .gate_results
+        .delete_by_mr_id_and_gate_id(mr_id.as_str(), gate_id.as_str())
+        .await
+    {
+        warn!(
+            mr_id = %mr_id,
+            gate_id = %gate_id,
+            error = format!("{e:#}"),
+            "gate arming: failed to clear prior gate results; retry may see stale rows"
+        );
+    }
+    let result_id = Id::new(uuid::Uuid::new_v4().to_string());
+    let result = GateResult {
+        id: result_id.clone(),
+        gate_id: gate_id.clone(),
+        mr_id: mr_id.clone(),
+        status: GateStatus::Pending,
+        output: None,
+        started_at: None,
+        finished_at: None,
+    };
+    if let Err(e) = state.gate_results.save(&result).await {
+        warn!(
+            mr_id = %mr_id,
+            gate_id = %gate_id,
+            error = format!("{e:#}"),
+            "gate arming: failed to record Pending gate result"
+        );
+    }
+    result_id
+}
+
+/// Record a new attempt for (MR, gate) and return its 1-based number.
+async fn bump_gate_attempt(state: &AppState, mr_id: &Id, gate_id: &Id) -> u64 {
+    let key = format!("{}:{}", mr_id.as_str(), gate_id.as_str());
+    let prior = state
+        .kv_store
+        .kv_get(GATE_ATTEMPTS_NS, &key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let attempt = prior.saturating_add(1);
+    if let Err(e) = state
+        .kv_store
+        .kv_set(GATE_ATTEMPTS_NS, &key, attempt.to_string())
+        .await
+    {
+        warn!(
+            mr_id = %mr_id,
+            gate_id = %gate_id,
+            error = format!("{e:#}"),
+            "gate attempt counter update failed"
+        );
+    }
+    attempt
+}
+
+/// Current attempt number for (MR, gate). Defaults to 1 when no counter
+/// is recorded — a result armed before the counter existed is still the
+/// first observed attempt for that gate.
+async fn gate_attempt_count(state: &AppState, mr_id: &Id, gate_id: &Id) -> u64 {
+    let key = format!("{}:{}", mr_id.as_str(), gate_id.as_str());
+    state
+        .kv_store
+        .kv_get(GATE_ATTEMPTS_NS, &key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1)
+}
+
 /// Create pending GateResult records for all gates belonging to the MR's
 /// repo, plus the per-spec gates declared by the spec manifest for the MR's
 /// `spec_ref` (spec-registry.md §16), then spawn a background task that
 /// runs each gate and updates the result.
+///
+/// Each call is one gate ATTEMPT for the MR (agent-gates.md §Gate Failure
+/// Feedback: the author "addresses the feedback, re-pushes, and gates
+/// re-run"). Arming a gate replaces that gate's prior result rows for the
+/// MR (see [`arm_gate_result`]) and bumps the per-(MR, gate) attempt
+/// counter, so a re-enqueued MR is decided on the run that reflects its
+/// current code — never vetoed by a stale failure from a previous attempt.
 pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) {
     // Collect gates for this repo.
     let gates = state
@@ -711,20 +812,13 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
     // for an MR whose spec_ref was read.
     let mr = state.merge_requests.find_by_id(&mr_id).await.ok().flatten();
 
-    // Create Pending GateResult for each gate.
+    // Arm one fresh Pending GateResult per gate (a new attempt replaces
+    // the gate's prior rows and bumps its attempt counter — see
+    // `arm_gate_result`).
     let mut result_ids: Vec<(Id, gyre_domain::QualityGate, Option<GateConstraints>)> = Vec::new();
     for gate in &gates {
-        let result_id = Id::new(uuid::Uuid::new_v4().to_string());
-        let result = GateResult {
-            id: result_id.clone(),
-            gate_id: gate.id.clone(),
-            mr_id: mr_id.clone(),
-            status: GateStatus::Pending,
-            output: None,
-            started_at: None,
-            finished_at: None,
-        };
-        let _ = state.gate_results.save(&result).await;
+        let result_id = arm_gate_result(&state, &mr_id, &gate.id).await;
+        bump_gate_attempt(&state, &mr_id, &gate.id).await;
         result_ids.push((result_id, gate.clone(), None));
     }
     for mg in &manifest_gates {
@@ -733,17 +827,8 @@ pub async fn trigger_gates_for_mr(state: Arc<AppState>, mr_id: Id, repo_id: Id) 
             Some(mr) => spawn_manifest_gate_agent(&state, mr, mg, &gate).await,
             None => None,
         };
-        let result_id = Id::new(uuid::Uuid::new_v4().to_string());
-        let result = GateResult {
-            id: result_id.clone(),
-            gate_id: gate.id.clone(),
-            mr_id: mr_id.clone(),
-            status: GateStatus::Pending,
-            output: None,
-            started_at: None,
-            finished_at: None,
-        };
-        let _ = state.gate_results.save(&result).await;
+        let result_id = arm_gate_result(&state, &mr_id, &gate.id).await;
+        bump_gate_attempt(&state, &mr_id, &gate.id).await;
         result_ids.push((
             result_id,
             gate,
@@ -799,6 +884,16 @@ async fn run_gate(
     };
 
     let finished_at = now_secs();
+    let gate_type_str = format!("{:?}", gate.gate_type);
+    // Attempt number of this run and the gate agent's identity (the real
+    // forge-spawned agent when known, else the gate's display identity —
+    // same form the GateFailure event has always carried).
+    let attempt = gate_attempt_count(&state, &mr_id, &gate.id).await;
+    let gate_agent_id = constraints
+        .as_ref()
+        .and_then(|c| c.gate_agent_id.clone())
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| format!("gate-agent:{}", gate.id));
 
     // Optional gates (§Gate Chains: `required = false`): advisory failures
     // don't block merging, but their results are recorded — surface the
@@ -816,7 +911,6 @@ async fn run_gate(
     );
 
     // Auto-track gate outcome (analytics.md §Auto-Emitted Events).
-    let gate_type_str = format!("{:?}", gate.gate_type);
     let duration_secs = finished_at.saturating_sub(started_at);
     let (event_name, props) = if status == GateStatus::Failed {
         (
@@ -863,7 +957,6 @@ async fn run_gate(
 
     // Emit GateFailure event so the MR's author agent can react immediately.
     if status == GateStatus::Failed {
-        let gate_type_str = format!("{:?}", gate.gate_type);
         match state
             .merge_requests
             .find_by_id(&mr_id)
@@ -873,7 +966,6 @@ async fn run_gate(
             .map(|mr| (mr.spec_ref, mr.workspace_id))
         {
             Some((spec_ref, ws_id)) => {
-                let gate_agent_id = format!("gate-agent:{}", gate.id);
                 state
                     .emit_event(
                         Some(ws_id.clone()),
@@ -887,6 +979,7 @@ async fn run_gate(
                             "output": output,
                             "spec_ref": spec_ref,
                             "gate_agent_id": gate_agent_id,
+                            "attempt": attempt,
                         })),
                     )
                     .await;
@@ -902,7 +995,11 @@ async fn run_gate(
         }
     }
 
-    // Notify MR author when gate fails (HSI §2).
+    // Notify MR author when the gate fails (HSI §2; agent-gates.md
+    // §Merge Processor Integration: "Any failed: notify author") — a
+    // GateResult notification carrying the full failure context: gate
+    // name, type, failure output, spec_ref, and the attempt number
+    // (§Gate Failure Feedback).
     if status == GateStatus::Failed {
         if let Ok(Some(mr)) = state.merge_requests.find_by_id(&mr_id).await {
             if let Some(ref author_id) = mr.author_agent_id {
@@ -912,7 +1009,11 @@ async fn run_gate(
                     &mr.workspace_id,
                     &mr_id.to_string(),
                     &gate.name,
-                    "default",
+                    &gate_type_str,
+                    &output,
+                    mr.spec_ref.as_deref(),
+                    attempt,
+                    &gate_agent_id,
                 )
                 .await;
             }
@@ -6248,5 +6349,230 @@ specs:
         // No gate.passed event for a failing gate.
         let passed = analytics_events(&state, "gate.passed").await;
         assert!(passed.is_empty(), "failed gate must not emit gate.passed");
+    }
+
+    /// Poll `cond` until it returns true or the deadline (10s) passes.
+    /// Returns the final value of `cond` so the caller can assert on it.
+    async fn eventually<F, Fut>(mut cond: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if cond().await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// §Merge Processor Integration retry path: a re-enqueued MR re-runs
+    /// its gates instead of being vetoed forever by the previous attempt's
+    /// Failed row. Arming the new attempt must REPLACE the gate's prior
+    /// result row (one row per gate, re-armed Pending) and bump the attempt
+    /// counter — `check_gates_for_mr` (what the merge processor polls every
+    /// cycle) must go Err → Ok(false)/Ok(true), never Err again from the
+    /// stale failure.
+    #[tokio::test]
+    async fn reenqueue_replaces_failed_gate_result_and_waits() {
+        let state = test_state();
+        let (mr_id, repo_id) = seed_mr_with_repo(&state).await;
+        let gate = QualityGate {
+            id: Id::new("gate-retry-1"),
+            repo_id: repo_id.clone(),
+            name: "unit tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("true".to_string()),
+            required_approvals: None,
+            persona: None,
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            position: 0,
+            timeout_secs: None,
+            created_at: now_secs(),
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        // Attempt 1: gate runs and passes.
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async { check_gates_for_mr(&state, &mr_id).await == Ok(true) }).await,
+            "attempt 1: gate must run and pass"
+        );
+
+        // Simulate the attempt-1 failure the retry path starts from: mark
+        // the recorded result Failed (a real failing run does exactly this).
+        let results = state
+            .gate_results
+            .list_by_mr_id(mr_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "one row per gate after attempt 1");
+        state
+            .gate_results
+            .update_status(
+                results[0].id.as_str(),
+                GateStatus::Failed,
+                None,
+                Some(now_secs()),
+                Some("attempt 1 failed".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            check_gates_for_mr(&state, &mr_id).await.is_err(),
+            "failed required gate must block the merge"
+        );
+
+        // Re-enqueue (attempt 2): the stale Failed row must be REPLACED by
+        // a fresh Pending row — not appended to. Before this fix the stale
+        // row survived and check_gates_for_mr returned Err forever, so the
+        // Ralph-loop retry path ("re-pushes, and gates re-run") could
+        // never merge.
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        let results = state
+            .gate_results
+            .list_by_mr_id(mr_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "re-arming must replace the gate's prior row, not append: {results:?}"
+        );
+        assert!(
+            check_gates_for_mr(&state, &mr_id).await.is_ok(),
+            "re-armed gate must hold the MR (Pending/Running → requeue), never fail it from the stale row"
+        );
+        assert!(
+            eventually(|| async { check_gates_for_mr(&state, &mr_id).await == Ok(true) }).await,
+            "attempt 2: re-run gate must pass and let the merge proceed"
+        );
+
+        // The attempt counter tracked both armings — this is the number the
+        // gate-failure feedback reports (§Gate Failure Feedback: "attempt").
+        assert_eq!(
+            gate_attempt_count(&state, &mr_id, &gate.id).await,
+            2,
+            "two enqueues = two gate attempts"
+        );
+    }
+
+    /// §Merge Processor Integration / §Gate Failure Feedback: when a
+    /// required gate fails, the author agent's spawning user receives a
+    /// GateResult notification carrying gate name, type, failure output,
+    /// spec_ref, and the attempt number — and the attempt number advances
+    /// across re-enqueues.
+    #[tokio::test]
+    async fn failing_gate_notifies_author_with_gate_result_payload() {
+        let state = test_state();
+        let (mr_id, repo_id) = seed_mr_with_repo(&state).await;
+
+        // Author agent with a spawning user (the notification recipient).
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("agent-retry-author"), "author", now_secs());
+        agent.workspace_id = Id::new("ws-test");
+        agent.spawned_by = Some("user-retry-author".to_string());
+        state.agents.create(&agent).await.unwrap();
+        let mut mr = state
+            .merge_requests
+            .find_by_id(&mr_id)
+            .await
+            .unwrap()
+            .unwrap();
+        mr.author_agent_id = Some(agent.id.clone());
+        mr.spec_ref = Some(
+            "specs/system/agent-gates.md@0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        state.merge_requests.update(&mr).await.unwrap();
+
+        let gate = QualityGate {
+            id: Id::new("gate-retry-fail"),
+            repo_id: repo_id.clone(),
+            name: "unit tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("false".to_string()), // always fails
+            required_approvals: None,
+            persona: None,
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            position: 0,
+            timeout_secs: None,
+            created_at: now_secs(),
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        let notifs_for_author = |state: Arc<AppState>| async move {
+            state
+                .notifications
+                .list_for_user(
+                    &Id::new("user-retry-author"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    50,
+                    0,
+                )
+                .await
+                .unwrap()
+        };
+
+        // Attempt 1 fails → exactly one GateResult notification, with the
+        // full failure context.
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async { !notifs_for_author(state.clone()).await.is_empty() }).await,
+            "failed gate must notify the author's spawning user"
+        );
+        let notifs = notifs_for_author(state.clone()).await;
+        assert_eq!(notifs.len(), 1, "one notification per failure: {notifs:?}");
+        let n = &notifs[0];
+        assert_eq!(
+            n.notification_type,
+            gyre_common::NotificationType::GateFailure
+        );
+        assert_eq!(
+            n.title,
+            "Gate 'unit tests' failed on MR 'Add feature' (attempt 1)"
+        );
+        let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["type"], "GateResult");
+        assert_eq!(body["mr_id"], mr_id.to_string());
+        assert_eq!(body["gate_name"], "unit tests");
+        assert_eq!(body["gate_type"], "TestCommand");
+        assert_eq!(body["status"], "Failed");
+        assert_eq!(
+            body["spec_ref"],
+            "specs/system/agent-gates.md@0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(body["attempt"], 1);
+        assert_eq!(
+            body["gate_agent_id"],
+            format!("gate-agent:{}", gate.id.as_str())
+        );
+        assert_eq!(body["agent_id"], "agent-retry-author");
+
+        // Attempt 2 (re-enqueue) fails again → the notification reports the
+        // advanced attempt number.
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async { notifs_for_author(state.clone()).await.len() == 2 }).await,
+            "second failed attempt must notify again"
+        );
+        let notifs = notifs_for_author(state.clone()).await;
+        let body: serde_json::Value =
+            serde_json::from_str(notifs[1].body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            body["attempt"], 2,
+            "attempt number must advance across re-enqueues"
+        );
     }
 }

@@ -320,4 +320,20 @@ impl GateResultRepository for PgStorage {
         })
         .await?
     }
+
+    async fn delete_by_mr_id_and_gate_id(&self, mr_id: &str, gate_id: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let mr_id = mr_id.to_string();
+        let gate_id = gate_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::delete(gate_results::table)
+                .filter(gate_results::mr_id.eq(&mr_id))
+                .filter(gate_results::gate_id.eq(&gate_id))
+                .execute(&mut *conn)
+                .context("delete gate results by mr_id and gate_id")?;
+            Ok(())
+        })
+        .await?
+    }
 }

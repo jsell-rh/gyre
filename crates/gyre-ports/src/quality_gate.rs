@@ -39,4 +39,11 @@ pub trait GateResultRepository: Send + Sync {
     ) -> Result<()>;
     async fn find_by_id(&self, id: &str) -> Result<Option<GateResult>>;
     async fn list_by_mr_id(&self, mr_id: &str) -> Result<Vec<GateResult>>;
+    /// Delete every gate result recorded for `(mr_id, gate_id)` — the
+    /// prior attempts of one gate on one MR. No-op when none exist.
+    /// Used to arm a fresh gate attempt: the new attempt's row must
+    /// replace the prior attempt's, or a stale `Failed` row vetoes every
+    /// re-enqueued MR (the merge decision polls `list_by_mr_id`, which is
+    /// not attempt-scoped).
+    async fn delete_by_mr_id_and_gate_id(&self, mr_id: &str, gate_id: &str) -> Result<()>;
 }
