@@ -6715,13 +6715,17 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-abac"), mr.id.clone(), 50, 1000);
 
             // Seed a deny policy: chain_depth > 1 → deny push to attestation resources.
+            // Priority 250: the user band (200–299) sits above the builtin
+            // attested-authorization Allow (150) that the seeded startup set
+            // contributes, so this Deny — not the builtin — decides deep
+            // chains (the builtin's definition documents the band).
             let deny_policy = Policy {
                 id: Id::new("deny-deep-chain"),
                 name: "deny-deep-chain".to_string(),
                 description: "Deny pushes with chain_depth > 1".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 100,
+                priority: 250,
                 effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
                     attribute: "subject.chain_depth".to_string(),
@@ -6739,14 +6743,16 @@ mod tests {
             };
             state.policies.create(&deny_policy).await.unwrap();
 
-            // Also seed a blanket allow so shallow chains would pass.
+            // Also seed a blanket allow so shallow chains would pass
+            // (priority 200 — user band, above the builtin Allow at 150 so
+            // it is the policy that actually carries a shallow-chain Allow).
             let allow_policy = Policy {
                 id: Id::new("allow-attestation"),
                 name: "allow-attestation".to_string(),
                 description: "Allow attestation merges".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 10,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![],
                 actions: vec!["merge".to_string()],
@@ -6814,13 +6820,15 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-shallow"), mr.id.clone(), 50, 1000);
 
             // Deny policy for deep chains only (chain_depth > 5).
+            // Priority 250: user band, above the seeded builtin
+            // attested-authorization Allow (150).
             let deny_policy = Policy {
                 id: Id::new("deny-deep-5"),
                 name: "deny-deep-5".to_string(),
                 description: "Deny deep chains".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 100,
+                priority: 250,
                 effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
                     attribute: "subject.chain_depth".to_string(),
@@ -6838,13 +6846,16 @@ mod tests {
             };
             state.policies.create(&deny_policy).await.unwrap();
 
+            // Priority 200: user band, above the seeded builtin
+            // attested-authorization Allow (150), so THIS policy is the
+            // matched one on the allow path.
             let allow_policy = Policy {
                 id: Id::new("allow-shallow"),
                 name: "allow-shallow".to_string(),
                 description: "Allow attestation merges".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 10,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![],
                 actions: vec!["merge".to_string()],
@@ -6912,13 +6923,15 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-signer"), mr.id.clone(), 50, 1000);
 
             // Allow only when root_signer == "user:trusted-principal".
+            // Priority 200: user band, above the seeded builtin
+            // attested-authorization Allow (150).
             let allow_trusted = Policy {
                 id: Id::new("allow-trusted-signer"),
                 name: "allow-trusted-signer".to_string(),
                 description: "Allow only trusted signer".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 50,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![Condition {
                     attribute: "subject.root_signer".to_string(),
@@ -6986,13 +6999,15 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-cc"), mr.id.clone(), 50, 1000);
 
             // Allow when constraint_count < 10.
+            // Priority 200: user band, above the seeded builtin
+            // attested-authorization Allow (150).
             let allow_low_cc = Policy {
                 id: Id::new("allow-low-cc"),
                 name: "allow-low-cc".to_string(),
                 description: "Allow when few constraints".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 50,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![Condition {
                     attribute: "subject.constraint_count".to_string(),
@@ -7061,13 +7076,15 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-tenant"), mr.id.clone(), 50, 1000);
 
             // Allow only when tenant_id == "tenant-specific-id".
+            // Priority 200: user band, above the seeded builtin
+            // attested-authorization Allow (150).
             let allow_tenant = Policy {
                 id: Id::new("allow-tenant"),
                 name: "allow-tenant".to_string(),
                 description: "Allow only specific tenant".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 50,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![Condition {
                     attribute: "subject.tenant_id".to_string(),
@@ -7237,13 +7254,16 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-att-audit"), mr.id.clone(), 50, 1000);
 
             // Deny: chain_depth > 0 → deny merge on attestation resources.
+            // Priority 250: user band, above the seeded builtin
+            // attested-authorization Allow (150) — otherwise the builtin
+            // Allow would decide and this Deny would never be attributed.
             let deny = Policy {
                 id: Id::new("deny-att-audit"),
                 name: "deny-att-audit".to_string(),
                 description: "Deny deep chains".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 100,
+                priority: 250,
                 effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
                     attribute: "subject.chain_depth".to_string(),

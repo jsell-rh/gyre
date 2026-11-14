@@ -887,7 +887,11 @@ mod tests {
         )
         .await;
 
-        // Out of scope (ws-B): default deny, no matched policy.
+        // Out of scope (ws-B): default deny. The dry-run state carries the
+        // full startup builtin set (production parity), so the deny is
+        // ATTRIBUTED to the tenant-level `default-deny` catchall (priority
+        // 1, no conditions) — never to the out-of-scope ws-A Allow, which
+        // the engine's scope filter must exclude.
         let json = evaluate(
             &app,
             serde_json::json!({ "type": "task", "workspace_id": "ws-B" }),
@@ -897,9 +901,10 @@ mod tests {
             json["decision"], "deny",
             "ws-A policy must not apply to ws-B"
         );
-        assert!(
-            json["matched_policy"].is_null(),
-            "out-of-scope policy must not be the matched policy"
+        assert_eq!(
+            json["matched_policy"], "builtin-default-deny",
+            "out-of-scope policy must not be the matched policy — only the \
+             default-deny catchall may decide an out-of-scope dry-run"
         );
 
         // In scope (ws-A): allowed by the scoped policy.
