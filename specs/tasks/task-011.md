@@ -127,6 +127,9 @@ When working on this task:
   `3488a06bf`)
 - `e0e88407` — process(task-011): list contract-restore process commit in
   task log (doc-only — the product-surface commit is `3488a06bf`)
+- `d50831a6` — process(task-011): re-apply completion record after contract
+  restore (repair `1475fe1e`; doc-only — the product-surface commit is
+  `3488a06bf`)
 
 ## Shipped
 
