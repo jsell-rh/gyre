@@ -8,7 +8,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
-commits: ["3350817099f10cc5fde2e505f9cb4ad8bb5d129e", "38b3134feeaa28be0e443e2e29344980ea6db552", "60c86252706b2392866b1dddd66634ab4cb123d6", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "33e30ac961ad1021b50f3cd3a65c3ac184a03ca1"]
+commits: ["33e30ac961ad1021b50f3cd3a65c3ac184a03ca1", "6033324f8936365465b9ffc9b27e6c3a6429f0d1", "60c86252706b2392866b1dddd66634ab4cb123d6", "38b3134feeaa28be0e443e2e29344980ea6db552", "3350817099f10cc5fde2e505f9cb4ad8bb5d129e"]
 ---
 
 ## Spec Excerpt
@@ -85,8 +85,10 @@ Read `specs/system/user-management.md` §API > User Management and §API > Works
 ### User management endpoints (§API > User Management)
 
 Five of the eight spec endpoints are implemented in production code;
-the three session endpoints are owned by task-111, so the
-§User Management coverage row stays task-assigned over them:
+the three session endpoints are owned by task-111 (its §Session
+Management row covers the UserSession entity, `user_sessions` storage,
+and auth-middleware revocation checks — not just the three routes), so
+the §User Management coverage row stays task-assigned over them:
 
 - **`GET /api/v1/users/{username}`** — tenant-public profile
   (`{id, username, display_name, avatar_url, timezone, created_at,
@@ -124,7 +126,7 @@ All seven spec endpoints are live:
   deletes the membership row.
 - `GET .../members`, `PUT .../members/{user_id}(/role)`, and
   `DELETE .../members/{user_id}` were pre-existing and carry the
-  last-Owner guard plus audited ownership transfer
+  last-owner guard plus audited ownership transfer
   (`ownership_transfer_unblocks_old_owner_removal_and_is_audited`).
 
 All routes are registered in `api/mod.rs` with ABAC resolver entries
@@ -133,97 +135,84 @@ global role can be an invitee). Pending invitations are unaccepted
 membership rows — the lifecycle is real storage state, not a parallel
 table.
 
-### This round (merge of task-112's branch `1ee52c43`, checkpoint 4fd846f2)
+### This round (rebase onto base `cdd1dd02`, checkpoint 03eed997)
 
-The executor staged the assigned repair: merge the task-112 pipeline
-branch (base `1ee52c43` — notification delivery channels, who-gets-
-notified routing, escalation routing) into this task-124 head. The
-merge auto-resolved all code files; the only textual conflict was
-`specs/coverage/system/user-management.md`, where the two branches had
-implemented disjoint rows of the same coverage matrix from a common
-ancestor:
+The executor staged the assigned repair: merge the new base
+`cdd1dd02` (task-011 spec-save git write-through, task-146 analytics
+scope columns, task-171 LLM endpoint work) into this task-124 head.
+The merge auto-resolved all code files; the only textual conflict was
+`specs/coverage/SUMMARY.md`, where the two branches had moved disjoint
+sets of coverage rows from assigned to implemented since the common
+ancestor `1ee52c43`:
 
-- Resolved as the union: rows 16/17/18 (task-112 implemented) come
-  from the base side, rows 26 (partial, session endpoints owned by
-  task-111) / 27 (task-124 implemented) from this branch. The
-  `Coverage:` header line was recomputed mechanically from the merged
-  table (`grep -c` per status, the same semantics as
-  `scripts/update-coverage-summary.sh`): 36 rows, 11 n/a, 0
-  not-started, 14 task-assigned, 11 implemented, 0 verified —
-  11/36. `specs/coverage/SUMMARY.md` regenerated via the script
-  (also picks up base-side platform-model.md row 7 / task-130 that
-  the stale SUMMARY had missed).
+- Resolved as the union: this branch's rows (agent-runtime,
+  meta-spec-reconciliation, platform-model, search, spec-registry,
+  user-management) and the base's analytics row (7 assigned / 5
+  implemented); the spec-links row was changed identically on both
+  sides and auto-merged. The TOTAL row was recomputed as the union:
+  25 sections moved assigned→implemented in total → 215 assigned,
+  204 implemented, 163 verified of 582 non-n/a = 63%.
 - Migration-version invariant holds under the merge: the base's
-  `2026-11-09-000060/000061` and this branch's
-  `2026-11-12/13-000060/000061/000063` map to distinct full Diesel
-  versions (date+sequence, dashes removed), so every migration runs;
-  `scripts/check-migration-versions.sh` exits 0.
+  `2026-10-08-000063_analytics_scope_columns` and this branch's
+  `2026-11-13-000063_user_deactivated_at` share the 6-digit sequence
+  but map to distinct full Diesel versions (`20261008000063` vs
+  `20261113000063`), so every migration runs;
+  `scripts/check-migration-versions.sh` and
+  `scripts/check-migration-sql-portability.sh` both exit 0 on the
+  merged tree.
 
-No task-124 source semantics changed: every code file auto-merged,
-`cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
-both pass on the merged tree, and all mechanical invariant scripts
-exit 0 (arch, ABAC route registry, ABAC exempt handlers, MCP write
-gates, migration versions/portability, byte-slice truncation, dead
-message kinds, mem port contracts, inert enforcement, relative path
-defaults, fail-open ref resolution, fabricated scope defaults, lossy
-secret conversion, scope literal defaults, task commit attribution,
-forwarded-header trust, in-memory state stores, unbounded external
-HTTP, forged scope fields). No duplicate axum route paths were
-introduced by the merged `api/mod.rs`.
+No task-124 source semantics changed: every code file auto-merged.
+Fresh probes on the merged tree (logs under `review-evidence/` in
+`/tmp/stage/review-evidence`):
 
-Fresh probes on the merged tree (logs under `review-evidence/`):
-
+- `cargo check -p gyre-server --tests` — exit 0 (8m18s;
+  `cargo-check-gyre-server-tests-merge-base-cdd1dd02.log`).
 - `cargo test -p gyre-common` — 125 passed.
-- `cargo test -p gyre-domain` — 510 + 8 passed.
-- `cargo test -p gyre-adapters` — 517 passed (includes both the
-  task-112 `user_channel_preferences` adapter tests and the task-124
-  migration backfill/deactivation storage paths on real SQLite).
-- `cargo check -p gyre-server --tests` — exit 0 (3m23s;
-  `review-evidence/cargo-check-gyre-server-tests-merge-112.log`).
+- `cargo test -p gyre-domain` — 511 + 8 passed.
+- `cargo test -p gyre-adapters` — 521 passed (includes the task-124
+  migration backfill/deactivation storage paths on real SQLite plus
+  the base's new analytics scope-column adapter tests).
+- Mechanical invariant scripts all exit 0: arch, ABAC route registry,
+  ABAC exempt handlers, MCP write gates, migration versions,
+  migration SQL portability, forged scope fields, inert enforcement,
+  unbounded external HTTP, task commit attribution (after restoring
+  this file's `commits:` frontmatter).
 - Running the server test binary itself is deferred to the verifier
   per the sandbox memory budget (commands below).
 
 ### Prior rounds (context)
 
-- Contract restoration round 0a1ec38f: same preservation pattern; the
-  shipped notes were rewritten rather than appended.
+- Merge of task-112's branch `1ee52c43` (checkpoint 4fd846f2): the two
+  branches implemented disjoint rows of the user-management coverage
+  matrix; union + mechanical recount; all code auto-merged.
 - Rebase repair (merge of `6f5a631c`): the only code conflict was the
-  `use users::{...}` import list in `api/mod.rs` (task-124 handlers vs
-  task-125 notification handlers), resolved as the union; coverage
-  narratives merged and mechanically recounted.
-- Merge of `1ee52c43` (this round's base, recorded above): only
-  conflict was the coverage matrix header; union + mechanical
-  recount. Earlier contract-restoration rounds (cebe3a499 and prior)
-  preserved the shipped production fixes unchanged and re-verified
-  them; review finding 3cd87005 (stale 7-argument
-  `list_for_user` call in `deactivate_user_cascades_to_auth_and_
-  ownership`) remains fixed by commit 33508170.
+  `use users::{...}` import list in `api/mod.rs`, resolved as the
+  union; coverage narratives merged and mechanically recounted.
+- Review finding 3cd87005 (stale 7-argument `list_for_user` call in
+  `deactivate_user_cascades_to_auth_and_ownership`) fixed by commit
+  33508170.
 - 38b3134f: fixed a test-fixture bug — `seed_workspace_with_owner`
   built the Owner membership as pending instead of the production
-  `create_workspace` semantics (accepted immediately), which had broken
-  `workspace_invitation_lifecycle`.
+  `create_workspace` semantics (accepted immediately), which had
+  broken `workspace_invitation_lifecycle`.
 
 ### Server tests the verifier must execute
 
 Large gyre-server test compilation is deferred to the independent
 verifier per the sandbox budget:
 
-- `cargo test --all` — the assignment's definition-of-done gate; the
-  compile error repaired earlier (E0061 in
-  `deactivate_user_cascades_to_auth_and_ownership`) was the blocker
-  and `cargo check -p gyre-server --tests` now passes.
+- `cargo test --all` — the assignment's definition-of-done gate;
+  `cargo check -p gyre-server --tests` passes on the merged tree.
 - `cargo test -p gyre-server api::users::tests` — includes
-  `deactivate_user_cascades_to_auth_and_ownership` (the repaired call
-  site), `workspace_invitation_lifecycle`,
+  `deactivate_user_cascades_to_auth_and_ownership`,
+  `workspace_invitation_lifecycle`,
   `get_user_by_username_is_tenant_scoped`,
   `list_users_is_tenant_admin_only_scoped_and_paginated`,
   `ownership_transfer_unblocks_old_owner_removal_and_is_audited`,
   `last_owner_cannot_be_removed_or_downgraded`,
   `member_management_requires_owner_admin_or_tenant_admin`,
   `invite_member_rejects_duplicate_membership`, plus the task-125
-  notification handlers that share `users.rs` after the rebase
-  (`list_my_notifications`, `get_unread_count`,
-  `mark_all_read_notifications`, `notification_stream`).
+  notification handlers that share `users.rs` after the rebase.
 - `cargo test -p gyre-server api::impersonation::tests` — includes
   `deactivating_target_revokes_impersonation_token`,
   `deactivating_impersonator_revokes_impersonation_token`,
