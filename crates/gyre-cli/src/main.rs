@@ -4011,20 +4011,24 @@ fn print_invitation_list(result: &serde_json::Value) {
     match items {
         Some(items) if !items.is_empty() => {
             println!(
-                "{:<38} {:<38} {:<10} {:<20} CREATED",
-                "INVITATION ID", "USER ID", "ROLE", "INVITED"
+                "{:<38} {:<38} {:<10} {:<9} CREATED",
+                "INVITATION ID", "USER ID", "ROLE", "ACCEPTED"
             );
             println!("{}", "-".repeat(130));
             for inv in items {
                 let id = inv["id"].as_str().unwrap_or("");
                 let user = inv["user_id"].as_str().unwrap_or("");
                 let role = inv["role"].as_str().unwrap_or("");
-                let invited_by = inv["id"].as_str().unwrap_or("");
+                let accepted = if inv["accepted"].as_bool().unwrap_or(false) {
+                    "yes"
+                } else {
+                    "no"
+                };
                 let created = inv["created_at"]
                     .as_u64()
                     .map(format_timestamp)
                     .unwrap_or_default();
-                println!("{id:<38} {user:<38} {role:<10} {invited_by:<20} {created}");
+                println!("{id:<38} {user:<38} {role:<10} {accepted:<9} {created}");
             }
         }
         _ => println!("No pending invitations."),
