@@ -103,13 +103,13 @@ use invitations::{
 };
 use std::sync::Arc;
 use users::{
-    add_team_member, create_team, create_token, create_user, delete_team, delete_token,
-    dismiss_notification, get_judgments, get_me, get_my_notifications, get_notification_count,
-    get_notification_preferences, get_unread_count, invite_member, list_members,
-    list_my_notifications, list_teams, list_tokens, mark_all_read_notifications,
-    mark_notification_read, mark_notification_unread, notification_stream, remove_member,
-    remove_team_member, resolve_notification, update_me, update_member_role,
-    update_notification_preferences, update_team,
+    add_team_member, create_team, create_token, create_user, deactivate_user, delete_team,
+    delete_token, dismiss_notification, get_judgments, get_me, get_my_notifications,
+    get_notification_count, get_notification_preferences, get_unread_count, get_user_by_username,
+    invite_member, list_members, list_my_notifications, list_teams, list_tokens, list_users,
+    mark_all_read_notifications, mark_notification_read, mark_notification_unread,
+    notification_stream, remove_member, remove_team_member, resolve_notification, update_me,
+    update_member_role, update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -923,13 +923,19 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .put(policies::update_policy)
                 .delete(policies::delete_policy),
         )
-        // Bootstrap user provisioning - Admin-only, per-handler check.
-        .route("/api/v1/users", post(create_user))
+        // Bootstrap user provisioning + user listing - Admin-only, per-handler check.
+        .route("/api/v1/users", get(list_users).post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
         // My workspace invitations (task-110 repair: the invitee's pending-
         // invitations view, spec §Workspace Invitation Flow steps 3-4)
         .route("/api/v1/users/me/invitations", get(list_my_invitations))
+        // Tenant-public profile by username (user-management.md §API >
+        // User Management). Registered after /users/me: axum's matchit
+        // prioritizes the static segment, so /users/me never lands here.
+        .route("/api/v1/users/:username", get(get_user_by_username))
+        // Deactivate a user (TenantAdmin only, per-handler check)
+        .route("/api/v1/users/:id/deactivate", put(deactivate_user))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",
@@ -989,6 +995,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/members",
             post(invite_member).get(list_members),
         )
+        // NOTE (task-110 rebase onto base 5984177): the four spec
+        // invitation paths below — POST /invite, GET /invitations,
+        // POST /invite/accept, DELETE /invitations/:id — are registered by
+        // api/invitations.rs (task-110's WorkspaceInvitation model). The
+        // task-124 base registered its membership-row handlers on the same
+        // paths; axum rejects duplicate registrations and both branches
+        // implemented the same spec section, so only task-110's
+        // superset model (decline, expiry, per-tenant policy,
+        // max_pending cap, background expiry) keeps them.
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),

@@ -1,8 +1,11 @@
 //! User management, workspace membership, teams, and notification endpoints (HSI §2 + §12).
 //!
 //! POST /api/v1/users                 (bootstrap admin user creation - Admin-only)
+//! GET  /api/v1/users                 (list users - TenantAdmin only, paginated)
 //! GET  /api/v1/users/me
 //! PUT  /api/v1/users/me
+//! GET  /api/v1/users/:username       (tenant-public profile)
+//! PUT  /api/v1/users/:id/deactivate  (TenantAdmin only, cascades to auth + ownership)
 //! GET  /api/v1/users/me/notifications?workspace_id=&min_priority=&max_priority=&limit=&offset=
 //! GET  /api/v1/notifications?workspace_id=&repo_id=&type=&priority=&limit=&offset=
 //! GET  /api/v1/notifications/unread-count?workspace_id=
@@ -17,6 +20,9 @@
 //! GET  /api/v1/workspaces/:id/members
 //! PUT  /api/v1/workspaces/:id/members/:user_id
 //! DELETE /api/v1/workspaces/:id/members/:user_id
+//! (Workspace invitation lifecycle endpoints — POST /invite,
+//! GET /invitations, POST /invite/accept, DELETE /invitations/:id —
+//! live in api/invitations.rs, task-110's WorkspaceInvitation model.)
 //! POST /api/v1/workspaces/:id/teams
 //! GET  /api/v1/workspaces/:id/teams
 //! PUT  /api/v1/workspaces/:id/teams/:team_id
@@ -76,6 +82,9 @@ pub struct UserProfileResponse {
     pub last_login_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Unix seconds of the account's deactivation, if a TenantAdmin
+    /// deactivated it (user-management.md §API > User Management).
+    pub deactivated_at: Option<u64>,
     /// Tenant binding (platform-model.md §1: every user belongs to exactly
     /// one tenant). None for legacy users provisioned before the binding
     /// existed (F1); those fail closed at the auth extractor.
@@ -99,6 +108,7 @@ impl From<User> for UserProfileResponse {
             last_login_at: u.last_login_at,
             created_at: u.created_at,
             updated_at: u.updated_at,
+            deactivated_at: u.deactivated_at,
             tenant_id: u.tenant_id.map(|t| t.to_string()),
         }
     }
@@ -134,6 +144,7 @@ pub async fn get_me(
         last_login_at: None,
         created_at: 0,
         updated_at: 0,
+        deactivated_at: None,
         tenant_id: None,
     };
     Ok(Json(profile))
@@ -236,6 +247,257 @@ pub async fn update_me(
         // dispatcher (which reads user_channel_prefs).
         state.user_channel_prefs.upsert(user_id, &channels).await?;
     }
+    Ok(Json(UserProfileResponse::from(user)))
+}
+
+// ─── User lookup & management (user-management.md §API > User Management) ────
+
+#[derive(Serialize)]
+pub struct PublicUserProfileResponse {
+    pub id: String,
+    pub username: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub timezone: String,
+    pub created_at: u64,
+    /// Workspace memberships and roles (user-management.md §User Profile
+    /// Page: "Workspace memberships and roles" is part of the tenant-public
+    /// profile surface).
+    pub memberships: Vec<MembershipResponse>,
+}
+
+/// GET /api/v1/users/:username — user profile, public within the tenant
+/// (user-management.md §API > User Management; §User Profile Page).
+///
+/// Tenants are hard isolation boundaries (§Workspace Membership): a user
+/// of another tenant is indistinguishable from a nonexistent one (404), so
+/// the endpoint cannot be used to probe foreign tenants' handles.
+pub async fn get_user_by_username(
+    auth: AuthenticatedAgent,
+    Path(username): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<PublicUserProfileResponse>, ApiError> {
+    let user = state
+        .users
+        .find_by_username(&username)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    // Tenant containment: the profile is tenant-public, not global-public.
+    // The system principal (bootstrap token) is exempt — it is the
+    // principal that provisioned the tenant hierarchy.
+    if !auth.is_system_principal() {
+        match (&user.tenant_id, &auth.tenant_id) {
+            (Some(user_tenant), caller_tenant) if user_tenant.as_str() == caller_tenant => {}
+            _ => return Err(ApiError::NotFound("User not found".to_string())),
+        }
+    }
+    let memberships = state.workspace_memberships.list_by_user(&user.id).await?;
+    Ok(Json(PublicUserProfileResponse {
+        id: user.id.to_string(),
+        username: user.username,
+        display_name: user.display_name,
+        avatar_url: user.avatar_url,
+        timezone: user.timezone,
+        created_at: user.created_at,
+        memberships: memberships.into_iter().map(Into::into).collect(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ListUsersParams {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// Whether the caller may perform TenantAdmin user-management operations
+/// (list users, deactivate): the system principal, a caller holding the
+/// Admin role, or a user whose stored global role is TenantAdmin. The
+/// stored record is authoritative when resolvable — a JWT role claim can
+/// lag a demotion (same rationale as `can_manage_membership`).
+async fn is_tenant_admin(state: &AppState, auth: &AuthenticatedAgent) -> Result<bool, ApiError> {
+    if auth.is_system_principal() || auth.roles.contains(&UserRole::Admin) {
+        return Ok(true);
+    }
+    if let Some(uid) = &auth.user_id {
+        if let Ok(Some(user)) = state.users.find_by_id(uid).await {
+            if user.global_role == gyre_domain::GlobalRole::TenantAdmin {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// GET /api/v1/users — list users, TenantAdmin only, paginated
+/// (user-management.md §API > User Management).
+///
+/// The result is scoped to the caller's tenant: the TenantAdmin role is a
+/// tenant-scoped role, never a cross-tenant one (platform-model.md §1).
+/// ABAC maps the route to the "user" resource; the TenantAdmin restriction
+/// itself is enforced per-handler (the POST /users bootstrap route uses the
+/// same split).
+pub async fn list_users(
+    auth: AuthenticatedAgent,
+    Query(params): Query<ListUsersParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !is_tenant_admin(&state, &auth).await? {
+        crate::rbac::record_rbac_denied(&state, &auth, "TenantAdmin", "GET /api/v1/users").await;
+        return Err(ApiError::Forbidden(
+            "listing users requires the TenantAdmin role".to_string(),
+        ));
+    }
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+    let mut users = state.users.list().await?;
+    // Tenant containment: a TenantAdmin sees their tenant's users only.
+    // Legacy unbound users (tenant_id None) predate the binding (F1) and
+    // are visible only to the system principal.
+    if !auth.is_system_principal() {
+        users.retain(|u| u.tenant_id.as_ref().map(|t| t.as_str()) == Some(auth.tenant_id.as_str()));
+    }
+    let total = users.len();
+    let items: Vec<UserProfileResponse> = users
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .map(Into::into)
+        .collect();
+    Ok(Json(serde_json::json!({
+        "users": items,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+    })))
+}
+
+#[derive(Deserialize, Default)]
+pub struct DeactivateUserRequest {
+    /// Optional reason recorded in the audit trail.
+    pub reason: Option<String>,
+}
+
+/// PUT /api/v1/users/:id/deactivate — deactivate a user, TenantAdmin only
+/// (user-management.md §API > User Management).
+///
+/// Cascade (the deactivation is effective immediately, not cosmetic):
+/// - the account fails authentication on every path (API-key extractor,
+///   WebSocket auth, SSO login) — see auth.rs;
+/// - active impersonation sessions the user participates in (as
+///   impersonator or target) are ended immediately, revoking the
+///   unexpired impersonation JWTs — see impersonation.rs (the resolver
+///   also re-checks account deactivation on every call);
+/// - workspaces the user owned stop having an active Owner: the ownerless
+///   flow records the transition and notifies the tenant's TenantAdmins
+///   inline (workspace_ownership), so ownership can be reassigned via
+///   `PUT /api/v1/workspaces/{id}/members/{new_owner_id}/role`;
+/// - lingering memberships survive for audit (deactivation is soft — the
+///   row remains so the departed Owner is still attributable).
+///
+/// ABAC maps the route to the "user" resource (PUT → write), and the
+/// handler enforces the TenantAdmin + same-tenant requirement (the same
+/// split as the POST /users bootstrap route).
+pub async fn deactivate_user(
+    auth: AuthenticatedAgent,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeactivateUserRequest>,
+) -> Result<Json<UserProfileResponse>, ApiError> {
+    if !is_tenant_admin(&state, &auth).await? {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "TenantAdmin",
+            "PUT /api/v1/users/:id/deactivate",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "deactivating users requires the TenantAdmin role".to_string(),
+        ));
+    }
+    let uid = Id::new(user_id);
+    let mut user = state
+        .users
+        .find_by_id(&uid)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    // Tenant containment: a TenantAdmin may only deactivate users of their
+    // own tenant (the system principal is exempt — bootstrap path).
+    if !auth.is_system_principal() {
+        let same_tenant = user
+            .tenant_id
+            .as_ref()
+            .map(|t| t.as_str() == auth.tenant_id)
+            .unwrap_or(false);
+        if !same_tenant {
+            return Err(ApiError::Forbidden(
+                "cannot deactivate a user of another tenant".to_string(),
+            ));
+        }
+    }
+    // Self-deactivation guard: the actor would lock themselves out of the
+    // very role needed to undo it (and could orphan the tenant's admin
+    // capability entirely).
+    if auth.user_id.as_ref() == Some(&uid) {
+        return Err(ApiError::Conflict(
+            "cannot deactivate your own account".to_string(),
+        ));
+    }
+
+    let already = user.is_deactivated();
+    let now = now_secs();
+    user.deactivate(now);
+    state.users.update(&user).await?;
+
+    // Audit trail (ownership transfers and membership changes are audited
+    // with actor + reason; deactivation is the same class of event).
+    use gyre_domain::audit::{AuditEvent, AuditEventType, AuditOutcome};
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::Custom("user_deactivated".to_string()),
+        Some(Id::new(auth.agent_id.clone())),
+        auth.user_id.clone(),
+        None,
+        None,
+        None,
+        "user".to_string(),
+        Some(user.id.to_string()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "user_id": user.id.to_string(),
+            "username": user.username,
+            "tenant_id": user.tenant_id.as_ref().map(|t| t.to_string()),
+            "reason": req.reason,
+            "actor": auth.agent_id,
+            "already_deactivated": already,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(user_id = %user.id, "user_deactivated audit event recording failed: {e}");
+    }
+
+    // Impersonation cascade: end every active impersonation session the
+    // deactivated user participates in (as impersonator or target). The
+    // resolver rejects deactivated accounts on its own, but ending the
+    // sessions here also closes the audit trail (ImpersonationEnded with
+    // a reason) and frees the impersonator's active-session slot.
+    crate::impersonation::end_active_sessions_for_user(
+        &state,
+        user.id.as_str(),
+        "user_deactivated",
+    )
+    .await;
+
+    // Ownerless cascade: re-track every workspace the user belongs to. With
+    // the account now deactivated, `has_active_owner` no longer counts the
+    // user, so a workspace whose last active Owner just departed is
+    // recorded ownerless and its TenantAdmins notified inline (the daily
+    // job would otherwise lag up to a day).
+    crate::workspace_ownership::on_user_removed(&state, &user.id).await;
+
     Ok(Json(UserProfileResponse::from(user)))
 }
 
@@ -747,8 +1009,8 @@ async fn can_manage_membership(
 
 /// Count active Owner memberships of a workspace, optionally excluding one
 /// user (the member being removed/downgraded). An Owner membership is
-/// active when its user record still exists — a deactivated/removed user's
-/// lingering membership is not an active Owner.
+/// active when its user record still exists and is not deactivated — a
+/// deactivated/removed user's lingering membership is not an active Owner.
 async fn count_active_owners_excluding(
     state: &AppState,
     workspace_id: &Id,
@@ -766,8 +1028,10 @@ async fn count_active_owners_excluding(
         if Some(&m.user_id) == exclude_user {
             continue;
         }
-        if let Ok(Some(_)) = state.users.find_by_id(&m.user_id).await {
-            owners += 1;
+        if let Ok(Some(u)) = state.users.find_by_id(&m.user_id).await {
+            if !u.is_deactivated() {
+                owners += 1;
+            }
         }
     }
     Ok(owners)
@@ -3506,7 +3770,7 @@ mod tests {
         owner.tenant_id = Some(Id::new("t-1"));
         state.users.create(&owner).await.unwrap();
 
-        let membership = WorkspaceMembership::new(
+        let mut membership = WorkspaceMembership::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new(owner_id.clone()),
             Id::new(ws_id.clone()),
@@ -3514,6 +3778,11 @@ mod tests {
             Id::new("system"),
             now,
         );
+        // Mirror production (`create_workspace`): the creator's Owner
+        // membership is active from birth, never a pending invitation —
+        // otherwise the ownerless-workspace invariant and the pending-
+        // invitation list both see a phantom second "invitee".
+        membership.accept(now);
         state
             .workspace_memberships
             .create(&membership)
@@ -3790,6 +4059,449 @@ mod tests {
                 .any(|d| { d.decision == gyre_domain::PolicyEffect::Allow && d.action == "write" }),
             "the request must have passed ABAC (Allow) so the 403 is the handler's"
         );
+    }
+
+    // ── User management endpoints (user-management.md §API > User
+    // Management) — task-124 ────────────────────────────────────────────
+
+    /// Seed a user with an API key in tenant t-1. Returns (user_id, key).
+    async fn seed_keyed_user(
+        state: &std::sync::Arc<crate::AppState>,
+        username: &str,
+        roles: Vec<gyre_domain::UserRole>,
+    ) -> (String, String) {
+        let now = 1_700_000_000u64;
+        let mut user = User::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            format!("{username}-ext"),
+            username,
+            now,
+        );
+        user.tenant_id = Some(Id::new("t-1"));
+        user.roles = roles.clone();
+        user.global_role = if roles.contains(&gyre_domain::UserRole::Admin) {
+            gyre_domain::GlobalRole::TenantAdmin
+        } else {
+            gyre_domain::GlobalRole::Member
+        };
+        state.users.create(&user).await.unwrap();
+        let key = format!("key-{username}");
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&key), &user.id, "test")
+            .await
+            .unwrap();
+        (user.id.to_string(), key)
+    }
+
+    /// GET /api/v1/users/:username returns the tenant-public profile with
+    /// workspace memberships; a user of another tenant is indistinguishable
+    /// from a nonexistent one (404) — tenants are hard isolation
+    /// boundaries, so the endpoint cannot probe foreign handles.
+    #[tokio::test]
+    async fn get_user_by_username_is_tenant_scoped() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+
+        // Owner's handle via the system principal.
+        let owner = state
+            .users
+            .find_by_id(&Id::new(&owner_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], owner_id);
+        assert_eq!(json["username"], owner.username);
+        // Profile page surface: workspace memberships and roles.
+        let memberships = json["memberships"].as_array().unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0]["workspace_id"], ws_id);
+        assert_eq!(memberships[0]["role"], "Owner");
+
+        // A same-tenant caller sees the profile too.
+        let (_, key) =
+            seed_keyed_user(&state, "peer", vec![gyre_domain::UserRole::Developer]).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}", owner.username))
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Cross-tenant: a t-2 user is invisible to a t-1 caller (404, not
+        // 403 — existence must not leak).
+        let now = 1_700_000_000u64;
+        let beta = gyre_domain::Tenant::new(Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+        let mut foreign = User::new(Id::new("foreign-user"), "foreign-ext", "foreign-user", now);
+        foreign.tenant_id = Some(Id::new("t-2"));
+        state.users.create(&foreign).await.unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/foreign-user")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Nonexistent handle: 404.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/nobody-here")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// GET /api/v1/users is TenantAdmin-only and tenant-scoped, with
+    /// limit/offset pagination.
+    #[tokio::test]
+    async fn list_users_is_tenant_admin_only_scoped_and_paginated() {
+        let state = test_state();
+        seed_workspace_with_owner(&state).await; // t-1 + one owner user
+        let (admin_id, admin_key) =
+            seed_keyed_user(&state, "list-admin", vec![gyre_domain::UserRole::Admin]).await;
+        let (_, dev_key) =
+            seed_keyed_user(&state, "list-dev", vec![gyre_domain::UserRole::Developer]).await;
+
+        // Cross-tenant user must not appear in the t-1 listing.
+        let now = 1_700_000_000u64;
+        let beta = gyre_domain::Tenant::new(Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+        let mut foreign = User::new(Id::new("foreign-list"), "foreign-ext", "foreign-list", now);
+        foreign.tenant_id = Some(Id::new("t-2"));
+        state.users.create(&foreign).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A plain Developer member is rejected.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users")
+                    .header("Authorization", format!("Bearer {dev_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The TenantAdmin gets their tenant's users only, paginated.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users?limit=1&offset=0")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let users = json["users"].as_array().unwrap();
+        assert_eq!(users.len(), 1, "limit=1 must return one user");
+        // t-1 has the seeded owner + the admin + the developer = 3 users.
+        assert_eq!(
+            json["total"], 3,
+            "total must count only the caller's tenant"
+        );
+        let usernames: Vec<&str> = users
+            .iter()
+            .map(|u| u["username"].as_str().unwrap())
+            .collect();
+        assert!(!usernames.contains(&"foreign-list"));
+
+        // offset walks the same set.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users?limit=2&offset=2")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["users"].as_array().unwrap().len(), 1);
+
+        // The admin sees themselves in the full listing (sanity: the admin
+        // is a t-1 user).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let ids: Vec<&str> = json["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&admin_id.as_str()));
+    }
+
+    /// PUT /api/v1/users/:id/deactivate — TenantAdmin-only, and the
+    /// deactivation cascades: the account stops authenticating, and a
+    /// workspace left without an active Owner is recorded ownerless with
+    /// the tenant's TenantAdmins notified.
+    #[tokio::test]
+    async fn deactivate_user_cascades_to_auth_and_ownership() {
+        let state = test_state();
+        let now = 1_700_000_000u64;
+        let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&tenant).await.unwrap();
+
+        // A workspace whose only Owner is the deactivation target.
+        let ws_id = uuid::Uuid::new_v4().to_string();
+        let ws = Workspace::new(
+            Id::new(ws_id.clone()),
+            Id::new("t-1"),
+            format!("deact-ws-{ws_id}"),
+            format!("deact-ws-{ws_id}"),
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let (target_id, target_key) = seed_keyed_user(
+            &state,
+            "deact-target",
+            vec![gyre_domain::UserRole::Developer],
+        )
+        .await;
+        let m = WorkspaceMembership::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(target_id.clone()),
+            Id::new(ws_id.clone()),
+            WorkspaceRole::Owner,
+            Id::new("system"),
+            now,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+
+        // The acting TenantAdmin and a plain Developer.
+        let (admin_id, admin_key) =
+            seed_keyed_user(&state, "deact-admin", vec![gyre_domain::UserRole::Admin]).await;
+        let (_, dev_key) =
+            seed_keyed_user(&state, "deact-dev", vec![gyre_domain::UserRole::Developer]).await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Pre-condition: the target's key authenticates.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {target_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A plain Developer member may not deactivate.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {dev_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Self-deactivation is rejected.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{admin_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Cross-tenant target is rejected.
+        let beta = gyre_domain::Tenant::new(Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+        let mut foreign = User::new(
+            Id::new("foreign-deact"),
+            "foreign-ext",
+            "foreign-deact",
+            now,
+        );
+        foreign.tenant_id = Some(Id::new("t-2"));
+        state.users.create(&foreign).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/foreign-deact/deactivate")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The TenantAdmin deactivates the target (last Owner of ws).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"reason": "leaving the company"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(
+            json["deactivated_at"].as_u64().is_some(),
+            "response must carry the deactivation stamp"
+        );
+
+        // Cascade 1 — the account no longer authenticates with the same key.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {target_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a deactivated user's API key must stop authenticating"
+        );
+
+        // Cascade 2 — the workspace lost its only active Owner: ownerless.
+        assert!(
+            !crate::workspace_ownership::has_active_owner(&state, &Id::new(&ws_id))
+                .await
+                .unwrap(),
+            "a deactivated Owner is not an active Owner"
+        );
+        let record = state
+            .kv_store
+            .kv_get("workspace_ownership", &ws_id)
+            .await
+            .unwrap();
+        assert!(
+            record.is_some(),
+            "the ownerless transition must be recorded"
+        );
+
+        // Cascade 3 — the tenant's TenantAdmins were notified.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new(&admin_id), None, None, None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::WorkspaceOwnerless),
+            "the acting TenantAdmin must have received a WorkspaceOwnerless notification"
+        );
+
+        // The deactivation is audit-logged with the reason.
+        let filter = gyre_ports::AuditQueryFilter {
+            event_type: Some("user_deactivated".to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+        let events = state.audit.query(&filter).await.unwrap();
+        assert_eq!(events.len(), 1, "exactly one user_deactivated audit event");
+        assert_eq!(
+            events[0].detail["reason"],
+            serde_json::json!("leaving the company")
+        );
+
+        // Deactivation is idempotent — a second call succeeds and keeps the
+        // original stamp.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json2 = body_json(resp).await;
+        assert_eq!(json2["deactivated_at"], json["deactivated_at"]);
     }
 
     // ─── Teams (user-management.md §Team Management) ─────────────────────────

@@ -553,6 +553,16 @@ impl ResourceResolver {
                     "workspace_member",
                     None,
                 ),
+                // NOTE (task-110 rebase onto base 5984177): the four
+                // workspace-invitation paths (POST /invite,
+                // GET /invitations, POST /invite/accept,
+                // DELETE /invitations/:id) are mapped by the task-110
+                // entries further below — resolve() is first-match, and
+                // the task-124 base had registered its membership-row
+                // handlers on the same paths; those routes and their
+                // mappings were removed in favor of task-110's
+                // WorkspaceInvitation model (superset: decline, expiry,
+                // per-tenant policy, cap, background expiry job).
                 // PUT (role change incl. ownership transfer) evaluates as the
                 // "transfer_ownership" action (user-management.md §Ownership
                 // Transfer & Reclamation); DELETE keeps "delete".
@@ -713,13 +723,20 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/policies/effective", "policy", None),
                 RouteResourceMapping::api("/api/v1/policies/:id", "policy", None),
                 // ── Users / Profile ────────────────────────────────────────
-                // POST /users (create) is admin-only, enforced in-handler.
+                // POST /users (create) is admin-only and GET /users (list)
+                // is TenantAdmin-only, both enforced in-handler.
                 RouteResourceMapping::api("/api/v1/users", "user", None),
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
                 // My workspace invitations (task-110 repair) — implicitly
                 // scoped to the authenticated user like the other me-routes;
                 // the handler filters by caller identity only.
                 RouteResourceMapping::api("/api/v1/users/me/invitations", "user", None),
+                // Tenant-public profile by username (user-management.md
+                // §API > User Management); tenant containment in-handler.
+                RouteResourceMapping::api("/api/v1/users/:username", "user", None),
+                // Deactivation is TenantAdmin-only, enforced in-handler
+                // (same split as POST /users).
+                RouteResourceMapping::api("/api/v1/users/:id/deactivate", "user", None),
                 // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
                 RouteResourceMapping::exempt("/api/v1/notifications"),

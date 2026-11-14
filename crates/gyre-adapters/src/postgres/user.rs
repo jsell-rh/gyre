@@ -39,6 +39,7 @@ struct UserRow {
     last_login_at: Option<i64>,
     tenant_id: Option<String>,
     global_role: String,
+    deactivated_at: Option<i64>,
 }
 
 impl From<UserRow> for User {
@@ -70,6 +71,7 @@ impl From<UserRow> for User {
         u.last_login_at = r.last_login_at.map(|v| v as u64);
         u.tenant_id = r.tenant_id.map(Id::new);
         u.global_role = global_role;
+        u.deactivated_at = r.deactivated_at.map(|v| v as u64);
         u
     }
 }
@@ -104,6 +106,7 @@ struct UserRecord<'a> {
     last_login_at: Option<i64>,
     tenant_id: Option<&'a str>,
     global_role: String,
+    deactivated_at: Option<i64>,
 }
 
 #[derive(Insertable)]
@@ -159,6 +162,7 @@ impl UserRepository for PgStorage {
                 last_login_at: u.last_login_at.map(|v| v as i64),
                 tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
                 global_role: global_role_to_str(&u.global_role).to_string(),
+                deactivated_at: u.deactivated_at.map(|v| v as i64),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -294,6 +298,7 @@ impl UserRepository for PgStorage {
                     users::last_login_at.eq(u.last_login_at.map(|v| v as i64)),
                     users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
                     users::global_role.eq(global_role_to_str(&u.global_role)),
+                    users::deactivated_at.eq(u.deactivated_at.map(|v| v as i64)),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
