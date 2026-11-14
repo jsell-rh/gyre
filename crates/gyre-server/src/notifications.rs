@@ -1269,7 +1269,10 @@ mod tests {
         assert_eq!(msg["type"], "NotificationPush");
         assert_eq!(msg["notification"]["id"], notif.id.as_str());
         assert_eq!(msg["notification"]["user_id"], "user-n1");
-        assert!(owner_rx.try_recv().is_err(), "exactly one push, not a duplicate");
+        assert!(
+            owner_rx.try_recv().is_err(),
+            "exactly one push, not a duplicate"
+        );
 
         // The other user's connection receives nothing.
         assert!(

@@ -1092,11 +1092,15 @@ mod tests {
             "header block must stay exactly 5 header lines, got {header_block:?}"
         );
         assert!(
-            header_lines
-                .iter()
-                .all(|l| ["From:", "To:", "Subject:", "MIME-Version:", "Content-Type:"]
-                    .iter()
-                    .any(|p| l.starts_with(p))),
+            header_lines.iter().all(|l| [
+                "From:",
+                "To:",
+                "Subject:",
+                "MIME-Version:",
+                "Content-Type:"
+            ]
+            .iter()
+            .any(|p| l.starts_with(p))),
             "unexpected header line in block: {header_block:?}"
         );
         assert_eq!(
@@ -1142,13 +1146,9 @@ mod tests {
                 port: 1,
                 from: "gyre@localhost".to_string(),
             };
-            let err = send_email(
-                &cfg,
-                "victim@example.com\r\nBcc: evil@example.com",
-                &email,
-            )
-            .await
-            .expect_err("CRLF recipient must be rejected");
+            let err = send_email(&cfg, "victim@example.com\r\nBcc: evil@example.com", &email)
+                .await
+                .expect_err("CRLF recipient must be rejected");
             assert!(
                 err.to_string().contains("invalid SMTP recipient"),
                 "unexpected error: {err:#}"
