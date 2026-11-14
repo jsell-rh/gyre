@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "abac-policy-engine.md §MCP Integration"
-commits: ["cd372a6cab32dbc7e0ba8ac33600416591ca64e8", "1b63ee4e"]
+commits: ["1b63ee4eb590e181e45e06f5a07aeb62574a55cd", "cd372a6cab32dbc7e0ba8ac33600416591ca64e8"]
 ---
 
 ## Spec Excerpt
