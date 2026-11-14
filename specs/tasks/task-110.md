@@ -2,7 +2,7 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
@@ -100,54 +100,59 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**This round: re-verification of the carried implementation on the new
-base** after the prior candidate's "Development controller" CI check
-failed with logs unavailable (durable finding fcdfa81a). No product code
-changed this round — the invitation flow is the independently approved
-implementation from the prior rounds (entities, ports,
-SQLite/Postgres/mem adapters, migrations 2026-11-13-000063/64/65, the
-five tenant endpoints, workspace invitation lifecycle, CSPRNG + SHA-256
-tokens, per-tenant `InvitationPolicy`, bulk invite, background expiry
-job, ABAC mappings), now merged with base 6ffd6799 (task-130 token
-scoping, which rewrote 400 lines of `auth.rs`).
+**This round: rebase repair onto current main head 1ee52c43** (durable
+finding 08005f87, merge_state DIRTY — the published PR head 6594708e
+conflicted with main after task-112 notification delivery channels and
+task-125 API rows landed). No product code changed: the invitation flow
+is the independently approved implementation from prior rounds (domain
+entities, ports, SQLite/Postgres/mem adapters, migrations
+2026-11-13-000063/64/65, the five tenant endpoints, workspace
+invitation lifecycle, CSPRNG + SHA-256 tokens, per-tenant
+`InvitationPolicy`, bulk invite, background expiry job, ABAC mappings),
+now merged with main 1ee52c43 as merge commit 104fc5e3.
 
-### CI finding investigation
+### Conflicts resolved (source only)
 
-The Development controller job runs only tooling tests
-(`tools/fullsend-dispatcher` Go tests, `scripts/test_dev*.py`,
-`scripts/test_pipeline*.py`, two node suites) — none of which read the
-task-110 diff, and the diff touches no `tools/` or `scripts/` file. Locally:
-node suites pass (7/7, 18/18); the two pipeline-test failures and three
-dev-test failures that occur in this sandbox reproduce **identically on
-a clean worktree of base 6ffd6799** (sandbox cargo-wrapper and
-signal/process artifacts — see `/tmp/stage/review-evidence/`). With logs
-unavailable and nothing reproducible from repo content, the recorded
-failure is consistent with a transient run (the job has a 10-minute
-timeout and timing-sensitive signal tests); re-running it on a fresh
-candidate is the remote-verification step.
+- `gyre-adapters/src/sqlite/mod.rs` — the `migration_000058_backfills_
+  unique_url_safe_usernames` test's exclusion set: both task-110's
+  `2026-11-13-000065_user_tenant_scope` (indexes 000058's tenant_id
+  column, so it cannot run pre-000058; runs in its deployed batch
+  position right after 000058) and task-112's
+  `2026-11-09-000060_user_preferences_channel_shape` (rewrites 000058's
+  flat backfill literal; runs after 000058 followed by the convergence
+  assert) are excluded from `pre` and run explicitly.
+- `specs/coverage/system/user-management.md` — header recomputed against
+  the auto-merged table: rows 5/6/7/25 (task-110) and 16/17/18
+  (task-112) are all implemented in the merged tree; counts 14/36
+  (11 n/a, 0 not-started, 11 task-assigned, 14 implemented, 0 verified).
+- `web/dist` took main's side verbatim (assignment-base state); no
+  rebuild — final integration regenerates and publishes those assets.
 
 ### Merge-integrity and gate evidence (this head)
 
-- `cargo check --all` passes — the task-110 auth additions (local-account
-  auth, invitation acceptance, API-key mint) and task-130's
-  `AgentJwtClaims` rewrite coexist type-safely.
-- CI-diff gates against base 6ffd6799: rustfmt-diff clean, clippy-diff
-  clean (21 Rust files, 0 new warnings).
-- All mechanical checks pass: arch, ABAC route registry, migration
-  versions (incl. SQL portability), hierarchy, dead message kinds, and
-  the full advisory battery (the 3 dead-parameter findings are
-  pre-existing on the base, untouched by this diff).
-- Focused tests: `cargo test -p gyre-adapters` 522 passed / 0 failed
-  (includes the SQLite invitation repositories and mem-port contract
-  tests); `-p gyre-domain -p gyre-ports` compile+run clean.
+- `cargo check --all` passes — the task-110 invitation/auth additions
+  and task-112's `NotificationDispatcher`/channel-preferences wiring
+  coexist type-safely.
+- `cargo fmt --all --check` clean; `cargo clippy -p gyre-adapters`
+  reports zero warnings in the hand-resolved file (remaining warnings
+  are pre-existing on both parents).
+- Mechanical checks pass: architecture lint, migration versions (no new
+  duplicate Diesel versions — 20261113000063/64/65 vs main's
+  20261109000060/61 are distinct), migration SQL portability, ABAC
+  route registry, ABAC exempt handlers.
+- Focused tests: `cargo test -p gyre-adapters` 524 passed / 0 failed —
+  includes the merged `migration_000058_backfills...` (pre + 000058 +
+  m65 + m60 ordering), `migration_000060_rewrites...`, the SQLite
+  invitation repositories, and the mem-port contract tests;
+  `-p gyre-domain -p gyre-ports -p gyre-common` 646 passed / 0 failed.
 - gyre-server test compilation is blocked by this sandbox's 4 GiB build
   wrapper (environment restriction, not a defect): the independent
   verifier must run `cargo nextest run --all` — in particular the 26
   `api::invitations` tests (tenant lifecycle, revocation blocks accept,
   expiry job marks expired, bulk invite, non-admin 403, local-mode accept
   mints an authenticating API key, re-invite fresh key, SSO link,
-  workspace lifecycle, cross-tenant containment, `max_pending`
-  cap, `allow_re_invite`).
+  workspace lifecycle, cross-tenant containment, `max_pending` cap,
+  `allow_re_invite`) and task-112's notification-dispatcher tests.
 
 Coverage rows 5, 6, 7, and 25 in
 `specs/coverage/system/user-management.md` remain `implemented` and
