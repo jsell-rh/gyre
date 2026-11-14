@@ -564,6 +564,11 @@ mod tests {
         state.workspaces.create(&ws).await.unwrap();
 
         let mut agent = gyre_domain::Agent::new(Id::new("stale-agent-2"), "paused", 1_000);
+        // The agent must actually live in ws-2: the event's workspace
+        // attribution comes from agent.workspace_id, so without this the
+        // scoping assertion below would compare against a fabricated
+        // bootstrap-"default" scope and could never pass.
+        agent.workspace_id = Id::new("ws-2");
         agent.disconnected_behavior = DisconnectedBehavior::Pause;
         agent.transition_status(AgentStatus::Active).unwrap();
         state.agents.create(&agent).await.unwrap();
