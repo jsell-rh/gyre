@@ -1340,6 +1340,28 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         // 3. API keys -- look up by SHA-256 hash of the raw token.
         if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
             if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+                // Deactivated accounts fail authentication (user-management.md
+                // §API > User Management: deactivation cascades to access).
+                // Checked before the tenant binding so a deactivation takes
+                // effect even for legacy unbound users.
+                if user.is_deactivated() {
+                    tracing::warn!(
+                        user_id = %user.id,
+                        username = %user.username,
+                        "API-key auth for deactivated user; rejecting"
+                    );
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "user account is deactivated",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err(
+                        (StatusCode::FORBIDDEN, "user account is deactivated").into_response()
+                    );
+                }
                 // F1: the tenant scope comes from the user's stored binding.
                 // Fail closed when it is absent: fabricating a tenant here
                 // made API-key admins global superusers across tenants.
@@ -1566,6 +1588,18 @@ pub async fn authenticate_token(
     // 3. API keys.
     if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
         if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+            // Deactivated accounts fail authentication (see the extractor's
+            // API-key path for the rationale).
+            if user.is_deactivated() {
+                tracing::warn!(
+                    user_id = %user.id,
+                    username = %user.username,
+                    "API-key auth for deactivated user; rejecting"
+                );
+                record_auth_failure(state, "api_key", "user account is deactivated", None, None)
+                    .await;
+                return Err("user account is deactivated");
+            }
             // F1: fail closed when the user has no tenant binding (see the
             // extractor's API-key path for the rationale).
             let tenant_id = match user.tenant_id.clone() {
@@ -1790,6 +1824,14 @@ async fn find_or_create_user(
         .as_secs();
 
     if let Some(mut existing) = state.users.find_by_external_id(external_id).await? {
+        // Deactivated accounts cannot log back in via SSO
+        // (user-management.md §API > User Management: deactivation is
+        // TenantAdmin-initiated and outlives the user's IdP session — a
+        // fresh OIDC login for a deactivated subject is still that
+        // deactivated account, not a new one).
+        if existing.is_deactivated() {
+            anyhow::bail!("user account is deactivated; contact a tenant administrator");
+        }
         // Spec §User Entity: last_login_at is set on each authentication.
         // username/external_id stay untouched (immutable after creation).
         existing.record_login(now);
