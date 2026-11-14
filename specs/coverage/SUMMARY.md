@@ -4,12 +4,12 @@
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
-| abac-policy-engine.md | 19 | 2 | 0 | 3 | 14 | 0 | 82% |
+| abac-policy-engine.md | 19 | 2 | 0 | 1 | 16 | 0 | 94% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| agent-gates.md | 25 | 9 | 0 | 14 | 2 | 0 | 12% |
+| agent-gates.md | 25 | 9 | 0 | 13 | 3 | 0 | 18% |
 | agent-runtime.md | 33 | 1 | 0 | 10 | 22 | 0 | 68% |
-| analytics.md | 12 | 0 | 0 | 4 | 8 | 0 | 66% |
+| analytics.md | 12 | 0 | 0 | 0 | 12 | 0 | 100% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |
 | business-continuity.md | 10 | 4 | 0 | 0 | 5 | 1 | 100% |
 | dependency-graph.md | 19 | 3 | 0 | 5 | 2 | 9 | 68% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 11 | 0 | 12 | 13 | 0 | 52% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **220** | **0** | **200** | **219** | **163** | **65%** |
+| **TOTAL** | **802** | **220** | **0** | **193** | **226** | **163** | **66%** |
