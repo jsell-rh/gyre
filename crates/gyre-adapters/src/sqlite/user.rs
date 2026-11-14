@@ -221,6 +221,30 @@ impl UserRepository for SqliteStorage {
         .await?
     }
 
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        let pool = Arc::clone(&self.pool);
+        let email = email.to_lowercase();
+        tokio::task::spawn_blocking(move || -> Result<Vec<User>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Case-insensitive match via lower() (portable across SQLite
+            // and PostgreSQL): invitation emails are normalized to
+            // lowercase, but SSO-provisioned accounts store the IdP's raw
+            // casing. Email is not unique (same person, multiple
+            // tenants), so every match is returned; callers scope by
+            // tenant. Ordered by creation for a deterministic pick.
+            let rows = users::table
+                .filter(
+                    diesel::dsl::sql::<diesel::sql_types::Bool>("lower(users.email) = ")
+                        .bind::<diesel::sql_types::Text, _>(email),
+                )
+                .order(users::created_at.asc())
+                .load::<UserRow>(&mut *conn)
+                .context("find users by email")?;
+            Ok(rows.into_iter().map(User::from).collect())
+        })
+        .await?
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<User>> {
@@ -281,6 +305,39 @@ impl UserRepository for SqliteStorage {
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let user_id = user_id.clone();
+        let new_external_id = new_external_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Port contract: fail if another user already owns the new
+            // external_id, or the target user does not exist.
+            let dup: Option<String> = users::table
+                .filter(
+                    users::external_id
+                        .eq(new_external_id.as_str())
+                        .and(users::id.ne(user_id.as_str())),
+                )
+                .select(users::id)
+                .first::<String>(&mut *conn)
+                .optional()
+                .context("check external_id owner")?;
+            if let Some(owner) = dup {
+                anyhow::bail!("external_id already owned by user {owner}");
+            }
+            let updated = diesel::update(users::table.find(user_id.as_str()))
+                .set(users::external_id.eq(new_external_id.as_str()))
+                .execute(&mut *conn)
+                .context("claim external_id")?;
+            if updated == 0 {
+                anyhow::bail!("cannot claim external_id for user {user_id}: not found");
+            }
             Ok(())
         })
         .await?
@@ -421,6 +478,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tenant_scope_and_global_role_round_trip() {
+        // TASK-110 repair F1: tenant_id and global_role were silently
+        // dropped by the DB adapters (no columns). The workspace
+        // invitation flow keys tenant containment on user.tenant_id, so
+        // a DB-backed deployment rejected every invitee. This kills that
+        // regression: create → read back through real SQLite.
+        let (_tmp, s) = setup();
+        let mut u = make_user("u-tenant", "tenant:acme:email:a@x.com", "alice");
+        u.tenant_id = Some(Id::new("acme"));
+        u.global_role = gyre_domain::GlobalRole::TenantAdmin;
+        UserRepository::create(&s, &u).await.unwrap();
+        let found = s
+            .find_by_external_id("tenant:acme:email:a@x.com")
+            .await
+            .unwrap()
+            .expect("user persisted");
+        assert_eq!(found.tenant_id, Some(Id::new("acme")));
+        assert_eq!(found.global_role, gyre_domain::GlobalRole::TenantAdmin);
+
+        // Update path also persists both fields.
+        let mut reloaded = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        reloaded.tenant_id = Some(Id::new("acme2"));
+        reloaded.global_role = gyre_domain::GlobalRole::Member;
+        UserRepository::update(&s, &reloaded).await.unwrap();
+        let after = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.tenant_id, Some(Id::new("acme2")));
+        assert_eq!(after.global_role, gyre_domain::GlobalRole::Member);
+
+        // A legacy tenant-less user still reads back as Member with no
+        // tenant (pre-migration rows get the column defaults).
+        let legacy = make_user("u-legacy", "local:legacy", "legacy");
+        UserRepository::create(&s, &legacy).await.unwrap();
+        let found_legacy = s
+            .find_by_external_id("local:legacy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_legacy.tenant_id, None);
+        assert_eq!(found_legacy.global_role, gyre_domain::GlobalRole::Member);
+    }
+
+    #[tokio::test]
     async fn find_by_external_id() {
         let (_tmp, s) = setup();
         let u = make_user("u1", "keycloak-sub-123", "bob");
@@ -534,6 +639,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claim_external_id_is_the_sanctioned_repoint() {
+        // Port contract: update() rejects external_id changes, but the
+        // invitation account-link (user-management.md §Tenant-Level User
+        // Onboarding: "SSO mode: ... then account linked") must re-point a
+        // local-mode account's external_id at the SSO subject. The claim
+        // transition is the only sanctioned path — and it must refuse to
+        // steal an external_id another user already owns, or the claim
+        // would create the duplicate external_id the create() contract
+        // exists to prevent.
+        let (_tmp, s) = setup();
+        let invited = make_user("u-inv", "tenant:acme:email:a@x.com", "alice");
+        UserRepository::create(&s, &invited).await.unwrap();
+        let other = make_user("u-other", "keycloak-sub-other", "bob");
+        UserRepository::create(&s, &other).await.unwrap();
+
+        // Claim succeeds and is visible through the new external_id only.
+        UserRepository::claim_external_id(&s, &invited.id, "keycloak-sub-alice")
+            .await
+            .unwrap();
+        let claimed = s
+            .find_by_external_id("keycloak-sub-alice")
+            .await
+            .unwrap()
+            .expect("account re-pointed to SSO subject");
+        assert_eq!(claimed.id, invited.id);
+        assert!(
+            s.find_by_external_id("tenant:acme:email:a@x.com")
+                .await
+                .unwrap()
+                .is_none(),
+            "old namespaced external_id must no longer resolve"
+        );
+
+        // Claiming an external_id owned by another user is rejected, and
+        // the rejected claim must not have touched either account.
+        let err = UserRepository::claim_external_id(&s, &invited.id, "keycloak-sub-other").await;
+        assert!(err.is_err(), "claim must refuse a taken external_id");
+        assert_eq!(
+            s.find_by_external_id("keycloak-sub-alice")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            invited.id
+        );
+
+        // Unknown user is rejected (no silent no-op).
+        assert!(
+            UserRepository::claim_external_id(&s, &Id::new("u-missing"), "keycloak-sub-x")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn update_persists_login_stamp_and_preferences() {
         // record_login + preferences updates must persist through update().
         let (_tmp, s) = setup();
@@ -582,5 +742,46 @@ mod tests {
             .unwrap();
         ApiKeyRepository::delete(&s, "gyre_key_abc").await.unwrap();
         assert!(s.find_user_id("gyre_key_abc").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn find_by_email_is_case_insensitive_and_returns_all_matches() {
+        // Task-110 review F1: invitation acceptance links an existing
+        // SSO-provisioned account by email. SSO accounts store the IdP's
+        // raw casing while invitation emails are normalized to lowercase,
+        // so the lookup must be case-insensitive; and email is NOT unique
+        // (the spec's cross-tenant model has the same person in two
+        // tenants), so every match is returned for the caller to scope by
+        // tenant. Exercises the real SQL (lower() comparison) through
+        // SQLite.
+        let (_tmp, s) = setup();
+        let mut sso = make_user("u-sso", "keycloak-subj-1", "sso-alice");
+        sso.email = Some("Sso-Alice@Example.com".to_string());
+        sso.tenant_id = Some(Id::new("acme"));
+        UserRepository::create(&s, &sso).await.unwrap();
+        let mut other_tenant = make_user(
+            "u-other",
+            "tenant:other:email:sso-alice@example.com",
+            "sso-alice-2",
+        );
+        other_tenant.email = Some("sso-alice@example.com".to_string());
+        other_tenant.tenant_id = Some(Id::new("other"));
+        UserRepository::create(&s, &other_tenant).await.unwrap();
+        let mut no_email = make_user("u-none", "ext-none", "none");
+        no_email.email = None;
+        UserRepository::create(&s, &no_email).await.unwrap();
+
+        let matches = s.find_by_email("sso-alice@example.com").await.unwrap();
+        let ids: Vec<&str> = matches.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["u-sso", "u-other"],
+            "both tenant accounts match (case-insensitive), ordered by creation"
+        );
+        assert!(s
+            .find_by_email("nobody@example.com")
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

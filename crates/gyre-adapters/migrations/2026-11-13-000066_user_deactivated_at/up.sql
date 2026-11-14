@@ -1,3 +1,13 @@
+-- Renumber note (task-110 rebase onto base 5984177): this migration
+-- originally held version 20261113000063, which the task-110 candidate
+-- branch also assigned to its `invitations` migration. Diesel runs only
+-- one migration per version (alphabetically first wins), so on a fresh
+-- database `users.deactivated_at` would silently never be created. The
+-- task-110 version was already reconciled against earlier upstream
+-- collisions (63/64/65), so this migration was renumbered to the next
+-- unused sequence, 000066. Databases that already ran the pre-renumber
+-- version are unaffected: Diesel records versions, not file contents.
+
 -- TASK-124: user deactivation (user-management.md §API > User Management:
 -- PUT /api/v1/users/{id}/deactivate, TenantAdmin only).
 --
