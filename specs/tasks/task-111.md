@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b942084c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d", "fd4351b9988673828b61a2b1379057db07548018"]
 ---
 
 ## Spec Excerpt
@@ -87,35 +87,35 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management is implemented end-to-end against `user-management.md` §Session Management by this branch's reviewed history (commits above; head of the implementation work: `ed6a9adc`; latest repair: the merge commit `52ad675e`).
+Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history (head of the implementation work: `ed6a9adc`; prior verification repairs through the task-112 base merge `52ad675e`). This round repairs the three findings from the last verification run, which merged the candidate onto the new assignment base `bfc36c9c` (task-146: analytics event schema).
 
-### Implementation
+### Implementation (unchanged this round)
 
-- **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields; only the SHA-256 of the session token is stored (`hash_api_key`), never plaintext; `is_active(now)` = not revoked and not expired.
-- **Port:** `SessionRepository` in `gyre-ports/src/user_profile.rs` — create (duplicate-id fails), list_for_user, find_by_id, find_by_token_hash, find_by_credential_and_device, touch (slides TTL, throttled), revoke (owner-scoped), revoke_all_for_user, delete_expired_before (never deletes revoked rows — the durable sign-out record). Implemented by SQLite, PostgreSQL, and mem adapters on shared migration `2026-10-08-000063_user_sessions`.
-- **Auth integration (`auth.rs`):** on successful API-key auth, the session for (credential, IP, User-Agent) is found or minted; `last_active_at` + sliding `expires_at` refreshed at most once per 60s; a revoked session for the device rejects auth with 401; `credential_revoked` rejects the key when every session for it is revoked ("sign out everywhere") — enforced on both the HTTP extractor and the WS/TTY `authenticate_token` paths. IP comes from `ConnectInfo` socket peer only (no forwarded-header trust, CWE-348).
-- **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with Admin-role **and tenant-containment** per-handler checks; target-user existence 404s.
-- **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
+- **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields; only the SHA-256 of the session token is stored, never plaintext.
+- **Port + adapters:** `SessionRepository` (create, list, find, touch, revoke, revoke_all, delete_expired) implemented by SQLite, PostgreSQL, and mem adapters.
+- **Auth integration:** sessions minted on API-key auth keyed by (credential, IP, User-Agent); `last_active_at` + sliding expiry refreshed at most once per 60s; revoked sessions reject auth on both HTTP and WS paths; IP from socket peer only.
+- **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with tenant-containment checks.
+- **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days.
 
-### This round's repair (rebase onto the task-112 base `1ee52c43`)
+### This round's repair (`fd4351b9`, on merge `92ed0c5d` of base `bfc36c9c`)
 
-The assignment base `1ee52c43` (task-112: notification delivery channels & routing) diverged from this branch at `b6892403`. Merged the base in as `52ad675e`, resolving seven content conflicts where task-112's `UserChannelPreferenceRepository` and task-111's `SessionRepository` land in the same files (`gyre-ports/src/lib.rs`, `gyre-ports/src/user_profile.rs`, `gyre-adapters/src/{postgres,sqlite}/user_profile.rs`, `gyre-server/src/api/mod.rs`, `gyre-server/src/lib.rs`, coverage matrix). Resolution keeps **both** sides: both port traits and re-exports, both schema imports, both `store!` wiring blocks, both route groups, both adapter impls, and both test sets (the sqlite channel-prefs round-trip test from the base sits next to the session tests). One semantic fallout fixed by hand: `upsert_batch` in the notification-preference impls now calls `UserNotificationPreferenceRepository::upsert(self, pref)` explicitly, because the merged storage types implement two `upsert` traits and the bare `self.upsert(...)` no longer resolves. The coverage header recounts the merged matrix (11 n/a, 14 task-assigned, 11 implemented — rows 12 and 16–18 both present). `web/dist` is restored to the assignment base; final integration rebuilds and publishes those assets remotely.
+The base `bfc36c9c` (task-146) and this branch both descend from `1ee52c43`; git auto-merged them without textual conflicts, leaving three semantic failures that the verifier caught (10 compile errors, duplicate migration version, fabricated scope literals):
+
+1. **`MergeRequest::new` call sites (10 × E0061/E0277):** this branch's task-111 verification repair made the constructor take `workspace_id` as its 3rd parameter; task-146's new test hunks in `api/specs.rs` and `merge_processor.rs` still used the old 6-arg form with a post-hoc `mr.workspace_id` assignment. All five sites now pass `workspace_id` in the constructor (redundant assignments dropped, `mut` adjusted).
+2. **Migration version collision (20261008000063):** task-146's `analytics_scope_columns` (from the base) and task-111's `user_sessions` both claimed sequence 000063 — the alphabetically-later `user_sessions` would silently never run. Renumbered `user_sessions` to the next unused sequence **000064**; coverage-matrix references updated.
+3. **Fabricated `tenant_id: "default"` scope literals (4):** task-146's analytics edits moved the four construction literals in `sqlite/postgres analytics.rs` off their frozen exemption lines (115/225 → 154/427, 171/443). Fixed for real rather than re-pointing exemptions (explicitly forbidden): the analytics `record()`/`record_cost()` rows now carry the storage handle's resolved `self.tenant_id` — the same form as the merge_request/repository `create()` rows from the earlier task-111 repair. All six exemption entries deleted (four fixed analytics sites, two dead `activity.rs` lines referencing files removed by task-207) and `FROZEN_EXEMPTION_COUNT` lowered 6→0 in both the shell header and the Python body.
 
 ### Test evidence
 
-In-sandbox this round (log: `/tmp/stage/review-evidence/merge-repair-round.log`):
+In-sandbox this round (log: `/tmp/stage/review-evidence/task-111-repair-round.log`):
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-ports -p gyre-adapters -p gyre-server -p gyre-domain` — clean (server type-checked; full server test compilation deferred per the 4 GiB budget).
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib user_profile` — 13 passed, 0 failed (9 session-repository tests incl. duplicate-id, owner-scoped revoke, retention-never-deletes-revoked, TTL slide; channel-prefs round-trip from the base; notification/token tests).
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain` — 509 + 8 passed, 0 failed.
-- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-ports -p gyre-adapters --all-targets` — exit 0; only the pre-existing async_trait `must_use` warnings, none new.
-- Mechanical gates: `check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh` (85 handlers), `check-mcp-write-tools.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh` — all OK.
-- `rustfmt --edition 2021 --check` on every resolved file — clean.
+- `SKIP_WEB_BUILD=1 cargo check --workspace --all-targets` — clean (reproduces and clears the verifier's 10 errors; server test *execution* deferred per the 4 GiB budget).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib` — 530 passed, 0 failed (includes the 9 session-repository tests and all 16 analytics tests exercising the re-scoped `record()`/`record_cost()` insert paths).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain` — 510 + 8 passed, 0 failed.
+- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-ports -p gyre-adapters --all-targets` — no errors; only pre-existing async_trait `must_use` warnings (all in base's unchanged `gyre-ports/src/analytics.rs` trait), none in edited files.
+- All 19 mechanical gates pass, including the three that failed in verification: `check-migration-versions.sh`, `check-scope-literal-defaults.sh`, and the workspace compile; rustfmt clean on all changed files; `check-task-commit-attribution.sh` OK.
 
 Required in the independent verifier (large gyre-server test compilation deferred per the 4 GiB budget):
 
-- `SKIP_WEB_BUILD=1 cargo test --all` — repo-wide acceptance criterion (both task-111 session suites and task-112 channel/dispatcher suites).
-- `SKIP_WEB_BUILD=1 cargo clippy` scoped to branch-changed files.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::users` and `auth` — the session-management surface.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` notification/dispatcher modules — the task-112 surface carried by this merge.
-- Full mechanical gate suite (CI).
+- `cargo test -p gyre-server --lib merge_processor` and `cargo test -p gyre-server --lib api::specs` — in particular the five repaired tests: `reject_spec_records_mr_closed_analytics_events`, `gate_failure_during_selection_records_queue_processed_failed`, `spec_policy_block_records_queue_processed_failed`, `circuit_breaker_cancel_records_queue_processed_skipped`, `queue_merge_records_mr_merged_analytics_event`.
+- The task-111 session test suites already run green in prior rounds (`users` sessions, `auth` session tracking) and are unaffected by this round's changes.
