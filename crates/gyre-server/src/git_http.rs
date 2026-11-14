@@ -8536,6 +8536,33 @@ specs:
         }
     }
 
+    /// Poll until the user has a notification of the given kind. Persona
+    /// owner notifications are written by a post-receive stage that runs
+    /// AFTER the approval task is created, so the notification can lag the
+    /// task — checking it exactly once races the background job.
+    async fn wait_for_notification(
+        state: &Arc<crate::AppState>,
+        user_id: &str,
+        kind: gyre_common::NotificationType,
+    ) -> gyre_common::Notification {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user_id), None, None, None, None, None, &[], 100, 0)
+                .await
+                .unwrap();
+            if let Some(n) = notifs.into_iter().find(|n| n.notification_type == kind) {
+                return n;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "notification of kind {kind:?} for user {user_id:?} was never created"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     #[test]
     fn parse_persona_changes_added_modified_deleted() {
         let input =
@@ -8787,28 +8814,14 @@ specs:
         // Exactly one approval task for this persona (no duplicates).
         assert_eq!(tasks.iter().filter(|t| t.title == title).count(), 1);
 
-        // The owner was notified.
-        let notifs = state
-            .notifications
-            .list_for_user(
-                &Id::new("user-1"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                &[],
-                100,
-                0,
-            )
-            .await
-            .unwrap();
-        let notif = notifs
-            .iter()
-            .find(|n| {
-                n.notification_type == gyre_common::NotificationType::PersonaChangePendingApproval
-            })
-            .expect("owner must be notified");
+        // The owner was notified (polled: the notification is written after
+        // the approval task by the same background job).
+        let notif = wait_for_notification(
+            &state,
+            "user-1",
+            gyre_common::NotificationType::PersonaChangePendingApproval,
+        )
+        .await;
         assert_eq!(notif.title, title);
         assert_eq!(notif.source.entity_type, "persona");
         assert_eq!(notif.source.entity_id, "security");

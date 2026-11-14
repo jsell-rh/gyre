@@ -998,8 +998,19 @@ mod tests {
         .await;
         let notifs = notifs_for(&state, "user-n1").await;
         assert_eq!(notifs.len(), 2);
+        // Select by source identity, never by list index: list_for_user
+        // sorts by (priority_rank asc, created_at desc) and notify_rich
+        // timestamps at whole-second granularity, so when the two calls
+        // straddle a wall-clock second boundary the newer unknown-workspace
+        // notification sorts FIRST and index [1] is the known-workspace
+        // notification, whose legitimate deep link then reads as a
+        // fabricated one (CI flake, run 43585665655).
+        let unknown_ws = notifs
+            .iter()
+            .find(|n| n.source.entity_id == "ws-does-not-exist")
+            .expect("notification sourced from the unknown workspace");
         assert!(
-            notifs[1].action_url.is_none(),
+            unknown_ws.action_url.is_none(),
             "unresolvable workspace must not fabricate a link"
         );
     }
