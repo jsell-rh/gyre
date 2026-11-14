@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Merge Processor Integration"
-commits: ["bfae8b786ac08cf87f081f2c77f5d9dbeb2868eb", "a05c7286ac53a17c2bd6957e3285c191c10fae1b"]
+commits: ["bfae8b786ac08cf87f081f2c77f5d9dbeb2868eb", "a05c7286ac53a17c2bd6957e3285c191c10fae1b", "38f3581880a97a3e2a4b41fca63b2cbb7ec968fe"]
 ---
 
 ## Spec Excerpt
@@ -125,6 +125,25 @@ still hollow:
   name/type, status, spec_ref, attempt, gate_agent_id, agent_id) and
   title, mirroring the attempt-1 assertions. No production code changed
   in this round.
+
+### Verification repair (round 2 — clippy changed-lines gate)
+
+- Finding dc04012 (checks.sh exit 1): the changed-lines clippy gate
+  flagged `crates/gyre-ports/src/quality_gate.rs:29
+  clippy::double_must_use`. Cause: commit a05c7286 added
+  `delete_by_mr_id_and_gate_id` to `GateResultRepository`, and
+  async-trait 0.1.89 injects `#[must_use]` into every expanded trait
+  method while the boxed-future return is already `#[must_use]`
+  (Future), so the modified trait newly emitted the upstream lint.
+  Repair: the crate's established trait-level
+  `#[allow(clippy::double_must_use)]` (same form as `repository.rs`,
+  `spec_approval.rs`, `graph.rs`). Attribute-only change; `clippy -p
+  gyre-ports --all-targets` drops from 228 to 224 warnings, remaining
+  `quality_gate.rs` warnings are the pre-existing
+  `QualityGateRepository` line-7 baseline on unchanged lines.
+  Everything else in the failed checks.sh run (rustfmt changed-lines,
+  architecture lints, all `scripts/check-*` gates, workspace cargo
+  check, npm ci + vite build) passed per the retained findings.log.
 
 ### Test evidence
 
