@@ -207,6 +207,35 @@ describe('TenantSettings', () => {
     expect(container.querySelectorAll('[data-testid="tenant-user-row"]').length).toBe(1);
   });
 
+  it('Users tab renders resolved i18n strings, never raw tenant_settings.users.* keys', async () => {
+    // Regression guard (review 44b2bd1d): en.json once lacked
+    // tenant_settings.users.col_role / .count_note, so the Users table
+    // header and count note rendered the literal dotted key paths —
+    // svelte-i18n falls back to the raw key for missing entries.
+    api.me.mockResolvedValue({ id: 'u-admin', username: 'admin', tenant_id: 't-1' });
+    api.listUsers.mockResolvedValue({
+      users: [
+        { id: 'u-1', username: 'alice', global_role: 'Member', created_at: 1690000000, deactivated_at: null },
+        { id: 'u-admin', username: 'admin', global_role: 'TenantAdmin', created_at: 1690000000, deactivated_at: null },
+      ],
+      total: 2,
+    });
+    const { container } = render(TenantSettings);
+    const table = await waitFor(() => {
+      const el = container.querySelector('[data-testid="tenant-users-table"]');
+      expect(el).toBeTruthy();
+      return el;
+    }, { timeout: 3000 });
+    // Role column header resolves to real copy.
+    expect(table.querySelector('thead').textContent).toContain('Role');
+    // Count note interpolates shown/total.
+    const panel = container.querySelector('[data-testid="tenant-tab-users"]');
+    expect(panel.textContent).toContain('Showing 2 of 2 users.');
+    // Any future missing key in this namespace renders as its raw dotted
+    // path — none may leak into the page.
+    expect(panel.textContent).not.toContain('tenant_settings.users.');
+  });
+
   it('Users tab deactivates a user through the API', async () => {
     window.prompt = vi.fn(() => 'offboarding');
     window.confirm = vi.fn(() => true);
