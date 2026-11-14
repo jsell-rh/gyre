@@ -245,7 +245,8 @@ pub struct NotificationParams {
     /// repo.
     pub repo_id: Option<String>,
     /// Four-level priority name (Low/Medium/High/Urgent), case-insensitive —
-    /// widens to the HSI §8 rank band it covers.
+    /// filters by the type-derived band (same derivation as the response's
+    /// `priority_level` field).
     pub priority: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
@@ -344,28 +345,41 @@ async fn list_my_notifications_impl(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
     let repo_id = params.repo_id.as_deref().map(Id::new);
-    // `?priority=` takes the four-level name (Low/Medium/High/Urgent,
-    // case-insensitive) and widens to the HSI §8 rank band it covers so the
-    // stored rank column can serve the filter. The rank bands are an
-    // Inbox-ordering approximation on the numeric scale — the entity's
-    // four-level band is type-derived and independent of it (amended
-    // §Notification Entity membership table; see
-    // NotificationPriority::for_notification_type).
-    let (band_min, band_max) = match params.priority.as_deref() {
-        Some(level) => {
-            let normalized = level.trim().to_ascii_lowercase();
-            let parsed = NotificationPriority::from_level_str(&normalized).ok_or_else(|| {
-                ApiError::InvalidInput(format!(
-                    "invalid priority filter '{level}': expected one of Low, Medium, High, Urgent"
-                ))
-            })?;
-            let band = parsed.rank_band();
-            (Some(band.0), Some(band.1))
-        }
-        None => (None, None),
-    };
-    let min_priority = params.min_priority.or(band_min);
-    let max_priority = params.max_priority.or(band_max);
+    // `?type=` is an exact-match filter on the persisted type string.
+    // `?priority=` filters by the entity's four-level band, which derives
+    // from the notification TYPE (amended §Notification Entity membership
+    // table) — never from the HSI §8 numeric rank, so it cannot be served
+    // by the stored rank column's min/max bounds (SpecApprovalRequested is
+    // rank 2 yet High; CascadeTestTriggered rank 4 yet Low; SecretExpiring
+    // rank 7 yet High). Expand the level to the set of persisted type
+    // strings whose band is that level — legacy DB names of renamed
+    // variants included, so pre-unification rows filter by their band too —
+    // and intersect with `?type=` when both are given. The filter and the
+    // response's `priority_level` field therefore share one derivation and
+    // can never disagree.
+    let mut notification_types: Option<Vec<String>> = params
+        .notification_type
+        .as_deref()
+        .map(|t| vec![t.to_string()]);
+    if let Some(level) = params.priority.as_deref() {
+        let normalized = level.trim().to_ascii_lowercase();
+        let parsed = NotificationPriority::from_level_str(&normalized).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "invalid priority filter '{level}': expected one of Low, Medium, High, Urgent"
+            ))
+        })?;
+        let band_types = parsed.notification_type_strings();
+        notification_types = Some(match notification_types {
+            Some(requested) => requested
+                .into_iter()
+                .filter(|t| band_types.contains(&t.as_str()))
+                .collect(),
+            None => band_types.into_iter().map(str::to_string).collect(),
+        });
+    }
+    let type_filter: Option<Vec<&str>> = notification_types
+        .as_ref()
+        .map(|ts| ts.iter().map(String::as_str).collect());
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
     let notifications = state
@@ -373,9 +387,9 @@ async fn list_my_notifications_impl(
         .list_for_user(
             &user_id,
             workspace_id.as_ref(),
-            min_priority,
-            max_priority,
-            params.notification_type.as_deref(),
+            params.min_priority,
+            params.max_priority,
+            type_filter.as_deref(),
             repo_id.as_ref(),
             limit,
             offset,
@@ -2187,6 +2201,22 @@ mod tests {
             1_700_000_001,
         );
         state.create_notification(&no_repo).await.unwrap();
+        // Rank/band divergence (amended §Notification Entity membership
+        // table): SpecApprovalRequested is numeric rank 2 — inside the Urgent
+        // rank band (1–2) — yet its band is High. Seeded specifically so the
+        // `?priority=` filter cannot pass by rank-band widening: the old
+        // rank-derived filter returned it under ?priority=urgent (labeled
+        // priority_level "High") and dropped it under ?priority=high.
+        let diverging = Notification::new(
+            Id::new("notif-spec-3"),
+            Id::new("ws-default"),
+            Id::new("system"),
+            NotificationType::SpecApprovalRequested, // rank 2 → High band
+            "Spec spec-1 awaiting approval",
+            "default",
+            1_700_000_002,
+        );
+        state.create_notification(&diverging).await.unwrap();
 
         let app = crate::api::api_router().with_state(state);
 
@@ -2206,9 +2236,9 @@ mod tests {
             body_json(resp).await
         }
 
-        // Unfiltered: both seeded notifications.
+        // Unfiltered: all three seeded notifications.
         let json = list(&app, "/api/v1/notifications").await;
-        assert_eq!(json["notifications"].as_array().unwrap().len(), 2);
+        assert_eq!(json["notifications"].as_array().unwrap().len(), 3);
 
         // ?type= filter (spec filter surface).
         let json = list(&app, "/api/v1/notifications?type=AgentCompleted").await;
@@ -2222,20 +2252,53 @@ mod tests {
         assert_eq!(notifs.len(), 1, "repo filter must narrow to the match");
         assert_eq!(notifs[0]["id"], "notif-spec-1");
 
-        // ?priority= filter — four-level name widens to its rank band:
-        // GateFailure (rank 3) is High, AgentCompleted (rank 9) is Low.
+        // ?priority= filters by the TYPE-derived band (the same derivation
+        // as the response's priority_level field), never by the HSI rank
+        // band: GateFailure (rank 3, High) and SpecApprovalRequested
+        // (rank 2 — inside the Urgent rank band — yet High) are High;
+        // AgentCompleted (rank 9) is Low.
         let json = list(&app, "/api/v1/notifications?priority=high").await;
         let notifs = json["notifications"].as_array().unwrap();
         assert_eq!(
             notifs.len(),
-            1,
-            "priority=high must match only the High item"
+            2,
+            "priority=high must match both High items, including the rank-2 divergence"
         );
-        assert_eq!(notifs[0]["id"], "notif-spec-1");
+        let ids: Vec<&str> = notifs.iter().map(|n| n["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"notif-spec-1"));
+        assert!(ids.contains(&"notif-spec-3"));
+        assert_eq!(
+            notifs.iter().find(|n| n["id"] == "notif-spec-3").unwrap()["priority_level"],
+            "High",
+            "the filter and the priority_level field must agree on the diverging type"
+        );
+        // The old rank-band widening returned the rank-2 type under
+        // ?priority=urgent while labeling it High — the divergence this
+        // filter must not reproduce.
+        let json = list(&app, "/api/v1/notifications?priority=urgent").await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(
+            notifs.len(),
+            0,
+            "priority=urgent must not match the rank-2 High-band type"
+        );
         let json = list(&app, "/api/v1/notifications?priority=low").await;
         let notifs = json["notifications"].as_array().unwrap();
         assert_eq!(notifs.len(), 1, "priority=low must match only the Low item");
         assert_eq!(notifs[0]["id"], "notif-spec-2");
+
+        // ?type= and ?priority= intersect: SpecApprovalRequested is not in
+        // the Low band, so the combination matches nothing.
+        let json = list(
+            &app,
+            "/api/v1/notifications?type=SpecApprovalRequested&priority=low",
+        )
+        .await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            0,
+            "type and priority filters must intersect"
+        );
 
         // An unknown priority level is a 400, not a silently ignored filter.
         let resp = app

@@ -19,8 +19,23 @@ pub trait NotificationRepository: Send + Sync {
     async fn get(&self, id: &Id, user_id: &Id) -> Result<Option<Notification>>;
 
     /// List notifications for a user. Optionally filtered by workspace, repo,
-    /// and priority range. When `workspace_id` is None, returns notifications
-    /// across all workspaces (tenant Inbox).
+    /// numeric priority range, and a notification-type set. When
+    /// `workspace_id` is None, returns notifications across all workspaces
+    /// (tenant Inbox).
+    ///
+    /// `notification_types` is an exact-match set filter on the persisted
+    /// `notification_type` column: a notification is returned when its
+    /// stored type string is one of the given values. An EMPTY set matches
+    /// nothing (it is a filter, not a no-op). Serves both the `?type=`
+    /// filter and the four-level `?priority=` filter, which expands to the
+    /// set of type strings whose band is that level
+    /// (`NotificationPriority::notification_type_strings`) — the band
+    /// derives from the notification type per the amended §Notification
+    /// Entity membership table, never from the numeric rank, so a level
+    /// filter cannot be expressed as a rank-range query. Callers filtering
+    /// by a level must include the legacy DB names of renamed variants
+    /// (they are part of the expansion) so pre-unification rows keep
+    /// filtering by their band.
     #[allow(clippy::too_many_arguments)] // filter + pagination parameters; pre-existing signature
     async fn list_for_user(
         &self,
@@ -28,7 +43,7 @@ pub trait NotificationRepository: Send + Sync {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
-        notification_type: Option<&str>,
+        notification_types: Option<&[&str]>,
         repo_id: Option<&Id>,
         limit: u32,
         offset: u32,
