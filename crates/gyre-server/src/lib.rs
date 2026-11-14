@@ -59,6 +59,7 @@ pub mod speculative_merge;
 pub(crate) mod explorer_ws;
 pub mod notifications;
 pub mod otlp_receiver;
+pub mod policy_cache;
 pub mod policy_engine;
 pub mod signal_chain;
 pub mod stale_agents;
@@ -396,6 +397,11 @@ pub struct AppState {
     pub personas: Arc<dyn PersonaRepository>,
     /// Full declarative ABAC policy engine (M22.6).
     pub policies: Arc<dyn PolicyRepository>,
+    /// Shared policy-set cache handle (§Performance): `policies` is wrapped
+    /// in a read-through [`policy_cache::CachedPolicyRepository`]; this handle
+    /// is the invalidation entry point for writers that persist policies
+    /// WITHOUT the `PolicyRepository` port (`apply_trust_transition`).
+    pub policy_cache: Arc<policy_cache::PolicyCache>,
     /// Workspace membership repository (M22.8).
     pub workspace_memberships: Arc<dyn WorkspaceMembershipRepository>,
     /// Per-repo access override repository (user-management.md §Repo Access).
@@ -1186,6 +1192,10 @@ pub fn build_state(
     // ABAC engine (which reads through `state.policies`). In DB-backed mode both
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
+    // Shared policy-set cache (§Performance): assigned into AppState both as
+    // the `policies` wrapper's backing cache and as the `policy_cache`
+    // invalidation handle.
+    let policy_cache = Arc::new(policy_cache::PolicyCache::default());
     // Shared workspace store for pure-mem mode: `MemComputeTargetRepository`
     // pairs with `MemWorkspaceRepository` so `has_workspace_references`
     // (agent-runtime.md §3 delete guard) sees real workspace assignments
@@ -1441,10 +1451,20 @@ pub fn build_state(
         ),
         workspaces,
         personas,
-        policies: store!(
-            dyn PolicyRepository,
-            mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
-        ),
+        // §Performance: the policy repository is wrapped in a read-through
+        // cache — policy evaluation happens on every request and must not
+        // hit the store each time. Mutations through the port invalidate
+        // the cache; `apply_trust_transition` (the one out-of-band policy
+        // writer) is invalidated explicitly by its handlers via
+        // `policy_cache`.
+        policies: Arc::new(policy_cache::CachedPolicyRepository::new(
+            store!(
+                dyn PolicyRepository,
+                mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
+            ),
+            Arc::clone(&policy_cache),
+        )) as Arc<dyn PolicyRepository>,
+        policy_cache,
         // Workspace memberships are durable: SQLite/PostgreSQL adapters
         // implement the port (M22.8 schema); mem mode keeps the in-code
         // store. Before task-121 this was unconditionally the mem adapter,

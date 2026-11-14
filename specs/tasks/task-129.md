@@ -3,7 +3,7 @@ title: "Implement ABAC evaluation engine, API, and audit integration"
 spec_ref: "abac-policy-engine.md §Evaluation Engine"
 depends_on:
   - task-128
-progress: not-started
+progress: complete
 coverage_sections:
   - "abac-policy-engine.md §Evaluation Engine"
   - "abac-policy-engine.md §Evaluation Flow"
@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: []
+commits: ["c459a69bb7af15825092f414e7de3603333f9282", "6e712b451a152eab71b9e3e9d53e69643424c25a", "a9f254b21b69ff07384f379502f5fc1cdff789b8", "1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
 ---
 
 ## Spec Excerpt
@@ -142,3 +142,111 @@ pub struct PolicyDecision {
 ## Agent Instructions
 
 Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run Evaluation. Existing ABAC: `gyre-server/src/abac.rs` (current policy evaluation), `abac_middleware.rs` (route protection), `policy_engine.rs` (if exists). Route registration: `gyre-server/src/api/mod.rs`. Policy domain: `gyre-domain/src/policy.rs`. Policy adapter: `gyre-adapters/src/sqlite/policy.rs`. Built-in policy seeding: grep for `builtin_policies\|seed_policies` in the codebase. The evaluation engine must integrate with the existing auth middleware — check `gyre-server/src/auth.rs` for how auth context is available in handlers. Verify API endpoint paths against `api/mod.rs` route registration before implementing.
+
+## Shipped
+
+### ABAC evaluation engine, API, and audit integration (rounds 1–9)
+
+Production code, in the listed commits:
+
+- **Evaluation engine** (`gyre-server/src/policy_engine.rs`): the 10-step
+  flow — subject/resource/action/environment attribute extraction,
+  repo → workspace → tenant policy collection, immutable Deny evaluated
+  first (bypasses priority ordering, cannot be overridden), then
+  priority-DESC with scope specificity (repo > workspace > tenant) and
+  Deny-before-Allow as tiebreakers, AND-condition evaluation,
+  first-match-wins with short-circuit, default deny. `scope_applies` is
+  the single canonical scope filter every evaluation path shares
+  (middleware, dry-run, effective-permissions, merge-time, push-time).
+- **Built-in policies**: the full §Built-In Policies table seeded at
+  startup (`seed_builtin_policies`, fail-closed) — system-full-access
+  (1000, matched by the reserved identity `gyre-system-token`),
+  tenant-isolation (950, fires only when both tenant ids resolve),
+  workspace-membership-required (940, keyed on the membership-store
+  boolean), persona-human-approval (950), agent-repo-scope (750, seeded
+  enabled with the dynamic `$resource.repo_id` reference), the immutable
+  `builtin:require-human-spec-approval`, and default-deny. Built-ins
+  cannot be deleted; immutable ones cannot be overridden; drifted
+  built-ins are refreshed to the code definition.
+- **Performance**: read-through `CachedPolicyRepository` (per-scope set
+  caching, invalidated on every port mutation and on out-of-band trust
+  transitions); membership lookups precomputed into the auth context;
+  mean-latency benchmark over the full seeded set under the 1 ms target.
+- **Audit integration**: every evaluation path (middleware, dry-run,
+  effective, merge-time, push-time) persists a `PolicyDecision` via
+  `record_decision_audit` (denials warn, allowances debug) to the
+  queryable `policy_decisions` store.
+- **API** (`gyre-server/src/api/policies.rs`): list (scope-filtered),
+  create (Admin-only), get, update, delete (not built-ins), dry-run
+  `evaluate`, `decisions` audit query, `effective` permissions with
+  real-store subject attribute resolution — all registered in
+  `api/mod.rs` and the ABAC route registry.
+- **Middleware migration**: `abac_middleware.rs` runs every registered
+  route through the engine (no system-token bypass — the global token
+  is allowed BY `system-full-access`), with reserved-identity and
+  scoped-gate-token containment ahead of evaluation.
+
+### Round-9 verification repair (commit 6e712b45)
+
+Round-8 `cargo test --all` failed 68 gyre-server lib tests. Repaired:
+
+- `mem::test_state` now pre-seeds the startup builtin set into the
+  shared policy store (production parity — main.rs seeds the same set
+  before serving; an empty store made every registered route
+  default-deny the global token after the round-2 bypass removal).
+  Fixture-drift tests updated to the production shape (policies list,
+  effective-permissions subject binding, repo-access dangling-workspace
+  now asserts both the middleware containment 403 and the handler's
+  fail-closed 404, push-attestation audit subject tenant).
+- The three `policy_engine` spec-example tests now carry the addressed
+  `resource.workspace_id`/`resource.repo_id` so the Workspace/Repo-scoped
+  spec-example Denies pass the round-4 scope filter (assertion strength
+  unchanged — the Deny must still outrank the Allow).
+- Two live middleware tests updated to the merged 12-arg
+  `mint_worker_scoped` signature.
+- Resolved the merge onto assignment base 6ffd679 keeping the task-129
+  audit shape in the scoped-token deny block and the worker-scoped
+  re-spawn JWT mint.
+
+### Round-10 verification repair (commit c459a69b)
+
+Round-9 verification (`cargo test --all --quiet`) failed 7 gyre-server
+lib tests — all fixture drift against the round-9 builtin seeding, no
+production defect. Root causes and repairs:
+
+- `api::policies::evaluate_respects_policy_scope`: the out-of-scope
+  ws-B dry-run leg asserted an ANONYMOUS default deny
+  (`matched_policy` null). With the builtin set seeded, the deny is
+  attributed to the tenant-level `default-deny` catchall (priority 1,
+  no conditions — §Policy Composition rule 4, §Built-In Policies
+  table). The assertion now pins `matched_policy` to exactly
+  `builtin-default-deny`: strictly stronger in the production shape,
+  since it proves both that the out-of-scope ws-A Allow stays excluded
+  by the scope filter and that no other policy decides the leg.
+- Six `merge_processor::attestation_abac_tests`: custom fixtures sat at
+  priorities 10–100, below the `builtin-attested-authorization` Allow
+  (150) that `evaluate_attestation_abac` matches first for
+  chain-present work (it sets `subject.attestation_chain_present` —
+  production parity; the passing dry-run equivalents don't set it,
+  which is why only the merge-time tests drifted). Fixtures moved into
+  the user band the builtin's definition documents (200–299): denies to
+  250, allows to 200. Assertions unchanged — same attribute-propagation
+  coverage (chain_depth, root_signer, constraint_count, tenant_id) and
+  same matched-policy attribution.
+
+### Test evidence
+
+- `cargo check -p gyre-server --lib --tests` — clean (this sandbox,
+  build wrapper, 8m19s).
+- `cargo fmt --check -p gyre-server` — clean.
+- `scripts/check-task-commit-attribution.sh` — clean with the restored
+  frontmatter commit list.
+- gyre-server test compilation exceeds this sandbox's 4 GiB cgroup
+  budget (established round 9), so the independent verifier must run:
+  - `cargo test --all --quiet`
+  - focused: `cargo test -p gyre-server --lib attestation_abac`
+  - focused: `cargo test -p gyre-server --lib evaluate_respects_policy_scope`
+  - round-9 focused probes: see the round-9 Shipped notes (controller
+    artifact `round9-test-state-seeding.md`, not a sandbox path)
+  Analysis backing the round-10 fixture repairs (this sandbox):
+  `/tmp/stage/review-evidence/round10-fixture-drift-analysis.md`
