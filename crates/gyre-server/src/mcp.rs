@@ -309,6 +309,28 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "gyre_analytics_decide",
+                "description": "Evaluate a named analytics decision (feature.promote, feature.rollback, gate.effectiveness, agent.performance, budget.headroom, merge_queue.health) or a custom rule DSL",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "decision": {
+                            "type": "string",
+                            "description": "Named decision to evaluate (feature.promote, feature.rollback, gate.effectiveness, agent.performance, budget.headroom, merge_queue.health). With custom_rules present, this is the custom decision's name instead."
+                        },
+                        "context": {
+                            "type": "object",
+                            "description": "Decision context, e.g. {\"flag\": \"new-diff-viewer\", \"baseline_days\": 7}. May scope the decision with workspace_id/repo_id."
+                        },
+                        "custom_rules": {
+                            "type": "array",
+                            "description": "Custom rule DSL rules ({metric, window, threshold, comparison, then, filter?}). First match wins; the decision's default applies otherwise. Omit to evaluate the named built-in decision."
+                        }
+                    },
+                    "required": ["decision"]
+                }
+            },
+            {
                 "name": "conversation_upload",
                 "description": "Upload the agent's full conversation blob for provenance linking (HSI §5). Call this just before agent.complete. The blob is base64-encoded zstd-compressed JSON. Max 10MB before base64 (configurable via GYRE_MAX_CONVERSATION_SIZE).",
                 "inputSchema": {
@@ -909,13 +931,52 @@ async fn validate_tool_scope(
             }
             check_repo_read_target(state, auth, repo, tool_name).await
         }
-        // Remaining read-only platform tools (analytics, messaging,
+        // gyre_analytics_decide addresses scope through its `context`
+        // object (context.workspace_id / context.repo_id name the events
+        // the decision is computed over) — the same scope-addressable
+        // surface as gyre_search's workspace_id arg. A scoped caller may
+        // only compute decisions over its own tier's scope; the shared
+        // core evaluator additionally validates the named scope against
+        // the caller's tenant (validate_decision_scope).
+        "gyre_analytics_decide" => {
+            let ctx = args.get("context").cloned().unwrap_or(json!({}));
+            let ws = ctx
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !ws.is_empty() {
+                let own = match &auth.workspace_id {
+                    Some(w) => w.clone(),
+                    None => {
+                        return Err(format!(
+                            "PERMISSION_DENIED: agent token carries no workspace claim; refusing {tool_name}"
+                        ))
+                    }
+                };
+                if ws != own {
+                    if has_workspace_scopes(auth) {
+                        check_workspace_scope(auth, Some(ws), false, tool_name)?;
+                    } else {
+                        return Err(format!(
+                            "PERMISSION_DENIED: token scope {:?} does not permit deciding over workspace {ws}",
+                            auth.scope
+                        ));
+                    }
+                }
+            }
+            let repo = ctx.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+            if !repo.is_empty() {
+                check_repo_read_target(state, auth, repo, tool_name).await?;
+            }
+            Ok(())
+        }
+        // Remaining read-only platform tools (analytics query, messaging,
         // conversation upload): scoped callers may read within their tier —
-        // analytics returns aggregate counters with no scope-addressable
-        // args, messaging is agent-identity routed and validated per tool,
-        // conversation upload is caller-bound (see the platform-model.md
-        // §Token Scoping coverage row for the per-tool read-surface
-        // justification).
+        // analytics query returns aggregate counters with no
+        // scope-addressable args, messaging is agent-identity routed and
+        // validated per tool, conversation upload is caller-bound (see the
+        // platform-model.md §Token Scoping coverage row for the per-tool
+        // read-surface justification).
         _ => Ok(()),
     }
 }
@@ -2637,6 +2698,61 @@ async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
         other => tool_error(format!(
             "unknown query_type: {other}. Use 'usage', 'compare', or 'top'"
         )),
+    }
+}
+
+/// `gyre_analytics_decide` (analytics.md §MCP Tool: `gyre_analytics_decide`)
+/// — the primary way agent code invokes analytics decisions without raw
+/// HTTP calls. A thin wrapper around the decision API's shared core
+/// evaluators (same functions the HTTP handlers call): with `custom_rules`
+/// present it assembles a `CustomDecisionSpec` and evaluates the rule DSL;
+/// otherwise it evaluates the named built-in decision. No decision logic
+/// lives here — scope validation, event fetching, and evaluation are all
+/// in `api::analytics::evaluate_builtin_decision` /
+/// `evaluate_custom_decision`.
+async fn handle_analytics_decide(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    let decision = match get_str(args, "decision") {
+        Some(d) => d.to_string(),
+        None => return tool_error("missing required field: decision"),
+    };
+    let context = args.get("context").cloned().unwrap_or(json!({}));
+    if !context.is_object() {
+        return tool_error("context must be a JSON object");
+    }
+
+    let result = if let Some(custom_rules) = args.get("custom_rules") {
+        if !custom_rules.is_array() {
+            return tool_error("custom_rules must be an array of rule DSL objects");
+        }
+        // Assemble the custom decision spec from the tool arguments: the
+        // `decision` arg names it, `context` scopes it, `custom_rules` are
+        // the DSL rules, and an optional `default` outcome fills the
+        // spec's default ("default" otherwise, matching the HTTP body
+        // shape of POST /api/v1/analytics/decide/custom).
+        let mut body = json!({
+            "name": decision,
+            "rules": custom_rules,
+            "context": context,
+        });
+        if let Some(default) = args.get("default") {
+            body["default"] = default.clone();
+        }
+        let spec = match gyre_domain::decisions::CustomDecisionSpec::parse(&body) {
+            Ok(spec) => spec,
+            Err(e) => return tool_error(format!("invalid custom decision: {e}")),
+        };
+        crate::api::analytics::evaluate_custom_decision(state, auth, &spec).await
+    } else {
+        crate::api::analytics::evaluate_builtin_decision(state, auth, &decision, context).await
+    };
+
+    match result {
+        Ok(response) => tool_result(serde_json::to_string_pretty(&response).unwrap_or_default()),
+        Err(e) => tool_error(format!("analytics decide failed: {e}")),
     }
 }
 
@@ -4810,6 +4926,7 @@ pub async fn mcp_handler(
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
+                "gyre_analytics_decide" => handle_analytics_decide(&state, &args, &auth).await,
                 "gyre_search" => handle_search(&state, &args, &auth).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
                 "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
@@ -5755,6 +5872,283 @@ mod tests {
         let tools = json["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"gyre_analytics_query"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_includes_analytics_decide() {
+        // analytics.md §MCP Tool: gyre_analytics_decide must be in the
+        // tools/list response — the primary agent entry point for decisions.
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 33,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let decide = tools
+            .iter()
+            .find(|t| t["name"] == "gyre_analytics_decide")
+            .expect("gyre_analytics_decide in tools/list");
+        assert!(decide["description"]
+            .as_str()
+            .unwrap()
+            .contains("feature.promote"));
+        assert!(decide["inputSchema"]["properties"]["context"].is_object());
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_builtin_via_protocol() {
+        // analytics.md §MCP Tool spec example: feature.promote over a flag
+        // with real adoption events, invoked via the MCP protocol — no raw
+        // HTTP. The response must carry the DecisionResult shape.
+        let state = test_state();
+        let now = now_secs();
+        let day = 86_400u64;
+        for i in 0..100 {
+            let mut cur = gyre_domain::AnalyticsEvent::new(
+                Id::new(format!("ev-cur-{i}")),
+                "feature.used",
+                None,
+                json!({"flag": "new-diff-viewer", "latency_ms": 100}),
+                now - day,
+            );
+            cur.user_id = Some(format!("user-{i}"));
+            state.analytics.record(&cur).await.unwrap();
+            let mut prev = gyre_domain::AnalyticsEvent::new(
+                Id::new(format!("ev-prev-{i}")),
+                "feature.used",
+                None,
+                json!({"flag": "new-diff-viewer", "latency_ms": 100}),
+                now - 8 * day,
+            );
+            prev.user_id = Some(format!("old-{i}"));
+            state.analytics.record(&prev).await.unwrap();
+        }
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 34,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "feature.promote",
+                        "context": {"flag": "new-diff-viewer", "baseline_days": 7}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let body: serde_json::Value = serde_json::from_str(text).expect("DecisionResult JSON");
+        // DecisionResult shape (same as GET /api/v1/analytics/decide).
+        assert_eq!(body["decision"], json!("feature.promote"));
+        assert_eq!(body["promote"], json!(true), "body: {body}");
+        assert_eq!(body["metrics"]["sample_size"], json!(100));
+        assert_eq!(body["metrics"]["adoption_rate"], json!(1.0));
+        assert!(body["confidence"].as_f64().unwrap() >= 0.9);
+        assert!(body["reason"].as_str().unwrap().contains("Adoption"));
+        assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_unknown_decision_is_tool_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 35,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {"decision": "feature.explode", "context": {}}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        // The built-in evaluator's rejection (not a generic failure):
+        // unknown names list the six built-in decisions.
+        assert!(text.contains("unknown decision"), "text: {text}");
+        assert!(text.contains("feature.promote"), "text: {text}");
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_custom_rules_via_protocol() {
+        // custom_rules present → the custom rule DSL evaluator runs (same
+        // core as POST /api/v1/analytics/decide/custom): first matching
+        // rule wins, default otherwise.
+        let state = test_state();
+        let now = now_secs();
+        for i in 0..2 {
+            state
+                .analytics
+                .record(&gyre_domain::AnalyticsEvent::new(
+                    Id::new(format!("ev-spec-{i}")),
+                    "spec.approved",
+                    None,
+                    json!({"spec_path": i}),
+                    now - 100,
+                ))
+                .await
+                .unwrap();
+        }
+        let app = crate::build_router(state);
+
+        let call = |rules: serde_json::Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 36,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "spec-approval-pace",
+                        "context": {},
+                        "custom_rules": rules,
+                        "default": "hold"
+                    }
+                }
+            })
+        };
+
+        // Threshold 3 > count 2 → no rule matches, default applies.
+        let (status, json) = mcp_post(
+            app.clone(),
+            call(json!([
+                {"metric": "spec.approved", "window": "7d", "threshold": 3, "comparison": "gte", "then": "approve"}
+            ])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(json["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["decision"], json!("spec-approval-pace"));
+        assert_eq!(body["outcome"], json!("hold"));
+        assert!(body["matched_rule"].is_null());
+        assert!(body["reason"].as_str().unwrap().contains("count 2"));
+        assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
+
+        // Same store, threshold 2 → rule 0 matches and wins.
+        let (status, json) = mcp_post(
+            app,
+            call(json!([
+                {"metric": "spec.approved", "window": "7d", "threshold": 2, "comparison": "gte", "then": "approve"},
+                {"metric": "spec.approved", "window": "7d", "threshold": 1, "comparison": "gte", "then": "never"}
+            ])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(json["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["outcome"], json!("approve"));
+        assert_eq!(body["matched_rule"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_invalid_custom_rule_is_tool_error() {
+        // Invalid DSL is rejected by the shared spec parser, naming the field.
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 37,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "bad",
+                        "context": {},
+                        "custom_rules": [
+                            {"metric": "m", "window": "7d", "threshold": 1, "comparison": "approx", "then": "x"}
+                        ]
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("comparison"), "text: {text}");
+    }
+
+    #[tokio::test]
+    async fn handle_analytics_decide_delegates_by_custom_rules_presence() {
+        // Unit test of the delegation contract: without custom_rules the
+        // built-in evaluator runs (unknown built-in name → its rejection,
+        // listing the built-ins); with custom_rules the custom evaluator
+        // runs (the same name is a valid custom decision name and the
+        // rule's outcome is returned).
+        let state = test_state();
+        let now = now_secs();
+        state
+            .analytics
+            .record(&gyre_domain::AnalyticsEvent::new(
+                Id::new("ev-del-1"),
+                "spec.approved",
+                None,
+                json!({"spec_path": 1}),
+                now - 100,
+            ))
+            .await
+            .unwrap();
+        let auth = agent_auth("agent-decide", "ws-decide", None);
+
+        // No custom_rules → built-in path.
+        let result = handle_analytics_decide(
+            &state,
+            &json!({"decision": "feature.explode", "context": {}}),
+            &auth,
+        )
+        .await;
+        assert!(result["isError"].as_bool().unwrap(), "result: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown decision"), "text: {text}");
+        assert!(text.contains("feature.promote"), "text: {text}");
+
+        // custom_rules present → custom path: the same decision name is
+        // legal, and the matching rule's outcome is returned.
+        let result = handle_analytics_decide(
+            &state,
+            &json!({
+                "decision": "feature.explode",
+                "context": {},
+                "custom_rules": [
+                    {"metric": "spec.approved", "window": "7d", "threshold": 1, "comparison": "gte", "then": "custom-outcome"}
+                ]
+            }),
+            &auth,
+        )
+        .await;
+        assert!(!result["isError"].as_bool().unwrap(), "result: {result}");
+        let body: serde_json::Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["decision"], json!("feature.explode"));
+        assert_eq!(body["outcome"], json!("custom-outcome"));
+        assert_eq!(body["matched_rule"], json!(0));
     }
 
     #[tokio::test]
