@@ -508,6 +508,8 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `trace://` | `trace://{mr_id}` | SDLC system trace for a merge request: spans, root_spans (HSI §3a). |
 | `secrets://names` | `secrets://names` | Secret names available to the calling agent (names only — never values); scope resolved from the caller's agent identity/claims (platform-model.md §7, task-098). |
 | `secrets://status` | `secrets://status` | Expiry status of the caller's secrets: `[{name, scope, expires_at, last_rotated_at, status: "active"|"expiring"|"expired"}]` (values never included) (platform-model.md §7, task-098). |
+| `permissions://me` | `permissions://me` | Effective ABAC permissions of the calling agent in its own scope: `[{resource_type, allowed_actions: []}]` over the canonical resource-type and action vocabularies, evaluated against the live policy set with the caller's real subject attributes (abac-policy-engine.md §MCP Integration, task-133). Only the caller's own permissions — no subject parameter exists. |
+| `permissions://check` | `permissions://check?action={action}&resource={type}` | Pre-flight policy check for the calling agent: `{allowed: bool, matched_policy: string\|null}` (abac-policy-engine.md §MCP Integration, task-133). |
 
 **Available prompts** (from `prompts/list`, agent-runtime.md §5 / platform-model.md §4). Under agent-runtime.md §5 the four platform-model prompts are the delivery mechanism for the three-section prompt structure; the persona/protocol sections are additionally injected into the agent container environment at spawn time as `GYRE_META_SPEC_PROMPT` / `GYRE_PROTOCOL_PROMPT` / `GYRE_PROMPT_*` (see docs/agent-protocol.md):
 

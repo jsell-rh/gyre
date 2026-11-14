@@ -17,15 +17,15 @@ use axum::{
 use futures_util::stream;
 use gyre_common::Id;
 use gyre_domain::{
-    CostEntry, DependencySource, MergeRequest, MergeRequestDependency, Task, TaskPriority,
-    TaskStatus,
+    CostEntry, DependencySource, MergeRequest, MergeRequestDependency, PolicyEffect, Task,
+    TaskPriority, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{auth::AuthenticatedAgent, AppState};
+use crate::{auth::AuthenticatedAgent, policy_engine, policy_engine::AttributeContext, AppState};
 
 use gyre_domain::UserRole;
 
@@ -3773,6 +3773,181 @@ async fn collect_secret_metadata(
     Ok(secrets)
 }
 
+// ── permissions:// resources (abac-policy-engine.md §MCP Integration) ─────────
+
+/// The ABAC action vocabulary probed by `permissions://me` — the spec's
+/// action-attribute examples (§Attributes: read, write, delete, approve,
+/// spawn, push, merge, escalate, generate).
+const PERMISSION_ACTIONS: &[&str] = &[
+    "read", "write", "delete", "approve", "spawn", "push", "merge", "escalate", "generate",
+];
+
+/// Build the CALLING agent's ABAC attribute context for the `permissions://`
+/// resources (abac-policy-engine.md §MCP Integration).
+///
+/// Subject attributes are extracted from the `AuthenticatedAgent` — the
+/// same sources the ABAC middleware uses on live requests (auth context,
+/// allowlisted agent-JWT claims, membership/team stores) — so the answer
+/// the pre-flight check gives is the answer the middleware would give.
+/// There is deliberately NO subject parameter: an agent can only ever
+/// query its own permissions, never another agent's.
+///
+/// Resource scope attributes come from the caller's own resolved scope
+/// (JWT claims → agent record → task, tenant from the governing
+/// workspace — `agent_secret_scope`), and `env.budget_remaining` from the
+/// real budget stores. `action`, `resource.type`, and `env.time` are
+/// injected by the evaluation engine itself.
+async fn agent_permission_context(state: &AppState, auth: &AuthenticatedAgent) -> AttributeContext {
+    let mut ctx = AttributeContext::default();
+
+    let subject_type = if auth.roles.contains(&UserRole::Agent) {
+        "agent"
+    } else {
+        "user"
+    };
+    ctx.set("subject.type", subject_type);
+    ctx.set("subject.id", &auth.agent_id);
+    ctx.set("subject.tenant_id", &auth.tenant_id);
+    // The genuine system principal carries the reserved, non-spoofable
+    // ABAC identity (same discipline as the middleware; see its comment
+    // on SYSTEM_ABAC_IDENTITY for why the audit id differs).
+    if auth.is_system_principal() {
+        ctx.set("subject.id", gyre_domain::SYSTEM_ABAC_IDENTITY);
+    }
+    // Role SET semantics, matching the middleware: empty roles leave the
+    // attribute unset (fail closed); multi-role callers get a list the
+    // engine evaluates with membership semantics.
+    match auth.roles.as_slice() {
+        [] => {}
+        [only] => ctx.set("subject.global_role", only.as_str()),
+        many => ctx.set_list(
+            "subject.global_role",
+            many.iter().map(|r| r.as_str().to_string()).collect(),
+        ),
+    }
+
+    // Allowlisted agent-JWT claim attributes (persona, stack_hash,
+    // attestation_level, repo_scope — §Attributes, source "Agent OIDC
+    // claim"), agent subjects only, with the spec-named normalization
+    // (wl_stack_hash → stack_hash). Same gate + allowlist as the
+    // middleware; a raw claim must never define a membership-sourced or
+    // extractor-sourced attribute.
+    if subject_type == "agent" {
+        if let Some(claims) = &auth.jwt_claims {
+            ctx.merge_agent_jwt_claims(claims);
+            crate::abac_middleware::normalize_agent_jwt_attributes(&mut ctx, claims);
+        }
+    }
+
+    // Membership-sourced subject attributes (workspace_ids, team_ids) for
+    // callers with a user identity — same stores the middleware consults.
+    // A failed lookup leaves the attributes unset (conditions on them
+    // fail closed), matching the middleware's read of these stores.
+    if let Some(user_id) = &auth.user_id {
+        if let Ok(memberships) = state.workspace_memberships.list_by_user(user_id).await {
+            let workspace_ids: Vec<String> = memberships
+                .iter()
+                .map(|m| m.workspace_id.to_string())
+                .collect();
+            if !workspace_ids.is_empty() {
+                ctx.set_list("subject.workspace_ids", workspace_ids);
+            }
+            let mut team_ids: Vec<String> = Vec::new();
+            for m in &memberships {
+                if let Ok(teams) = state.teams.list_for_user(&m.workspace_id, user_id).await {
+                    for team in teams {
+                        team_ids.push(team.id.to_string());
+                    }
+                }
+            }
+            if !team_ids.is_empty() {
+                ctx.set_list("subject.team_ids", team_ids);
+            }
+        }
+    }
+
+    // Resource scope chain from the caller's own agent scope (JWT claims →
+    // agent record → task; tenant from the governing workspace record —
+    // never fabricated). This is what makes "in my scope" real: scoped
+    // policies apply via the engine's canonical scope filter only when
+    // the context names the caller's actual scope. A caller with no
+    // resolvable agent scope (e.g. a user token) queries an unscoped
+    // resource — scoped policies conservatively do not apply, same as the
+    // REST effective-permissions endpoint's no-scope path.
+    if let Some(scope) = agent_secret_scope(state, auth).await {
+        ctx.set("resource.tenant_id", &scope.tenant_id);
+        ctx.set("resource.workspace_id", &scope.workspace_id);
+        if !scope.repo_id.is_empty() {
+            ctx.set("resource.repo_id", &scope.repo_id);
+        }
+        // env.budget_remaining (§Attributes): tokens remaining in the
+        // governing workspace's daily budget, from the real budget stores;
+        // absent when no cap is configured (conditions fail closed).
+        let key = format!("workspace:{}", scope.workspace_id);
+        let config = state.budget_configs.get_config(&key).await.ok().flatten();
+        let usage = state.budget_usages.get_usage(&key).await.ok().flatten();
+        if let Some(remaining) =
+            crate::abac_middleware::budget_tokens_remaining(config.as_ref(), usage.as_ref())
+        {
+            ctx.set_number("env.budget_remaining", remaining);
+        }
+    }
+
+    ctx
+}
+
+/// `permissions://me` — the caller's effective permissions: a JSON array of
+/// `{resource_type, allowed_actions: []}`, one entry per canonical resource
+/// type (the route registry's vocabulary), each listing the spec's action
+/// vocabulary entries the current policy set would ALLOW for this caller
+/// in its own scope (abac-policy-engine.md §MCP Integration).
+async fn resource_permissions_me(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    let ctx = agent_permission_context(state, auth).await;
+    let policies = match state.policies.list().await {
+        Ok(p) => p,
+        Err(e) => return json!({"error": format!("failed to load policies: {e}")}),
+    };
+    let resource_types = crate::abac_middleware::all_resource_types();
+    let mut results = Vec::with_capacity(resource_types.len());
+    for resource_type in resource_types {
+        let mut allowed_actions = Vec::new();
+        for action in PERMISSION_ACTIONS {
+            let result = policy_engine::evaluate(policies.clone(), &ctx, action, resource_type);
+            if result.effect == PolicyEffect::Allow {
+                allowed_actions.push(*action);
+            }
+        }
+        results.push(json!({
+            "resource_type": resource_type,
+            "allowed_actions": allowed_actions,
+        }));
+    }
+    Value::Array(results)
+}
+
+/// `permissions://check?action={action}&resource={type}` — single pre-flight
+/// policy check: can this caller perform `action` on `resource_type` in its
+/// own scope? Returns `{allowed, matched_policy}` (abac-policy-engine.md
+/// §MCP Integration). The subject is always the caller — there is no way to
+/// ask about another agent.
+async fn resource_permissions_check(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    action: &str,
+    resource_type: &str,
+) -> Value {
+    let ctx = agent_permission_context(state, auth).await;
+    let policies = match state.policies.list().await {
+        Ok(p) => p,
+        Err(e) => return json!({"error": format!("failed to load policies: {e}")}),
+    };
+    let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
+    json!({
+        "allowed": result.effect == PolicyEffect::Allow,
+        "matched_policy": result.matched_policy,
+    })
+}
+
 fn resource_definitions() -> Value {
     json!({
         "resources": [
@@ -3835,6 +4010,19 @@ fn resource_definitions() -> Value {
                 "name": "Secret Expiry Status",
                 "description": "Expiry status of the secrets available to this agent: [{name, scope, expires_at, last_rotated_at, status: active|expiring|expired}] (platform-model.md §7).",
                 "mimeType": "application/json"
+            },
+            {
+                "uri": "permissions://me",
+                "name": "My Permissions",
+                "description": "Effective ABAC permissions of the calling agent in its own scope: [{resource_type, allowed_actions: []}] (abac-policy-engine.md §MCP Integration). Only the caller's own permissions — never another agent's.",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "permissions://check",
+                "name": "Permission Pre-Flight Check",
+                "description": "Can the calling agent perform a specific action? URI: permissions://check?action={action}&resource={type} (abac-policy-engine.md §MCP Integration). Returns {allowed, matched_policy}.",
+                "mimeType": "application/json",
+                "uriTemplate": "permissions://check?action={action}&resource={type}"
             }
         ]
     })
@@ -4403,6 +4591,56 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             None => {
                 json!({"error": "secrets:// resources resolve scope from the caller's agent identity — no agent record or scope claims found"})
             }
+        }
+    } else if let Some(rest) = uri.strip_prefix("permissions://") {
+        // permissions://me | permissions://check?action={action}&resource={type}
+        // (abac-policy-engine.md §MCP Integration). The subject is always
+        // the caller: neither resource accepts a subject parameter, so an
+        // agent can only ever query its own permissions.
+        let (name, query) = match rest.split_once('?') {
+            Some((n, q)) => (n, q),
+            None => (rest, ""),
+        };
+        match name {
+            "me" => {
+                let result = resource_permissions_me(state, auth).await;
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            "check" => {
+                // Parse action= and resource= query params (plain tokens —
+                // same non-decoding parse the other parameterized
+                // resources use for their query strings).
+                let action = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("action="))
+                    .unwrap_or("");
+                let resource_type = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("resource="))
+                    .unwrap_or("");
+                if action.is_empty() || resource_type.is_empty() {
+                    return json!({"error": "permissions://check requires both query params: action={action}&resource={type}"});
+                }
+                let result = resource_permissions_check(state, auth, action, resource_type).await;
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            other => json!({
+                "error": format!(
+                    "unknown permissions:// resource '{other}' — expected permissions://me or permissions://check?action={{action}}&resource={{type}}"
+                )
+            }),
         }
     } else {
         json!({"error": format!("unknown resource URI scheme: {uri}")})
@@ -5674,6 +5912,283 @@ mod tests {
         assert!(names.contains(&"Spec Files"));
         assert!(names.contains(&"Workspace Agents"));
         assert!(names.contains(&"Merge Queue"));
+    }
+
+    // ── TASK-133: permissions:// resources (abac-policy-engine.md §MCP Integration) ──
+
+    #[tokio::test]
+    async fn mcp_resources_list_includes_permission_resources() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 60,
+                "method": "resources/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resources = json["result"]["resources"].as_array().unwrap();
+        let me = resources
+            .iter()
+            .find(|r| r["uri"] == "permissions://me")
+            .expect("permissions://me must be listed in resources/list");
+        assert_eq!(me["mimeType"], "application/json");
+        let check = resources
+            .iter()
+            .find(|r| r["uri"] == "permissions://check")
+            .expect("permissions://check must be listed in resources/list");
+        assert_eq!(
+            check["uriTemplate"],
+            "permissions://check?action={action}&resource={type}"
+        );
+    }
+
+    /// `permissions://me` and `permissions://check` must answer from the
+    /// REAL policy set for the CALLER's own attributes. A Gyre-minted
+    /// worker JWT (roles=[Agent]) is allowed read/write/approve on most
+    /// types by `builtin-agent-scoped-access`, and denied `approve` on
+    /// `spec` by the immutable `builtin:require-human-spec-approval` —
+    /// the immutable Deny wins over the role Allow, so both assertions
+    /// can only pass through the real evaluation engine with the caller's
+    /// real subject attributes.
+    #[tokio::test]
+    async fn permissions_resources_evaluate_real_policies_for_agent_jwt() {
+        let state = orch_state().await;
+        let (_id, token) = register_worker(&state, "permw", "r-1").await;
+        let app = crate::build_router(state);
+
+        // Pre-flight check, allowed case.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 61,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=read&resource=repo" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("permissions://check must return a text content");
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], true, "got: {result}");
+        assert_eq!(
+            result["matched_policy"], "builtin-agent-scoped-access",
+            "got: {result}"
+        );
+
+        // Pre-flight check, denied case: the immutable human-only spec
+        // approval Deny beats the agent role Allow.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 62,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=approve&resource=spec" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], false, "got: {result}");
+        assert_eq!(
+            result["matched_policy"], "builtin-require-human-spec-approval",
+            "got: {result}"
+        );
+
+        // permissions://me: per-resource-type allowed action lists, from
+        // the same evaluation. The worker's repo entry must carry the
+        // agent-role actions but NOT push/merge/spawn/delete; the spec and
+        // persona entries must NOT carry approve (human-only Denies).
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 63,
+                "method": "resources/read",
+                "params": { "uri": "permissions://me" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let me: Value = serde_json::from_str(text).unwrap();
+        let entries = me
+            .as_array()
+            .expect("permissions://me returns a JSON array");
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.get("resource_type").is_some() && e["allowed_actions"].is_array()),
+            "every entry must be {{resource_type, allowed_actions: []}}"
+        );
+        let repo = entries
+            .iter()
+            .find(|e| e["resource_type"] == "repo")
+            .expect("canonical resource-type vocabulary includes repo");
+        let repo_actions: Vec<&str> = repo["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        for allowed in ["read", "write", "approve"] {
+            assert!(
+                repo_actions.contains(&allowed),
+                "repo must allow {allowed}: {repo_actions:?}"
+            );
+        }
+        for denied in ["push", "merge", "spawn", "delete", "escalate", "generate"] {
+            assert!(
+                !repo_actions.contains(&denied),
+                "repo must not allow {denied}: {repo_actions:?}"
+            );
+        }
+        for human_only in ["spec", "persona"] {
+            let entry = entries
+                .iter()
+                .find(|e| e["resource_type"] == human_only)
+                .unwrap_or_else(|| panic!("{human_only} must appear in permissions://me"));
+            let actions: Vec<&str> = entry["allowed_actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            assert!(
+                !actions.contains(&"approve"),
+                "{human_only} approve must be denied to agents: {actions:?}"
+            );
+        }
+    }
+
+    /// The permissions:// resources answer ONLY for the caller. Two JWT
+    /// callers with different identities get different answers for the
+    /// same action: user A is allowed `push` on `repo` by a custom Allow
+    /// keyed on A's subject.id, user B (no such policy) is denied. If the
+    /// resource ignored the caller's identity (fixed subject, or a
+    /// query-param subject), both callers would get the same answer.
+    #[tokio::test]
+    async fn permissions_check_is_caller_scoped() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
+        };
+
+        let state = make_test_state_with_jwt();
+        // Allow push on repo for exactly one subject id, at priority 2000
+        // (above every seeded builtin, so the matched policy is pinned).
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("perm-me-push-a"),
+                name: "perm-me-push-a".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 2000,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("perm-user-a".to_string()),
+                }],
+                actions: vec!["push".to_string()],
+                resource_types: vec!["repo".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        let token_a = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "perm-sub-a",
+                "preferred_username": "perm-user-a",
+                "realm_access": {"roles": []}
+            }),
+            3600,
+        );
+        let token_b = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "perm-sub-b",
+                "preferred_username": "perm-user-b",
+                "realm_access": {"roles": []}
+            }),
+            3600,
+        );
+        let app = crate::build_router(state);
+
+        let read_check = json!({
+            "jsonrpc": "2.0",
+            "id": 64,
+            "method": "resources/read",
+            "params": { "uri": "permissions://check?action=push&resource=repo" }
+        });
+        let (status, json) = mcp_post_with_token(app.clone(), read_check.clone(), &token_a).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], true, "user A: {result}");
+        assert_eq!(result["matched_policy"], "perm-me-push-a");
+
+        let (status, json) = mcp_post_with_token(app, read_check, &token_b).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], false, "user B: {result}");
+        assert_eq!(result["matched_policy"], Value::Null);
+    }
+
+    /// Missing query params are a usage error, not a silent deny — an
+    /// agent must not mistake a malformed pre-flight for a policy denial.
+    #[tokio::test]
+    async fn permissions_check_requires_both_params() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 65,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=push" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("action={action}&resource={type}"),
+            "got: {err}"
+        );
+
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 66,
+                "method": "resources/read",
+                "params": { "uri": "permissions://other" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("unknown permissions:// resource"),
+            "got: {err}"
+        );
     }
 
     // ── resources/read — unknown scheme ──────────────────────────────────────
