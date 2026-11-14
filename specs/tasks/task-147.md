@@ -80,13 +80,13 @@ Agents can define and evaluate custom decisions using a simple rule DSL with `me
 
 ## Acceptance Criteria
 
-- [x] `GET /api/v1/analytics/decide` evaluates all 6 built-in decisions
-- [x] `POST /api/v1/analytics/decide/custom` evaluates custom rule DSL
-- [x] Each built-in decision returns the spec-defined response shape
-- [x] Custom decisions support `metric`, `window`, `threshold`, `comparison`, `then` rules
-- [x] Decisions are based on real analytics data from the event store
-- [x] Confidence scores are computed from sample size and statistical significance
-- [x] Tests pass
+- [ ] `GET /api/v1/analytics/decide` evaluates all 6 built-in decisions
+- [ ] `POST /api/v1/analytics/decide/custom` evaluates custom rule DSL
+- [ ] Each built-in decision returns the spec-defined response shape
+- [ ] Custom decisions support `metric`, `window`, `threshold`, `comparison`, `then` rules
+- [ ] Decisions are based on real analytics data from the event store
+- [ ] Confidence scores are computed from sample size and statistical significance
+- [ ] Tests pass
 
 ## Agent Instructions
 
