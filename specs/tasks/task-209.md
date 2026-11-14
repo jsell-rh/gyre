@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "062f925e2d5abdf4196291df05fac6cf9e9fbd06"]
 ---
 
 ## Spec Excerpt
@@ -155,90 +155,69 @@ What shipped, per acceptance criterion:
   recorded by JWT validation via debounced
   `UserRepository::record_login`; `GET /api/v1/users/me` returns both
   read-only.
+- **Profile ledger UI** — type filter
+  (all/approval/rejection/gate/trust/meta-spec), workspace filter, and
+  Load More pagination; `GET /users/me/judgments?type=<unknown>`
+  returns 400 listing accepted values.
 
-### This round: review repair (findings F1–F5) + rebase onto b6892403
+### This round: rebase repair onto bfc36c9c (task-146/112 lineage)
 
-Durable finding (rebase): merging the candidate (7b0caf07) onto the
-assignment base b6892403 (task-056 abandoned-branch lineage) conflicted
-in `crates/gyre-server/src/abandoned_branch.rs`. Resolved keeping the
-base's 5-arg `has_active_notification` call (matching the
-NotificationRepository port at this base); the module's de-dup test was
-repaired to the current 9-arg `list_for_user` signature (exclude_types
-slot, `&[]` per the port contract for background de-dup jobs).
+Durable finding (rebase): merging the candidate (25acd4f1) onto the
+assignment base bfc36c9c conflicted in three files. Resolution:
 
-Review findings repaired (round bda74a16):
+- `sqlite/user_profile.rs` — import union: task-209's `AuditEventType`
+  (judgment ledger) + task-112's `NotificationChannels` (channel
+  prefs); both impls retained.
+- `postgres/user_profile.rs` — kept task-112's real
+  `UserChannelPreferenceRepository` impl alongside task-209's real
+  notif-prefs/tokens/judgment impls (base's pre-task-112 "stub"
+  comment dropped as stale); `upsert_batch` disambiguated to
+  `UserNotificationPreferenceRepository::upsert` (now-ambiguous
+  inherent-style call), matching the sqlite sibling.
+- `api/users.rs` `update_notification_preferences` — merged body:
+  task-112's channel support (`validate_channel_config`, dual persist
+  to `user_channel_prefs` + `users.preferences.notification_channels`)
+  combined with task-209's canonical-name normalization of preference
+  types (rejects legacy aliases that would create dead toggles).
+- Arity repair (062f925e): base-side
+  `NotificationRepository::list_for_user` call sites (task-112/146
+  test code) updated to the 9-arg port signature with `&[]`
+  (see-everything, per the port doc for background jobs) in the
+  `exclude_types` slot; production code was already 9-arg.
 
-- **F1** — `revoke_spec_approval` derived `caller_is_agent` via a scope
-  string comparison that never fired (Gyre agent JWTs carry scope as a
-  non-empty array), regressing agent self-revoke to 403. Now derived
-  via the non-empty scope array — the same derivation as `approve_spec`
-  and `is_agent_jwt`. Test:
-  `agent_can_revoke_its_own_approval_with_agent_jwt` (mints a real
-  EdDSA agent JWT, approves, revokes, asserts the ledger row).
-- **F2** — rejecting an already-approved spec wrote `rejected_by`
-  nowhere. `agent-gates.md` §Spec Approval Ledger now specifies
-  Approved → Rejected as the decline-after-approval path (terminal
-  states unchanged); the domain/port contract and `reject_spec` handler
-  implement it — Pending AND Approved rows transition, `rejected_by`
-  carries the declining human's canonical user Id. Tests: domain
-  `approved_to_rejected_records_declining_human`, sqlite
-  `reject_from_pending_and_from_approved_records_decliner`, gates.rs
-  reject-transition coverage, end-to-end
-  `reject_approved_spec_records_declining_human`.
-- **F3** — the postgres judgment-ledger mirror had no tests. Query
-  construction factored into `spec_approval_judgment_query` /
-  `audit_judgment_query` (the production path) with SQL-shape
-  regression tests per the postgres/search.rs precedent: workspace
-  filter present in SQL only when requested, the ledger join, all three
-  attribution keys, since predicates, audit scope, and a cross-backend
-  parity assertion against the sqlite sibling's audit-type list.
-- **F4** — the Profile ledger tab now exposes the server-side filters:
-  a type filter (all/approval/rejection/gate/trust/meta-spec), a
-  workspace filter, and Load More pagination advancing the offset.
-  Judgments beyond the first 50 are reachable from the UI.
-- **F5** — `GET /users/me/judgments?type=<unknown>` now returns 400
-  listing the accepted values instead of silently unfiltered results.
-  Test: `judgments_unknown_type_returns_400`.
+### Test evidence (this round, sandbox probes, head 062f925e)
 
-### Test evidence (this round, sandbox probes, code state b60bead2)
-
-- `cargo test -p gyre-domain --lib` — 508 passed, 0 failed
-  (t209-r4-domain-tests.log).
-- `cargo test -p gyre-adapters --lib` — 528 passed, 0 failed; includes
-  the new PG SQL-shape suite (6 tests) and the updated sqlite
-  spec-approval transition tests (t209-r4-adt-tests.log).
-- `cd web && npm ci && npm test` — 113 files, 2315 passed, 41 skipped,
-  exit 0; includes the 3 new ledger filter/pagination tests
-  (t209-r4-web-tests.log).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` — exit 0
-  (t209-r4-srv-check.log).
-- Scoped clippy (domain/ports/adapters, diff vs base b6892403): zero
-  warnings on changed lines (t209-r4-clippy-changed-lines.log).
-- Mechanical checks: check-arch.sh, check-mem-port-contracts.sh,
-  check-inert-enforcement.sh,
-  check-fail-open-ref-resolution.sh, check-forged-scope-fields.sh,
-  check-lossy-secret-conversion.sh, check-dead-message-kinds.sh,
-  check-task-commit-attribution.sh — all exit 0.
-  check-tenant-filter.sh fails with an mawk syntax error identically on
-  the candidate parent 7b0caf07 (byte-identical script; sandbox has
-  mawk 1.3.4, CI runs gawk) — environmental, not a code defect
-  (t209-r4-check-scripts.log).
-- Round summary with source SHAs and exit codes:
-  /tmp/stage/review-evidence/t209-r4-round-summary.txt.
+- `SKIP_WEB_BUILD=1 cargo check --workspace --all-targets` — exit 0
+  (check-all-workspace.txt).
+- `cargo test -p gyre-adapters --lib sqlite::user_profile` — 13
+  passed, 0 failed: judgment-ledger source merge, reverse-chron,
+  pagination, type filter, workspace filter (drops unattributed),
+  compressed-audit decompression, exclude-types list+count, channel
+  prefs roundtrip (adt-user-profile-tests.txt).
+- `cargo test -p gyre-domain --lib` — 511 passed, 0 failed
+  (adt-domain-tests.txt).
+- `cargo test -p gyre-adapters --lib mem` — 14 passed, 0 failed.
+- Mechanical checks exit 0: check-arch.sh,
+  check-abac-route-registry.sh, check-abac-exempt-handlers.sh,
+  check-migration-versions.sh, check-mem-port-contracts.sh,
+  check-dead-message-kinds.sh.
+- `scripts/check-tenant-filter.sh` fails with an mawk 1.3.4 syntax
+  error identically at merge-base b6892403 (byte-identical script;
+  CI runs gawk) — pre-existing environment incompatibility, not a
+  code defect (check-tenant-filter-mawk.txt).
+- Evidence directory: /tmp/stage/review-evidence/.
 
 ### Server tests the independent verifier must execute
 
 The hard 4 GiB budget defers server test compilation/execution to the
-verifier. Required at this round's head:
+verifier. Required at this round's head (062f925e):
 
-- `agent_can_revoke_its_own_approval_with_agent_jwt`
-  (api/specs.rs — F1 regression)
-- `reject_approved_spec_records_declining_human`
-  (api/specs.rs — F2 regression)
-- `reject_via_jwt_surfaces_rejection_in_judgment_ledger`
-  and `approve_via_jwt_surfaces_in_judgment_ledger` (api/specs.rs)
+- `agent_can_revoke_its_own_approval_with_agent_jwt` (api/specs.rs)
+- `reject_approved_spec_records_declining_human` (api/specs.rs)
+- `reject_via_jwt_surfaces_rejection_in_judgment_ledger` and
+  `approve_via_jwt_surfaces_in_judgment_ledger` (api/specs.rs)
 - `reject_transition_pending_to_rejected_and_audit` (api/gates.rs)
-- `judgments_unknown_type_returns_400` (api/users.rs — F5)
+- `judgments_unknown_type_returns_400` (api/users.rs)
 - `disabled_preference_excludes_type_from_inbox_and_count`
   (api/users.rs)
 - `get_me_returns_recorded_auth_provider_info` (api/users.rs)
@@ -249,6 +228,11 @@ verifier. Required at this round's head:
 - `publish_writes_meta_spec_publish_audit_event` (api/meta_specs.rs)
 - `push_check_notifications_broadcast_to_stream_subscribers`
   (graph_extraction.rs)
+- task-112/146 notification/dispatch suites at the merged call sites
+  (notification_dispatcher, signal_chain, spec_patrol,
+  reconciliation, secret_rotation, impersonation, prompt_assembly,
+  spec_link_staleness, merge_processor tests — the `&[]` arity repair
+  touched only test call sites)
 
 plus the standard full gates (`cargo test --all`, diff-scoped clippy,
 `cd web && npm ci && npm test`, exact-head GitHub checks).
