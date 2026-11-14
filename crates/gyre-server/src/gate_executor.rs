@@ -6567,12 +6567,46 @@ specs:
             eventually(|| async { notifs_for_author(state.clone()).await.len() == 2 }).await,
             "second failed attempt must notify again"
         );
+        // Select by the payload's attempt field, not by list position:
+        // list_for_user returns newest-first within a priority band at
+        // created_at (epoch-second) granularity, so when the two
+        // GateFailure creations straddle a wall-clock second boundary the
+        // attempt-2 notification is notifs[0], not notifs[1].
         let notifs = notifs_for_author(state.clone()).await;
-        let body: serde_json::Value =
-            serde_json::from_str(notifs[1].body.as_deref().unwrap()).unwrap();
+        let n = notifs
+            .iter()
+            .find(|n| {
+                serde_json::from_str::<serde_json::Value>(n.body.as_deref().unwrap())
+                    .map(|b| b["attempt"] == 2)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("attempt-2 GateResult notification missing: {notifs:?}"));
+        assert_eq!(
+            n.notification_type,
+            gyre_common::NotificationType::GateFailure
+        );
+        assert_eq!(
+            n.title,
+            "Gate 'unit tests' failed on MR 'Add feature' (attempt 2)"
+        );
+        let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["type"], "GateResult");
+        assert_eq!(body["mr_id"], mr_id.to_string());
+        assert_eq!(body["gate_name"], "unit tests");
+        assert_eq!(body["gate_type"], "TestCommand");
+        assert_eq!(body["status"], "Failed");
+        assert_eq!(
+            body["spec_ref"],
+            "specs/system/agent-gates.md@0123456789abcdef0123456789abcdef01234567"
+        );
         assert_eq!(
             body["attempt"], 2,
             "attempt number must advance across re-enqueues"
         );
+        assert_eq!(
+            body["gate_agent_id"],
+            format!("gate-agent:{}", gate.id.as_str())
+        );
+        assert_eq!(body["agent_id"], "agent-retry-author");
     }
 }
