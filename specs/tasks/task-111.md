@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d", "db116ab7498d7ef385b229a9761d487bee10297e"]
 ---
 
 ## Spec Excerpt
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management is implemented end-to-end against `user-management.md` §Session Management by this branch's reviewed history (commits above; head of that work: `ed6a9adc`). No production code changed this round — the round only repaired the task-document contract (finding `7f47cc82`): the assigned task text is restored verbatim (acceptance-criteria checkboxes left as assigned) and all progress notes live under this heading.
+Session management is implemented end-to-end against `user-management.md` §Session Management by this branch's reviewed history (commits above; head of the implementation work: `ed6a9adc`, latest fixture repair: `db116ab7`). No product code changed this round — the round repaired verification finding `f182c1c1` (`cargo test --all`, exit 101).
 
 ### Implementation
 
@@ -97,24 +97,20 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 - **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with Admin-role **and tenant-containment** per-handler checks; target-user existence 404s.
 - **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
 
-### Prior verification repairs absorbed into the branch
+### This round's repair (`db116ab7`, finding `f182c1c1`)
 
-- `74749334`: verification-finding repairs; fixed merge-request scope fabrications (7-arg `MergeRequest::new` with real workspace ids).
-- `6f20bcb2`: tenant containment on TenantAdmin session endpoints.
-- `a4e0eaf8`/`0564d4e5`: migration renumbering past base duplicates.
-- `ed6a9adc` (latest): durable finding `08f72f21` — `gyre-server` lib test compilation failed (E0061/E0277 at `gate_executor.rs:4421/4427/5068/5074`) because the assigned base `6f5a631c` (task-195, manifest-driven gate selection) added fixtures constructing MRs with the old 6-arg `MergeRequest::new`; repaired to the 7-arg form with real workspace ids. The finding's Svelte/a11y/CSS log tail is pre-existing web-build noise (the vite build itself succeeded).
+Four merge-request tests that arrived with the task-195 base (`submit_review_binds_agent_token_caller_to_own_identity`, `submit_review_human_non_admin_cannot_forge_agent_reviewer`, `submit_review_admin_can_record_on_behalf_of_agent`, `list_mrs_enriches_merged_rows_with_merge_commit_sha`) built the router from `test_state()` without seeding repository `repo-1`. `create_mr` has refused unknown repositories since the M34 scope-fabrication repair (`74749334`), so `create_test_mr` received a 404 and panicked unwrapping `json["id"]` (merge_requests.rs:1425). Fix: add the `seed_repo(&state).await` fixture every other test in the module already uses — 4 test-fixture lines, no product code. The auth machinery these tests exercise after creation (agent-JWT and API-key+session paths) is already proven by passing tests in `auth.rs`, `api/users.rs`, `merge_deps.rs`, and `jj.rs`.
 
-### Test evidence (at head; logs under `/tmp/stage/review-evidence/`)
+### Test evidence
 
-In-sandbox (offline — no crates.io access from this stage, so Rust compilation is deferred to the verifier):
+In-sandbox (no network / no cargo registry in this stage, so Rust compilation is deferred to the verifier):
 
-- `rustfmt --edition 2021 --check crates/gyre-server/src/gate_executor.rs` — clean.
-- All 20 mechanical gate scripts listed in AGENTS.md re-run PASS at head, including exemption freezes (`mechanical-gates.log`); `check-task-commit-attribution.sh` PASSes once this round's frontmatter is committed.
-- Structural verification of the ed6a9adc fixture repair: both `gate_executor.rs` sites construct `MergeRequest::new` with 7 positional args and real workspace ids (`ws.id` / `repo.workspace_id`).
+- `rustfmt --edition 2021 --check crates/gyre-server/src/api/merge_requests.rs` — clean (log: `review-evidence/rustfmt.log`).
+- `scripts/check-conditional-test-guards.sh` and `check-aspirational-test-names.sh` — PASS at the fix; `check-assertionless-tests.sh` cannot execute in this sandbox (its awk program uses gawk-only 3-arg `match()`; this stage has mawk 1.3.4, so the script exits 2 before scanning any file — environment limitation recorded for remote verification, not a code finding; the four edited tests all contain assertions and only gained fixture lines) (log: `review-evidence/mechanical-gates.log`).
+- Structural verification: all 6 `test_state()` sites in the module that call `create_test_mr` now seed `repo-1`; the 4 remaining sites create their own repositories or none.
 
-Required in the independent verifier (no network / no cargo registry in this sandbox; server test compilation exceeds the in-sandbox budget):
+Required in the independent verifier:
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` — the exact failing target of finding `08f72f21`; must compile clean.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — full suite (previous round: 1724 passed; includes the session-management tests in `auth.rs` and `api/users.rs` and the manifest-gate tests adapted by `ed6a9adc`).
-- `SKIP_WEB_BUILD=1 cargo test --all` — repo-wide acceptance criterion.
-- `bash /tmp/stage/checks.sh` — the previously failing verification command.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::merge_requests` — the exact 4 tests of finding `f182c1c1` must pass.
+- `SKIP_WEB_BUILD=1 cargo test --all` — repo-wide acceptance criterion (prior verification run at the pre-fix head: 2055 passed / 4 failed, all four fixed here).
+- `bash /tmp/stage/checks.sh` — full mechanical gate suite (passed at the pre-fix head; this round only adds 4 test-fixture lines).
