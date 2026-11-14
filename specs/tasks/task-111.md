@@ -79,7 +79,7 @@ Users can:
 - [x] POST revoke-all revokes all sessions for user
 - [x] Revoked sessions rejected in auth middleware
 - [x] Routes registered with ABAC mappings
-- [ ] `cargo test --all` passes (deferred to the independent verifier — 4 GiB build wrapper)
+- [ ] `cargo test --all` passes (deferred to the independent verifier — 4 GiB build wrapper; focused in-sandbox probes green, see Shipped)
 
 ## Agent Instructions
 
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round (repair `5c7b2879`) and the two prior rounds were contract-restore repairs over an unchanged tree; no product behavior changed.
+Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round is a contract-restore repair (attempt `1892d0d9`, repair `5c7b2879`): the executor's checkout restored the pristine assigned task document over the checkpoint metadata while merging the new base `adf4df3` (task-145) into the branch. The production fix is unchanged and was re-verified on the merged tree.
 
 ### Implementation
 
@@ -97,29 +97,24 @@ Session management per `user-management.md` §Session Management is implemented 
 - **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants (`/users/:user_id/sessions...`) with per-handler role checks and tenant containment. Session routes are ABAC-exempt by design with per-handler authorization (validated by `check-abac-exempt-handlers.sh`).
 - **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days (revoked rows kept as the durable sign-out record).
 
-### This round: contract restore (repair `5c7b2879`)
+### This round: contract restore over the base-`adf4df3` merge (repair `5c7b2879`)
 
-- The executor's checkout again restored the pristine assigned task document (progress reset to `not-started`, `commits:` emptied, checkboxes unchecked, `## Shipped` dropped) — the same contract-reset shape as the prior rounds' repairs `2d09a4ab` and `34e4e281`. The contract body is byte-identical to the checkpoint version, so the checkpoint metadata (progress `ready-for-review`, the 23-commit attribution list, checked criteria, these notes) was restored over it unchanged. This also keeps `check-task-commit-attribution.sh` passing — the gate fails while the restored `commits: []` hides the branch's task-labeled commits from review scoping.
-- **No source change:** `git diff 3ba9bba5..HEAD -- . ':!specs/tasks/task-111.md'` is empty — every commit after base merge `3ba9bba5` touches only this task document. All session surfaces were re-verified present by direct inspection this round at head `0f6cb439`: `UserSession` entity, `SessionRepository` port + SQLite/PostgreSQL/mem impls, migration `2026-10-08-000064_user_sessions`, auth-path session tracking, all six session routes with their ABAC-exempt mappings and per-handler authorization, and `spawn_session_cleanup`. Probe evidence: `/tmp/stage/review-evidence/task-111-repair-contract-restore.md`.
-
-Prior-round context, preserved: the executor merged base `3f7871b6` (task-148's `gyre_analytics_decide` MCP tool) into this branch as `3ba9bba5` — `git diff c0988beb..3ba9bba5` touched only `api/analytics.rs`, `mcp.rs`, docs, and task-148's spec files, with no conflict markers. Earlier repair history (base-merge conflict resolution `44049f85` against the task-124 base, fixture repairs, migration renumbering) is preserved in the branch history and the commits list below; it is not re-diagnosed here.
+- The executor merged base `adf4df3` (task-145's spec-enforcement tests) into the branch as `172b6bb0` and restored the pristine assigned task document (progress reset to `not-started`, `commits:` emptied, checkboxes unchecked, `## Shipped` dropped). The checkpoint metadata (progress `ready-for-review`, the 23-commit attribution list, checked criteria, these notes) was restored over it. This keeps `check-task-commit-attribution.sh` passing — the gate fails (18 flagged commits) while the restored `commits: []` hides the branch's task-labeled product-surface commits from review scoping.
+- **No session-surface change:** `git diff --stat 236834f3..HEAD -- <session surface files>` is empty — the base merge touched only `git_http.rs`, `merge_processor.rs`, `notifications.rs`, `tests/spec_enforcement.rs` (task-145 line) and specs files. No conflict markers remain in the tree.
+- All 23 attribution SHAs verified ancestors of HEAD.
 
 ### Test evidence
 
-This round (no source change; direct inspection only — full gates are not repeated inside a repair round):
+This round (probes on the merged tree at head `172b6bb0`; log: `/tmp/stage/review-evidence/task-111-attempt-1892d0d9-round1.md`):
 
-- `git diff --stat 3ba9bba5..HEAD -- . ':!specs/tasks/task-111.md'` — empty; no session surface differs from the previously verified tree.
-- Source-surface presence probes at head `0f6cb439` (entity, port + SQLite/PostgreSQL/mem impls, migration, routes, ABAC-exempt mappings, cleanup spawn) — all present; log: `/tmp/stage/review-evidence/task-111-repair-contract-restore.md`.
-- Differential probe of the gate this repair fixes: `bash scripts/check-task-commit-attribution.sh` — exit 0 with the restored `commits:` frontmatter; exit 1 when the frontmatter is reset to `commits: []` (the executor's restored state, 23 unlisted commits), proving the restore is load-bearing, not cosmetic. Logs: `/tmp/stage/review-evidence/task-111-attribution-checkpoint.log` (pristine, exit 1) and `/tmp/stage/review-evidence/task-111-attribution-pristine-vs-checkpoint.log` (checkpoint, exit 0).
+- `cargo check -p gyre-server` — exit 0 (7m22s; domain/ports/adapters/server type-check on the task-145-merged tree, web assets rebuilt).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters session` — 9/9 passed (create/roundtrip, duplicate-id contract, credential+device matching, newest-match, touch/sliding expiry, revoke scoping, revoke-all + delete-expired, retention never deleting revoked rows).
+- Session-surface identity probe vs the reviewed checkpoint `236834f3` — empty diff across entity, port, SQLite/PostgreSQL/mem impls, migration, auth, routes, ABAC mappings, cleanup wiring.
+- Differential probe of the gate this restore fixes: `bash scripts/check-task-commit-attribution.sh` — exit 1 against the executor's `commits: []` restore (18 unlisted commits); exit 0 with the restored frontmatter.
 
-Prior-round evidence on the identical source tree (head `3ba9bba5`, the only later commits are task-doc restores):
-
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — exit 0 (6m21s, includes domain/ports/adapters; validates the task-148 base merge against the session surfaces).
-- `cargo test -p gyre-adapters session` — 9/9 passed (create/roundtrip, duplicate-id contract, credential+device matching, newest-match, touch/sliding expiry, revoke scoping, revoke-all + delete-expired, retention never deleting revoked rows).
-- Mechanical gates on the merged tree: `check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh` — all exit 0; `check-task-commit-attribution.sh` exits 0 with the restored commits frontmatter (it fails against the executor's `commits: []` restore, as expected).
-- Earlier round (head `44049f85`, unchanged surfaces): `cargo test -p gyre-domain --lib` 535/535, `cargo fmt --check` exit 0, `check-forwarded-header-trust.sh` / `check-forged-scope-fields.sh` / `check-in-memory-state-stores.sh` exit 0.
+Prior-round evidence on the unchanged session surfaces (head `3ba9bba5` line): `cargo test -p gyre-domain --lib` 535/535; `cargo fmt --check` exit 0; mechanical gates `check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-forwarded-header-trust.sh`, `check-forged-scope-fields.sh`, `check-in-memory-state-stores.sh` — all exit 0.
 
 ### Deferred to the independent verifier
 
 - `cargo test --all` on this exact head (the acceptance-criterion gate; gyre-server test codegen exceeds the in-sandbox 4 GiB budget, blocked by the build wrapper by design).
-- Focused server suites for the merged surfaces: `cargo test -p gyre-server --test git_integration` (prior round's repaired fixtures) and the task-111 session test module (WS auth path, active-session listing, throttle).
+- Focused server suites for the merged surfaces: `cargo test -p gyre-server --test git_integration`, `cargo test -p gyre-server --test spec_enforcement` (task-145 surface that arrived via the base merge), and the task-111 session test module in `gyre-server/src/api/users.rs` (WS auth path, active-session listing, throttle).
