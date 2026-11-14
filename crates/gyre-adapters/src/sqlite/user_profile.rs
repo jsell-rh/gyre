@@ -487,6 +487,7 @@ mod tests {
                 enabled: true,
                 digest: gyre_domain::DigestFrequency::Daily,
                 min_priority: gyre_domain::NotificationPriority::High,
+                type_overrides: [("AgentFailed".to_string(), true)].into(),
             },
             webhook: Some(gyre_domain::WebhookConfig {
                 url: "https://hooks.example.test/g".to_string(),
