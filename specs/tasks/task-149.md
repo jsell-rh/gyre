@@ -3,7 +3,7 @@ title: "Implement analytics dashboard UI and data retention policy"
 spec_ref: "analytics.md §Analytics Dashboard (UI)"
 depends_on:
   - task-147
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "analytics.md §Analytics Dashboard (UI)"
   - "analytics.md §Data Retention"
