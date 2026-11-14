@@ -52,8 +52,12 @@ impl NotificationRow {
             id: Id::new(self.id),
             workspace_id: source.workspace_id.clone(),
             user_id: Id::new(self.user_id),
-            notification_type: ntype,
-            priority: gyre_common::NotificationPriority::from_rank(priority_rank),
+            notification_type: ntype.clone(),
+            // Band derives from the persisted notification TYPE per the
+            // amended §Notification Entity membership table — never from
+            // the numeric rank (only the rank is persisted, and no numeric
+            // threshold reproduces the specced membership).
+            priority: gyre_common::NotificationPriority::for_notification_type(&ntype),
             priority_rank,
             title: self.title,
             body: self.body,
@@ -153,7 +157,7 @@ impl NotificationRepository for SqliteStorage {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
-        notification_type: Option<&str>,
+        notification_types: Option<&[&str]>,
         repo_id: Option<&Id>,
         limit: u32,
         offset: u32,
@@ -161,7 +165,11 @@ impl NotificationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
-        let ntype = notification_type.map(|s| s.to_string());
+        // Owned copy for the spawn_blocking closure; empty set matches
+        // nothing (port contract), handled explicitly below so the SQL
+        // never depends on `IN ()` semantics.
+        let ntypes: Option<Vec<String>> =
+            notification_types.map(|ts| ts.iter().map(|s| s.to_string()).collect());
         let rid = repo_id.cloned();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
@@ -179,8 +187,12 @@ impl NotificationRepository for SqliteStorage {
             if let Some(max_p) = max_priority {
                 query = query.filter(notifications::priority.le(max_p as i32));
             }
-            if let Some(ref nt) = ntype {
-                query = query.filter(notifications::notification_type.eq(nt));
+            if let Some(ref ts) = ntypes {
+                if ts.is_empty() {
+                    return Ok(Vec::new());
+                }
+                query = query
+                    .filter(notifications::notification_type.eq_any(ts.iter().map(String::as_str)));
             }
             if let Some(ref r) = rid {
                 query = query.filter(notifications::repo_id.eq(r.as_str()));
@@ -513,6 +525,66 @@ mod tests {
             n.resolved_at = Some(created_at + 10);
         }
         n
+    }
+
+    /// Read-path band derivation (task-123 repair): only the numeric rank is
+    /// persisted; the four-level band must be reconstructed from the
+    /// persisted notification TYPE per the amended §Notification Entity
+    /// membership table — never threshold-mapped from the rank. Pins the
+    /// types whose rank and band deliberately disagree: rank 2 → High (not
+    /// Urgent), rank 4 → Low (not High), rank 7 → High (not Medium).
+    #[tokio::test]
+    async fn read_path_reconstructs_band_from_type_not_rank() {
+        let (_tmp, s) = setup();
+        let cases = [
+            (
+                "n-band-1",
+                NotificationType::SpecApprovalRequested,
+                2u8,
+                gyre_common::NotificationPriority::High,
+            ),
+            (
+                "n-band-2",
+                NotificationType::CascadeTestTriggered,
+                4,
+                gyre_common::NotificationPriority::Low,
+            ),
+            (
+                "n-band-3",
+                NotificationType::SecretExpiring,
+                7,
+                gyre_common::NotificationPriority::High,
+            ),
+            (
+                "n-band-4",
+                NotificationType::SpecAssertionFailure,
+                9,
+                gyre_common::NotificationPriority::Medium,
+            ),
+        ];
+        for (id, ntype, rank, band) in cases {
+            let n = Notification::new(
+                Id::new(id),
+                Id::new("ws-1"),
+                Id::new("user-1"),
+                ntype.clone(),
+                format!("band probe {id}"),
+                "tenant-1",
+                1000,
+            );
+            assert_eq!(n.priority_rank, rank, "{ntype:?} rank");
+            assert_eq!(n.priority, band, "{ntype:?} band at creation");
+            NotificationRepository::create(&s, &n).await.unwrap();
+            let loaded = NotificationRepository::get(&s, &Id::new(id), &Id::new("user-1"))
+                .await
+                .unwrap()
+                .expect("notification must load");
+            assert_eq!(loaded.priority_rank, rank, "{ntype:?} rank round-trips");
+            assert_eq!(
+                loaded.priority, band,
+                "{ntype:?} band must reconstruct from the type, not from_rank({rank})"
+            );
+        }
     }
 
     #[tokio::test]
@@ -883,6 +955,115 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(all.len(), 2, "no repo filter returns both");
+    }
+
+    /// The four-level `?priority=` filter pushes down as a type-string set
+    /// on the persisted `notification_type` column (amended §Notification
+    /// Entity membership table — the band derives from the type, never the
+    /// numeric rank). The set must match pre-unification rows persisted
+    /// under legacy type names, and an empty set is a filter that matches
+    /// nothing, not a no-op.
+    #[tokio::test]
+    async fn list_for_user_type_set_filter_matches_persisted_column() {
+        let (_tmp, s) = setup();
+        let user1 = Id::new("user-1");
+        // SpecApprovalRequested: rank 2 yet High — the rank/band divergence
+        // that makes a rank-range query wrong for level filtering.
+        let mut approval = make("n-set-1", 1000, false);
+        approval.notification_type = NotificationType::SpecApprovalRequested;
+        NotificationRepository::create(&s, &approval).await.unwrap();
+        // make() seeds GateFailure: rank 3, High.
+        NotificationRepository::create(&s, &make("n-set-2", 1001, false))
+            .await
+            .unwrap();
+        // A pre-unification row persisted under the legacy type name — only
+        // the raw column carries it.
+        let legacy = NewNotificationRow {
+            id: "n-set-legacy",
+            workspace_id: "ws-1",
+            user_id: "user-1",
+            notification_type: "SpecPendingApproval",
+            priority: 2,
+            title: "legacy row",
+            body: None,
+            entity_ref: None,
+            repo_id: None,
+            entity_type: None,
+            action_url: None,
+            read: 0,
+            read_at: None,
+            resolved_at: None,
+            dismissed_at: None,
+            created_at: 1002,
+            tenant_id: "tenant-1",
+        };
+        {
+            let mut conn = s.pool.get().unwrap();
+            diesel::insert_into(notifications::table)
+                .values(&legacy)
+                .execute(&mut conn)
+                .unwrap();
+        }
+
+        let high = gyre_common::NotificationPriority::High.notification_type_strings();
+        assert!(high.contains(&"SpecPendingApproval"));
+        let hits = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            Some(&high),
+            None,
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        let mut ids: Vec<&str> = hits.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["n-set-1", "n-set-2", "n-set-legacy"],
+            "the High band set must match the rank-2 type and the legacy-named row"
+        );
+
+        let urgent = gyre_common::NotificationPriority::Urgent.notification_type_strings();
+        let none = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            Some(&urgent),
+            None,
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(none.len(), 0, "no seeded type is in the Urgent band");
+
+        let empty = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            Some(&[]),
+            None,
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty.len(), 0, "an empty type set matches nothing");
+
+        let all =
+            NotificationRepository::list_for_user(&s, &user1, None, None, None, None, None, 50, 0)
+                .await
+                .unwrap();
+        assert_eq!(all.len(), 3, "no type filter returns everything");
     }
 
     #[tokio::test]

@@ -351,7 +351,7 @@ mod tests {
                 Some(&Id::new(ws_id)),
                 None,
                 None,
-                Some(NotificationType::TrustSuggestion.as_str()),
+                Some(&[NotificationType::TrustSuggestion.as_str()]),
                 None,
                 50,
                 0,
