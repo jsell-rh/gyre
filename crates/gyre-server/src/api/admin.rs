@@ -369,6 +369,29 @@ pub(crate) async fn kill_agent(
         }
     }
 
+    // Block the agent's current task.
+    if let Some(task_id) = &agent.current_task_id {
+        if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
+            if task.status == TaskStatus::InProgress {
+                let pre_block_status = task.status.clone();
+                let _ = task.transition_status(TaskStatus::Blocked);
+                task.updated_at = now;
+                let _ = state.tasks.update(&task).await;
+                // task.status_changed analytics event (analytics.md
+                // §Auto-Emitted Events: "Task transitions status") — the
+                // kill auto-block is a production transition.
+                if task.status != pre_block_status {
+                    crate::api::analytics::record_task_status_changed(
+                        state,
+                        &task,
+                        &pre_block_status,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
     // M22.2: release the budget active-agent slot this agent held.
     if was_active {
         crate::api::budget::decrement_active_agents(state, &agent.workspace_id.to_string()).await;
@@ -450,16 +473,27 @@ pub async fn admin_kill_agent(
     )
     .await?;
 
-    // Block the agent's current task.
-    if let Some(task_id) = &agent.current_task_id {
-        if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
-            if task.status == TaskStatus::InProgress {
-                let _ = task.transition_status(TaskStatus::Blocked);
-                task.updated_at = now_secs();
-                let _ = state.tasks.update(&task).await;
-            }
-        }
-    }
+    // Auto-track agent kill (analytics.md §Auto-Emitted Events: agent.failed
+    // covers "fails or is killed").
+    let now = now_secs();
+    let ev = gyre_domain::AnalyticsEvent::new(
+        crate::api::new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "force-killed by admin",
+            "duration_secs": now.saturating_sub(agent.spawned_at),
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
+    );
+    let _ = state.analytics.record(&ev).await;
 
     // The kill ended the run — charge the wall-clock compute minutes
     // (spawn → kill, agent-runtime.md §4 What's Tracked). The budget
@@ -1224,6 +1258,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(killed.status, gyre_domain::AgentStatus::Dead);
+
+        // analytics.md §Auto-Emitted Events: agent.failed covers "fails or
+        // is killed" — the admin force-kill path must record it with the
+        // kill reason.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.failed event expected");
+        assert_eq!(events[0].agent_id.as_deref(), Some("agent-kill-1"));
+        assert_eq!(events[0].properties["reason"], "force-killed by admin");
+        assert!(
+            events[0].properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
     }
 
     #[tokio::test]
@@ -1362,6 +1412,25 @@ mod tests {
 
         let blocked_task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(blocked_task.status, TaskStatus::Blocked);
+
+        // analytics.md §Auto-Emitted Events: task.status_changed (trigger
+        // "Task transitions status") — the admin force-kill auto-block is a
+        // production transition and must record. Regression: previously only
+        // the HTTP status endpoint and MCP update_task recorded.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "admin force-kill auto-block must record task.status_changed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], "task-for-kill");
+        assert_eq!(ev.properties["old_status"], "InProgress");
+        assert_eq!(ev.properties["new_status"], "Blocked");
     }
 
     #[tokio::test]

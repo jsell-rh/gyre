@@ -9,7 +9,7 @@
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | agent-gates.md | 25 | 9 | 0 | 16 | 0 | 0 | 0% |
 | agent-runtime.md | 33 | 1 | 0 | 16 | 16 | 0 | 50% |
-| analytics.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
+| analytics.md | 12 | 0 | 0 | 7 | 5 | 0 | 41% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |
 | business-continuity.md | 10 | 4 | 0 | 0 | 5 | 1 | 100% |
 | dependency-graph.md | 19 | 3 | 0 | 5 | 2 | 9 | 68% |
@@ -33,7 +33,7 @@
 | search.md | 18 | 4 | 0 | 8 | 5 | 1 | 42% |
 | source-control.md | 13 | 2 | 0 | 1 | 0 | 10 | 90% |
 | spec-lifecycle.md | 13 | 3 | 0 | 0 | 5 | 5 | 100% |
-| spec-links.md | 17 | 3 | 0 | 1 | 3 | 10 | 92% |
+| spec-links.md | 17 | 3 | 0 | 0 | 4 | 10 | 100% |
 | spec-registry.md | 19 | 1 | 0 | 3 | 6 | 9 | 83% |
 | supply-chain.md | 18 | 4 | 0 | 7 | 6 | 1 | 50% |
 | system-explorer.md | 19 | 10 | 0 | 9 | 0 | 0 | 0% |

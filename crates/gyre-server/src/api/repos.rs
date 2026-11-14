@@ -384,11 +384,23 @@ pub async fn archive_repo(
             TaskStatus::Backlog | TaskStatus::InProgress | TaskStatus::Review | TaskStatus::Blocked
         );
         if cancellable {
+            let pre_cancel_status = task.status.clone();
             task.status = TaskStatus::Cancelled;
             task.cancelled_at = Some(now);
             task.cancelled_reason = Some("Repository archived".to_string());
             task.updated_at = now;
             state.tasks.update(&task).await?;
+            // task.status_changed analytics event (analytics.md §Auto-Emitted
+            // Events: "Task transitions status") — the repo-archive
+            // cancellation is a production transition.
+            if task.status != pre_cancel_status {
+                crate::api::analytics::record_task_status_changed(
+                    &state,
+                    &task,
+                    &pre_cancel_status,
+                )
+                .await;
+            }
             // meta-spec-reconciliation.md §11: cancellation of the last open
             // reconciliation / drift-review task completes the wave. The
             // shared hook also advances a §7 rolling rollout (next batch)
@@ -417,6 +429,27 @@ pub async fn archive_repo(
             // not heartbeat expiration (agent-runtime.md §1 AgentStatus enum).
             let _ = agent.transition_status(AgentStatus::Stopped);
             state.agents.update(&agent).await?;
+            // agent.failed analytics event (analytics.md §Auto-Emitted Events:
+            // "Agent fails or is killed") — the repo-archive stop is a kill
+            // path, like stop_agent/admin kill/stale abort.
+            let ev = gyre_domain::AnalyticsEvent::new(
+                new_id(),
+                "agent.failed",
+                Some(agent.id.to_string()),
+                serde_json::json!({
+                    "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                    "reason": "killed (repo archived)",
+                    "duration_secs": now.saturating_sub(agent.spawned_at),
+                }),
+                now,
+            )
+            .with_scope(
+                None,
+                None,
+                Some(&agent.workspace_id),
+                agent.repo_id.as_ref(),
+            );
+            let _ = state.analytics.record(&ev).await;
 
             // Platform Model §7: the agent's task was just cancelled — its
             // one-time task-scoped secrets must not outlive the task.
@@ -437,6 +470,22 @@ pub async fn archive_repo(
             if let Err(e) = state.traces.delete_by_mr(&mr.id).await {
                 tracing::warn!(mr_id = %mr.id, error = %e, "failed to delete gate trace on MR close");
             }
+            // mr.closed analytics event (analytics.md §Auto-Emitted Events:
+            // "MR closed without merge") — repo archival is one of the close
+            // paths; the HTTP transition endpoint and spec-reject are others.
+            let ev = gyre_domain::AnalyticsEvent::new(
+                new_id(),
+                "mr.closed",
+                mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                serde_json::json!({
+                    "mr_id": mr.id.to_string(),
+                    "repo_id": mr.repository_id.to_string(),
+                    "reason": "repo_archived",
+                }),
+                now,
+            )
+            .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+            let _ = state.analytics.record(&ev).await;
         }
     }
 
@@ -1769,6 +1818,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(t3_after.status, TaskStatus::Done);
+
+        // analytics.md §Auto-Emitted Events: task.status_changed — the
+        // repo-archive cancellation is a production transition and must
+        // record. Regression: previously only the HTTP status endpoint and
+        // MCP update_task recorded.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "each archived-repo task cancellation must record task.status_changed"
+        );
+        for ev in &events {
+            assert_eq!(ev.properties["new_status"], "Cancelled");
+            let old = ev.properties["old_status"].as_str().unwrap_or_default();
+            assert!(
+                ev.properties["task_id"] == "task-cancel-1" && old == "Backlog"
+                    || ev.properties["task_id"] == "task-cancel-2" && old == "InProgress",
+                "unexpected task_id/old_status pair: {} {}",
+                ev.properties["task_id"],
+                old
+            );
+        }
     }
 
     #[tokio::test]
@@ -1818,6 +1893,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(a2.status, AgentStatus::Idle);
+
+        // analytics.md §Auto-Emitted Events: agent.failed ("Agent fails or
+        // is killed") — the repo-archive agent stop is a kill path, like
+        // stop_agent/admin kill/stale abort. Regression: this path
+        // previously recorded no event.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "repo-archive agent stop must record agent.failed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(ev.properties["task_id"], "task-agent-1");
+        assert_eq!(ev.properties["reason"], "killed (repo archived)");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
     }
 
     #[tokio::test]
@@ -1897,6 +1995,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(m3.status, MrStatus::Merged);
+        // analytics.md §Auto-Emitted Events: each MR closed by the archive
+        // must record an `mr.closed` event with the spec-required properties.
+        // Regression: the archive close path previously recorded nothing.
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "one mr.closed event per closed MR (open + approved), none for the merged MR"
+        );
+        let mut closed_ids: Vec<&str> = events
+            .iter()
+            .map(|e| e.properties["mr_id"].as_str().unwrap())
+            .collect();
+        closed_ids.sort();
+        assert_eq!(closed_ids, vec!["mr-approved-2", "mr-open-1"]);
+        for ev in &events {
+            assert_eq!(ev.properties["repo_id"], repo_id);
+            assert_eq!(ev.properties["reason"], "repo_archived");
+        }
     }
 
     #[tokio::test]

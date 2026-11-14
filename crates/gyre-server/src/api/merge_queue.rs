@@ -163,6 +163,21 @@ pub async fn cancel_entry(
     }
 
     state.merge_queue.cancel(&Id::new(&id)).await?;
+
+    // merge_queue.processed analytics event (analytics.md §Auto-Emitted
+    // Events: "Queue entry processed") — an operator cancellation is a
+    // terminal outcome of the entry, same as the circuit-breaker Cancelled
+    // path; the spec outcome value is "skipped".
+    crate::merge_processor::emit_queue_processed_terminal(
+        &state,
+        &entry,
+        None,
+        "skipped",
+        "cancelled",
+        "cancelled by operator",
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -430,6 +445,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` (trigger
+    /// "Queue entry processed") must record on every terminal outcome. An
+    /// operator cancellation terminates the entry, same as the
+    /// circuit-breaker Cancelled path — outcome "skipped". Regression:
+    /// this path previously cancelled the entry with no analytics event.
+    #[tokio::test]
+    async fn cancel_records_queue_processed_skipped() {
+        let (app, state) = make_app().await;
+        let (app, id) = enqueue_entry(app, &state, "mr-1", None).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/merge-queue/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "operator cancellation must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-1");
+        assert_eq!(ev.properties["outcome"], "skipped");
+        assert_eq!(ev.properties["failure_kind"], "cancelled");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
     }
 
     #[tokio::test]

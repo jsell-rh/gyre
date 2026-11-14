@@ -428,6 +428,25 @@ impl AnalyticsRepository for IndexingAnalyticsRepository {
         self.inner.query(event_name, since, limit).await
     }
 
+    // Read paths delegate unchanged — the decorator only adds index-on-write
+    // behavior to `record`; the filtered query and grouped count are pure
+    // reads of the wrapped repository (analytics.md §Query Parameters —
+    // filter evaluation happens in the adapter, not here).
+    async fn query_filtered(
+        &self,
+        filter: &gyre_ports::analytics::AnalyticsQueryFilter,
+    ) -> Result<Vec<AnalyticsEvent>> {
+        self.inner.query_filtered(filter).await
+    }
+
+    async fn count_grouped(
+        &self,
+        filter: &gyre_ports::analytics::AnalyticsQueryFilter,
+        group_by: gyre_ports::analytics::AnalyticsGroupBy,
+    ) -> Result<Vec<(String, u64)>> {
+        self.inner.count_grouped(filter, group_by).await
+    }
+
     async fn count(&self, event_name: &str, since: u64, until: u64) -> Result<u64> {
         self.inner.count(event_name, since, until).await
     }
