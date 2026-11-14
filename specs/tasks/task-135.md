@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Chains (Composable Policies)"
   - "agent-gates.md §Gate Agent Lifecycle"
-commits: ["25a6f4639150bdabb1c9f89e9e2a0bc2e41c89aa", "9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d"]
+commits: ["25a6f4639150bdabb1c9f89e9e2a0bc2e41c89aa", "9ff6b003411e9f09c18d3a0a8e327780bbc59c22", "089cdce388806ffd3c3514859f73148488c3c3a5", "2999bb5e7b9989eaf0518ecb4b484ecb2228b188", "6ccbdff179e7e559c35c08e5072b53b4590dd29c", "d715552208fab61ea2e1e241e36d0f86074ae2b0", "583c4a07dde4629da277a1efdafaa5b077596b9d", "54ac2796a7963af5cf7da39219ef36080186f8d8"]
 ---
 
 ## Spec Excerpt
@@ -103,64 +103,67 @@ Read `specs/system/agent-gates.md` §Gate Chains and §Gate Agent Lifecycle. Exi
 ## Shipped
 
 Both coverage sections are implemented in production code and were
-independently approved in prior rounds. This round is a contract repair:
-the prior checkpoint amended protected task text (the last acceptance
-criterion's wording), which the contract guard rejects; this commit
-restores the assigned contract verbatim, records the branch's
-product-surface commits, and sets ready-for-review. No production code
-changed this round — the tree is identical to the verified 25a6f463
-(the doc-only commits after it touch only this file).
+independently approved in prior rounds. This round is a verification
+repair: the full-suite run of candidate b4093d74 (attempt c7b64c69)
+failed exactly one test,
+`gate_executor::tests::agent_review_context_capture_skips_without_workspace_tenant`
+("capture must be skipped, not stored under a fabricated tenant").
 
-### Behavior (attributed commits)
+### Root cause (fixture, not production code)
+
+`seed_mr_with_repo` left the MR on `MergeRequest::new`'s bootstrap
+`default` workspace binding while the repo lives in `ws-test`, and
+ensured a workspace row for `default` — so the MR's workspace always
+resolved and the capture was always recorded under a tenant the repo
+does not belong to. The orphan test's premise (no scoperable tenant)
+could never hold, and the whole fixture family silently scoped
+gate-agent tokens and captured context windows to the wrong workspace.
+
+### Repair (54ac2796)
+
+- `seed_mr_with_repo` now models the production create paths: the MR
+carries the repo's workspace (`ws-test`) and the ws-test workspace row
+is ensured — the same shape as the existing `seed_full_review_fixture`.
+The stray `default`-row ensure is removed.
+- The orphan test now deletes the ws-test row after seeding and asserts
+the §1 token-scoping contract (task-130 dependency, fail-closed): the
+gate FAILS with `workspace ws-test not found`, no gate token is minted
+(fail-before-mint), and no `gate_agent_context` audit event exists
+(capture skipped, never stored under a fabricated tenant). The prior
+"reviewer runs and exits without submitting" expectation contradicted
+the fail-closed dependency contract and was corrected; all original
+guards are preserved or strengthened.
+
+### Behavior (prior rounds, unchanged)
 
 - **Gate chains (§Gate Chains):** repos configure an ordered list of
-  mixed gate types (TestCommand, LintCommand, AgentReview,
-  AgentValidation, RequiredApprovals) with per-gate `required` flags
-  and type-specific config. `trigger_gates_for_mr`
-  (crates/gyre-server/src/gate_executor.rs) creates a Pending
-  GateResult per gate and spawns every gate's execution concurrently
-  (tokio tasks); the merge processor waits until every required gate
-  passes. Required-gate failure blocks the MR and notifies the author
-  agent with failure details; `required = false` gates record results
-  and attach advisory comments without blocking. Per-MR gate status is
-  tracked Pending → Running → Passed/Failed in the `gate_results`
-  store.
+mixed gate types (TestCommand, LintCommand, AgentReview,
+AgentValidation, RequiredApprovals) with per-gate `required` flags and
+type-specific config. `trigger_gates_for_mr` creates a Pending
+GateResult per gate and spawns every gate's execution concurrently;
+the merge processor waits until every required gate passes.
+Required-gate failure blocks the MR and notifies the author agent with
+failure details; `required = false` gates record results and attach
+advisory comments without blocking. Per-MR gate status is tracked
+Pending → Running → Passed/Failed in the `gate_results` store.
 - **Gate agent lifecycle (§Gate Agent Lifecycle):** review/validation
-  agents are spawned per gate run with a scoped OIDC token
-  (`review:submit` / `validation:report` only — no push, no task
-  creation), attributed to their persona and gate config
-  (`reviewer_persona`/`gate_id` derived server-side from the token's
-  `task_id` claim, never from caller-supplied fields), torn down
-  (token revoked) after the verdict, and their full context window
-  captured to the audit trail.
+agents are spawned per gate run with a scoped OIDC token
+(`review:submit` / `validation:report` only), attributed to their
+persona and gate config (derived server-side from the token's
+`task_id` claim, never from caller-supplied fields), torn down (token
+revoked) after the verdict, and their full context window captured to
+the audit trail.
 
-### CI repair already landed (25a6f463)
+### Test evidence
 
-The merge of base 6ffd6799 (task-130 §1 token-scoping claims) left two
-task-135-side sites on the pre-§1 contract: the
-`scoped_gate_review_records_persona_attribution` test called the old
-6-arg `mint_scoped` (E0061 in the lib test target — the Clippy failure,
-run 43535816551), and `submit_review`'s attribution gate read the scope
-claim as a raw JSON string, which with the claim now a `Vec<String>` is
-always `None`, silently dropping persona/gate attribution. Both were
-repaired: the test mints exactly as the gate executor does (MR →
-workspace → tenant resolved fail-closed, persona slug from the gate
-persona reference), and the attribution gate reads the
-extractor-derived `auth.scope`, identical to the identity binding above
-it. A tree-wide sweep confirmed no other string-form scope reader
-remains. Clippy-diff vs main and vs assigned base both exited 0 at
-25a6f463; all mechanical lints passed (logs retained under
-/tmp/stage/review-evidence/).
-
-### Verifier-required probes
-
-The sandbox build wrapper refuses gyre-server test compilation during
-implement (4 GiB budget). The independent verifier must run
-`cargo nextest run --all` (the CI test job), in particular the
-gyre-server slices:
-
-- `api::merge_requests::tests::scoped_gate_review_records_persona_attribution`
-- `api::merge_requests::tests::unscoped_review_has_no_gate_attribution`
-- `api::merge_requests::tests::submit_review_binds_agent_token_caller_to_own_identity`
-- `--test task134_review_probe` (scoped-token enforcement suite)
-- `gate_executor::` (gate chain + scoped-token suites)
+- This sandbox: `cargo check -p gyre-server --lib --tests` exit 0
+(type-checks the repaired test module; the implement-stage build
+wrapper refuses gyre-server test compilation under the 4 GiB budget),
+`rustfmt --check` clean, `check-fabricated-scope-defaults`,
+`check-scope-literal-defaults`, and `check-arch` all OK. Evidence:
+`/tmp/stage/review-evidence/task-135-orphan-capture-repair.md`.
+- Verifier must run `cargo test --all` (the failing command) — in
+particular `cargo test -p gyre-server --lib gate_executor`: the
+repaired orphan test plus the ~20 sibling tests on the changed fixture
+(TestCommand/LintCommand/check_gates_for_mr family, AgentReview
+context-gathering family, validation-token family) must pass.
