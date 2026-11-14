@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Notification Entity"
-commits: ["6b3d464140fa60b5b7b33e91f784fd576558cc80", "d6592051175e4ca81cfe2567582c3e5f049759fa", "12f5495f0461154f1da417295ed7527cddc139d1", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
+commits: ["27bfb2a699f9bd6f22085b497726e0d32f8f688a", "deec7953a0c6a6d289d99f8239068ba403c43b06", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "12f5495f0461154f1da417295ed7527cddc139d1", "d6592051175e4ca81cfe2567582c3e5f049759fa", "6b3d464140fa60b5b7b33e91f784fd576558cc80", "90edbb2fb3e9c9aca75cde3aedfbead0cceedea0"]
 ---
 
 ## Spec Excerpt
@@ -110,10 +110,11 @@ Read `specs/system/user-management.md` §Notification Entity. Existing notificat
 ## Shipped
 
 `user-management.md` §Notification Entity is closed in production code.
-Original implementation: commits 27bfb2a69, deec7953a0, f92a48916 (re-homed
-across base merges 730073ad1/7f0ec2b7c/33ae5e394), lint-gate repair
-12f5495f0. Priority-band repair for the verification requirements gap
-(attempt 5d7e43ea): commit 6b3d4641 on base 1ee52c43.
+Original implementation: 27bfb2a69, deec7953a0, f92a48916 (re-homed across
+base merges 730073ad1/7f0ec2b7c/33ae5e394), lint-gate repair 12f5495f0.
+Priority-band repair (attempt 5d7e43ea gap): 6b3d4641 on base 1ee52c43.
+`?priority=` filter repair (review F1, attempt 0cd05eaa): 90edbb2f on base
+bfc36c9c.
 
 ### Entity model (gyre-common/src/notification.rs)
 
@@ -121,88 +122,117 @@ across base merges 730073ad1/7f0ec2b7c/33ae5e394), lint-gate repair
   `notification_type`, `title`, `body`, `source`, `priority`,
   `action_url`, `read`, `read_at`, `created_at` — plus the HSI §2 inbox
   fields (`workspace_id`, `priority_rank`, `resolved_at`, `dismissed_at`,
-  `tenant_id`).
-- All 18 `NotificationType` variants defined, unified with the HSI §2
-  inbox types (41 total, including base-merged `ImpersonationRequest`,
+  `tenant_id`) the HSI contracts require.
+- All 18 `NotificationType` variants are defined, unified with the HSI §2
+  inbox types (41 total after the base merges carried `ImpersonationRequest`,
   `ImpersonationAlert`, `PersonaChangePendingApproval`, `SecretExpiring`,
-  `WorkspaceOwnerless`, `ComputeTargetUnavailable`). `parse()` accepts
-  legacy DB strings (`SpecPendingApproval`, `BudgetWarning`) so existing
-  rows keep parsing.
+  `WorkspaceOwnerless`, `ComputeTargetUnavailable` over). Renames per this
+  spec: `SpecPendingApproval` → `SpecApprovalRequested`, `BudgetWarning` →
+  `AgentBudgetWarning`, `AgentEscalation` 5→2 (Urgent). `parse()` accepts
+  the legacy DB strings so existing rows keep parsing; supersession note in
+  `specs/system/human-system-interface.md` §2. `NotificationType::all()` is
+  the single enumeration of the taxonomy.
+- `NotificationPriority` (Low/Medium/High/Urgent). The band derives from
+  the notification TYPE via `for_notification_type` (the amended §Notification
+  Entity membership table) — never from the HSI §8 numeric rank, which the
+  amendment deliberately does not threshold-map onto the bands
+  (`default_priority`, the SQL adapters' read path, and the domain
+  channel-routing table all delegate to the same function, so one
+  notification carries one band on every surface). `priority_rank` remains
+  the HSI §8 Inbox-ordering scale.
 - `NotificationSource` (`entity_type`, `entity_id`, `workspace_id`,
   `repo_id`) replaces the flat `entity_ref`/`repo_id` pair.
 
-### Priority model (repaired per the amended membership table)
+### Persistence (migration 000059, SQLite + PostgreSQL, portable SQL)
 
-- The authoritative type→band table lives in
-  `NotificationPriority::for_notification_type` (gyre-common).
-  `NotificationType::default_priority()` derives from it — never from
-  `from_rank(default_priority_rank())`, which the amendment forbids
-  ("deliberately not threshold-mapped onto these bands": the 12 types
-  whose rank and band disagree, e.g. SpecApprovalRequested rank 2 → High
-  not Urgent, CascadeTestTriggered rank 4 → Low, SecretExpiring rank 7 →
-  High, are now banded per the table).
-- `gyre-domain`'s channel-routing `for_notification_type` delegates to
-  the same table, so the entity band (API `priority_level`, webhook/email
-  payloads) and the delivery-gating band can never disagree.
-- The SQLite and PostgreSQL adapters reconstruct `priority` from the
-  persisted `notification_type` on every read (only the rank is
-  persisted); the mem adapter stores the struct whose band was set at
-  creation. `from_rank`/`rank_band` remain only as the numeric scale's
-  band description for the `?priority=` list-filter widening.
-- spec_patrol error findings keep the rank-3 Inbox position; their band
-  is the type's Medium per the table (the `from_rank(3)` High override
-  was removed).
-- Module doc, `default_priority_rank` doc, coverage row, and the spec
-  amendment's code-location pointer updated; no surface still claims the
-  band-of-rank invariant.
-
-### Persistence & creation paths (unchanged by the repair)
-
-- Migration 000059 (SQLite + PostgreSQL, portable SQL): `entity_type`,
-  `action_url`, `read`, `read_at` columns; read state backfilled.
-- Port methods `mark_read` / `has_active_notification` implemented in
+- Columns `entity_type`, `action_url`, `read`, `read_at`; read state
+  backfilled from resolved/dismissed timestamps.
+- Port methods `mark_read` and `has_active_notification` implemented in
   SQLite, PostgreSQL, and mem; retention counts marked-read as read.
-- Typed emitters: MrMerged, AgentFailed, SpecApprovalRequested,
-  PersonaApprovalRequested, AgentBudgetWarning/Exhausted (threshold
-  crossing, deduped per period), GatePassed (deduped per user+MR),
-  MergeQueuePaused, BreakingChangeDetected, SpecDriftDetected,
-  DependencyStale (stale transition only), InvitationReceived,
-  MembershipChanged. `SecurityFinding`/`SystemAlert` have no emitting
-  feature yet (no security scanner / system-alert source exists) —
-  documented, not faked.
-- `notify_rich` auto-derives `action_url` deep links via workspace slug +
-  repo name to the SPA entity routes; never fabricates a link.
+- `list_for_user`'s type filter is an exact-match type-string SET on the
+  persisted `notification_type` column (empty set matches nothing),
+  implemented with diesel `eq_any` in the SQL adapters and `contains` in
+  mem — the surface the `?priority=` band filter pushes down through.
 
-### API
+### Creation paths (typed per the taxonomy)
 
-- `GET /api/v1/users/me/notifications` and `/api/v1/notifications`
-  expose `priority_level` (type-derived band), numeric `priority` rank,
-  `entity_type`, `action_url`, `read`/`read_at`. `POST
-  /api/v1/notifications/:id/read|unread` with per-handler auth.
+- MrMerged, AgentFailed, SpecApprovalRequested, PersonaApprovalRequested,
+  AgentBudgetWarning/AgentBudgetExhausted (threshold crossing, deduped per
+  period), GatePassed (deduped per user+MR), MergeQueuePaused,
+  BreakingChangeDetected, SpecDriftDetected, DependencyStale (stale
+  transition only), InvitationReceived, MembershipChanged.
+  `SecurityFinding`/`SystemAlert` have no emitting feature yet (no security
+  scanner / system-alert source exists) — documented in the coverage row,
+  not faked.
+- `notify_rich` auto-derives `action_url` deep links through the workspace
+  slug + repo name to the SPA entity routes; no link is fabricated when the
+  workspace cannot be resolved.
+
+### API (users.rs)
+
+- `GET /api/v1/notifications` (spec path) and `/users/me/notifications`
+  (legacy): paginated, filterable by `?type=`, `?priority=`, `?workspace_id=`,
+  `?repo_id=`, `?min_priority=&max_priority=` (numeric ranks).
+- `?priority=<level>` filters by the TYPE-derived band — the same
+  `for_notification_type` derivation as the response's `priority_level`
+  field — never by the HSI rank band (review F1 repair, 90edbb2f): the
+  handler expands the level via `NotificationPriority::notification_type_strings()`
+  (canonical strings plus the legacy DB names of renamed variants, so
+  pre-unification rows filter by their band) into the port's type-set
+  filter and intersects with `?type=`. Unknown level → 400.
+- `POST /api/v1/notifications/:id/read|unread`, mark-all-read,
+  unread-count, preferences, SSE stream — per-handler auth identical to
+  dismiss/resolve; registered in the ABAC resolver as exempt with
+  per-handler auth.
+- Response carries `priority_level` (type-derived band), numeric `priority`
+  rank, structured source, `action_url`, `read`/`read_at` alongside the
+  fields the web Inbox and CLI read today. `docs/api-reference.md` and the
+  user-management coverage rows updated.
 
 ### Test evidence
 
-- gyre-common (10 notification tests, green): 18-variant round-trip,
-  legacy-name parsing, spec level examples, full amended-membership
-  probe `entity_priority_matches_amended_membership_table` (all 41
-  variants, table spelled out independently of the implementation so
-  drift fails the probe).
-- gyre-domain: 509 tests green (delegation compiles; band behavior
-  covered by the dispatcher suite).
-- gyre-adapters SQLite (11 notification tests, green, real migration):
-  new `read_path_reconstructs_band_from_type_not_rank` pins rank 2 →
-  High, 4 → Low, 7 → High, 9 → Medium on the read path — fails if the
-  adapter regresses to `from_rank`.
-- gyre-server (type-checked via `cargo check --all-targets`; test
-  execution recorded for the independent verifier — this sandbox cannot
-  compile gyre-server test binaries within the 4 GiB budget): suites to
-  run — `notification_dispatcher` (incl. new
-  `entity_band_equals_channel_routing_band` over the 12 repaired types),
-  `notifications`, `spec_patrol`, `workspace_ownership`, `users`
-  (priority_level now High for SpecApprovalRequested), `budget`,
-  `personas`, `dep_staleness`, `merge_queue`, `impersonation`,
-  `secret_rotation`, `merge_processor`, `git_http`.
-- Changed-line gates on base 1ee52c43: `check-rustfmt-diff.py` clean,
-  `check-clippy-diff.py` clean (8 Rust files); `check-arch.sh` and
-  `check-mem-port-contracts.sh` pass. Evidence:
-  /tmp/stage/review-evidence (focused-tests.txt, gates.txt).
+- gyre-common (128 tests green, incl. 12 notification tests): taxonomy
+  round-trip, legacy-name parsing, amended membership table pinned
+  per-variant, `all()` enumerates the taxonomy exactly once, and the band
+  type-string sets partition the taxonomy with legacy names riding their
+  variant's band and the rank/band divergences pinned (SpecApprovalRequested
+  High, CascadeTestTriggered Low, SecretExpiring High).
+- gyre-adapters SQLite (real migration, 12 notification tests green):
+  create/mark_read/dedup/retention, read-path band reconstruction from the
+  persisted type, and the type-set filter matching the persisted column —
+  including a raw legacy `SpecPendingApproval` row — with empty-set
+  semantics.
+- gyre-server: type-checked via `cargo check --all --all-targets` (clean);
+  test execution deferred to the independent verifier (this sandbox's
+  build wrapper blocks server test codegen within the 4 GiB budget).
+  Required probes recorded in /tmp/stage/review-evidence/deferred-probes.txt:
+  `spec_path_notifications_list_with_filters` (now seeds the rank-2
+  SpecApprovalRequested divergence: `?priority=high` returns it labeled
+  `priority_level: High`, `?priority=urgent` returns none of the seeded
+  items, `?type=`×`?priority=` intersect to empty) plus the notifications,
+  users, secret_rotation, trust_suggestion, constraint_check, and
+  workspace_ownership suites covering the updated `list_for_user` call
+  sites.
+- Changed-line gates on base bfc36c9c: `check-rustfmt-diff.py` and
+  `check-clippy-diff.py` both clean; `check-arch.sh` and
+  `check-mem-port-contracts.sh` pass. Evidence retained under
+  /tmp/stage/review-evidence.
+
+### Rebase resolutions (durable history)
+
+- Onto fefde294 (merge 730073ad1, fix f92a48916): kept the task's
+  rank-based API in `gyre-common/src/notification.rs`; adapted the base's
+  `secret_rotation.rs` expiry notifications to the structured source model.
+- Onto 774737638 (merge 7f0ec2b7c): `spawn.rs` `fail_agent` — kept both
+  sides (base's `revoke_agent_task_secrets` + the task's `AgentFailed`
+  typed notification).
+- Onto 79dfbdde (merge 33ae5e394): `notification.rs` and `api/mod.rs` —
+  kept the task's notification handlers and rank-based API, carried the
+  base's new variants and creation sites over to the structured source
+  model.
+- Priority-band repair 6b3d4641 (base 1ee52c43): the entity band derives
+  from the type via `for_notification_type`, never `from_rank`; adapters
+  reconstruct the band from the persisted type on read; domain
+  channel-routing delegates to the same table.
+- Filter repair 90edbb2f (base bfc36c9c): `?priority=` band filter moved
+  from rank-band widening to the type-string set (review F1).
