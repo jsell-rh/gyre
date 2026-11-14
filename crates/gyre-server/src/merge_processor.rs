@@ -11774,12 +11774,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-no-spec-ref"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "No spec_ref MR",
             "feat/nospec",
             "main",
             4000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("author-agent-specref"));
         state.merge_requests.create(&mr).await.unwrap();
         let entry = MergeQueueEntry::new(Id::new("entry-no-spec-ref"), mr.id.clone(), 50, 4000);
@@ -11838,12 +11838,12 @@ mod tests {
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-with-spec-ref"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Spec_ref MR",
             "feat/withspec",
             "main",
             4001,
         );
-        mr2.workspace_id = Id::new("ws-1");
         mr2.spec_ref = Some(format!("system/identity.md@{}", "a".repeat(40)));
         state.merge_requests.create(&mr2).await.unwrap();
         let entry2 = MergeQueueEntry::new(Id::new("entry-with-spec-ref"), mr2.id.clone(), 50, 4001);
@@ -11907,12 +11907,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-unapproved-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Unapproved spec MR",
             "feat/unapproved",
             "main",
             5000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("author-agent-unapproved"));
         mr.spec_ref = Some(format!("system/unapproved.md@{sha}"));
         state.merge_requests.create(&mr).await.unwrap();
@@ -11953,12 +11953,12 @@ mod tests {
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-approved-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Approved spec MR",
             "feat/approved",
             "main",
             5001,
         );
-        mr2.workspace_id = Id::new("ws-1");
         mr2.spec_ref = Some(format!("system/unapproved.md@{sha}"));
         state.merge_requests.create(&mr2).await.unwrap();
         let entry2 = MergeQueueEntry::new(Id::new("entry-approved-spec"), mr2.id.clone(), 50, 5001);
