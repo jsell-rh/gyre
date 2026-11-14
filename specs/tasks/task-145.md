@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §What This Prevents"
-commits: ["0c0529449e16bbb3ae93b099f5b5907fc2aa791b", "0de2f4e4cb9b591e951718aa7bba459e77479152", "f4b7f15195215cd8695e682404343ea4f1db325a"]
+commits: ["6128a39c8fa30617634c5ac192529ee469506ffb", "0c0529449e16bbb3ae93b099f5b5907fc2aa791b", "0de2f4e4cb9b591e951718aa7bba459e77479152", "f4b7f15195215cd8695e682404343ea4f1db325a"]
 ---
 
 ## Spec Excerpt
@@ -134,38 +134,39 @@ that had no merge-level coverage (`require_spec_ref`,
 rejection with a clear reason, author notification, and a positive control
 that merges.
 
-### Rebase repair (this round, commit `0c052944`)
+### Verification repair (this round, commit `6128a39c`)
 
-Durable finding: published PR 817 conflicted with current main (merge
-state DIRTY). Resolved the merge of `f7f5f59` (task-125 teams/notifications
-API, which added a `repo_id` filter to `NotificationStore::list_for_user`)
-into this branch:
+Durable finding: the prior verification round (attempt
+`9428944faefc42fe8635f3e009b4d12f`) failed at compilation —
+`tests/spec_enforcement.rs:988: E0061`. The merge of `b6892403` brought
+task-130's token scoping (`6ffd6799`), which added
+tenant/workspace/repo-name hierarchy arguments to
+`AgentSigningKey::mint`, but the Row 7 test still called the 5-arg form.
 
-- `git_http.rs` conflict: kept the candidate's polling
-  `wait_for_notification` helper (the race fix from `0de2f4e4`) and
-  adapted it to the new 8-arg port signature, discarding the incoming
-  single-check inline listing that reintroduced the race.
-- `merge_processor.rs`: the auto-merge had reformatted the task-145
-  `require_spec_ref` unit test's `list_for_user` call to the new arity but
-  dropped the `repo_id` argument (compile error caught by `cargo check`);
-  filled in the missing `None`.
-
-All other files merged cleanly; `tests/spec_enforcement.rs` itself is
-byte-identical to the approved candidate.
+Repair: the rogue agent JWT is minted with the four scope arguments
+(self-consistent rogue scope). The denial under test is role-based — the
+immutable `builtin:require-human-spec-approval` Deny fires on
+`subject.type != "user"` — so any registered agent JWT must still be
+refused; the hierarchy claims only mirror onto the principal and do not
+widen or narrow that condition. Interplay with task-195 (manifest-driven
+gate selection, `6f5a631c`, also in the merged base) was checked: the
+Row 5 fixture repos commit no `specs/manifest.yaml`, so
+`resolve_manifest_gates_for_mr` selects nothing and the repo-level
+`agent_review` gate runs exactly as before.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --lib --tests` on this round's head
-  (`0c052944`): clean — lib, unit tests, and `tests/spec_enforcement.rs`
-  all type-check against the merged base (evidence:
-  `/tmp/stage/review-evidence/cargo-check-merge-resolution.txt`).
-- Full `cargo test --all` on the prior candidate `9b9954f1` (same test
-  tree plus the race present): 1974/1975 passed; the single failure is the
-  race fixed in `0de2f4e4`, i.e. the spec-enforcement suite itself passed
-  in that run.
+- `cargo check -p gyre-server --test spec_enforcement` on this round's
+  head (`6128a39c`): clean (evidence:
+  `/tmp/stage/review-evidence/cargo-check-spec-enforcement.txt`). This is
+  the exact probe that failed in the prior verification round; the E0061
+  is resolved.
+- Full `cargo test --all` on the earlier candidate `9b9954f1` (same test
+  tree): 1974/1975 passed, the single failure being a notification race
+  fixed in `0de2f4e4` — i.e. the spec-enforcement suite itself passed in
+  that run.
 - Server test execution is deferred to the independent verifier per the
   build-budget constraint. The verifier must execute:
   - `cargo test -p gyre-server --test spec_enforcement`
   - `cargo test -p gyre-server --lib merge_processor`
-  - `cargo test -p gyre-server --lib git_http::tests::push_persona_change_updates_entity_resets_approval_and_notifies_owner`
   - then the full `cargo test --all`
