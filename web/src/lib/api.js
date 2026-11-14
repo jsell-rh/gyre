@@ -534,6 +534,28 @@ export const api = {
     request(`/workspaces/${id}/members`, { method: 'POST', body: JSON.stringify(data) }),
   removeWorkspaceMember: (id, userId) =>
     request(`/workspaces/${id}/members/${userId}`, { method: 'DELETE' }),
+  // Workspace membership management (user-management.md §API > Workspace
+  // Membership, task-124): role change incl. ownership transfer, invitations.
+  updateMemberRole: (id, userId, { role, reason } = {}) =>
+    request(`/workspaces/${id}/members/${userId}/role`, { method: 'PUT', body: JSON.stringify({ role, reason }) }),
+  inviteWorkspaceMember: (id, data) =>
+    request(`/workspaces/${id}/invite`, { method: 'POST', body: JSON.stringify(data) }),
+  workspaceInvitations: (id) => request(`/workspaces/${id}/invitations`),
+  acceptWorkspaceInvitation: (id) =>
+    request(`/workspaces/${id}/invite/accept`, { method: 'POST' }),
+  revokeWorkspaceInvitation: (id, invitationId) =>
+    request(`/workspaces/${id}/invitations/${invitationId}`, { method: 'DELETE' }),
+  // Teams (user-management.md §API > Teams, task-122/125)
+  createTeam: (id, data) =>
+    request(`/workspaces/${id}/teams`, { method: 'POST', body: JSON.stringify(data) }),
+  updateTeam: (id, teamId, data) =>
+    request(`/workspaces/${id}/teams/${teamId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteTeam: (id, teamId) =>
+    request(`/workspaces/${id}/teams/${teamId}`, { method: 'DELETE' }),
+  addTeamMember: (id, teamId, userId) =>
+    request(`/workspaces/${id}/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
+  removeTeamMember: (id, teamId, userId) =>
+    request(`/workspaces/${id}/teams/${teamId}/members/${userId}`, { method: 'DELETE' }),
   // Personas (M22.5)
   personas: () => request('/personas'),
   persona: (id) => request(`/personas/${id}`),
@@ -562,6 +584,20 @@ export const api = {
   me: () => request('/users/me'),
   updateMe: (data) =>
     request('/users/me', { method: 'PUT', body: JSON.stringify(data) }),
+  // Tenant-public profile by username (user-management.md §API > User
+  // Management, task-124): { id, username, display_name, avatar_url,
+  // timezone, created_at, memberships: [...] }
+  userByUsername: (username) => request(`/users/${encodeURIComponent(username)}`),
+  // Tenant user management (task-124): TenantAdmin-only paginated listing,
+  // soft deactivation, and admin user provisioning.
+  listUsers: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/users${qs ? '?' + qs : ''}`);
+  },
+  deactivateUser: (id, reason) =>
+    request(`/users/${id}/deactivate`, { method: 'PUT', body: JSON.stringify({ reason }) }),
+  provisionUser: (data) =>
+    request('/users', { method: 'POST', body: JSON.stringify(data) }),
   myNotifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/users/me/notifications${qs ? '?' + qs : ''}`);
@@ -570,8 +606,26 @@ export const api = {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/users/me/notifications/count${qs}`).then(r => r?.count ?? 0);
   },
+  // Spec notification paths (user-management.md §API > Notifications,
+  // task-125): listing with filters, unread count, read/unread, bulk read.
+  notifications: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/notifications${qs ? '?' + qs : ''}`);
+  },
+  unreadNotificationCount: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/unread-count${qs}`).then(r => r?.count ?? 0);
+  },
   markNotificationRead: (id) =>
+    request(`/notifications/${id}/read`, { method: 'POST' }),
+  markNotificationUnread: (id) =>
+    request(`/notifications/${id}/unread`, { method: 'POST' }),
+  dismissNotification: (id) =>
     request(`/notifications/${id}/dismiss`, { method: 'POST' }),
+  markAllNotificationsRead: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/mark-all-read${qs}`, { method: 'POST' });
+  },
   resolveNotification: (id) =>
     request(`/notifications/${id}/resolve`, { method: 'POST' }),
   // Notification preferences (HSI §12)

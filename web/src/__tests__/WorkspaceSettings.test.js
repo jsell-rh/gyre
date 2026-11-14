@@ -27,6 +27,18 @@ vi.mock('../lib/api.js', () => ({
   api: {
     computeList: vi.fn().mockResolvedValue([]),
     workspaceMembers: vi.fn().mockResolvedValue([]),
+    workspaceTeams: vi.fn().mockResolvedValue([]),
+    listUsers: vi.fn().mockResolvedValue({ users: [], total: 0 }),
+    userByUsername: vi.fn().mockRejectedValue(new Error('not found')),
+    workspaceInvitations: vi.fn().mockResolvedValue({ invitations: [] }),
+    inviteWorkspaceMember: vi.fn().mockResolvedValue({}),
+    updateMemberRole: vi.fn().mockResolvedValue(null),
+    revokeWorkspaceInvitation: vi.fn().mockResolvedValue(null),
+    createTeam: vi.fn().mockResolvedValue({}),
+    updateTeam: vi.fn().mockResolvedValue({}),
+    deleteTeam: vi.fn().mockResolvedValue(null),
+    addTeamMember: vi.fn().mockResolvedValue({}),
+    removeTeamMember: vi.fn().mockResolvedValue(null),
     workspaceBudget: vi.fn().mockResolvedValue(null),
     setWorkspaceBudget: vi.fn().mockResolvedValue({ entity_type: 'workspace', entity_id: 'ws-1', config: { max_tokens_per_day: 5000 }, usage: { tokens_used_today: 0, cost_today: 0, active_agents: 0, period_start: 0 } }),
     workspaceAbacPolicies: vi.fn().mockResolvedValue([]),
@@ -96,14 +108,15 @@ describe('WorkspaceSettings', () => {
     expect(tablist.getAttribute('role')).toBe('tablist');
   });
 
-  it('renders all 10 tabs', () => {
+  it('renders all 11 tabs', () => {
     const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(10);
+    expect(tabs.length).toBe(11);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Trust Level');
     expect(labels).toContain('Policies');
+    expect(labels).toContain('Members');
     expect(labels).toContain('Teams');
     expect(labels).toContain('Budget');
     // HSI §1.5 Admin workspace-scope row: Policies (Trust & Policies) + Repos tabs
@@ -530,36 +543,114 @@ describe('WorkspaceSettings', () => {
       expect(container.querySelector('[data-testid="teams-tab"]')).toBeTruthy();
     });
 
-    it('loads workspace members', async () => {
-      api.workspaceMembers.mockResolvedValue([]);
+    it('loads workspace teams', async () => {
+      api.workspaceTeams.mockResolvedValue({ teams: [] });
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
       await openTeamsTab(container);
-      expect(api.workspaceMembers).toHaveBeenCalledWith('ws-1');
+      expect(api.workspaceTeams).toHaveBeenCalledWith('ws-1');
     });
 
-    it('shows member table when members exist', async () => {
-      api.workspaceMembers.mockResolvedValue([
-        { name: 'Alice', email: 'alice@example.com', role: 'admin' },
-        { name: 'Bob', email: 'bob@example.com', role: 'member' },
-      ]);
+    it('shows team rows with lead and member count', async () => {
+      api.workspaceTeams.mockResolvedValue({
+        teams: [
+          { id: 'team-1', name: 'Platform', slug: 'platform', lead: 'u-1', member_ids: ['u-1', 'u-2'] },
+        ],
+      });
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
       await openTeamsTab(container);
-      // Wait for async data load
       await new Promise(r => setTimeout(r, 0));
-      // Table should appear
+      const table = container.querySelector('[data-testid="teams-table"]');
+      expect(table).toBeTruthy();
+      const rows = table.querySelectorAll('[data-testid="team-row"]');
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain('Platform');
+      expect(rows[0].textContent).toContain('platform');
+    });
+
+    it('shows empty state when no teams', async () => {
+      api.workspaceTeams.mockResolvedValue({ teams: [] });
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openTeamsTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      expect(container.querySelector('[data-testid="teams-tab"]')).toBeTruthy();
+    });
+  });
+
+  describe('Members tab', () => {
+    async function openMembersTab(container) {
+      await fireEvent.click(container.querySelector('#ws-tab-members'));
+    }
+
+    it('shows members panel with invite button', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openMembersTab(container);
+      expect(container.querySelector('[data-testid="members-tab"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="invite-member-btn"]')).toBeTruthy();
+    });
+
+    it('loads workspace members and pending invitations', async () => {
+      api.workspaceMembers.mockResolvedValue({ members: [] });
+      api.workspaceInvitations.mockResolvedValue({ invitations: [] });
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openMembersTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      expect(api.workspaceMembers).toHaveBeenCalledWith('ws-1');
+      expect(api.workspaceInvitations).toHaveBeenCalledWith('ws-1');
+    });
+
+    it('shows member table with role select and remove action', async () => {
+      api.workspaceMembers.mockResolvedValue({
+        members: [
+          { id: 'm-1', user_id: 'u-1', workspace_id: 'ws-1', role: 'Owner', accepted: true, accepted_at: 1700000000, created_at: 1700000000 },
+          { id: 'm-2', user_id: 'u-2', workspace_id: 'ws-1', role: 'Developer', accepted: true, accepted_at: 1700000000, created_at: 1700000000 },
+        ],
+      });
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openMembersTab(container);
+      await new Promise(r => setTimeout(r, 0));
       const table = container.querySelector('[data-testid="members-table"]');
       expect(table).toBeTruthy();
       const rows = table.querySelectorAll('[data-testid="member-row"]');
-      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.length).toBe(2);
+      expect(container.querySelector('[data-testid="role-select-u-2"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="remove-member-u-2"]')).toBeTruthy();
     });
 
-    it('shows empty state when no members', async () => {
-      api.workspaceMembers.mockResolvedValue([]);
+    it('changing the role select calls the role endpoint and reloads', async () => {
+      api.workspaceMembers.mockResolvedValue({
+        members: [
+          { id: 'm-2', user_id: 'u-2', workspace_id: 'ws-1', role: 'Developer', accepted: true, created_at: 1700000000 },
+        ],
+      });
+      api.updateMemberRole.mockResolvedValue(null);
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
-      await openTeamsTab(container);
+      await openMembersTab(container);
       await new Promise(r => setTimeout(r, 0));
-      // Either empty text or loading, both are acceptable initial states
-      expect(container.querySelector('[data-testid="teams-tab"]')).toBeTruthy();
+      const select = container.querySelector('[data-testid="role-select-u-2"]');
+      await fireEvent.change(select, { target: { value: 'Admin' } });
+      await waitFor(() => {
+        expect(api.updateMemberRole).toHaveBeenCalledWith('ws-1', 'u-2', { role: 'Admin', reason: undefined });
+      });
+    });
+
+    it('invite modal resolves the username and invites by user id', async () => {
+      api.workspaceMembers.mockResolvedValue({ members: [] });
+      api.userByUsername.mockResolvedValue({ id: 'u-9', username: 'alice' });
+      api.inviteWorkspaceMember.mockResolvedValue({ id: 'm-9' });
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openMembersTab(container);
+      await fireEvent.click(container.querySelector('[data-testid="invite-member-btn"]'));
+      const input = await waitFor(() => {
+        const el = container.querySelector('[data-testid="invite-username-input"]');
+        expect(el).toBeTruthy();
+        return el;
+      });
+      await fireEvent.input(input, { target: { value: '@alice' } });
+      await fireEvent.submit(input.closest('form'));
+      await waitFor(() => {
+        expect(api.userByUsername).toHaveBeenCalledWith('alice');
+        expect(api.inviteWorkspaceMember).toHaveBeenCalledWith('ws-1', { user_id: 'u-9', role: 'Developer' });
+      });
     });
   });
 

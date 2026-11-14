@@ -35,6 +35,16 @@ function parseUrl(pathname) {
     return { mode: 'profile', slug: null, repoName: null, tab: null };
   }
 
+  // /@username — tenant-public profile (user-management.md §UI Pages)
+  if (raw.length === 1 && raw[0].startsWith('@') && raw[0].length > 1) {
+    return { mode: 'public_profile', slug: null, repoName: null, tab: null, username: raw[0].slice(1) };
+  }
+
+  // /invite/:workspaceId — pending invitation accept page (§UI Pages)
+  if (raw[0] === 'invite' && raw.length === 2) {
+    return { mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: raw[1] };
+  }
+
   // /all  or  /all/settings  (cross-workspace view §10)
   if (raw[0] === 'all') {
     const tab = raw[1] ?? null;
@@ -58,8 +68,10 @@ function parseUrl(pathname) {
 
 function urlFor(parsed) {
   if (!parsed) return '/';
-  const { mode: m, slug, repoName, tab } = parsed;
+  const { mode: m, slug, repoName, tab, username, inviteId } = parsed;
   if (m === 'profile') return '/profile';
+  if (m === 'public_profile') return `/@${encodeURIComponent(username ?? '')}`;
+  if (m === 'invite_accept') return `/invite/${encodeURIComponent(inviteId ?? '')}`;
   if (m === 'cross_workspace') {
     return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
   }
@@ -189,6 +201,23 @@ describe('urlFor', () => {
 
   it('returns /profile', () => {
     expect(urlFor({ mode: 'profile', slug: null, repoName: null, tab: null })).toBe('/profile');
+  });
+
+  it('parses /@username as public_profile', () => {
+    expect(parseUrl('/@asmith')).toEqual({
+      mode: 'public_profile', slug: null, repoName: null, tab: null, username: 'asmith',
+    });
+  });
+
+  it('parses /invite/:id as invite_accept', () => {
+    expect(parseUrl('/invite/ws-9')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: 'ws-9',
+    });
+  });
+
+  it('generates /@username and /invite/:id URLs', () => {
+    expect(urlFor({ mode: 'public_profile', username: 'asmith' })).toBe('/@asmith');
+    expect(urlFor({ mode: 'invite_accept', inviteId: 'ws-9' })).toBe('/invite/ws-9');
   });
 
   it('returns / when no slug', () => {

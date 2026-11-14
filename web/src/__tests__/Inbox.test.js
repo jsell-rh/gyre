@@ -74,6 +74,7 @@ vi.mock('../lib/api.js', () => ({
     enqueue: vi.fn().mockResolvedValue({}),
     updateWorkspace: vi.fn().mockResolvedValue({}),
     markNotificationRead: vi.fn().mockResolvedValue({}),
+    dismissNotification: vi.fn().mockResolvedValue({}),
     resolveNotification: vi.fn().mockResolvedValue({}),
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
     task: vi.fn().mockResolvedValue({ title: 'test-task' }),

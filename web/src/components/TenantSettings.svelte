@@ -18,6 +18,7 @@
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+  const goToPublicProfile = getContext('goToPublicProfile') ?? null;
   function nav(type, id, data) {
     if (goToEntityDetail) goToEntityDetail(type, id, data ?? {});
     else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
@@ -46,10 +47,32 @@
 
   let activeTab = $state('users');
 
-  // ── Users ─────────────────────────────────────────────────────────────
+  // ── Users ─────────────────────────────────────────────────────────
   let currentUser = $state(null);
   let usersLoading = $state(false);
   let usersError = $state(null);
+  // Tenant user management (user-management.md §UI Pages > Tenant User
+  // Management; task-124 endpoints: GET /users TenantAdmin listing +
+  // PUT /users/:id/deactivate + POST /users provisioning).
+  let tenantUsers = $state([]);
+  let tenantUsersTotal = $state(0);
+  let usersSearch = $state('');
+  let usersNotAdmin = $state(false); // listing is TenantAdmin-gated
+  let deactivateSavingId = $state(null);
+  let provisionModalOpen = $state(false);
+  let provisionForm = $state({ username: '', role: 'Developer' });
+  let provisionSaving = $state(false);
+  let provisionError = $state(null);
+  let provisionedApiKey = $state(null); // raw key shown once after creation
+
+  let filteredTenantUsers = $derived.by(() => {
+    const q = usersSearch.trim().toLowerCase();
+    if (!q) return tenantUsers;
+    return tenantUsers.filter(u =>
+      (u.username ?? '').toLowerCase().includes(q) ||
+      (u.display_name ?? '').toLowerCase().includes(q) ||
+      (u.email ?? '').toLowerCase().includes(q));
+  });
 
   // ── Compute Targets ───────────────────────────────────────────────────
   let computeTargets = $state([]);
@@ -265,8 +288,64 @@
       currentUser = await api.me();
     } catch (e) {
       usersError = e?.message ?? $t('tenant_settings.error_load_users');
+    }
+    try {
+      const raw = await api.listUsers({ limit: 200 });
+      tenantUsers = Array.isArray(raw?.users) ? raw.users : [];
+      tenantUsersTotal = raw?.total ?? tenantUsers.length;
+      usersNotAdmin = false;
+    } catch {
+      // GET /users is TenantAdmin-only — a forbidden listing is not an
+      // error state for a non-admin viewer, it just leaves the list empty.
+      tenantUsers = [];
+      tenantUsersTotal = 0;
+      usersNotAdmin = true;
     } finally {
       usersLoading = false;
+    }
+  }
+
+  async function deactivateTenantUser(user) {
+    if (deactivateSavingId) return;
+    // Self-deactivation is rejected server-side; hide the action for self.
+    if (user.id === currentUser?.id) return;
+    const reason = window.prompt($t('tenant_settings.users.deactivate_reason_prompt', { values: { name: user.username ?? user.id } })) ?? '';
+    if (!window.confirm($t('tenant_settings.users.deactivate_confirm', { values: { name: user.username ?? user.id } }))) return;
+    deactivateSavingId = user.id;
+    try {
+      await api.deactivateUser(user.id, reason || undefined);
+      await loadUsers();
+    } catch (e) {
+      usersError = e?.message ?? String(e);
+    } finally {
+      deactivateSavingId = null;
+    }
+  }
+
+  async function submitProvisionUser() {
+    const username = provisionForm.username.trim();
+    if (provisionSaving || !username) return;
+    const tenantId = currentUser?.tenant_id;
+    if (!tenantId) {
+      provisionError = $t('tenant_settings.users.provision_no_tenant');
+      return;
+    }
+    provisionSaving = true;
+    provisionError = null;
+    try {
+      const result = await api.provisionUser({
+        username,
+        tenant_id: tenantId,
+        roles: [provisionForm.role],
+      });
+      provisionedApiKey = result?.api_key?.key ?? null;
+      provisionModalOpen = false;
+      provisionForm = { username: '', role: 'Developer' };
+      await loadUsers();
+    } catch (e) {
+      provisionError = e?.message ?? String(e);
+    } finally {
+      provisionSaving = false;
     }
   }
 
@@ -704,7 +783,9 @@
           <div class="panel-loading" aria-live="polite">{$t('tenant_settings.users.loading')}</div>
         {:else if usersError}
           <div class="panel-error" role="alert">{usersError}</div>
-        {:else if currentUser}
+        {/if}
+
+        {#if currentUser}
           <div class="info-card">
             <div class="info-row">
               <span class="info-label">{$t('tenant_settings.users.current_user')}</span>
@@ -729,11 +810,91 @@
               </div>
             {/if}
           </div>
-          <div class="panel-note">
-            <p>{$t('tenant_settings.users.provisioning_note')}</p>
-          </div>
         {:else}
           <div class="panel-empty">{$t('tenant_settings.users.no_user_info')}</div>
+        {/if}
+
+        <!-- Tenant user management (user-management.md §UI Pages > Tenant
+             User Management): list, search, deactivate, provision. The
+             listing is TenantAdmin-only (task-124). -->
+        {#if usersNotAdmin}
+          <div class="panel-note">
+            <p>{$t('tenant_settings.users.not_admin_note')}</p>
+          </div>
+        {:else}
+          <div class="users-toolbar">
+            <input
+              class="users-search"
+              type="search"
+              placeholder={$t('tenant_settings.users.search_placeholder')}
+              bind:value={usersSearch}
+              aria-label={$t('tenant_settings.users.search_placeholder')}
+              data-testid="tenant-users-search"
+            />
+            <button class="btn-primary" onclick={() => { provisionError = null; provisionModalOpen = true; }} data-testid="provision-user-btn">
+              {$t('tenant_settings.users.provision')}
+            </button>
+          </div>
+
+          {#if provisionedApiKey}
+            <div class="info-card api-key-banner" data-testid="provisioned-key-banner">
+              <p>{$t('tenant_settings.users.provisioned_key_note')}</p>
+              <code class="mono">{provisionedApiKey}</code>
+              <button class="btn-primary" onclick={() => (provisionedApiKey = null)}>{$t('common.close')}</button>
+            </div>
+          {/if}
+
+          {#if tenantUsers.length === 0}
+            <div class="panel-empty">{$t('tenant_settings.users.no_users')}</div>
+          {:else}
+            <table class="users-table" data-testid="tenant-users-table">
+              <thead>
+                <tr>
+                  <th scope="col">{$t('tenant_settings.users.col_user')}</th>
+                  <th scope="col">{$t('tenant_settings.users.col_role')}</th>
+                  <th scope="col">{$t('tenant_settings.users.col_status')}</th>
+                  <th scope="col">{$t('tenant_settings.users.col_created')}</th>
+                  <th scope="col"><span class="sr-only">{$t('common.actions')}</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each filteredTenantUsers as user (user.id)}
+                  <tr data-testid="tenant-user-row" class:user-deactivated={!!user.deactivated_at}>
+                    <td>
+                      {#if goToPublicProfile && user.username}
+                        <button class="user-link" onclick={() => goToPublicProfile(user.username)} title={$t('tenant_settings.users.view_profile')} data-testid={`user-profile-link-${user.id}`}>@{user.username}</button>
+                      {:else}
+                        <span>@{user.username ?? shortId(user.id)}</span>
+                      {/if}
+                      {#if user.display_name && user.display_name !== user.username}
+                        <span class="user-display-name">{user.display_name}</span>
+                      {/if}
+                    </td>
+                    <td>{user.global_role ?? '—'}</td>
+                    <td>
+                      {#if user.deactivated_at}
+                        <span class="role-badge status-deactivated">{$t('tenant_settings.users.status_deactivated')}</span>
+                      {:else}
+                        <span class="role-badge status-active">{$t('tenant_settings.users.status_active')}</span>
+                      {/if}
+                    </td>
+                    <td>{user.created_at ? absoluteTime(user.created_at) : '—'}</td>
+                    <td>
+                      {#if user.id !== currentUser?.id && !user.deactivated_at}
+                        <button
+                          class="btn-danger"
+                          onclick={() => deactivateTenantUser(user)}
+                          disabled={deactivateSavingId === user.id}
+                          data-testid={`deactivate-user-${user.id}`}
+                        >{deactivateSavingId === user.id ? '…' : $t('tenant_settings.users.deactivate')}</button>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <p class="panel-note-text">{$t('tenant_settings.users.count_note', { values: { shown: filteredTenantUsers.length, total: tenantUsersTotal } })}</p>
+          {/if}
         {/if}
       </div>
 
@@ -1597,6 +1758,38 @@
     {/if}
 
   </div>
+
+  <!-- Provision user modal (tenant user management “invite”: admin
+       user provisioning, POST /users). Tenant invitation emails are a
+       separate flow (task-110) — this is the tenant onboarding surface
+       the current API exposes. -->
+  {#if provisionModalOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="modal-backdrop" role="presentation" onclick={() => (provisionModalOpen = false)}>
+      <div class="modal-card" role="dialog" aria-modal="true" tabindex="-1" aria-label={$t('tenant_settings.users.provision')} onclick={(e) => e.stopPropagation()}>
+        <h3>{$t('tenant_settings.users.provision')}</h3>
+        <form onsubmit={(e) => { e.preventDefault(); submitProvisionUser(); }}>
+          <label class="info-label">{$t('tenant_settings.users.col_user')}
+            <input class="users-search" bind:value={provisionForm.username} placeholder="username" data-testid="provision-username-input" required autocomplete="off" />
+          </label>
+          <label class="info-label">{$t('tenant_settings.users.col_role')}
+            <select class="users-search" bind:value={provisionForm.role} data-testid="provision-role-select">
+              {#each ['Developer', 'Admin', 'ReadOnly'] as role}<option value={role}>{role}</option>{/each}
+            </select>
+          </label>
+          {#if provisionError}
+            <p class="panel-error" role="alert" data-testid="provision-error">{provisionError}</p>
+          {/if}
+          <div class="modal-actions">
+            <button type="button" class="btn-primary" onclick={() => (provisionModalOpen = false)}>{$t('common.cancel')}</button>
+            <button type="submit" class="btn-primary" disabled={provisionSaving || !provisionForm.username.trim()} data-testid="provision-submit">
+              {provisionSaving ? '…' : $t('tenant_settings.users.provision')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -2525,6 +2718,78 @@
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-primary { background: var(--color-primary); color: white; }
   .btn-primary:hover:not(:disabled) { opacity: 0.85; }
+
+  /* ── Tenant user management ───────────────────────────────────── */
+  .users-toolbar { display: flex; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; }
+  .users-search {
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+    flex: 1;
+    max-width: 320px;
+  }
+  .users-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+  .users-table th {
+    text-align: left;
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .users-table td { padding: var(--space-2); border-bottom: 1px solid var(--color-border); }
+  .users-table tr.user-deactivated td { opacity: 0.55; }
+  .user-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--color-primary);
+    cursor: pointer;
+  }
+  .user-link:hover { text-decoration: underline; }
+  .user-display-name { display: block; font-size: var(--text-xs); color: var(--color-text-muted); }
+  .status-deactivated { background: var(--color-danger, #c33); color: #fff; }
+  .status-active { background: var(--color-success, #2a2); color: #fff; }
+  .btn-danger {
+    background: transparent;
+    border: 1px solid var(--color-danger, #c33);
+    color: var(--color-danger, #c33);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+  }
+  .btn-danger:disabled { opacity: 0.6; cursor: not-allowed; }
+  .panel-note-text { font-size: var(--text-xs); color: var(--color-text-muted); margin: var(--space-2) 0 0; }
+  .api-key-banner { display: flex; flex-direction: column; gap: var(--space-2); align-items: flex-start; }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal-card {
+    background: var(--color-surface);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    width: min(420px, 90vw);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .modal-card form { display: flex; flex-direction: column; gap: var(--space-3); }
+  .modal-card .info-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); }
+  .modal-card .users-search { max-width: none; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
   .btn-secondary { background: var(--color-surface-elevated); color: var(--color-text); border: 1px solid var(--color-border); }
   .btn-secondary:hover:not(:disabled) { border-color: var(--color-border-strong); }
   .btn-danger-sm {

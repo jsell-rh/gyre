@@ -10,16 +10,18 @@
   import { getContext, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
-  import { toastError } from '../lib/toast.svelte.js';
+  import { toastError, toastSuccess } from '../lib/toast.svelte.js';
   import { shortId } from '../lib/entityNames.svelte.js';
   import SecretsPanel from './SecretsPanel.svelte';
+  import Modal from '../lib/Modal.svelte';
+  import Badge from '../lib/Badge.svelte';
 
   let {
     workspace = null,
     onBack = undefined,
   } = $props();
 
-  const TAB_IDS = ['general', 'trust', 'policies', 'teams', 'budget', 'repos', 'compute', 'llm', 'secrets', 'audit'];
+  const TAB_IDS = ['general', 'trust', 'policies', 'members', 'teams', 'budget', 'repos', 'compute', 'llm', 'secrets', 'audit'];
   let TABS = $derived(TAB_IDS.map(id => ({ id, label: id === 'llm' ? 'LLM Config' : $t(`workspace_settings.tabs.${id}`) })));
 
   let activeTab = $state('general');
@@ -159,6 +161,264 @@
     }
   }
 
+  // ── Members & invitations (user-management.md §UI Pages > Workspace
+  // Members / Workspace Invitations; task-124 endpoints) ─────────────
+  const WORKSPACE_ROLES = ['Owner', 'Admin', 'Developer', 'Viewer'];
+  // Best-effort user_id → user enrichment. The members listing carries
+  // ids only; usernames resolve through the TenantAdmin user listing, so
+  // non-admin managers keep the raw id display.
+  let memberUsers = $state({});
+  let roleSavingId = $state(null);
+  let removeSavingId = $state(null);
+  let inviteModalOpen = $state(false);
+  let inviteForm = $state({ username: '', role: 'Developer' });
+  let inviteSaving = $state(false);
+  let inviteError = $state(null);
+  let invitations = $state([]);
+  let invitationsLoading = $state(false);
+  let revokeSavingId = $state(null);
+
+  function memberLabel(m) {
+    const u = memberUsers[m.user_id];
+    return u?.username ? `@${u.username}` : shortId(m.user_id);
+  }
+
+  async function loadMemberUsers() {
+    try {
+      const raw = await api.listUsers({ limit: 200 });
+      const map = {};
+      for (const u of raw?.users ?? []) map[u.id] = u;
+      memberUsers = map;
+    } catch {
+      memberUsers = {}; // 403 for non-TenantAdmin callers — id-only display
+    }
+  }
+
+  async function loadInvitations(wsId) {
+    invitationsLoading = true;
+    try {
+      const raw = await api.workspaceInvitations(wsId);
+      invitations = Array.isArray(raw?.invitations) ? raw.invitations : [];
+    } catch {
+      invitations = []; // listing is Owner/Admin/TenantAdmin-gated
+    } finally {
+      invitationsLoading = false;
+    }
+  }
+
+  async function changeMemberRole(m, role) {
+    const wsId = workspace?.id;
+    if (!wsId || roleSavingId || role === m.role) return;
+    roleSavingId = m.user_id;
+    try {
+      // Ownership transfer is audit-logged with a reason (§Ownership
+      // Transfer & Reclamation) — collect one for any Owner-role change.
+      const reason = role === 'Owner' || m.role === 'Owner'
+        ? (window.prompt($t('workspace_settings.members.transfer_reason_prompt')) ?? '')
+        : undefined;
+      if ((role === 'Owner' || m.role === 'Owner') && !reason) {
+        // Cancelled prompt — abort the transfer rather than sending it
+        // without the audit reason.
+        roleSavingId = null;
+        return;
+      }
+      await api.updateMemberRole(wsId, m.user_id, { role, reason });
+      await loadMembers(wsId);
+      toastSuccess($t('workspace_settings.members.role_updated'));
+    } catch (e) {
+      toastError($t('workspace_settings.members.role_update_failed', { values: { error: e?.message ?? e } }));
+    } finally {
+      roleSavingId = null;
+    }
+  }
+
+  async function removeMember(m) {
+    const wsId = workspace?.id;
+    if (!wsId || removeSavingId) return;
+    if (!window.confirm($t('workspace_settings.members.remove_confirm', { values: { name: memberLabel(m) } }))) return;
+    removeSavingId = m.user_id;
+    try {
+      await api.removeWorkspaceMember(wsId, m.user_id);
+      await loadMembers(wsId);
+      await loadInvitations(wsId);
+    } catch (e) {
+      toastError($t('workspace_settings.members.remove_failed', { values: { error: e?.message ?? e } }));
+    } finally {
+      removeSavingId = null;
+    }
+  }
+
+  async function submitInvite() {
+    const wsId = workspace?.id;
+    const username = inviteForm.username.trim().replace(/^@/, '');
+    if (!wsId || inviteSaving || !username) return;
+    inviteSaving = true;
+    inviteError = null;
+    try {
+      // Invite by username (tenant-internal): resolve the handle to a
+      // user id through the tenant-public profile, then create the
+      // pending membership.
+      const user = await api.userByUsername(username);
+      await api.inviteWorkspaceMember(wsId, { user_id: user.id, role: inviteForm.role });
+      inviteModalOpen = false;
+      inviteForm = { username: '', role: 'Developer' };
+      await loadMembers(wsId);
+      await loadInvitations(wsId);
+    } catch (e) {
+      inviteError = e?.message ?? String(e);
+    } finally {
+      inviteSaving = false;
+    }
+  }
+
+  async function revokeInvitation(inv) {
+    const wsId = workspace?.id;
+    if (!wsId || revokeSavingId) return;
+    revokeSavingId = inv.id;
+    try {
+      await api.revokeWorkspaceInvitation(wsId, inv.id);
+      await loadInvitations(wsId);
+      await loadMembers(wsId);
+    } catch (e) {
+      toastError($t('workspace_settings.members.revoke_failed', { values: { error: e?.message ?? e } }));
+    } finally {
+      revokeSavingId = null;
+    }
+  }
+
+  // ── Teams (user-management.md §UI Pages > Team Management; task-122
+  // endpoints: CRUD + membership) ─────────────────────────────────────
+  let teams = $state([]);
+  let teamsLoading = $state(false);
+  let teamsError = $state(null);
+  let teamModalOpen = $state(false);
+  let teamEditing = $state(null); // team being edited, or null when creating
+  let teamForm = $state({ name: '', slug: '', description: '', lead: '' });
+  let teamSaving = $state(false);
+  let teamError = $state(null);
+  let teamMemberModal = $state(null); // team whose membership panel is open
+  let teamMemberUsername = $state('');
+  let teamMemberSaving = $state(false);
+  let teamMemberError = $state(null);
+
+  async function loadTeams(wsId) {
+    teamsLoading = true;
+    teamsError = null;
+    try {
+      const raw = await api.workspaceTeams(wsId);
+      teams = Array.isArray(raw?.teams) ? raw.teams : Array.isArray(raw) ? raw : [];
+    } catch (e) {
+      teamsError = e?.message ?? String(e);
+      teams = [];
+    } finally {
+      teamsLoading = false;
+    }
+  }
+
+  function openTeamCreate() {
+    teamEditing = null;
+    teamForm = { name: '', slug: '', description: '', lead: '' };
+    teamError = null;
+    teamModalOpen = true;
+  }
+
+  function openTeamEdit(team) {
+    teamEditing = team;
+    teamForm = {
+      name: team.name ?? '',
+      slug: team.slug ?? '',
+      description: team.description ?? '',
+      lead: team.lead ?? '',
+    };
+    teamError = null;
+    teamModalOpen = true;
+  }
+
+  async function submitTeam() {
+    const wsId = workspace?.id;
+    const name = teamForm.name.trim();
+    if (!wsId || teamSaving || !name) return;
+    if (!teamForm.lead.trim()) {
+      teamError = $t('workspace_settings.teams.lead_required');
+      return;
+    }
+    teamSaving = true;
+    teamError = null;
+    try {
+      // The lead is a workspace member user id (validated server-side
+      // against real membership); the form accepts a @username and resolves
+      // it through the tenant-public profile.
+      const leadUser = await api.userByUsername(teamForm.lead.trim().replace(/^@/, ''));
+      const payload = {
+        name,
+        description: teamForm.description.trim() || null,
+        lead: leadUser.id,
+      };
+      if (teamForm.slug.trim()) payload.slug = teamForm.slug.trim();
+      if (teamEditing) {
+        await api.updateTeam(wsId, teamEditing.id, payload);
+      } else {
+        await api.createTeam(wsId, payload);
+      }
+      teamModalOpen = false;
+      await loadTeams(wsId);
+    } catch (e) {
+      teamError = e?.message ?? String(e);
+    } finally {
+      teamSaving = false;
+    }
+  }
+
+  async function deleteTeam(team) {
+    const wsId = workspace?.id;
+    if (!wsId) return;
+    if (!window.confirm($t('workspace_settings.teams.delete_confirm', { values: { name: team.name } }))) return;
+    try {
+      await api.deleteTeam(wsId, team.id);
+      await loadTeams(wsId);
+    } catch (e) {
+      toastError($t('workspace_settings.teams.delete_failed', { values: { error: e?.message ?? e } }));
+    }
+  }
+
+  function openTeamMembers(team) {
+    teamMemberModal = team;
+    teamMemberUsername = '';
+    teamMemberError = null;
+  }
+
+  async function addTeamMember(team) {
+    const wsId = workspace?.id;
+    const username = teamMemberUsername.trim().replace(/^@/, '');
+    if (!wsId || teamMemberSaving || !username) return;
+    teamMemberSaving = true;
+    teamMemberError = null;
+    try {
+      const user = await api.userByUsername(username);
+      await api.addTeamMember(wsId, team.id, user.id);
+      teamMemberUsername = '';
+      await loadTeams(wsId);
+      // Keep the modal's team in sync with the reloaded list.
+      teamMemberModal = teams.find(t => t.id === team.id) ?? teamMemberModal;
+    } catch (e) {
+      teamMemberError = e?.message ?? String(e);
+    } finally {
+      teamMemberSaving = false;
+    }
+  }
+
+  async function removeTeamMember(team, userId) {
+    const wsId = workspace?.id;
+    if (!wsId) return;
+    try {
+      await api.removeTeamMember(wsId, team.id, userId);
+      await loadTeams(wsId);
+      teamMemberModal = teams.find(t => t.id === team.id) ?? teamMemberModal;
+    } catch (e) {
+      toastError($t('workspace_settings.teams.remove_member_failed', { values: { error: e?.message ?? e } }));
+    }
+  }
+
   // ── Repos (repo-lifecycle.md §1 Admin → Workspace Scope → Repos Tab) ──
   let repos = $state([]);
   let reposLoading = $state(false);
@@ -268,8 +528,8 @@
     return [...members].sort((a, b) => {
       let av, bv;
       if (membersSortCol === 'name') {
-        av = a.name ?? a.username ?? '';
-        bv = b.name ?? b.username ?? '';
+        av = memberUsers[a.user_id]?.username ?? a.user_id ?? '';
+        bv = memberUsers[b.user_id]?.username ?? b.user_id ?? '';
       } else {
         av = String(a[membersSortCol] ?? '');
         bv = String(b[membersSortCol] ?? '');
@@ -433,8 +693,13 @@
     if (activeTab === 'trust' || activeTab === 'policies') {
       if (untrack(() => abacPolicies.length === 0 && !policiesLoading)) loadAbacPolicies(wsId);
     }
+    if (activeTab === 'members') {
+      if (untrack(() => members.length === 0 && !membersLoading)) loadMembers(wsId);
+      if (untrack(() => !invitationsLoading && invitations.length === 0)) loadInvitations(wsId);
+    }
     if (activeTab === 'teams') {
       if (untrack(() => members.length === 0 && !membersLoading)) loadMembers(wsId);
+      if (untrack(() => teams.length === 0 && !teamsLoading)) loadTeams(wsId);
     }
     if (activeTab === 'budget') {
       if (untrack(() => !budget && !budgetLoading)) loadBudget(wsId);
@@ -487,7 +752,9 @@
     membersLoading = true;
     membersError = null;
     try {
-      members = await api.workspaceMembers(wsId) ?? [];
+      const raw = await api.workspaceMembers(wsId);
+      members = Array.isArray(raw?.members) ? raw.members : Array.isArray(raw) ? raw : [];
+      loadMemberUsers();
     } catch (e) {
       membersError = e.message;
       members = [];
@@ -998,10 +1265,18 @@
         {/if}
       </div>
 
-    <!-- Teams tab -->
-    {:else if activeTab === 'teams'}
-      <div class="settings-section" data-testid="teams-tab">
-        <h2 class="section-title">{$t('workspace_settings.teams.title')}</h2>
+    <!-- Members tab (user-management.md §UI Pages > Workspace Members:
+         member list, invite modal, role management, ownership transfer;
+         plus pending invitations with revoke — §Workspace Invitations) -->
+    {:else if activeTab === 'members'}
+      <div class="settings-section" data-testid="members-tab">
+        <h2 class="section-title">{$t('workspace_settings.members.title')}</h2>
+
+        <div class="members-toolbar">
+          <button class="btn-primary" onclick={() => { inviteError = null; inviteModalOpen = true; }} data-testid="invite-member-btn">
+            {$t('workspace_settings.members.invite')}
+          </button>
+        </div>
 
         {#if membersLoading}
           <p class="loading-text">{$t('workspace_settings.teams.loading')}</p>
@@ -1016,20 +1291,130 @@
                 <th scope="col" aria-sort={membersSortCol === 'name' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                   <button class="sort-btn" onclick={() => toggleMembersSort('name')}>{$t('workspace_settings.teams.col_name')} <span class="sort-arrow" aria-hidden="true">{membersSortArrow('name')}</span></button>
                 </th>
-                <th scope="col" aria-sort={membersSortCol === 'email' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                  <button class="sort-btn" onclick={() => toggleMembersSort('email')}>{$t('workspace_settings.teams.col_email')} <span class="sort-arrow" aria-hidden="true">{membersSortArrow('email')}</span></button>
-                </th>
-                <th scope="col" aria-sort={membersSortCol === 'role' ? (membersSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                  <button class="sort-btn" onclick={() => toggleMembersSort('role')}>{$t('workspace_settings.teams.col_role')} <span class="sort-arrow" aria-hidden="true">{membersSortArrow('role')}</span></button>
-                </th>
+                <th scope="col">{$t('workspace_settings.teams.col_role')}</th>
+                <th scope="col">{$t('workspace_settings.members.col_status')}</th>
+                <th scope="col">{$t('workspace_settings.members.col_since')}</th>
+                <th scope="col"><span class="sr-only">{$t('common.actions')}</span></th>
               </tr>
             </thead>
             <tbody>
-              {#each sortedMembers as member}
+              {#each sortedMembers as member (member.id)}
                 <tr data-testid="member-row">
-                  <td class="member-name">{member.name ?? member.username ?? '—'}</td>
-                  <td class="member-email">{member.email ?? '—'}</td>
-                  <td class="member-role">{member.role ?? '—'}</td>
+                  <td class="member-name" title={member.user_id}>{memberLabel(member)}</td>
+                  <td class="member-role">
+                    <Badge variant={member.role === 'Owner' ? 'success' : member.role === 'Admin' ? 'info' : 'default'} value={member.role} />
+                    <select
+                      class="role-select"
+                      value={member.role}
+                      disabled={roleSavingId === member.user_id}
+                      onchange={(e) => changeMemberRole(member, e.currentTarget.value)}
+                      aria-label={$t('workspace_settings.members.change_role_for', { values: { name: memberLabel(member) } })}
+                      data-testid={`role-select-${member.user_id}`}
+                    >
+                      {#each WORKSPACE_ROLES as role}
+                        <option value={role}>{role}</option>
+                      {/each}
+                    </select>
+                  </td>
+                  <td>
+                    {#if member.accepted}
+                      <Badge variant="success" value={$t('workspace_settings.members.status_active')} />
+                    {:else}
+                      <Badge variant="warning" value={$t('workspace_settings.members.status_pending')} />
+                    {/if}
+                  </td>
+                  <td>{member.accepted_at ?? member.created_at ? new Date((member.accepted_at ?? member.created_at) * 1000).toLocaleDateString() : '—'}</td>
+                  <td>
+                    <button
+                      class="btn-danger-sm"
+                      onclick={() => removeMember(member)}
+                      disabled={removeSavingId === member.user_id}
+                      data-testid={`remove-member-${member.user_id}`}
+                    >{removeSavingId === member.user_id ? '…' : $t('common.remove')}</button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+
+        <h3 class="sub-section-title">{$t('workspace_settings.members.invitations_title')}</h3>
+        {#if invitationsLoading}
+          <p class="loading-text">{$t('workspace_settings.teams.loading')}</p>
+        {:else if invitations.length === 0}
+          <p class="empty-text">{$t('workspace_settings.members.no_invitations')}</p>
+        {:else}
+          <table class="members-table" data-testid="invitations-table">
+            <thead>
+              <tr>
+                <th scope="col">{$t('workspace_settings.members.col_invitee')}</th>
+                <th scope="col">{$t('workspace_settings.teams.col_role')}</th>
+                <th scope="col">{$t('workspace_settings.members.col_invited')}</th>
+                <th scope="col"><span class="sr-only">{$t('common.actions')}</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each invitations as inv (inv.id)}
+                <tr data-testid="invitation-row">
+                  <td class="member-name" title={inv.user_id}>{memberUsers[inv.user_id]?.username ? '@' + memberUsers[inv.user_id].username : shortId(inv.user_id)}</td>
+                  <td class="member-role">{inv.role}</td>
+                  <td>{new Date(inv.created_at * 1000).toLocaleDateString()}</td>
+                  <td>
+                    <button
+                      class="btn-danger-sm"
+                      onclick={() => revokeInvitation(inv)}
+                      disabled={revokeSavingId === inv.id}
+                      data-testid={`revoke-invitation-${inv.id}`}
+                    >{revokeSavingId === inv.id ? '…' : $t('workspace_settings.members.revoke')}</button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+
+    <!-- Teams tab (user-management.md §UI Pages > Team Management:
+         create/edit teams, manage membership) -->
+    {:else if activeTab === 'teams'}
+      <div class="settings-section" data-testid="teams-tab">
+        <h2 class="section-title">{$t('workspace_settings.teams.title')}</h2>
+
+        <div class="members-toolbar">
+          <button class="btn-primary" onclick={openTeamCreate} data-testid="create-team-btn">
+            {$t('workspace_settings.teams.create')}
+          </button>
+        </div>
+
+        {#if teamsLoading}
+          <p class="loading-text">{$t('workspace_settings.teams.loading')}</p>
+        {:else if teamsError}
+          <p class="error-text" role="alert">{teamsError}</p>
+        {:else if teams.length === 0}
+          <p class="empty-text">{$t('workspace_settings.teams.no_teams')}</p>
+        {:else}
+          <table class="members-table" data-testid="teams-table">
+            <thead>
+              <tr>
+                <th scope="col">{$t('workspace_settings.teams.col_name')}</th>
+                <th scope="col">{$t('workspace_settings.teams.col_slug')}</th>
+                <th scope="col">{$t('workspace_settings.teams.col_lead')}</th>
+                <th scope="col">{$t('workspace_settings.teams.col_members')}</th>
+                <th scope="col"><span class="sr-only">{$t('common.actions')}</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each teams as team (team.id)}
+                <tr data-testid="team-row">
+                  <td class="member-name">{team.name}</td>
+                  <td class="member-email mono">{team.slug}</td>
+                  <td>{memberUsers[team.lead]?.username ? '@' + memberUsers[team.lead].username : shortId(team.lead)}</td>
+                  <td>{(team.member_ids ?? []).length}</td>
+                  <td class="team-actions">
+                    <button class="btn-secondary-sm" onclick={() => openTeamEdit(team)} data-testid={`edit-team-${team.id}`}>{$t('common.edit')}</button>
+                    <button class="btn-secondary-sm" onclick={() => openTeamMembers(team)} data-testid={`team-members-${team.id}`}>{$t('workspace_settings.teams.manage_members')}</button>
+                    <button class="btn-danger-sm" onclick={() => deleteTeam(team)} data-testid={`delete-team-${team.id}`}>{$t('common.delete')}</button>
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -1430,6 +1815,104 @@
       </div>
     {/if}
   </div>
+
+  <!-- Invite member modal (§Workspace Members: invite by username) -->
+  <Modal bind:open={inviteModalOpen} title={$t('workspace_settings.members.invite')} size="sm">
+    <form class="modal-form" onsubmit={(e) => { e.preventDefault(); submitInvite(); }}>
+      <label class="field-label">{$t('workspace_settings.members.invite_username')}
+        <input
+          class="field-input"
+          placeholder="@username"
+          bind:value={inviteForm.username}
+          data-testid="invite-username-input"
+          autocomplete="off"
+        />
+      </label>
+      <label class="field-label">{$t('workspace_settings.teams.col_role')}
+        <select class="field-input" bind:value={inviteForm.role} data-testid="invite-role-select">
+          {#each ['Developer', 'Viewer', 'Admin', 'Owner'] as role}<option value={role}>{role}</option>{/each}
+        </select>
+      </label>
+      {#if inviteError}
+        <p class="error-text" role="alert" data-testid="invite-error">{inviteError}</p>
+      {/if}
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" onclick={() => (inviteModalOpen = false)}>{$t('common.cancel')}</button>
+        <button type="submit" class="btn-primary" disabled={inviteSaving || !inviteForm.username.trim()} data-testid="invite-submit">
+          {inviteSaving ? '…' : $t('workspace_settings.members.invite')}
+        </button>
+      </div>
+    </form>
+  </Modal>
+
+  <!-- Team create/edit modal -->
+  <Modal bind:open={teamModalOpen} title={teamEditing ? $t('workspace_settings.teams.edit_title', { values: { name: teamEditing.name } }) : $t('workspace_settings.teams.create_title')} size="sm">
+    <form class="modal-form" onsubmit={(e) => { e.preventDefault(); submitTeam(); }}>
+      <label class="field-label">{$t('workspace_settings.teams.col_name')}
+        <input class="field-input" bind:value={teamForm.name} data-testid="team-name-input" required />
+      </label>
+      <label class="field-label">{$t('workspace_settings.teams.col_slug')}
+        <input class="field-input" bind:value={teamForm.slug} placeholder="auto" data-testid="team-slug-input" />
+      </label>
+      <label class="field-label">{$t('workspace_settings.teams.col_description')}
+        <input class="field-input" bind:value={teamForm.description} data-testid="team-description-input" />
+      </label>
+      <label class="field-label">{$t('workspace_settings.teams.col_lead')}
+        <input class="field-input" placeholder="@username" bind:value={teamForm.lead} data-testid="team-lead-input" required />
+      </label>
+      {#if teamError}
+        <p class="error-text" role="alert" data-testid="team-error">{teamError}</p>
+      {/if}
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" onclick={() => (teamModalOpen = false)}>{$t('common.cancel')}</button>
+        <button type="submit" class="btn-primary" disabled={teamSaving || !teamForm.name.trim()} data-testid="team-submit">
+          {teamSaving ? '…' : $t('common.save')}
+        </button>
+      </div>
+    </form>
+  </Modal>
+
+  <!-- Team membership modal -->
+  <Modal open={teamMemberModal !== null} title={$t('workspace_settings.teams.members_title', { values: { name: teamMemberModal?.name ?? '' } })} size="md" onclose={() => (teamMemberModal = null)}>
+    {#if teamMemberModal}
+      <div class="modal-form">
+        <form class="team-member-add" onsubmit={(e) => { e.preventDefault(); addTeamMember(teamMemberModal); }}>
+          <input
+            class="field-input"
+            placeholder="@username"
+            bind:value={teamMemberUsername}
+            data-testid="team-member-username-input"
+            autocomplete="off"
+          />
+          <button type="submit" class="btn-primary" disabled={teamMemberSaving || !teamMemberUsername.trim()} data-testid="team-member-add-btn">
+            {teamMemberSaving ? '…' : $t('workspace_settings.teams.add_member')}
+          </button>
+        </form>
+        {#if teamMemberError}
+          <p class="error-text" role="alert">{teamMemberError}</p>
+        {/if}
+        {#if (teamMemberModal.member_ids ?? []).length === 0}
+          <p class="empty-text">{$t('workspace_settings.teams.no_members')}</p>
+        {:else}
+          <ul class="team-member-list" role="list">
+            {#each teamMemberModal.member_ids as userId (userId)}
+              <li class="team-member-row">
+                <span class="member-name">{memberUsers[userId]?.username ? '@' + memberUsers[userId].username : shortId(userId)}</span>
+                {#if teamMemberModal.lead === userId}
+                  <Badge variant="info" value={$t('workspace_settings.teams.lead_badge')} />
+                {/if}
+                <button
+                  class="btn-danger-sm"
+                  onclick={() => removeTeamMember(teamMemberModal, userId)}
+                  data-testid={`team-remove-member-${userId}`}
+                >{$t('common.remove')}</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
+  </Modal>
 </div>
 
 <style>
@@ -2280,6 +2763,55 @@
   }
 
   /* ── Buttons ──────────────────────────────────────────────────────── */
+  .members-toolbar { display: flex; justify-content: flex-end; margin-bottom: var(--space-2); }
+  .sub-section-title { font-size: var(--text-sm); font-weight: 600; margin: var(--space-4) 0 var(--space-2); }
+  .role-select {
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+    margin-left: var(--space-2);
+  }
+  .team-actions { display: flex; gap: var(--space-1); flex-wrap: wrap; }
+  .btn-danger-sm {
+    background: transparent;
+    border: 1px solid var(--color-danger, #c33);
+    color: var(--color-danger, #c33);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+  }
+  .btn-danger-sm:disabled { opacity: 0.6; cursor: not-allowed; }
+  .btn-secondary-sm {
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+  }
+  .btn-secondary-sm:hover { border-color: var(--color-text-muted); }
+  .modal-form { display: flex; flex-direction: column; gap: var(--space-3); }
+  .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  .field-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); font-weight: 500; }
+  .field-input {
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+  }
+  .team-member-add { display: flex; gap: var(--space-2); }
+  .team-member-list { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+  .team-member-row { display: flex; align-items: center; gap: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); }
+  .mono { font-family: var(--font-mono); }
   .btn-primary {
     padding: var(--space-2) var(--space-5);
     background: var(--color-primary);

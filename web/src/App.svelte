@@ -9,6 +9,9 @@
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
   import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
+  import PublicUserProfile from './components/PublicUserProfile.svelte';
+  import InvitationAccept from './components/InvitationAccept.svelte';
+  import NotificationDrawer from './components/NotificationDrawer.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
@@ -22,8 +25,18 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'workspace_settings' | 'repo' | 'profile'
+  // 'workspace_home' | 'workspace_settings' | 'repo' | 'profile' |
+  // 'public_profile' (@username) | 'invite_accept' (/invite/:id)
   let mode = $state('workspace_home');
+
+  // ── Public profile / invitation accept state ────────────────────────
+  // /@username — tenant-public profile (user-management.md §UI Pages)
+  let publicUsername = $state('');
+  // /invite/:id — pending workspace invitation accept page. The path
+  // segment is the workspace id (task-124 models a pending invitation as
+  // a membership row keyed by workspace; the token form belongs to the
+  // tenant-invitation flow, task-110).
+  let inviteWorkspaceId = $state(null);
 
   // ── Workspace / repo state ───────────────────────────────────────────
   let workspaces = $state([]);
@@ -133,6 +146,9 @@
   let wsDropdownEl = $state(null);
 
   let mobileDrawerOpen = $state(false);
+  // Notification drawer (user-management.md §UI Pages > Notification
+  // Drawer): slide-out panel from the top-nav bell.
+  let notifDrawerOpen = $state(false);
   let createWsModalOpen = $state(false);
   let createWsForm = $state({ name: '', description: '' });
   let createWsSaving = $state(false);
@@ -221,7 +237,9 @@
   // /workspaces/:slug/r/:repo/tasks/:id        → task detail page
   // /workspaces/:slug/r/:repo/agents/:id       → agent detail page
   // /workspaces/:slug/r/:repo/specs/*path      → spec detail page
-  // /profile                                   → user profile
+  // /profile                                   → user profile (self)
+  // /@username                                 → tenant-public profile (user-management.md §UI Pages)
+  // /invite/:workspaceId                       → pending invitation accept page (§UI Pages)
 
   const REPO_TABS = ['specs', 'tasks', 'mrs', 'agents', 'architecture', 'decisions', 'code', 'settings'];
   const ENTITY_TABS = ['mrs', 'tasks', 'agents'];
@@ -246,6 +264,18 @@
     // /profile
     if (raw.length === 1 && raw[0] === 'profile') {
       return { mode: 'profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
+    }
+
+    // /@username — tenant-public profile (user-management.md §UI Pages >
+    // User Profile). The handle is URL-decoded with the rest of the path.
+    if (raw.length === 1 && raw[0].startsWith('@') && raw[0].length > 1) {
+      return { mode: 'public_profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null, username: raw[0].slice(1) };
+    }
+
+    // /invite/:workspaceId — pending invitation accept page
+    // (user-management.md §UI Pages > Pending Invitation Accept Page).
+    if (raw[0] === 'invite' && raw.length === 2) {
+      return { mode: 'invite_accept', slug: null, repoName: null, tab: null, entityType: null, entityId: null, inviteId: raw[1] };
     }
 
     // /all  or  /all/settings  or  /all/agent-rules  (cross-workspace view §10)
@@ -300,8 +330,10 @@
 
   export function urlFor(parsed) {
     if (!parsed) return '/';
-    const { mode: m, slug, repoName, tab, entityType, entityId } = parsed;
+    const { mode: m, slug, repoName, tab, entityType, entityId, username, inviteId } = parsed;
     if (m === 'profile') return '/profile';
+    if (m === 'public_profile') return `/@${encodeURIComponent(username ?? '')}`;
+    if (m === 'invite_accept') return `/invite/${encodeURIComponent(inviteId ?? '')}`;
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
     }
@@ -555,6 +587,89 @@
     fadeContent();
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
   }
+
+  function goToPublicProfile(username) {
+    mode = 'public_profile';
+    publicUsername = username;
+    currentRepo = null;
+    fadeContent();
+    window.history.pushState(
+      { mode: 'public_profile', username },
+      '',
+      `/@${encodeURIComponent(username)}`,
+    );
+  }
+
+  function goToInviteAccept(workspaceId) {
+    mode = 'invite_accept';
+    inviteWorkspaceId = workspaceId;
+    currentRepo = null;
+    fadeContent();
+    window.history.pushState(
+      { mode: 'invite_accept', inviteId: workspaceId },
+      '',
+      `/invite/${encodeURIComponent(workspaceId)}`,
+    );
+  }
+
+  /** Apply a parsed URL to the app state. Used by drawer deep links
+   *  (action_url paths) — the same transitions the popstate handler
+   *  performs, without duplicating its history handling. */
+  function applyParsed(p) {
+    if (!p) return;
+    currentRepo = null;
+    entityDetail = null;
+    if (p.mode === 'public_profile') {
+      mode = 'public_profile';
+      publicUsername = p.username;
+    } else if (p.mode === 'invite_accept') {
+      mode = 'invite_accept';
+      inviteWorkspaceId = p.inviteId;
+    } else if (p.mode === 'profile') {
+      mode = 'profile';
+    } else if (p.mode === 'cross_workspace') {
+      mode = 'cross_workspace';
+      crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
+    } else if (p.slug) {
+      const ws = findWorkspaceBySlug(p.slug);
+      if (ws) {
+        currentWorkspace = ws;
+        try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
+        loadWorkspaceData(ws.id);
+        if (p.mode === 'workspace_settings') mode = 'workspace_settings';
+        else if (p.mode === 'agent_rules') mode = 'agent_rules';
+        else if (p.mode === 'repo' && p.repoName) {
+          mode = 'repo';
+          repoTab = p.tab ?? 'specs';
+          currentRepo = { id: null, name: p.repoName };
+          if (p.entityType && p.entityId) {
+            entityDetail = { type: p.entityType, id: p.entityId, data: {} };
+          }
+          api.repos({ workspaceId: ws.id }).then(repos => {
+            const found = (Array.isArray(repos) ? repos : []).find(r => r.name === p.repoName);
+            if (found && currentRepo?.name === p.repoName) {
+              currentRepo = { id: found.id, name: found.name };
+              repoIdCache.set(`${ws.id}:${found.name}`, found.id);
+            }
+          }).catch(() => { /* keep name-only ref */ });
+        } else mode = 'workspace_home';
+      } else {
+        mode = 'workspace_home';
+      }
+    } else {
+      mode = 'workspace_home';
+    }
+    loadDecisionsCount();
+  }
+
+  /** Navigate to an SPA path (notification action_url deep links). */
+  function navigateToPath(path) {
+    const parsed = parseUrl(path);
+    if (!parsed) return;
+    window.history.pushState({ ...window.history.state, path }, '', path);
+    applyParsed(parsed);
+    fadeContent();
+  }
   function goToCrossWorkspace() {
     mode = 'cross_workspace';
     crossWorkspaceTab = null;
@@ -630,6 +745,9 @@
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
+  setContext('goToPublicProfile', (username) => goToPublicProfile(username));
+  setContext('goToInviteAccept', (workspaceId) => goToInviteAccept(workspaceId));
+  setContext('navigateToPath', (path) => navigateToPath(path));
   setContext('goToRepo', (repo, tab) => goToRepo(repo, tab));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
@@ -725,6 +843,7 @@
     if (e.key === 'Escape') {
       if (shortcutsOpen) { shortcutsOpen = false; gKeyPending = false; return; }
       if (mobileDrawerOpen) { mobileDrawerOpen = false; gKeyPending = false; return; }
+      if (notifDrawerOpen) { notifDrawerOpen = false; gKeyPending = false; return; }
       if (userMenuOpen) { userMenuOpen = false; gKeyPending = false; return; }
       if (wsDropdownOpen) { wsDropdownOpen = false; gKeyPending = false; return; }
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
@@ -989,6 +1108,10 @@
     const repoName = currentRepo?.name ?? '';
     if (mode === 'profile') {
       document.title = 'Profile | Gyre';
+    } else if (mode === 'public_profile') {
+      document.title = publicUsername ? `@${publicUsername} | Gyre` : 'Profile | Gyre';
+    } else if (mode === 'invite_accept') {
+      document.title = 'Workspace Invitation | Gyre';
     } else if (mode === 'cross_workspace') {
       document.title = 'All Workspaces | Gyre';
     } else if (mode === 'agent_rules') {
@@ -1046,6 +1169,12 @@
 
     if (parsed?.mode === 'profile') {
       mode = 'profile';
+    } else if (parsed?.mode === 'public_profile') {
+      mode = 'public_profile';
+      publicUsername = parsed.username ?? '';
+    } else if (parsed?.mode === 'invite_accept') {
+      mode = 'invite_accept';
+      inviteWorkspaceId = parsed.inviteId ?? null;
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
       crossWorkspaceTab = (parsed.tab === 'settings' || parsed.tab === 'agent-rules') ? parsed.tab : null;
@@ -1169,9 +1298,11 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: pUsername, inviteId: pInviteId } = e.state;
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'public_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules')
           ? m : 'workspace_home';
+        if (m === 'public_profile') publicUsername = pUsername ?? parseUrl(window.location.pathname)?.username ?? '';
+        if (m === 'invite_accept') inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
         // Restore entity detail state from history with repo_id for data loading
@@ -1181,7 +1312,7 @@
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m !== 'cross_workspace' && m !== 'profile') {
+        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'public_profile' && m !== 'invite_accept') {
           // Try to recover workspace from URL slug if state doesn't have wsId
           const p2 = parseUrl(window.location.pathname);
           if (p2?.slug) {
@@ -1217,13 +1348,19 @@
       if (p) {
         if (p.mode === 'profile') {
           mode = 'profile';
+        } else if (p.mode === 'public_profile') {
+          mode = 'public_profile';
+          publicUsername = p.username ?? '';
+        } else if (p.mode === 'invite_accept') {
+          mode = 'invite_accept';
+          inviteWorkspaceId = p.inviteId ?? null;
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
           crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'public_profile' || p.mode === 'invite_accept')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -1573,22 +1710,17 @@
       <!-- Right: decisions badge + user avatar -->
       <div class="topbar-right">
         <!-- Decisions badge (🔔) -->
+        <!-- Notification bell: opens the notification drawer
+            (user-management.md §UI Pages > Notification Drawer). The badge
+            count is the global active-decisions count (ui-navigation.md
+            principle 4). -->
         <button
           class="decisions-badge-btn"
-          onclick={async () => {
-            if (mode === 'repo') {
-              goToRepoTab('decisions');
-            } else {
-              // Ensure workspace home is rendered before attempting scroll
-              if (mode !== 'workspace_home') {
-                goToWorkspaceHome(currentWorkspace);
-                await tick();
-              }
-              document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
-          }}
+          onclick={() => (notifDrawerOpen = true)}
           aria-label={decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : $t('topbar.no_decisions')}
-          title={$t('workspace_home.sections.decisions')}
+          title={$t('notification_drawer.title')}
+          aria-haspopup="dialog"
+          aria-expanded={notifDrawerOpen}
           data-testid="decisions-badge"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
@@ -1764,6 +1896,10 @@
           {/if}
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
+        {:else if mode === 'public_profile'}
+          <PublicUserProfile username={publicUsername} />
+        {:else if mode === 'invite_accept'}
+          <InvitationAccept inviteId={inviteWorkspaceId} />
         {/if}
       </div>
     </main>
@@ -1860,6 +1996,9 @@
   else if (v === 'specs') { workspaceActiveSection = 'specs'; tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
   else goToWorkspaceHome(currentWorkspace);
 }} />
+<!-- Notification drawer (user-management.md §UI Pages): slide-out panel
+    from the bell with priority grouping, deep links, and read/unread. -->
+<NotificationDrawer bind:open={notifDrawerOpen} onnavigate={(path) => navigateToPath(path)} />
 <Toast />
 
 <!-- Keyboard shortcut overlay -->

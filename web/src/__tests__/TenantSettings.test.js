@@ -24,6 +24,9 @@ import { render, waitFor, fireEvent } from '@testing-library/svelte';
 vi.mock('../lib/api.js', () => ({
   api: {
     me: vi.fn().mockResolvedValue({ username: 'admin', email: 'admin@example.com', role: 'Admin' }),
+    listUsers: vi.fn().mockResolvedValue({ users: [], total: 0 }),
+    deactivateUser: vi.fn().mockResolvedValue({}),
+    provisionUser: vi.fn().mockResolvedValue({ user: {}, api_key: { key: 'gyre_x' } }),
     computeList: vi.fn().mockResolvedValue([]),
     budgetSummary: vi.fn().mockResolvedValue(null),
     adminAudit: vi.fn().mockResolvedValue([]),
@@ -164,6 +167,66 @@ describe('TenantSettings', () => {
       const panel = container.querySelector('[data-testid="tenant-tab-users"]');
       expect(panel?.textContent).toContain('admin');
     }, { timeout: 3000 });
+  });
+
+  it('Users tab lists tenant users with search and deactivate action', async () => {
+    api.me.mockResolvedValue({ id: 'u-admin', username: 'admin', tenant_id: 't-1' });
+    api.listUsers.mockResolvedValue({
+      users: [
+        { id: 'u-1', username: 'alice', display_name: 'Alice', global_role: 'Member', created_at: 1690000000, deactivated_at: null },
+        { id: 'u-admin', username: 'admin', global_role: 'TenantAdmin', created_at: 1690000000, deactivated_at: null },
+      ],
+      total: 2,
+    });
+    const { container } = render(TenantSettings);
+    await waitFor(() => {
+      expect(api.listUsers).toHaveBeenCalledWith({ limit: 200 });
+    }, { timeout: 3000 });
+    const table = await waitFor(() => {
+      const el = container.querySelector('[data-testid="tenant-users-table"]');
+      expect(el).toBeTruthy();
+      return el;
+    });
+    const rows = table.querySelectorAll('[data-testid="tenant-user-row"]');
+    expect(rows.length).toBe(2);
+    // Self-deactivation is hidden (server rejects it too).
+    expect(container.querySelector('[data-testid="deactivate-user-u-admin"]')).toBeNull();
+    expect(container.querySelector('[data-testid="deactivate-user-u-1"]')).toBeTruthy();
+    // Search filters the list client-side.
+    const search = container.querySelector('[data-testid="tenant-users-search"]');
+    await fireEvent.input(search, { target: { value: 'alice' } });
+    expect(container.querySelectorAll('[data-testid="tenant-user-row"]').length).toBe(1);
+  });
+
+  it('Users tab deactivates a user through the API', async () => {
+    window.prompt = vi.fn(() => 'offboarding');
+    window.confirm = vi.fn(() => true);
+    api.me.mockResolvedValue({ id: 'u-admin', username: 'admin', tenant_id: 't-1' });
+    api.listUsers.mockResolvedValue({
+      users: [{ id: 'u-1', username: 'alice', global_role: 'Member', created_at: 1690000000, deactivated_at: null }],
+      total: 1,
+    });
+    const { container } = render(TenantSettings);
+    const btn = await waitFor(() => {
+      const el = container.querySelector('[data-testid="deactivate-user-u-1"]');
+      expect(el).toBeTruthy();
+      return el;
+    }, { timeout: 3000 });
+    await fireEvent.click(btn);
+    await waitFor(() => {
+      expect(api.deactivateUser).toHaveBeenCalledWith('u-1', 'offboarding');
+    });
+  });
+
+  it('Users tab shows the not-admin note when the listing is forbidden', async () => {
+    api.me.mockResolvedValue({ username: 'dev', tenant_id: 't-1' });
+    api.listUsers.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+    const { container } = render(TenantSettings);
+    await waitFor(() => {
+      const panel = container.querySelector('[data-testid="tenant-tab-users"]');
+      expect(panel?.textContent).toContain('TenantAdmin');
+    }, { timeout: 3000 });
+    expect(container.querySelector('[data-testid="tenant-users-table"]')).toBeNull();
   });
 
   it('Users tab shows error state gracefully', async () => {
