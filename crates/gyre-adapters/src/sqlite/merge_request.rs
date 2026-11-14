@@ -143,8 +143,10 @@ impl MergeRequestRepository for SqliteStorage {
     async fn create(&self, mr: &MergeRequest) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let m = mr.clone();
-        // Tenant scope resolved on the storage handle (single-tenant default,
-        // or the request's tenant via `with_tenant`) — not a fabricated literal.
+        // Persist under the storage handle's tenant scope (mirrors
+        // TaskRepository::create): the tenant is a real configured scope,
+        // never a fabricated "default" literal — a tenant-scoped handle
+        // must not write rows invisible to its own tenant-filtered reads.
         let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
@@ -388,6 +390,7 @@ mod tests {
         MergeRequest::new(
             Id::new(id),
             Id::new(repo_id),
+            Id::new("default"),
             format!("MR {}", id),
             "feat/x",
             "main",
@@ -407,6 +410,37 @@ mod tests {
             .unwrap();
         assert_eq!(found.title, "MR mr1");
         assert_eq!(found.status, MrStatus::Open);
+    }
+
+    /// A tenant-scoped storage handle must persist MRs under ITS tenant
+    /// scope, not a fabricated "default" literal — otherwise the handle's
+    /// own tenant-filtered reads (find_by_id / list_by_repo) cannot see the
+    /// rows it just wrote. Killing test for the `tenant_id: "default"`
+    /// fabrication this create() used to perform: with the old code the row
+    /// is stored under tenant "default" while the scoped handle reads
+    /// filter by "t1", so both lookups below come back empty.
+    #[tokio::test]
+    async fn create_persists_under_the_handles_tenant_scope() {
+        let (_tmp, s) = setup();
+        let scoped = s.with_tenant("t1");
+        create_repo(&s, "p1", "r1").await;
+        let mr = make_mr("mr-tenant-scoped", "r1");
+        MergeRequestRepository::create(&scoped, &mr).await.unwrap();
+
+        let found = MergeRequestRepository::find_by_id(&scoped, &mr.id)
+            .await
+            .unwrap()
+            .expect("a tenant-scoped handle must see the MR it just created");
+        assert_eq!(found.id, mr.id);
+
+        let listed = MergeRequestRepository::list_by_repo(&scoped, &Id::new("r1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "a tenant-scoped handle's list_by_repo must include the MR it created"
+        );
     }
 
     #[tokio::test]

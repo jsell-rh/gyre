@@ -133,7 +133,7 @@ pub use trace::{SpanPayload, TraceRepository};
 pub use trust_anchor::TrustAnchorRepository;
 pub use user::{ApiKeyRepository, UserRepository};
 pub use user_profile::{
-    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    JudgmentLedgerRepository, SessionRepository, UserChannelPreferenceRepository,
     UserNotificationPreferenceRepository, UserTokenRepository,
 };
 pub use user_workspace_state::UserWorkspaceStateRepository;

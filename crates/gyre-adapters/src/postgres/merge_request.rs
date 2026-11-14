@@ -143,8 +143,10 @@ impl MergeRequestRepository for PgStorage {
     async fn create(&self, mr: &MergeRequest) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let m = mr.clone();
-        // Tenant scope resolved on the storage handle (single-tenant default,
-        // or the request's tenant via `with_tenant`) — not a fabricated literal.
+        // Persist under the storage handle's tenant scope (mirrors
+        // TaskRepository::create): the tenant is a real configured scope,
+        // never a fabricated "default" literal — a tenant-scoped handle
+        // must not write rows invisible to its own tenant-filtered reads.
         let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;

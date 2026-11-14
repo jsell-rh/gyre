@@ -283,9 +283,20 @@ pub async fn create_mr(
 
     let now = now_secs();
     let repo_id = Id::new(req.repository_id);
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement). Refuse to create an MR whose scope cannot be resolved
+    // instead of fabricating a "default" workspace identity — a repo that
+    // does not exist has no workspace, and an MR without its mandatory
+    // scope would silently ride a fabricated identity downstream.
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {repo_id} not found")))?;
     let mut mr = MergeRequest::new(
         new_id(),
         repo_id.clone(),
+        repo.workspace_id.clone(),
         req.title,
         req.source_branch.clone(),
         req.target_branch.clone(),
@@ -338,38 +349,35 @@ pub async fn create_mr(
     };
 
     // Compute diff stats, conflict detection, and auto-detect branch lineage deps.
-    if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        if let Ok(diff) = state
-            .git_ops
-            .diff(&repo.path, &req.target_branch, &req.source_branch)
-            .await
-        {
-            mr.diff_stats = Some(gyre_domain::DiffStats {
-                files_changed: diff.files_changed,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
-            });
-        }
-        if let Ok(can_merge) = state
-            .git_ops
-            .can_merge(&repo.path, &req.source_branch, &req.target_branch)
-            .await
-        {
-            mr.has_conflicts = Some(!can_merge);
-        }
-        // Auto-detect branch lineage dependencies (P4).
-        let lineage_deps = detect_lineage_deps(
-            &state,
-            &repo_id,
-            &repo.path,
-            &req.source_branch,
-            &repo.default_branch,
-        )
-        .await;
-        if !lineage_deps.is_empty() {
-            mr.depends_on = lineage_deps;
-        }
+    if let Ok(diff) = state
+        .git_ops
+        .diff(&repo.path, &req.target_branch, &req.source_branch)
+        .await
+    {
+        mr.diff_stats = Some(gyre_domain::DiffStats {
+            files_changed: diff.files_changed,
+            insertions: diff.insertions,
+            deletions: diff.deletions,
+        });
+    }
+    if let Ok(can_merge) = state
+        .git_ops
+        .can_merge(&repo.path, &req.source_branch, &req.target_branch)
+        .await
+    {
+        mr.has_conflicts = Some(!can_merge);
+    }
+    // Auto-detect branch lineage dependencies (P4).
+    let lineage_deps = detect_lineage_deps(
+        &state,
+        &repo_id,
+        &repo.path,
+        &req.source_branch,
+        &repo.default_branch,
+    )
+    .await;
+    if !lineage_deps.is_empty() {
+        mr.depends_on = lineage_deps;
     }
 
     // Merge explicit deps with lineage deps: explicit takes precedence,
@@ -1459,8 +1467,24 @@ mod tests {
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
+    async fn app() -> Router {
+        let state = test_state();
+        seed_repo(&state).await;
+        crate::api::api_router().with_state(state)
+    }
+
+    /// create_mr resolves the MR's workspace scope from its repository (M34
+    /// hierarchy enforcement) and refuses unknown repositories — seed the
+    /// repository these tests open MRs against.
+    async fn seed_repo(state: &crate::AppState) {
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-1"),
+            gyre_common::Id::new("ws1"),
+            "repo-1",
+            "/repos/repo-1",
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -1496,7 +1520,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_get_mr() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Add feature").await;
 
         let resp = app
@@ -1516,7 +1540,7 @@ mod tests {
 
     #[tokio::test]
     async fn mr_status_transition_valid() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Approve me").await;
 
         let body = serde_json::json!({ "status": "approved" });
@@ -1539,7 +1563,7 @@ mod tests {
 
     #[tokio::test]
     async fn mr_status_transition_invalid() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Invalid trans").await;
         let body = serde_json::json!({ "status": "merged" });
         let resp = app
@@ -1562,6 +1586,7 @@ mod tests {
     #[tokio::test]
     async fn closing_mr_deletes_gate_trace() {
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Close deletes trace").await;
 
@@ -1620,6 +1645,7 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
 
         let state = make_test_state_with_jwt();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, id) = create_test_mr(app, "Self-approve attempt").await;
 
@@ -1674,6 +1700,7 @@ mod tests {
         // analytics.md §Auto-Emitted Events: mr.closed carries mr_id, repo_id,
         // reason; scope fields workspace_id/repo_id are attached for filtering.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Analytics close").await;
 
@@ -1714,6 +1741,7 @@ mod tests {
         // analytics.md §Auto-Emitted Events: mr.merged carries mr_id, repo_id,
         // gate_count, queue_wait_secs.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Analytics merge").await;
 
@@ -1790,7 +1818,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_mrs_by_repository() {
-        let app = app();
+        let app = app().await;
         let (_, _) = create_test_mr(app.clone(), "MR for repo").await;
 
         let resp = app
@@ -1810,6 +1838,7 @@ mod tests {
     #[tokio::test]
     async fn list_mrs_per_page_keeps_newest() {
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, oldest) = create_test_mr(app, "oldest").await;
         let (app, middle) = create_test_mr(app, "middle").await;
@@ -1855,6 +1884,7 @@ mod tests {
     #[tokio::test]
     async fn get_mr_not_found() {
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-requests/no-such")
@@ -1868,7 +1898,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_and_list_comments() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Comment test").await;
 
         let body = serde_json::json!({
@@ -1907,7 +1937,7 @@ mod tests {
 
     #[tokio::test]
     async fn comment_with_file_and_line() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "File comment test").await;
 
         let body = serde_json::json!({
@@ -1941,6 +1971,7 @@ mod tests {
         // task_id claim (the gate id); nothing in the request body can
         // forge or suppress it.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Attribution test").await;
 
@@ -1966,8 +1997,9 @@ mod tests {
         // them: task_id carries the gate id, tenant resolved fail-closed
         // from the MR's workspace (task-130 hierarchy claims), persona slug
         // from the gate persona reference. The API-created MR binds to the
-        // bootstrap workspace because the mem repo store has no repo-1
-        // row, so seed that workspace row for the tenant resolution —
+        // seeded repo fixture's workspace (create_mr resolves the scope from
+        // the repository row), but the mem workspace store has no row for
+        // it, so seed that workspace row for the tenant resolution —
         // never a fabricated literal at the mint site.
         let mr = state
             .merge_requests
@@ -2066,6 +2098,7 @@ mod tests {
         // A regular (non-gate) reviewer gets no persona attribution — the
         // fields are gate-agent concepts, derived from the scoped token.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "No attribution test").await;
 
@@ -2098,7 +2131,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_approve_review() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Review test").await;
 
         let body = serde_json::json!({
@@ -2141,7 +2174,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_changes_requested_review() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Changes test").await;
 
         let body = serde_json::json!({
@@ -2174,6 +2207,7 @@ mod tests {
         // manifest gates' min_attestation_level / stack_hash constraints
         // (spec-registry.md §Agent Approver / Gate Schema).
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Forge test").await;
 
@@ -2266,6 +2300,7 @@ mod tests {
         // named agent; nothing records the submitting human. A non-admin
         // human may record a review only under its own verified identity.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Human forge test").await;
 
@@ -2345,6 +2380,7 @@ mod tests {
         // The on-behalf escape hatch is reserved for Admin principals —
         // the same trust level that can merge directly.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Admin on-behalf test").await;
 
@@ -2385,7 +2421,7 @@ mod tests {
 
     #[tokio::test]
     async fn review_bad_decision_rejected() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Bad decision").await;
 
         let body = serde_json::json!({
@@ -2409,7 +2445,7 @@ mod tests {
 
     #[tokio::test]
     async fn diff_endpoint_returns_200() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Diff test").await;
 
         let resp = app
@@ -2435,6 +2471,7 @@ mod tests {
     async fn comment_on_missing_mr_returns_404() {
         let body = serde_json::json!({ "author_agent_id": "a1", "body": "hi" });
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -2452,6 +2489,7 @@ mod tests {
     async fn review_on_missing_mr_returns_404() {
         let body = serde_json::json!({ "reviewer_agent_id": "a1", "decision": "approved" });
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -2473,6 +2511,7 @@ mod tests {
         use crate::attestation::{sign_attestation, MergeAttestation};
 
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Merged MR").await;
 
@@ -2544,6 +2583,7 @@ mod tests {
     #[tokio::test]
     async fn attestation_missing_mr_returns_404() {
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-requests/no-such-mr/attestation")
@@ -2557,7 +2597,7 @@ mod tests {
 
     #[tokio::test]
     async fn attestation_unmerged_mr_returns_404() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Not yet merged").await;
 
         // MR exists but has no attestation yet (not merged)
@@ -2618,6 +2658,7 @@ mod tests {
         use crate::mem::test_state;
 
         let state = test_state();
+        seed_repo(&state).await;
 
         // Create an MR so the GET endpoint can find it.
         let app = crate::api::api_router().with_state(state.clone());
@@ -2664,7 +2705,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_mr_with_depends_on() {
-        let app = app();
+        let app = app().await;
         let (app, dep_id) = create_test_mr(app, "Dependency MR").await;
 
         // Create MR with depends_on referencing the first one.
@@ -2699,7 +2740,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_mr_with_depends_on_nonexistent_rejected() {
-        let app = app();
+        let app = app().await;
 
         let body = serde_json::json!({
             "repository_id": "repo-1",
@@ -2725,7 +2766,7 @@ mod tests {
     #[tokio::test]
     async fn create_mr_without_depends_on_works() {
         // Omitting depends_on should still work (backward compat).
-        let app = app();
+        let app = app().await;
         let body = serde_json::json!({
             "repository_id": "repo-1",
             "title": "No deps MR",
@@ -3249,12 +3290,12 @@ mod tests {
             let mut mr = MergeRequest::new(
                 gyre_common::Id::new(id),
                 gyre_common::Id::new("repo-list"),
+                ws.clone(),
                 title,
                 "feat/x",
                 "main",
                 updated_at,
             );
-            mr.workspace_id = ws.clone();
             mr.updated_at = updated_at;
             state.merge_requests.create(&mr).await.unwrap();
             mrs.push(id);
@@ -3373,12 +3414,12 @@ mod tests {
         let mut mr = MergeRequest::new(
             gyre_common::Id::new("mr-pinned-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "Pinned spec MR",
             "feat/pinned",
             "main",
             1000,
         );
-        mr.workspace_id = gyre_common::Id::new("ws-1");
         mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -3407,15 +3448,15 @@ mod tests {
         );
 
         // MR without a spec_ref: nothing to serve.
-        let mut mr_no_spec = MergeRequest::new(
+        let mr_no_spec = MergeRequest::new(
             gyre_common::Id::new("mr-no-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "No spec MR",
             "feat/nospec",
             "main",
             1001,
         );
-        mr_no_spec.workspace_id = gyre_common::Id::new("ws-1");
         state.merge_requests.create(&mr_no_spec).await.unwrap();
         let resp = app
             .clone()
@@ -3433,12 +3474,12 @@ mod tests {
         let mut mr_ghost = MergeRequest::new(
             gyre_common::Id::new("mr-ghost-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "Ghost spec MR",
             "feat/ghost",
             "main",
             1002,
         );
-        mr_ghost.workspace_id = gyre_common::Id::new("ws-1");
         mr_ghost.spec_ref = Some(format!("system/identity.md@{}", "e".repeat(40)));
         state.merge_requests.create(&mr_ghost).await.unwrap();
         let resp = app

@@ -1933,6 +1933,7 @@ mod tests {
         let mr1 = MergeRequest::new(
             Id::new("mr-open-1"),
             Id::new(&repo_id),
+            Id::new("default"),
             "Open MR",
             "feat/x",
             "main",
@@ -1944,6 +1945,7 @@ mod tests {
         let mut mr2 = MergeRequest::new(
             Id::new("mr-approved-2"),
             Id::new(&repo_id),
+            Id::new("default"),
             "Approved MR",
             "feat/y",
             "main",
@@ -1956,6 +1958,7 @@ mod tests {
         let mut mr3 = MergeRequest::new(
             Id::new("mr-merged-3"),
             Id::new(&repo_id),
+            Id::new("default"),
             "Merged MR",
             "feat/z",
             "main",

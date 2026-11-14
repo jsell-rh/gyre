@@ -2438,10 +2438,21 @@ pub(crate) async fn create_mr_for_completion(
 
     let now = now_secs();
 
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement, like create_mr). Refuse to create an MR whose scope
+    // cannot be resolved instead of fabricating a "default" workspace
+    // identity.
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {repo_id} not found")))?;
+
     // Create MergeRequest
     let mut mr = MergeRequest::new(
         new_id(),
         repo_id,
+        repo.workspace_id.clone(),
         title.to_string(),
         branch,
         target_branch,
@@ -2520,27 +2531,26 @@ pub(crate) async fn create_mr_for_completion(
 
     // Compute diff stats + conflict detection (like create_mr does) —
     // AFTER the jj export above so the stats reflect the agent's actual
-    // completed work (R19 F2).
-    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        if let Ok(diff) = state
-            .git_ops
-            .diff(&repo.path, &mr.target_branch, &mr.source_branch)
-            .await
-        {
-            mr.diff_stats = Some(gyre_domain::DiffStats {
-                files_changed: diff.files_changed,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
-            });
-        }
-        if let Ok(can_merge) = state
-            .git_ops
-            .can_merge(&repo.path, &mr.source_branch, &mr.target_branch)
-            .await
-        {
-            mr.has_conflicts = Some(!can_merge);
-        }
+    // completed work (R19 F2). `repo` is already resolved above (M34
+    // hierarchy enforcement); the MR's workspace scope was set at
+    // construction from it.
+    if let Ok(diff) = state
+        .git_ops
+        .diff(&repo.path, &mr.target_branch, &mr.source_branch)
+        .await
+    {
+        mr.diff_stats = Some(gyre_domain::DiffStats {
+            files_changed: diff.files_changed,
+            insertions: diff.insertions,
+            deletions: diff.deletions,
+        });
+    }
+    if let Ok(can_merge) = state
+        .git_ops
+        .can_merge(&repo.path, &mr.source_branch, &mr.target_branch)
+        .await
+    {
+        mr.has_conflicts = Some(!can_merge);
     }
 
     state.merge_requests.create(&mr).await?;
