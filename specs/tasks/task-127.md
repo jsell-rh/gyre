@@ -4,7 +4,7 @@ spec_ref: "user-management.md §UI Pages"
 depends_on:
   - task-124
   - task-125
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §UI Pages"
 commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f"]
