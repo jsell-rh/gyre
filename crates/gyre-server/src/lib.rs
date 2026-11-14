@@ -1205,6 +1205,26 @@ pub fn build_state(
     let mem_meta_spec_binding_store =
         Arc::new(RwLock::new(Vec::<gyre_domain::MetaSpecBinding>::new()));
 
+    // In pure in-memory mode (no DB), the judgment ledger (HSI §12) aggregates
+    // the SAME audit / spec-approval / spec-ledger stores these repos write
+    // through. In DB-backed mode these stores are unused.
+    let mem_audit = Arc::new(mem::MemAuditRepository::default());
+    let mem_spec_approvals = Arc::new(mem::MemSpecApprovalRepository::default());
+    let mem_spec_ledger = Arc::new(mem::MemSpecLedgerRepository::default());
+
+    // Same as `store!` but the mem branch shares a pre-constructed store.
+    macro_rules! store_shared {
+        ($trait:ty, $arc:expr) => {
+            if let Some(d) = &pg_db {
+                Arc::clone(d) as Arc<$trait>
+            } else if let Some(d) = &sqlite_db {
+                Arc::clone(d) as Arc<$trait>
+            } else {
+                Arc::clone(&$arc) as Arc<$trait>
+            }
+        };
+    }
+
     // search.md §Index Updates: entity repositories are wrapped in
     // search-sync decorators so every write path (REST, MCP, background
     // jobs) keeps the search index in sync. The search port must be resolved
@@ -1253,8 +1273,12 @@ pub fn build_state(
         ),
         Arc::clone(&search),
     );
+    // The audit repo keeps both concerns: search-sync indexing on every
+    // recorded event (task-202) AND store sharing with the judgment ledger
+    // in pure-mem mode (task-209, HSI §12) — the decorator wraps the shared
+    // store instead of constructing its own.
     let audit: Arc<dyn AuditRepository> = search_sync::wrap_audit(
-        store!(dyn AuditRepository, mem::MemAuditRepository::default()),
+        store_shared!(dyn AuditRepository, mem_audit),
         Arc::clone(&search),
     );
 
@@ -1362,10 +1386,7 @@ pub fn build_state(
         ),
         db_storage,
         storage,
-        spec_approvals: store!(
-            dyn SpecApprovalRepository,
-            mem::MemSpecApprovalRepository::default()
-        ),
+        spec_approvals: store_shared!(dyn SpecApprovalRepository, mem_spec_approvals),
         spec_policies: store!(
             dyn SpecPolicyRepository,
             mem::MemSpecPolicyRepository::default()
@@ -1411,10 +1432,7 @@ pub fn build_state(
             dyn ContainerAuditRepository,
             mem::MemContainerAuditRepository::default()
         ),
-        spec_ledger: store!(
-            dyn SpecLedgerRepository,
-            mem::MemSpecLedgerRepository::default()
-        ),
+        spec_ledger: store_shared!(dyn SpecLedgerRepository, mem_spec_ledger),
         spec_approval_history: store!(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
@@ -1565,7 +1583,11 @@ pub fn build_state(
         ),
         judgment_ledger: store!(
             dyn gyre_ports::JudgmentLedgerRepository,
-            mem::MemJudgmentLedgerRepository
+            mem::MemJudgmentLedgerRepository::with_sources(
+                &mem_audit,
+                &mem_spec_approvals,
+                &mem_spec_ledger
+            )
         ),
         orchestrator_registry: signal_chain::OrchestratorRegistry::new(),
         ws_tickets: auth::WsTicketStore::new(),
