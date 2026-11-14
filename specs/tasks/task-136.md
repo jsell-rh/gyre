@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Merge Processor Integration"
-commits: ["a05c7286"]
+commits: ["a05c7286ac53a17c2bd6957e3285c191c10fae1b"]
 ---
 
 ## Spec Excerpt
