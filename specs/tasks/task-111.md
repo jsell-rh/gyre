@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d", "52ad675e45e0645d92535c265ab86b1c2b343d65"]
 ---
 
 ## Spec Excerpt
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management is implemented end-to-end against `user-management.md` §Session Management by this branch's reviewed history (commits above; head of the implementation work: `ed6a9adc`; latest repair: `97ef01dd`).
+Session management is implemented end-to-end against `user-management.md` §Session Management by this branch's reviewed history (commits above; head of the implementation work: `ed6a9adc`; latest repair: the merge commit `52ad675e`).
 
 ### Implementation
 
@@ -97,23 +97,25 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 - **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with Admin-role **and tenant-containment** per-handler checks; target-user existence 404s.
 - **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
 
-### This round's repair (verification finding 651f1e90)
+### This round's repair (rebase onto the task-112 base `1ee52c43`)
 
-Verification run `651f1e90020741298fe217dfb511140c` (candidate `12252f0e`) failed `checks.sh` on exactly one item: `clippy::empty_line_after_doc_comments` at `crates/gyre-domain/src/merge_request.rs:104` — the earlier rebase repair onto the task-130 base (`a5cc47de`) removed the incoming dead helper but left its explanatory doc comment floating above `impl MergeRequest`. Fixed by `97ef01dd`, converting the block to regular comments (comment-only change, no behavior change). All other checks in that run passed (mechanical gates, web build; the svelte/chunk-size messages are warnings, not failures).
+The assignment base `1ee52c43` (task-112: notification delivery channels & routing) diverged from this branch at `b6892403`. Merged the base in as `52ad675e`, resolving seven content conflicts where task-112's `UserChannelPreferenceRepository` and task-111's `SessionRepository` land in the same files (`gyre-ports/src/lib.rs`, `gyre-ports/src/user_profile.rs`, `gyre-adapters/src/{postgres,sqlite}/user_profile.rs`, `gyre-server/src/api/mod.rs`, `gyre-server/src/lib.rs`, coverage matrix). Resolution keeps **both** sides: both port traits and re-exports, both schema imports, both `store!` wiring blocks, both route groups, both adapter impls, and both test sets (the sqlite channel-prefs round-trip test from the base sits next to the session tests). One semantic fallout fixed by hand: `upsert_batch` in the notification-preference impls now calls `UserNotificationPreferenceRepository::upsert(self, pref)` explicitly, because the merged storage types implement two `upsert` traits and the bare `self.upsert(...)` no longer resolves. The coverage header recounts the merged matrix (11 n/a, 14 task-assigned, 11 implemented — rows 12 and 16–18 both present). `web/dist` is restored to the assignment base; final integration rebuilds and publishes those assets remotely.
 
 ### Test evidence
 
-In-sandbox this round (logs under `/tmp/stage/review-evidence/clippy-repair-round.log`):
+In-sandbox this round (log: `/tmp/stage/review-evidence/merge-repair-round.log`):
 
-- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-domain --all-targets` — zero `empty_line_after_doc_comments` occurrences (was 1 at `merge_request.rs:104`).
-- `rustfmt --edition 2021 --check crates/gyre-domain/src/merge_request.rs` — clean.
-- `cargo test -p gyre-domain` — 507 + 8 passed, 0 failed.
-- `cargo test -p gyre-adapters --lib merge_request` — 14 passed, 0 failed.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-ports -p gyre-adapters -p gyre-server -p gyre-domain` — clean (server type-checked; full server test compilation deferred per the 4 GiB budget).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib user_profile` — 13 passed, 0 failed (9 session-repository tests incl. duplicate-id, owner-scoped revoke, retention-never-deletes-revoked, TTL slide; channel-prefs round-trip from the base; notification/token tests).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain` — 509 + 8 passed, 0 failed.
+- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-ports -p gyre-adapters --all-targets` — exit 0; only the pre-existing async_trait `must_use` warnings, none new.
+- Mechanical gates: `check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh` (85 handlers), `check-mcp-write-tools.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh` — all OK.
+- `rustfmt --edition 2021 --check` on every resolved file — clean.
 
 Required in the independent verifier (large gyre-server test compilation deferred per the 4 GiB budget):
 
-- `SKIP_WEB_BUILD=1 cargo test --all` — repo-wide acceptance criterion.
-- `SKIP_WEB_BUILD=1 cargo clippy` scoped to branch-changed files — the check that failed in run 651f1e90.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib mcp::tests` — task-130 fixture adapted to the 7-arg `MergeRequest::new`.
+- `SKIP_WEB_BUILD=1 cargo test --all` — repo-wide acceptance criterion (both task-111 session suites and task-112 channel/dispatcher suites).
+- `SKIP_WEB_BUILD=1 cargo clippy` scoped to branch-changed files.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::users` and `auth` — the session-management surface.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` notification/dispatcher modules — the task-112 surface carried by this merge.
 - Full mechanical gate suite (CI).
