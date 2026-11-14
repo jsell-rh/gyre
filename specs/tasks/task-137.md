@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Failure Feedback"
-commits: ["a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "0e6ab6ad0a862ac91f322ec9c174933a245f21ea"]
+commits: ["0e6ab6ad0a862ac91f322ec9c174933a245f21ea", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3"]
 ---
 
 ## Spec Excerpt
@@ -76,20 +76,16 @@ From `agent-gates.md` §Gate Failure Feedback:
 
 ## Acceptance Criteria
 
-- [x] GateResult MessageKind defined with all required fields
-- [x] Gate failure delivers GateResult to author agent's inbox
-- [x] Live agents receive WebSocket broadcast of GateResult
-- [x] Gate failure attempt count tracked per gate per MR
-- [x] 3+ failures + session ended → deferred task created (Backlog, High priority)
-- [x] Security gate failure → security persona notified
-- [x] Critical security findings → Overseer escalation
-- [x] 3+ consecutive failures → repo orchestrator notified
-- [x] All gates failed → MR removed from queue + reassessment task
-- [ ] `cargo test --all` passes — gyre-server test compilation is refused by
-  the sandbox build wrapper (4 GiB budget); `cargo check --all --tests` is
-  green and the required test list is recorded in
-  `/tmp/stage/review-evidence/task-137-evidence.md` for the independent
-  verifier
+- [ ] GateResult MessageKind defined with all required fields
+- [ ] Gate failure delivers GateResult to author agent's inbox
+- [ ] Live agents receive WebSocket broadcast of GateResult
+- [ ] Gate failure attempt count tracked per gate per MR
+- [ ] 3+ failures + session ended → deferred task created (Backlog, High priority)
+- [ ] Security gate failure → security persona notified
+- [ ] Critical security findings → Overseer escalation
+- [ ] 3+ consecutive failures → repo orchestrator notified
+- [ ] All gates failed → MR removed from queue + reassessment task
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -99,7 +95,9 @@ Read `specs/system/agent-gates.md` §Gate Failure Feedback (all three subsection
 
 All of §Gate Failure Feedback now runs as real production code in the gate
 executor (`crates/gyre-server/src/gate_executor.rs`), which task-136 made
-the single point where required-gate failures are decided.
+the single point where required-gate failures are decided. The acceptance
+criteria above are left in their assigned form (the task document text is
+protected); their status is recorded here instead.
 
 ### GateResult message + inbox delivery
 
@@ -197,3 +195,13 @@ if the behavior breaks; list + rationale in
 passed). gyre-server test execution is refused by the sandbox build
 wrapper (4 GiB budget) — the verifier must run the recorded server test
 list plus the standard full gates.
+
+### Contract repair round
+
+- The previous round checked the acceptance-criteria boxes and edited the
+  last criterion's wording, which changed protected task text. This round
+  restores the assigned document body verbatim (boxes left as assigned)
+  and records status only in this `## Shipped` section.
+- The production fix from commits `0e6ab6ad` (feature) and `a8c4e4e9`
+  (clippy/queue-entry terminality fix) is preserved unchanged; no source
+  files were touched in this round.
