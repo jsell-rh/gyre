@@ -1376,20 +1376,37 @@ mod tests {
         let sha = "f".repeat(40);
         let apr = seed_ledger_entry(&state, "apr-4", "system/rejected.md", &sha).await;
 
-        // Approved entries cannot be rejected (only revoked).
+        // Decline after approval (agent-gates.md §Spec Approval Ledger):
+        // Approved → Rejected records the declining human in rejected_by
+        // (HSI §12 judgment attribution) and must stop verifying at the
+        // forge — require_approved_spec only honors active approvals.
         state
             .spec_approvals
             .approve(&apr, 1700000100)
             .await
             .unwrap()
             .expect("entry exists");
+        state
+            .spec_approvals
+            .reject(&apr, "user:reviewer", "no", 1700000150)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        let reloaded = state
+            .spec_approvals
+            .find_by_id(&apr)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Rejected
+        );
+        assert_eq!(reloaded.rejected_by.as_deref(), Some("user:reviewer"));
+        assert_eq!(reloaded.approved_at, None, "mutual exclusivity");
         assert!(
-            state
-                .spec_approvals
-                .reject(&apr, "user:reviewer", "no", 1700000150)
-                .await
-                .is_err(),
-            "Approved → Rejected must be an invalid transition"
+            !reloaded.is_active(),
+            "rejected approval must not be active"
         );
 
         // Pending entries reject cleanly and never verify.

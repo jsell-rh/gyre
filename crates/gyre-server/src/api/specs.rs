@@ -1135,16 +1135,21 @@ pub async fn revoke_spec_approval(
     // Only the original approver or an Admin can revoke.
     let is_admin = auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
     // Caller label must be derived the SAME way approve_spec derives the
-    // event's approver_id: "agent:" only for Gyre agent JWTs (scope=agent);
-    // Keycloak user JWTs are "user:<display name>". Treating every JWT as
-    // an agent made the original human approver's caller_id never match
-    // their own approval event, locking them out of revocation (403).
+    // event's approver_id: Gyre agent JWTs carry scope as a NON-EMPTY ARRAY
+    // (§1 Token Scoping — the same derivation as `is_agent_jwt` in mcp.rs
+    // and the approve path above), so an agent's label is
+    // "agent:<agent-uuid>" and matches its own approve-written event;
+    // Keycloak user JWTs carry no scope array and label "user:<display
+    // name>". Comparing scope to the string "agent" never fires on the
+    // array form and locked agents out of self-revoke (403); conversely
+    // treating every JWT as an agent locked the original human approver
+    // out of their own revocation. Only the array check gets both right.
     let caller_is_agent = auth
         .jwt_claims
         .as_ref()
         .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
-        == Some("agent");
+        .and_then(|s| s.as_array())
+        .is_some_and(|arr| !arr.is_empty());
     let caller_id = format!(
         "{}:{}",
         if caller_is_agent { "agent" } else { "user" },
@@ -1305,10 +1310,12 @@ pub async fn reject_spec(
     let _ = state.spec_ledger.save(&entry).await;
 
     // Wire the rejection into the durable spec-approvals ledger
-    // (agent-gates.md §Spec Approval Ledger: Pending → Rejected, and
-    // "Rejection closes associated MR" — handled above). Active approvals
-    // for the current SHA are transitioned; already-approved rows whose
-    // spec version was later superseded keep their own lifecycle.
+    // (agent-gates.md §Spec Approval Ledger: Pending → Rejected and
+    // Approved → Rejected — the decline-after-approval path — and
+    // "Rejection closes associated MR" — handled below). Rows still
+    // live (Pending or Approved) for this path are transitioned so the
+    // declining human's judgment is recorded in rejected_by; rows already
+    // in a terminal state (Revoked/Rejected) keep their own lifecycle.
     {
         // HSI §12: `rejected_by` carries the canonical user Id so the
         // rejection surfaces in the declining human's judgment ledger.
@@ -1323,7 +1330,11 @@ pub async fn reject_spec(
             .await
             .unwrap_or_default();
         for approval in pending {
-            if approval.status() == gyre_domain::spec_approval::ApprovalStatus::Pending {
+            if matches!(
+                approval.status(),
+                gyre_domain::spec_approval::ApprovalStatus::Pending
+                    | gyre_domain::spec_approval::ApprovalStatus::Approved
+            ) {
                 if let Err(e) = state
                     .spec_approvals
                     .reject(&approval.id, &ledger_rejecter, &req.reason, now)
@@ -1332,7 +1343,7 @@ pub async fn reject_spec(
                     tracing::warn!(
                         approval_id = %approval.id,
                         error = %e,
-                        "failed to reject pending ledger approval for spec"
+                        "failed to reject ledger approval for spec"
                     );
                 }
             }
@@ -3399,6 +3410,207 @@ mod tests {
         assert_eq!(judgments[0]["judgment_type"], "rejection");
         assert_eq!(judgments[0]["entity_ref"], spec_path);
         assert_eq!(judgments[0]["detail"], "not coherent");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_can_revoke_its_own_approval_with_agent_jwt() {
+        // Review F1 regression: Gyre agent JWTs carry scope as a NON-EMPTY
+        // ARRAY (§1 Token Scoping), not the string "agent". Deriving
+        // caller_is_agent via `scope.as_str() == Some("agent")` never fired,
+        // so the agent's caller label ("user:<agent-uuid>") never matched
+        // its own approve-written "agent:<agent-uuid>" event — the agent
+        // was locked out of self-revoke with a 403.
+        let state = crate::mem::test_state();
+        let spec_path = "system/agent-self-revoke.md";
+        let sha = "7".repeat(40);
+        seed_judgment_spec(&state, spec_path, &sha).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Mint a real Gyre agent JWT (EdDSA, fine-grained scope array) and
+        // register it in the agent-token registry — the same path a spawned
+        // agent's token takes.
+        let agent_id = "agt-self-revoke-1";
+        let token = state
+            .agent_signing_key
+            .mint(
+                agent_id,
+                "task-self-revoke",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "default",
+                "ws-default",
+                "repo-default",
+                "gyre",
+            )
+            .expect("test agent JWT must mint");
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent_id, token.clone())
+            .await
+            .unwrap();
+
+        // The agent approves its spec — the history event records
+        // approver_id "agent:<agent-id>" (agent JWT → agent branch).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fagent-self-revoke.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "sha": sha })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .spec_approval_history
+            .list_by_path(spec_path)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].approver_id, format!("agent:{agent_id}"));
+
+        // Same token revokes its own approval — must NOT 403.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fagent-self-revoke.md/revoke")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "reason": "superseded" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The ledger row is revoked, attributed to the agent's own label
+        // (agents have no canonical user Id).
+        let rows = state.spec_approvals.list_by_path(spec_path).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Revoked
+        );
+        assert_eq!(rows[0].revoked_by.as_deref(), Some("agent:agt-self-revoke-1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_approved_spec_records_declining_human() {
+        // Review F2 regression: rejecting a spec that already has an
+        // Approved ledger row must transition that row to Rejected with
+        // rejected_by = the declining human's canonical user Id — otherwise
+        // the judgment surfaces in nobody's HSI §12 ledger. (The pending
+        // flow was already covered; this seeds an APPROVED row.)
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let spec_path = "system/judgment-reject-approved.md";
+        let sha = "8".repeat(40);
+        seed_judgment_spec(&state, spec_path, &sha).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Approver (human, developer) approves the spec.
+        let approver_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-approve-then-reject-sub",
+                "preferred_username": "judg-approver-2",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fjudgment-reject-approved.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {approver_jwt}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "sha": sha })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // A second human rejects the (already approved) spec.
+        let rejecter_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-reject-approved-sub",
+                "preferred_username": "judg-rejecter-2",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fjudgment-reject-approved.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {rejecter_jwt}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "reason": "no longer wanted" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Writer side: the previously-Approved row transitioned to Rejected
+        // with the DECLINING human's canonical user Id in rejected_by.
+        let rows = state.spec_approvals.list_by_path(spec_path).await.unwrap();
+        assert_eq!(rows.len(), 1, "got {rows:?}");
+        let rejecter = state
+            .users
+            .find_by_external_id("judg-reject-approved-sub")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the rejecting user");
+        assert_eq!(
+            rows[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Rejected,
+            "Approved row must transition to Rejected on spec rejection"
+        );
+        assert_eq!(rows[0].rejected_by.as_deref(), Some(rejecter.id.as_str()));
+        assert_eq!(rows[0].approved_at, None, "mutual exclusivity");
+
+        // Reader side: the decline surfaces in the REJECTER's judgment
+        // ledger (not the original approver's).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=rejection")
+                    .header("authorization", format!("Bearer {rejecter_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let judgments = json["judgments"].as_array().unwrap();
+        assert_eq!(judgments.len(), 1, "got {judgments:?}");
+        assert_eq!(judgments[0]["judgment_type"], "rejection");
+        assert_eq!(judgments[0]["entity_ref"], spec_path);
+        assert_eq!(judgments[0]["detail"], "no longer wanted");
     }
 
     // -----------------------------------------------------------------------
