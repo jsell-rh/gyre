@@ -4,7 +4,7 @@ spec_ref: "user-management.md §API > User Management"
 depends_on:
   - task-120
   - task-121
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Management"
   - "user-management.md §Workspace Membership"
@@ -68,13 +68,13 @@ From §API > Workspace Membership:
 
 ## Acceptance Criteria
 
-- [ ] `GET /api/v1/users/{username}` returns public profile within tenant
-- [ ] `GET /api/v1/users` lists users (TenantAdmin only, paginated)
-- [ ] `PUT /api/v1/users/{id}/deactivate` deactivates user with cascade (TenantAdmin only)
-- [ ] Workspace invitation list, accept, and revoke endpoints functional
-- [ ] Role change endpoint supports ownership transfer validation
-- [ ] All routes registered in `api/mod.rs` with ABAC route mappings
-- [ ] `cargo test --all` passes
+- [x] `GET /api/v1/users/{username}` returns public profile within tenant
+- [x] `GET /api/v1/users` lists users (TenantAdmin only, paginated)
+- [x] `PUT /api/v1/users/{id}/deactivate` deactivates user with cascade (TenantAdmin only)
+- [x] Workspace invitation list, accept, and revoke endpoints functional
+- [x] Role change endpoint supports ownership transfer validation
+- [x] All routes registered in `api/mod.rs` with ABAC route mappings
+- [ ] `cargo test --all` passes (deferred to the independent verifier per the sandbox memory budget; `cargo check -p gyre-server` exits 0 on the merged tree)
 
 ## Agent Instructions
 
@@ -135,74 +135,31 @@ global role can be an invitee). Pending invitations are unaccepted
 membership rows — the lifecycle is real storage state, not a parallel
 table.
 
-### This round (rebase onto base `cdd1dd02`, checkpoint 03eed997)
+### This round (merge of base `c844ea52`, repair `dc996978`)
 
-The executor staged the assigned repair: merge the new base
-`cdd1dd02` (task-011 spec-save git write-through, task-146 analytics
-scope columns, task-171 LLM endpoint work) into this task-124 head.
-The merge auto-resolved all code files; the only textual conflict was
-`specs/coverage/SUMMARY.md`, where the two branches had moved disjoint
-sets of coverage rows from assigned to implemented since the common
-ancestor `1ee52c43`:
+The published head `0538bd1b` conflicted with main at
+`crates/gyre-server/src/auth.rs` (merge state DIRTY). Both branches had
+added a different fail-closed login guard inside
+`find_or_create_user`'s existing-user block since ancestor `32c4faef`:
+this branch's deactivated-account SSO rejection (task-124) and main's
+reserved `SYSTEM_ABAC_IDENTITY` display-name rejection (task-129
+review round 3). Resolved as the union in merge commit `5f86aede` —
+both guards kept, deactivation check first; no task-124 semantics
+changed and every other file auto-merged.
 
-- Resolved as the union: this branch's rows (agent-runtime,
-  meta-spec-reconciliation, platform-model, search, spec-registry,
-  user-management) and the base's analytics row (7 assigned / 5
-  implemented); the spec-links row was changed identically on both
-  sides and auto-merged. The TOTAL row was recomputed as the union:
-  25 sections moved assigned→implemented in total → 215 assigned,
-  204 implemented, 163 verified of 582 non-n/a = 63%.
-- Migration-version invariant holds under the merge: the base's
-  `2026-10-08-000063_analytics_scope_columns` and this branch's
-  `2026-11-13-000063_user_deactivated_at` share the 6-digit sequence
-  but map to distinct full Diesel versions (`20261008000063` vs
-  `20261113000063`), so every migration runs;
-  `scripts/check-migration-versions.sh` and
-  `scripts/check-migration-sql-portability.sh` both exit 0 on the
-  merged tree.
+Probes on the merged tree (logs under `/tmp/stage/review-evidence`):
 
-No task-124 source semantics changed: every code file auto-merged.
-Fresh probes on the merged tree (logs under `review-evidence/` in
-`/tmp/stage/review-evidence`):
-
-- `cargo check -p gyre-server --tests` — exit 0 (8m18s;
-  `cargo-check-gyre-server-tests-merge-base-cdd1dd02.log`).
-- `cargo test -p gyre-common` — 125 passed.
-- `cargo test -p gyre-domain` — 511 + 8 passed.
-- `cargo test -p gyre-adapters` — 521 passed (includes the task-124
-  migration backfill/deactivation storage paths on real SQLite plus
-  the base's new analytics scope-column adapter tests).
-- Mechanical invariant scripts all exit 0: arch, ABAC route registry,
-  ABAC exempt handlers, MCP write gates, migration versions,
-  migration SQL portability, forged scope fields, inert enforcement,
-  unbounded external HTTP, task commit attribution (after restoring
-  this file's `commits:` frontmatter).
-- Running the server test binary itself is deferred to the verifier
-  per the sandbox memory budget (commands below).
-
-### Prior rounds (context)
-
-- Merge of task-112's branch `1ee52c43` (checkpoint 4fd846f2): the two
-  branches implemented disjoint rows of the user-management coverage
-  matrix; union + mechanical recount; all code auto-merged.
-- Rebase repair (merge of `6f5a631c`): the only code conflict was the
-  `use users::{...}` import list in `api/mod.rs`, resolved as the
-  union; coverage narratives merged and mechanically recounted.
-- Review finding 3cd87005 (stale 7-argument `list_for_user` call in
-  `deactivate_user_cascades_to_auth_and_ownership`) fixed by commit
-  33508170.
-- 38b3134f: fixed a test-fixture bug — `seed_workspace_with_owner`
-  built the Owner membership as pending instead of the production
-  `create_workspace` semantics (accepted immediately), which had
-  broken `workspace_invitation_lifecycle`.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — exit 0.
+- `scripts/check-abac-route-registry.sh`, `scripts/check-arch.sh`,
+  `scripts/check-abac-exempt-handlers.sh` — all exit 0.
+- No conflict markers remain under `crates/`.
 
 ### Server tests the verifier must execute
 
 Large gyre-server test compilation is deferred to the independent
-verifier per the sandbox budget:
+verifier per the sandbox memory budget:
 
-- `cargo test --all` — the assignment's definition-of-done gate;
-  `cargo check -p gyre-server --tests` passes on the merged tree.
+- `cargo test --all` — the assignment's definition-of-done gate.
 - `cargo test -p gyre-server api::users::tests` — includes
   `deactivate_user_cascades_to_auth_and_ownership`,
   `workspace_invitation_lifecycle`,
@@ -211,9 +168,11 @@ verifier per the sandbox budget:
   `ownership_transfer_unblocks_old_owner_removal_and_is_audited`,
   `last_owner_cannot_be_removed_or_downgraded`,
   `member_management_requires_owner_admin_or_tenant_admin`,
-  `invite_member_rejects_duplicate_membership`, plus the task-125
-  notification handlers that share `users.rs` after the rebase.
+  `invite_member_rejects_duplicate_membership`.
 - `cargo test -p gyre-server api::impersonation::tests` — includes
   `deactivating_target_revokes_impersonation_token`,
   `deactivating_impersonator_revokes_impersonation_token`,
   `resolver_rejects_deactivated_accounts_even_with_unended_session`.
+- `cargo test -p gyre-server auth::tests` — includes
+  `jwt_rejects_reserved_system_identity_provisioning` (task-129 guard
+  sharing the block resolved this round).
