@@ -560,6 +560,52 @@ impl ResourceResolver {
                     "workspace_member",
                     &[("PUT", "transfer_ownership")],
                 ),
+                // Tenant/workspace invitations (task-110). Management
+                // routes run ABAC (tenant resource); the TenantAdmin-only
+                // and Owner/Admin constraints are additionally enforced
+                // per-handler in api/invitations.rs because the dev/system
+                // token bypasses ABAC and workspace-role conditions are not
+                // expressible in the global policy set.
+                RouteResourceMapping::api("/api/v1/tenant/invite", "tenant", Some("write")),
+                RouteResourceMapping::api("/api/v1/tenant/invite/bulk", "tenant", Some("write")),
+                RouteResourceMapping::api("/api/v1/tenant/invitations", "tenant", None),
+                RouteResourceMapping::api("/api/v1/tenant/invitations/policy", "tenant", None),
+                RouteResourceMapping::api(
+                    "/api/v1/tenant/invitations/:id",
+                    "tenant",
+                    Some("delete"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invite",
+                    "workspace_member",
+                    Some("write"),
+                ),
+                // Invitee-facing accept/decline (task-110 repair): the
+                // invited user is not a workspace member yet, so the
+                // workspace_member resource mapping would never match a
+                // membership for them — per-handler authorization keys on
+                // the invitation's user_id instead (the caller must BE the
+                // invitee, same tenant).
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invite/accept",
+                    "workspace",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invite/decline",
+                    "workspace",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invitations",
+                    "workspace_member",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invitations/:id",
+                    "workspace_member",
+                    Some("delete"),
+                ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
                 RouteResourceMapping::api(
@@ -660,6 +706,10 @@ impl ResourceResolver {
                 // POST /users (create) is admin-only, enforced in-handler.
                 RouteResourceMapping::api("/api/v1/users", "user", None),
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
+                // My workspace invitations (task-110 repair) — implicitly
+                // scoped to the authenticated user like the other me-routes;
+                // the handler filters by caller identity only.
+                RouteResourceMapping::api("/api/v1/users/me/invitations", "user", None),
                 // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
                 RouteResourceMapping::exempt("/api/v1/notifications"),

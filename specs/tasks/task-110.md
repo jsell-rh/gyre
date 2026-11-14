@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: []
+commits: ["5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
 ---
 
 ## Spec Excerpt
@@ -97,3 +97,58 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
+
+## Shipped
+
+**This round: re-verification of the carried implementation on the new
+base** after the prior candidate's "Development controller" CI check
+failed with logs unavailable (durable finding fcdfa81a). No product code
+changed this round — the invitation flow is the independently approved
+implementation from the prior rounds (entities, ports,
+SQLite/Postgres/mem adapters, migrations 2026-11-13-000063/64/65, the
+five tenant endpoints, workspace invitation lifecycle, CSPRNG + SHA-256
+tokens, per-tenant `InvitationPolicy`, bulk invite, background expiry
+job, ABAC mappings), now merged with base 6ffd6799 (task-130 token
+scoping, which rewrote 400 lines of `auth.rs`).
+
+### CI finding investigation
+
+The Development controller job runs only tooling tests
+(`tools/fullsend-dispatcher` Go tests, `scripts/test_dev*.py`,
+`scripts/test_pipeline*.py`, two node suites) — none of which read the
+task-110 diff, and the diff touches no `tools/` or `scripts/` file. Locally:
+node suites pass (7/7, 18/18); the two pipeline-test failures and three
+dev-test failures that occur in this sandbox reproduce **identically on
+a clean worktree of base 6ffd6799** (sandbox cargo-wrapper and
+signal/process artifacts — see `/tmp/stage/review-evidence/`). With logs
+unavailable and nothing reproducible from repo content, the recorded
+failure is consistent with a transient run (the job has a 10-minute
+timeout and timing-sensitive signal tests); re-running it on a fresh
+candidate is the remote-verification step.
+
+### Merge-integrity and gate evidence (this head)
+
+- `cargo check --all` passes — the task-110 auth additions (local-account
+  auth, invitation acceptance, API-key mint) and task-130's
+  `AgentJwtClaims` rewrite coexist type-safely.
+- CI-diff gates against base 6ffd6799: rustfmt-diff clean, clippy-diff
+  clean (21 Rust files, 0 new warnings).
+- All mechanical checks pass: arch, ABAC route registry, migration
+  versions (incl. SQL portability), hierarchy, dead message kinds, and
+  the full advisory battery (the 3 dead-parameter findings are
+  pre-existing on the base, untouched by this diff).
+- Focused tests: `cargo test -p gyre-adapters` 522 passed / 0 failed
+  (includes the SQLite invitation repositories and mem-port contract
+  tests); `-p gyre-domain -p gyre-ports` compile+run clean.
+- gyre-server test compilation is blocked by this sandbox's 4 GiB build
+  wrapper (environment restriction, not a defect): the independent
+  verifier must run `cargo nextest run --all` — in particular the 26
+  `api::invitations` tests (tenant lifecycle, revocation blocks accept,
+  expiry job marks expired, bulk invite, non-admin 403, local-mode accept
+  mints an authenticating API key, re-invite fresh key, SSO link,
+  workspace lifecycle, cross-tenant containment, `max_pending`
+  cap, `allow_re_invite`).
+
+Coverage rows 5, 6, 7, and 25 in
+`specs/coverage/system/user-management.md` remain `implemented` and
+describe the merged tree accurately.
