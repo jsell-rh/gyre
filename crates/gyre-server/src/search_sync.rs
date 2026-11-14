@@ -453,7 +453,7 @@ impl AnalyticsRepository for IndexingAnalyticsRepository {
 
     async fn aggregate_by_day(
         &self,
-        event_name: &str,
+        event_name: Option<&str>,
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>> {
