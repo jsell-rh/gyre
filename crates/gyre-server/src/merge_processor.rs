@@ -7744,15 +7744,15 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap();
 
-            let mut mr = MergeRequest::new(
+            let mr = MergeRequest::new(
                 Id::new("mr-trust-audit"),
                 repo.id.clone(),
+                Id::new("ws-trust-audit"),
                 "trust audit MR",
                 "feat/trust-audit",
                 "main",
                 1000,
             );
-            mr.workspace_id = Id::new("ws-trust-audit");
 
             // Seed an explicit Allow for the merge-processor service identity
             // so the recorded decision carries a real matched policy — an
@@ -7849,13 +7849,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-att-audit"),
                 repo.id.clone(),
+                Id::new("ws-att-audit"),
                 "att audit MR",
                 "feat/att-audit",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:att-worker"));
-            mr.workspace_id = Id::new("ws-att-audit");
             let entry = MergeQueueEntry::new(Id::new("entry-att-audit"), mr.id.clone(), 50, 1000);
 
             // Deny: chain_depth > 0 → deny merge on attestation resources.
@@ -8000,13 +8000,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-fail-closed"),
                 repo.id.clone(),
+                Id::new("ws-fail-closed"),
                 "fail closed MR",
                 "feat/fail",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:fail-worker"));
-            mr.workspace_id = Id::new("ws-fail-closed");
             let entry = MergeQueueEntry::new(Id::new("entry-fail-closed"), mr.id.clone(), 50, 1000);
 
             let result =
