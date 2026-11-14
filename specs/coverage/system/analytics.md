@@ -1,16 +1,16 @@
 # Coverage: Product Analytics
 
 **Spec:** [`system/analytics.md`](../../system/analytics.md)
-**Last audited:** 2026-04-13
-**Coverage:** 0/12
+**Last audited:** 2026-11-05
+**Coverage:** 5/12 (0 not-started, 7 task-assigned, 5 implemented)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
-| 1 | Purpose | 2 | task-assigned | task-146 | Context/rationale — analytics system partially exists (event recording + query endpoints) but auto-emitted events incomplete. |
-| 2 | Event Schema | 2 | task-assigned | task-146 | AnalyticsEvent struct exists but may be missing spec-required fields (user_id, session_id, workspace_id, repo_id). |
-| 3 | Auto-Emitted Events | 3 | task-assigned | task-146 | Partial — task.status_changed, agent.spawned, mr.merged, merge_queue.processed exist. Missing: mr.closed, agent.completed, agent.failed, gate.failed, gate.passed, spec.approved, budget.warning, search.query. |
-| 4 | Query API | 2 | task-assigned | task-146 | Implemented — POST/GET /api/v1/analytics/events, GET /count, GET /daily exist. Need to verify all spec-required filter parameters. |
-| 5 | Query Parameters | 3 | task-assigned | task-146 | Partially implemented — event_name, since, until, limit filtering exists. Need to verify workspace_id, repo_id, agent_id, group_by. |
+| 1 | Purpose | 2 | implemented | task-146 | Context/rationale — analytics system (event recording + query endpoints + all 12 auto-emitted events) now real; no implementable requirement beyond the sections below. |
+| 2 | Event Schema | 2 | implemented | task-146 | All 9 spec fields present on `AnalyticsEvent` (gyre-domain/src/analytics.rs); `with_scope` populates user/session/workspace/repo; serde round-trip test pins the shape. Id-typed fields stored as text (Option<String>), matching the storage layer's TEXT columns. |
+| 3 | Auto-Emitted Events | 3 | implemented | task-146 | All 12 events emit at real trigger points with all spec properties, each with a passing per-event test (see task-146.md Shipped). Multi-path triggers covered: merge_queue.processed (merged + every terminal Failed path — gate failure in candidate selection, MR/repo not found, spec policy, breaking-change policy, spec-link gates, constraint enforcement, attestation-ABAC denial, dependency closed — plus circuit-breaker Cancelled as outcome "skipped"); task.status_changed (HTTP endpoint, MCP update_task, spawn auto-advance, completion auto-advance, admin force-kill block, stale-abort block, spec-reject cancel, repo-archive cancel, ralph-loop Review→InProgress re-open, ralph-loop iteration-ceiling and terminal re-spawn Blocks, ralph-loop merge-completion Review→Done, signal-chain scheduler orchestrator/worker claims and releases, final-spawn-failure Block, delegation/coordination completions); agent.failed (fail/admin-kill/stale-abort/spec-reject stop/repo-archive stop, ralph-loop iteration ceiling and terminal re-spawn failure, worker failed-launch teardown, orchestrator process-death monitor, agent status endpoint); gate.failed/gate.passed (pre-merge run_gate AND post-merge run_post_merge_gates — single-entry merge, revert re-runs, atomic-group validation, recovery HEAD check); mr.closed (transition/repo-archive/spec-reject/ralph-loop gate-failure close); mr.merged (HTTP transition + queue merge); search.query identity/scope bound to the verified caller. |
+| 4 | Query API | 2 | implemented | task-146 | POST/GET /api/v1/analytics/events, GET /count, GET /daily all real against SQLite/Postgres/mem adapters; ISO8601 or unix-sec since/until; daily supports ?event_name=&days= per spec. |
+| 5 | Query Parameters | 3 | implemented | task-146 | event_name (incl. trailing-`*` prefix — LITERAL case-sensitive on every adapter: mem `starts_with`, SQLite `substr(...) = ...` under BINARY collation, Postgres escaped case-sensitive LIKE; `MR.*` and `mr.m_rged*` match nothing, pinned by regression tests on mem and SQLite), agent_id, user_id, workspace_id, repo_id, since, until, limit (default 100, max 10_000), group_by (event_name/agent_id/workspace_id/day — Day keyed to the UTC calendar day on all three adapters, Postgres via `AT TIME ZONE 'UTC'`), unsupported fields rejected — all implemented and adapter-tested (analytics_query_filtered_all_params, analytics_event_name_prefix_is_literal_case_sensitive). |
 | 6 | Decision API for Agents | 2 | task-assigned | task-147 | Not started — no /api/v1/analytics/decide endpoint exists. |
 | 7 | `GET /api/v1/analytics/decide` | 3 | task-assigned | task-147 | Not started — no built-in decision evaluators. |
 | 8 | `POST /api/v1/analytics/decide/custom` | 3 | task-assigned | task-147 | Not started — no custom decision rule DSL. |
