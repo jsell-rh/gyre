@@ -112,7 +112,9 @@ When working on this task:
   `3488a06bf`)
 - `db9980a2` — process(task-011): list contract-restore process commit in
   task log (doc-only — the product-surface commit is `3488a06bf`)
-- REAPPLY_SHA_PLACEHOLDER
+- `8a19603d` — process(task-011): re-apply completion record after contract
+  restore (repair `4a17771f`; doc-only — the product-surface commit is
+  `3488a06bf`)
 
 ## Shipped
 
