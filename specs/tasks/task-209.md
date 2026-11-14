@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["eaca83fb8c0bf871c51a7ff7dc9adaea4b9f83ad", "062f925e2d5abdf4196291df05fac6cf9e9fbd06", "b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "4d1d81b3e5d7ffdb22b7c6cb83fb4199457824e9"]
+commits: ["eaca83fb8c0bf871c51a7ff7dc9adaea4b9f83ad", "062f925e2d5abdf4196291df05fac6cf9e9fbd06", "b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "4d1d81b3e5d7ffdb22b7c6cb83fb4199457824e9", "0aef8422b3403625e23cd124c5b2a8b4fafd1dd5"]
 ---
 
 ## Spec Excerpt
@@ -128,7 +128,7 @@ listed in the frontmatter; coverage row 53 is `implemented`.
 What shipped, per acceptance criterion:
 
 - **Spec amendment (Part 1)** — HSI §12 Judgment Ledger names the four
-  concrete sources (`spec_approvals`; `audit_events` rows
+  concrete sources (`spec_approvals`; `audit_events` rows with
   `event_type IN (gate_override, trust_change, meta_spec_publish)`;
   `meta_spec_versions` joined to `meta_specs`), and the `?type=` values
   are `approval|rejection|gate|trust|meta-spec`, matching
@@ -149,8 +149,8 @@ What shipped, per acceptance criterion:
 - **Meta-spec publish attribution** — meta-spec registry create/update
   write `meta_spec_publish` events (kind/name/version/content_hash).
 - **Inbox filtering** — `user_notification_preferences` rows with
-  `enabled = 0` are excluded in-query (before pagination) from both the
-  inbox list and the unread-count badge, and from the MCP inbox tool.
+  `enabled = 0` are excluded in-query (before pagination) from the
+  inbox list, the unread-count badge, and the MCP inbox tool.
 - **Auth provider info** — `users.oidc_issuer` + `last_login_at`
   recorded by JWT validation via debounced
   `UserRepository::record_login`; `GET /api/v1/users/me` returns both
@@ -160,62 +160,71 @@ What shipped, per acceptance criterion:
   Load More pagination; `GET /users/me/judgments?type=<unknown>`
   returns 400 listing accepted values.
 
-### This round: verification repair (eaca83fb)
+### This round: rebase repair against main c844ea52 (0aef8422)
 
-Verification round 9c3a7d54 ran `bash /tmp/stage/checks.sh` at candidate
-1aba5d5e and exited 1 on exactly one gate: rustfmt changed-lines —
-`crates/gyre-server/src/api/specs.rs:3611,3612,3628` (the F1/F2
-spec-approval review tests added in add632b1). Every other gate in that
-run passed (diff-scoped clippy clean, architecture/hierarchy lints, all
-invariant scripts OK, web build succeeded). Fix eaca83fb applies
-rustfmt's preferred formatting to those lines (collapse the
-serde_json::to_vec chain to one line; reflow the revoked_by assertion
-to multi-line). Behavior-neutral whitespace only; the file is now
-fully rustfmt-clean, not just the changed lines.
+The published PR head (32765e3) conflicted with current main
+(c844ea52, task-129 ABAC evaluation engine). Merge 0aef8422 resolves
+the single content conflict — the `update_workspace` trust-transition
+block in `crates/gyre-server/src/api/workspaces.rs` — by keeping BOTH
+sides: main's `state.policy_cache.invalidate()` after the atomic
+`apply_trust_transition` (policy_cache.rs contract) and task-209's
+`trust_change` audit event for the HSI §12 judgment ledger. Cache
+invalidation runs first so a failed audit write cannot leave the ABAC
+engine evaluating stale trust policies. Every other path merged
+cleanly and additively: main's additions (reserved system ABAC
+identity guards in users/auth, SCIM/repo-access/policy surfaces,
+policy_cache) do not intersect task-209's profile surfaces; the merge
+touches no adapter file and no `web/` file (frontend source is
+bit-identical to the verified published head). Generated `web/dist`
+was restored to the assignment base by the executor and stays
+uncommitted here; final integration rebuilds and publishes it
+remotely.
 
-### Test evidence (this round, head eaca83fb)
+### Test evidence (this round, head 0aef8422)
 
-- `python3 scripts/check-rustfmt-diff.py cdd1dd02` — 50 Rust files
-  checked, changed lines clean, exit 0 (the failing gate from round
-  9c3a7d54).
-- `python3 scripts/check-rustfmt-diff.py HEAD^1` and `HEAD^2` — clean
-  for both merge parents.
-- Whole-file rustfmt: no diff (specs.rs fully formatted).
-- Prior-round evidence (head 062f925e, unchanged code paths): workspace
-  check exit 0; `gyre-adapters` sqlite::user_profile 13 passed;
-  `gyre-domain` 511 passed; mem adapter 14 passed. Evidence directory:
-  /tmp/stage/review-evidence/.
-- rustfmt parsed and reformatted the file successfully — the change is
-  a pure whitespace reflow inside existing test expressions; server
-  test compilation is deferred to the independent verifier per the
-  4 GiB budget.
+- `cargo check -p gyre-server` and `cargo check -p gyre-server
+  --all-targets` — exit 0 on the merged tree (lib + test code).
+- `python3 scripts/check-rustfmt-diff.py HEAD^1` (18 files) and
+  `python3 scripts/check-rustfmt-diff.py c844ea52` (50 files) —
+  changed lines clean, exit 0.
+- `python3 scripts/check-clippy-diff.py HEAD^1` and `... c844ea52` —
+  changed lines clean, exit 0.
+- Invariant scripts (arch, ABAC route registry, ABAC exempt handlers,
+  MCP write tools, migration versions/portability, dead message kinds,
+  byte-slice truncation, relative path defaults, fail-open ref
+  resolution, mem port contracts, fabricated/lossy scope defaults,
+  inert enforcement, forged scope fields, forwarded header trust,
+  in-memory state stores, unbounded external HTTP, notification toggle
+  coverage, task commit attribution) — all exit 0 after this round's
+  task-file update. `scripts/check-tenant-filter.sh` cannot parse
+  under this sandbox's mawk (gawk-only 3-arg `match()`); it is a
+  parse-time dialect failure independent of tree contents, and this
+  round's merge changed zero files under `crates/gyre-adapters` (the
+  script's entire input domain), so its verified state at 32765e3
+  carries forward. Evidence: /tmp/stage/review-evidence/.
+- Focused adapter/domain tests: `cargo test -p gyre-adapters
+  sqlite::user_profile` (13 passed), `cargo test -p gyre-adapters
+  postgres::user_profile` (6 passed), `cargo test -p gyre-domain`
+  (511 + 8 passed).
 
-### Server tests the independent verifier must execute
+### Server and web tests the independent verifier must execute
 
-The hard 4 GiB budget defers server test compilation/execution to the
-verifier. Required at this round's head (eaca83fb):
+The hard 4 GiB budget defers gyre-server test compilation and the web
+suite to the verifier. Required at this round's head (0aef8422):
 
-- `agent_can_revoke_its_own_approval_with_agent_jwt` (api/specs.rs)
-- `reject_approved_spec_records_declining_human` (api/specs.rs)
-- `reject_via_jwt_surfaces_rejection_in_judgment_ledger` and
-  `approve_via_jwt_surfaces_in_judgment_ledger` (api/specs.rs)
-- `reject_transition_pending_to_rejected_and_audit` (api/gates.rs)
-- `judgments_unknown_type_returns_400` (api/users.rs)
-- `disabled_preference_excludes_type_from_inbox_and_count`
-  (api/users.rs)
-- `get_me_returns_recorded_auth_provider_info` (api/users.rs)
-- `trust_transition_writes_trust_change_audit_event`
-  (api/workspaces.rs)
-- `human_approval_on_failed_gate_writes_gate_override_event`
-  (api/merge_requests.rs)
-- `publish_writes_meta_spec_publish_audit_event` (api/meta_specs.rs)
-- `push_check_notifications_broadcast_to_stream_subscribers`
-  (graph_extraction.rs)
-- task-112/146 notification/dispatch suites at the merged call sites
-  (notification_dispatcher, signal_chain, spec_patrol,
-  reconciliation, secret_rotation, impersonation, prompt_assembly,
-  spec_link_staleness, merge_processor tests — the `&[]` arity repair
-  touched only test call sites)
-
-plus the standard full gates (`cargo test --all`, diff-scoped clippy,
-`cd web && npm ci && npm test`, exact-head GitHub checks).
+- `cargo test --all` (workspace; includes the in-module server tests
+  below).
+- `cd web && npm ci && npm test` (frontend source is unchanged from
+  the verified 32765e3; UserProfile.test.js covers the ledger UI
+  filters and notification toggles).
+- `api/workspaces.rs::trust_transition_writes_trust_change_audit_event`
+- `api/merge_requests.rs::human_approval_on_failed_gate_writes_gate_override_event`
+- `api/meta_specs.rs::publish_writes_meta_spec_publish_audit_event`
+- `api/users.rs::disabled_preference_excludes_type_from_inbox_and_count`
+- `api/users.rs::get_me_returns_recorded_auth_provider_info`
+- `api/users.rs::judgments_unknown_type_returns_400`
+- `api/specs.rs::agent_can_revoke_its_own_approval_with_agent_jwt`,
+  `reject_approved_spec_records_declining_human`
+- `api/users.rs::judgments_unknown_type_returns_400` (the test `app()`
+  state wires `MemJudgmentLedgerRepository` (mem.rs:5227), so endpoint
+  tests exercise the mem-adapter judgment-ledger parity path)
