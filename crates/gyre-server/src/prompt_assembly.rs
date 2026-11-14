@@ -704,7 +704,17 @@ mod tests {
 
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-chan"), None, None, None, None, None, 10, 0)
+            .list_for_user(
+                &Id::new("user-chan"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
             .await
             .unwrap();
         assert!(

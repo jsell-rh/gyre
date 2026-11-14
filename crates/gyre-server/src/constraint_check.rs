@@ -2206,6 +2206,7 @@ mod tests {
                 None,
                 Some("ConstraintViolation"),
                 None,
+                &[],
                 100,
                 0,
             )

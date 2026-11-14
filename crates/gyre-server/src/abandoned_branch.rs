@@ -305,6 +305,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -357,6 +358,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -379,6 +381,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -401,6 +404,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -450,6 +454,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -500,6 +505,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -549,6 +555,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -599,6 +606,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -676,6 +684,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -755,6 +764,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 100,
                 0,
             )
@@ -874,6 +884,7 @@ mod tests {
                 Some(9),
                 None,
                 None,
+                &[],
                 1000,
                 0,
             )

@@ -10,6 +10,7 @@ vi.mock('../lib/api.js', () => ({
     workspaces: vi.fn(),
     updateMe: vi.fn(),
     markNotificationRead: vi.fn(),
+    notificationCount: vi.fn(),
     getNotificationPreferences: vi.fn(),
     updateNotificationPreferences: vi.fn(),
   },
@@ -21,7 +22,28 @@ vi.mock('../lib/toast.svelte.js', () => ({
 }));
 
 import { api } from '../lib/api.js';
+import { NOTIF_TYPE_IDS } from '../lib/notification-types.js';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import UserProfile from '../components/UserProfile.svelte';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Canonical NotificationType variant names, extracted from the Rust enum
+// itself (the single source of truth). Deriving the expected set here --
+// instead of hardcoding a count that mirrors the implementation's own list
+// -- makes this test fail when the enum gains a variant with no toggle
+// (review finding: 'WorkspaceOwnerless' shipped with no toggle while a
+// hardcoded toBe(40) still passed).
+const RUST_ENUM_PATH = '../../../crates/gyre-common/src/notification.rs';
+const rustNotificationTypeVariants = () => {
+  const src = readFileSync(resolve(__dirname, RUST_ENUM_PATH), 'utf8');
+  const body = src.match(/^pub enum NotificationType \{[\s\S]*?^\}/m)[0];
+  return body
+    .match(/^    [A-Z][A-Za-z0-9]+,?$/gm)
+    .map((line) => line.trim().replace(/,$/, ''));
+};
 
 const ME = {
   username: 'jsell',
@@ -30,7 +52,8 @@ const ME = {
   global_role: 'admin',
   timezone: 'America/New_York',
   locale: 'en-US',
-  oidc_issuer: null,
+  oidc_issuer: 'https://idp.example.com/realms/gyre',
+  last_login_at: 1759000000,
 };
 
 const WORKSPACES = [
@@ -38,14 +61,18 @@ const WORKSPACES = [
   { id: 'ws-2', name: 'Platform', slug: 'platform', trust_level: null, role: 'member' },
 ];
 
+// Real GET /users/me/notifications wire shape: NotificationResponse items.
+// Read state is resolved_at/dismissed_at (both null = unread), NOT a `read` bool.
+const NOW = Math.floor(Date.now() / 1000);
 const NOTIFICATIONS = [
-  { id: 'n-1', notification_type: 'SpecApproval', title: 'Spec approved', read: false, created_at: new Date(Date.now() - 300000).toISOString() },
-  { id: 'n-2', notification_type: 'AgentFailure', title: 'Agent crashed', read: true, created_at: new Date(Date.now() - 7200000).toISOString() },
+  { id: 'n-1', notification_type: 'SpecApprovalRequested', title: 'Spec approved', resolved_at: null, dismissed_at: null, created_at: (NOW - 300) },
+  { id: 'n-2', notification_type: 'GateFailure', title: 'Gate crashed', resolved_at: null, dismissed_at: NOW - 100, created_at: (NOW - 7200) },
 ];
 
+// Real GET /users/me/judgments wire shape: JudgmentEntryResponse items.
 const JUDGMENTS = [
-  { event_type: 'spec_approved', spec_path: 'specs/auth.md', timestamp: new Date(Date.now() - 60000).toISOString(), workspace_name: 'Payments', sha: 'abc1234567890' },
-  { event_type: 'trust_override', spec_path: null, resource_id: 'ws-1', timestamp: new Date(Date.now() - 86400000).toISOString(), workspace_name: 'Platform' },
+  { judgment_type: 'approval', entity_ref: 'specs/auth.md', workspace_id: 'ws-1', timestamp: NOW - 60, detail: null },
+  { judgment_type: 'gate', entity_ref: 'mr-9', workspace_id: 'ws-1', timestamp: NOW - 86400, detail: 'gate test_command overridden: failed -> overridden' },
 ];
 
 const CTX = new Map([['navigate', vi.fn()], ['goToWorkspaceHome', vi.fn()], ['openDetailPanel', vi.fn()]]);
@@ -55,12 +82,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   api.me.mockResolvedValue({ ...ME });
-  api.myNotifications.mockResolvedValue([...NOTIFICATIONS]);
-  api.myJudgments.mockResolvedValue([...JUDGMENTS]);
+  api.myNotifications.mockResolvedValue({ notifications: [...NOTIFICATIONS] });
+  api.myJudgments.mockResolvedValue({ judgments: [...JUDGMENTS] });
   api.workspaces.mockResolvedValue([...WORKSPACES]);
   api.updateMe.mockResolvedValue({ ...ME, display_name: 'Updated Name' });
   api.markNotificationRead.mockResolvedValue({});
-  api.getNotificationPreferences.mockResolvedValue({});
+  api.notificationCount.mockResolvedValue(1);
+  api.getNotificationPreferences.mockResolvedValue({ preferences: [] });
   api.updateNotificationPreferences.mockResolvedValue({});
 });
 
@@ -90,13 +118,13 @@ describe('UserProfile', () => {
     expect(adminEls.length).toBeGreaterThan(0);
   });
 
-  it('exposes exactly the six permitted tabs — HSI §12 forbids My Agents/Tasks/MRs', async () => {
+  it('exposes exactly the six permitted tabs -- HSI §12 forbids My Agents/Tasks/MRs', async () => {
     const { container, findAllByText } = r();
     await findAllByText('James Sell');
     const ids = [...container.querySelectorAll('[role="tab"]')].map((el) => el.dataset.id);
     expect(ids).toEqual(['info', 'tokens', 'memberships', 'ledger', 'notif-prefs', 'notifications']);
     // HSI §12 "What the Profile Is NOT": tasks are agent work units, MRs are
-    // judged not authored, agents are machinery — none is a per-user surface.
+    // judged not authored, agents are machinery -- none is a per-user surface.
     for (const forbidden of ['my-agents', 'my-tasks', 'my-mrs']) {
       expect(ids).not.toContain(forbidden);
     }
@@ -109,6 +137,20 @@ describe('UserProfile', () => {
     expect(await findByText('jsell@example.com')).toBeTruthy();
     expect(await findByText('America/New_York')).toBeTruthy();
     expect(await findByText('en-US')).toBeTruthy();
+  });
+
+  it('shows read-only OIDC issuer in Profile tab', async () => {
+    const { findByText } = r();
+    expect(await findByText('https://idp.example.com/realms/gyre')).toBeTruthy();
+  });
+
+  it('shows read-only last login in Profile tab', async () => {
+    const { findByText } = r();
+    // 1759000000 * 1000 formatted by toLocaleString -- assert the label and
+    // that some rendered value carries the year of the recorded login.
+    expect(await findByText('Last Login')).toBeTruthy();
+    const d = new Date(1759000000 * 1000);
+    expect(await findByText(d.toLocaleString())).toBeTruthy();
   });
 
   it('shows Edit button that opens edit form', async () => {
@@ -129,10 +171,13 @@ describe('UserProfile', () => {
     });
   });
 
-  it('shows unread notification count badge', async () => {
+  it('badge count comes from the server-side count endpoint, not the list page', async () => {
     const { findByText } = r();
-    // 1 unread notification
-    expect(await findByText('1')).toBeTruthy();
+    // notificationCount resolves 7 while the list mock holds only 2 items --
+    // a client-side `list.filter(unread)` badge would show a different number.
+    api.notificationCount.mockResolvedValue(7);
+    expect(await findByText('7')).toBeTruthy();
+    expect(api.notificationCount).toHaveBeenCalledTimes(1);
   });
 
   it('shows workspace memberships in Workspaces tab', async () => {
@@ -160,51 +205,188 @@ describe('UserProfile', () => {
     expect(await findByText('Trust: autonomous')).toBeTruthy();
   });
 
-  it('shows judgment events in Judgment Ledger tab', async () => {
+  it('shows judgment entries with real wire fields in Judgment Ledger tab', async () => {
     const { findByText } = r();
     const ledgerTab = await findByText('Judgment Ledger');
     await fireEvent.click(ledgerTab);
-    expect(await findByText('spec_approved')).toBeTruthy();
-    expect(await findByText('trust_override')).toBeTruthy();
+    // judgment_type / entity_ref are the JudgmentEntryResponse field names.
+    expect(await findByText('approval')).toBeTruthy();
+    expect(await findByText('gate')).toBeTruthy();
     expect(await findByText('specs/auth.md')).toBeTruthy();
+    expect(await findByText('mr-9')).toBeTruthy();
   });
 
-  it('shows SHA snippets in judgment ledger', async () => {
+  it('shows judgment detail line when present', async () => {
     const { findByText } = r();
     const ledgerTab = await findByText('Judgment Ledger');
     await fireEvent.click(ledgerTab);
-    expect(await findByText('abc1234')).toBeTruthy();
+    expect(await findByText('gate test_command overridden: failed -> overridden')).toBeTruthy();
   });
 
   it('shows empty state when no judgments', async () => {
-    api.myJudgments.mockResolvedValue([]);
+    api.myJudgments.mockResolvedValue({ judgments: [] });
     const { findByText } = r();
     const ledgerTab = await findByText('Judgment Ledger');
     await fireEvent.click(ledgerTab);
     expect(await findByText(/No activity recorded/)).toBeTruthy();
   });
 
-  it('shows notification preference toggles', async () => {
+  it('ledger type filter re-fetches with the server ?type= param', async () => {
+    const { findByText, container } = r();
+    const ledgerTab = await findByText('Judgment Ledger');
+    await fireEvent.click(ledgerTab);
+    await findByText('specs/auth.md');
+    const typeSelect = container.querySelector('.ledger-select[aria-label="Filter judgments by type"]');
+    expect(typeSelect).toBeTruthy();
+    await fireEvent.change(typeSelect, { target: { value: 'gate' } });
+    await waitFor(() => {
+      const last = api.myJudgments.mock.calls[api.myJudgments.mock.calls.length - 1][0];
+      expect(last.type).toBe('gate');
+      expect(last.offset).toBe(0);
+    });
+  });
+
+  it('ledger workspace filter re-fetches with the server ?workspace_id= param', async () => {
+    const { findByText, container } = r();
+    const ledgerTab = await findByText('Judgment Ledger');
+    await fireEvent.click(ledgerTab);
+    await findByText('specs/auth.md');
+    const wsSelect = container.querySelector('.ledger-select[aria-label="Filter judgments by workspace"]');
+    expect(wsSelect).toBeTruthy();
+    await fireEvent.change(wsSelect, { target: { value: 'ws-1' } });
+    await waitFor(() => {
+      const last = api.myJudgments.mock.calls[api.myJudgments.mock.calls.length - 1][0];
+      expect(last.workspace_id).toBe('ws-1');
+      expect(last.offset).toBe(0);
+    });
+  });
+
+  it('ledger paginates past the first page via Load More and offset', async () => {
+    // First page: a full 50-item page (page size) so "Load more" appears;
+    // second page: a single item, which ends pagination.
+    const page1 = Array.from({ length: 50 }, (_, i) => ({
+      judgment_type: 'approval',
+      entity_ref: `specs/p1-${i}.md`,
+      workspace_id: 'ws-1',
+      timestamp: NOW - 60 - i,
+      detail: null,
+    }));
+    const page2 = [
+      { judgment_type: 'trust', entity_ref: 'ws-1', workspace_id: 'ws-1', timestamp: NOW - 5000, detail: null },
+    ];
+    api.myJudgments.mockResolvedValueOnce({ judgments: page1 }).mockResolvedValueOnce({ judgments: page2 });
+    const { findByText, findAllByText } = r();
+    const ledgerTab = await findByText('Judgment Ledger');
+    await fireEvent.click(ledgerTab);
+    await findAllByText('specs/p1-0.md');
+    const moreBtn = await findByText('Load more');
+    await fireEvent.click(moreBtn);
+    await waitFor(() => {
+      expect(api.myJudgments).toHaveBeenCalledTimes(2);
+    });
+    expect(api.myJudgments.mock.calls[1][0].offset).toBe(50);
+    expect(api.myJudgments.mock.calls[1][0].limit).toBe(50);
+    // Appended, not replaced: both pages' entries render.
+    expect(await findAllByText('specs/p1-0.md')).toBeTruthy();
+    expect(await findByText('ws-1', { selector: '.ledger-target' })).toBeTruthy();
+  });
+
+  it('shows a toggle for every canonical NotificationType', async () => {
     const { findByText, container } = r();
     const prefsTab = await findByText('Notification Preferences');
     await fireEvent.click(prefsTab);
-    expect(await findByText('Spec Approvals')).toBeTruthy();
+    // Spot-check canonical NotificationType::as_str() names, including
+    // types the curated subset previously omitted (review F3: the spec
+    // requires a toggle for ANY NotificationType variant).
+    expect(await findByText('Gate Failures')).toBeTruthy();
+    expect(await findByText('Specs Pending Approval')).toBeTruthy();
+    expect(await findByText('Merge Queue Escalations')).toBeTruthy();
     expect(await findByText('Agent Failures')).toBeTruthy();
-    expect(await findByText('Trust Suggestions')).toBeTruthy();
+    expect(await findByText('Security Findings')).toBeTruthy();
+    expect(await findByText('Merge Queue Paused')).toBeTruthy();
+    expect(await findByText('Persona Changes Pending Approval')).toBeTruthy();
+    // Review F1: 'ComputeTargetUnavailable' (Priority-1 inbox type) had no
+    // toggle -- a human could not disable it. It must render like the rest.
+    expect(await findByText('Compute Target Unavailable')).toBeTruthy();
+    // Review round 2: 'WorkspaceOwnerless' (Priority-2, task-121 lineage) had
+    // no toggle either. It must render like the rest.
+    expect(await findByText('Ownerless Workspaces')).toBeTruthy();
     const checkboxes = container.querySelectorAll('.pref-checkbox');
-    expect(checkboxes.length).toBe(10);
+    // One toggle per canonical NotificationType variant. The expected set is
+    // extracted from the gyre-common enum source -- NOT a count mirrored from
+    // the implementation's own list, which silently forgives a missing toggle.
+    const variants = rustNotificationTypeVariants();
+    expect(NOTIF_TYPE_IDS).toEqual(variants);
+    expect(checkboxes.length).toBe(variants.length);
   });
 
-  it('saves notification preferences via server API', async () => {
-    api.updateNotificationPreferences.mockResolvedValue({});
+  it('loads server-side prefs rows into the toggles', async () => {
+    api.getNotificationPreferences.mockResolvedValue({
+      preferences: [
+        { notification_type: 'GateFailure', enabled: false },
+        { notification_type: 'AgentBudgetWarning', enabled: true },
+      ],
+    });
+    const { findByText, container } = r();
+    const prefsTab = await findByText('Notification Preferences');
+    await fireEvent.click(prefsTab);
+    await findByText('Gate Failures');
+    const boxes = container.querySelectorAll('.pref-checkbox');
+    const gate = [...boxes].find(b => b.getAttribute('aria-label')?.includes('Gate Failures'));
+    expect(gate?.checked).toBe(false);
+  });
+
+  it('ignores legacy alias-named prefs rows instead of toggling canonical switches', async () => {
+    // Rows written by older clients may carry parse aliases
+    // ('SpecPendingApproval'/'BudgetWarning'); the canonical toggles must
+    // stay at their default (enabled) rather than keying on a name that
+    // never matches a stored notification.
+    api.getNotificationPreferences.mockResolvedValue({
+      preferences: [
+        { notification_type: 'SpecPendingApproval', enabled: false },
+        { notification_type: 'BudgetWarning', enabled: false },
+      ],
+    });
+    const { findByText, container } = r();
+    const prefsTab = await findByText('Notification Preferences');
+    await fireEvent.click(prefsTab);
+    await findByText('Specs Pending Approval');
+    const boxes = container.querySelectorAll('.pref-checkbox');
+    const specApproval = [...boxes].find(b => b.getAttribute('aria-label')?.includes('Specs Pending Approval'));
+    expect(specApproval?.checked).toBe(true);
+  });
+
+  it('saves prefs with the server wire format and canonical names', async () => {
     const { findByText } = r();
     const prefsTab = await findByText('Notification Preferences');
     await fireEvent.click(prefsTab);
     const saveBtn = await findByText('Save Preferences');
     await fireEvent.click(saveBtn);
-    expect(api.updateNotificationPreferences).toHaveBeenCalled();
+    expect(api.updateNotificationPreferences).toHaveBeenCalledTimes(1);
     const arg = api.updateNotificationPreferences.mock.calls[0][0];
-    expect(arg.SpecApproval).toBe(true);
+    // Backend PUT expects { preferences: [{ notification_type, enabled }] }
+    // with canonical names -- anything else is a 400.
+    expect(Array.isArray(arg.preferences)).toBe(true);
+    expect(arg.preferences.length).toBe(NOTIF_TYPE_IDS.length);
+    const types = arg.preferences.map(p => p.notification_type);
+    expect(types).toContain('GateFailure');
+    expect(types).toContain('MergeQueueEscalation');
+    expect(types).toContain('ComputeTargetUnavailable');
+    // Previously-omitted canonical variants are now toggleable and saved.
+    expect(types).toContain('AgentFailed');
+    expect(types).toContain('SecurityFinding');
+    expect(types).toContain('BreakingChangeDetected');
+    expect(types).toContain('PersonaChangePendingApproval');
+    // Fabricated names must be gone.
+    expect(types).not.toContain('SpecApproval');
+    expect(types).not.toContain('MergeRequestMerged');
+    // Legacy parse aliases are not canonical as_str() names -- a toggle
+    // keyed on an alias never matches a stored notification.
+    expect(types).not.toContain('SpecPendingApproval');
+    expect(types).not.toContain('BudgetWarning');
+    for (const p of arg.preferences) {
+      expect(typeof p.enabled).toBe('boolean');
+    }
   });
 
   it('shows notifications in Notifications tab', async () => {
@@ -212,16 +394,16 @@ describe('UserProfile', () => {
     const notifTab = await findByText('Notifications');
     await fireEvent.click(notifTab);
     expect(await findByText('Spec approved')).toBeTruthy();
-    expect(await findByText('Agent crashed')).toBeTruthy();
+    expect(await findByText('Gate crashed')).toBeTruthy();
   });
 
-  it('shows mark-as-read button for unread notifications', async () => {
+  it('treats resolved/dismissed notifications as read', async () => {
     const { findByText, container } = r();
     const notifTab = await findByText('Notifications');
     await fireEvent.click(notifTab);
     await findByText('Spec approved');
     const markBtns = container.querySelectorAll('.mark-read-btn');
-    expect(markBtns.length).toBe(1); // only 1 unread
+    expect(markBtns.length).toBe(1); // n-2 has dismissed_at set
   });
 
   it('marks notification as read when button is clicked', async () => {
@@ -235,7 +417,7 @@ describe('UserProfile', () => {
   });
 
   it('shows empty state when no notifications', async () => {
-    api.myNotifications.mockResolvedValue([]);
+    api.myNotifications.mockResolvedValue({ notifications: [] });
     const { findByText } = r();
     const notifTab = await findByText('Notifications');
     await fireEvent.click(notifTab);
