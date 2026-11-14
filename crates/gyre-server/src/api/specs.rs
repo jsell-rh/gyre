@@ -554,12 +554,17 @@ pub async fn approve_spec(
     let (approver_type, approver_id, attestation_level, stack_hash) = if let Some(claims) =
         auth.jwt_claims.as_ref()
     {
-        // Gyre agent JWT (scope="agent"): capture the verified workload claims
-        // so §9 agent-approval validity (attestation_level >= manifest minimum,
-        // stack_hash exact match) can be evaluated from the recorded event.
-        // Keycloak user JWTs do not carry agent workload claims; their scope
-        // is not "agent", so they are treated as human approvals.
-        let is_agent = claims.get("scope").and_then(|s| s.as_str()) == Some("agent");
+        // Gyre agent JWT (scope is a non-empty fine-grained list per §1
+        // Token Scoping — see `is_agent_jwt` in mcp.rs): capture the verified
+        // workload claims so §9 agent-approval validity (attestation_level
+        // >= manifest minimum, stack_hash exact match) can be evaluated from
+        // the recorded event. Keycloak user JWTs carry no scope array and
+        // legacy UUID agent tokens carry no claims at all — both fall to the
+        // human path below.
+        let is_agent = claims
+            .get("scope")
+            .and_then(|s| s.as_array())
+            .is_some_and(|arr| !arr.is_empty());
         if is_agent {
             // Stack hash: from the verified JWT `wl_stack_hash` claim
             // (spec §5: "the forge verifies the agent's OIDC token contains
@@ -3252,6 +3257,12 @@ specs:
                 "system",
                 &state.base_url,
                 3600,
+                "default", // tenant of ws-e2e (seed_e2e_specs)
+                "ws-e2e",
+                "repo-e2e",
+                "e2e-repo",
+                None,                         // persona
+                Some(level),                  // attestation_level
                 None,                         // wl_pid
                 None,                         // wl_hostname
                 Some("local".to_string()),    // wl_compute_target
