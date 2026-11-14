@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -97,71 +97,3 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
-## Shipped
-
-**This round: repair review finding F1 (attempt 6fd7a0e0) — the
-invitee-facing workspace-invitation routes were unreachable in
-production — plus the merge onto assignment base 9bfab365 (task-149
-analytics).** No invitation behavior otherwise changed; the
-implementation approved across prior rounds (domain entities, ports,
-SQLite/Postgres/mem adapters, migrations 2026-11-13-000063/64/65, the
-five tenant endpoints plus policy endpoints, workspace invitation
-lifecycle, CSPRNG + SHA-256 tokens, per-tenant `InvitationPolicy`,
-bulk invite, background expiry job, docs) carries over.
-
-### Repairs this round
-
-- **F1 (BLOCKING, code):** `POST /api/v1/workspaces/{id}/invite/accept`
-  and `/invite/decline` were mapped as non-exempt workspace-resource
-  routes in `abac_middleware.rs`, so the middleware derived
-  `subject.member_of_resource_workspace=false` for the invited user
-  (an invitation exists only for non-members) and the seeded builtin
-  `workspace-membership-required` (Deny, priority 940) returned 403
-  before the per-handler invitee check ran — the spec-named invitee
-  endpoints and the `accept_url` embedded in the invitee's
-  `InvitationReceived` notification were dead in real deployments.
-  Fix: both routes are now `RouteResourceMapping::exempt`; per-handler
-  authorization (workspace load, tenant containment 403,
-  caller-must-be-the-invitee 404) was restructured into
-  `authorize_my_pending_invitation` so the decision is visible in the
-  exempt handlers' bodies — `check-abac-exempt-handlers.sh` passes (81
-  handlers checked), `check-abac-route-registry.sh` passes.
-- **Production-chain regression test**
-  `invitee_accepts_and_declines_through_abac_middleware`: the real
-  `api_router` layered with `abac_middleware` (as `build_router` does),
-  seeded builtin policies, API-key invitee. A control assertion first
-  proves the non-member invitee is still 403-denied on a
-  workspace-MAPPED route (so the builtin is live in the fixture), then
-  accept → 204 + membership activated, and decline → 204 +
-  `Declined` + no membership. Without the exemption this test fails
-  with 403 on both invitee routes.
-- Merged assignment base 9bfab365 (task-149 analytics UI + retention)
-  and resolved `specs/coverage/SUMMARY.md` by mechanical recount via
-  `scripts/update-coverage-summary.sh` — this also fixes the round's
-  non-blocking process finding (stale abac-policy-engine / agent-gates
-  / analytics rows; the merged tree recounts to 191 assigned / 228
-  implemented / 67%).
-- Restored this task's `commits:` frontmatter (assignment reset had
-  emptied it): the nine previously recorded SHAs (all re-verified
-  in-branch) plus this round's fix `d1103854`.
-
-### Verification evidence
-
-- `cargo check -p gyre-server --tests` — OK (all edits type-checked,
-  including the new regression test).
-- `bash scripts/check-abac-route-registry.sh` — OK.
-- `bash scripts/check-abac-exempt-handlers.sh` — OK (81 handlers).
-- `bash scripts/update-coverage-summary.sh` — regenerated SUMMARY.md.
-
-### Deferred to the independent verifier
-
-(gyre-server test compilation exceeds the model-resident 4 GiB budget)
-
-- `cargo test -p gyre-server invitee_accepts_and_declines_through_abac_middleware`
-  (the new production-chain regression test).
-- `cargo test -p gyre-server api::invitations` (full invitation
-  module — the shared invitee lookup was restructured).
-- `cargo test -p gyre-server builtin_workspace_membership_required_denies_non_member_live`
-  (adjacent builtin-policy live test, unchanged).
-- `cargo test --all` (task acceptance criterion; verifier-owned).
