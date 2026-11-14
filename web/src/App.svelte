@@ -9,6 +9,8 @@
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
   import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
+  import NotificationBell from './components/NotificationBell.svelte';
+  import NotificationSettings from './components/NotificationSettings.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
@@ -22,7 +24,7 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'workspace_settings' | 'repo' | 'profile'
+  // 'workspace_home' | 'workspace_settings' | 'repo' | 'profile' | 'notification_settings'
   let mode = $state('workspace_home');
 
   // ── Workspace / repo state ───────────────────────────────────────────
@@ -248,6 +250,12 @@
       return { mode: 'profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
     }
 
+    // /settings/notifications (user-management.md §In-App Notification UI:
+    // notification preferences page in user settings)
+    if (raw[0] === 'settings' && raw[1] === 'notifications') {
+      return { mode: 'notification_settings', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
+    }
+
     // /all  or  /all/settings  or  /all/agent-rules  (cross-workspace view §10)
     if (raw[0] === 'all') {
       const tab = raw[1] ?? null;
@@ -302,6 +310,7 @@
     if (!parsed) return '/';
     const { mode: m, slug, repoName, tab, entityType, entityId } = parsed;
     if (m === 'profile') return '/profile';
+    if (m === 'notification_settings') return '/settings/notifications';
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
     }
@@ -555,6 +564,11 @@
     fadeContent();
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
   }
+  function goToNotificationSettings() {
+    mode = 'notification_settings';
+    fadeContent();
+    pushState({ mode: 'notification_settings', slug: null, repoName: null, tab: null });
+  }
   function goToCrossWorkspace() {
     mode = 'cross_workspace';
     crossWorkspaceTab = null;
@@ -630,6 +644,7 @@
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
+  setContext('goToNotificationSettings', () => goToNotificationSettings());
   setContext('goToRepo', (repo, tab) => goToRepo(repo, tab));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
@@ -989,6 +1004,8 @@
     const repoName = currentRepo?.name ?? '';
     if (mode === 'profile') {
       document.title = 'Profile | Gyre';
+    } else if (mode === 'notification_settings') {
+      document.title = 'Notification Settings | Gyre';
     } else if (mode === 'cross_workspace') {
       document.title = 'All Workspaces | Gyre';
     } else if (mode === 'agent_rules') {
@@ -1046,6 +1063,8 @@
 
     if (parsed?.mode === 'profile') {
       mode = 'profile';
+    } else if (parsed?.mode === 'notification_settings') {
+      mode = 'notification_settings';
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
       crossWorkspaceTab = (parsed.tab === 'settings' || parsed.tab === 'agent-rules') ? parsed.tab : null;
@@ -1170,7 +1189,7 @@
       }
       if (e.state?.mode) {
         const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings')
           ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
@@ -1181,7 +1200,7 @@
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m !== 'cross_workspace' && m !== 'profile') {
+        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'notification_settings') {
           // Try to recover workspace from URL slug if state doesn't have wsId
           const p2 = parseUrl(window.location.pathname);
           if (p2?.slug) {
@@ -1217,6 +1236,8 @@
       if (p) {
         if (p.mode === 'profile') {
           mode = 'profile';
+        } else if (p.mode === 'notification_settings') {
+          mode = 'notification_settings';
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
           crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
@@ -1603,6 +1624,13 @@
           {decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : ''}
         </span>
 
+        <!-- Notification bell (user-management.md §In-App Notification UI):
+            unread count badge + slide-out drawer. Distinct from the Decisions
+            badge (HSI §1.1): that one tracks unresolved items needing judgment
+            and navigates to the Decisions section; this one tracks read state
+            across ALL notifications. -->
+        <NotificationBell {workspaces} currentWorkspaceId={currentWorkspace?.id ?? null} />
+
         <!-- User avatar dropdown -->
         <div class="user-menu-wrap">
           <button
@@ -1634,6 +1662,9 @@
             >
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToProfile(); userMenuOpen = false; }}>
                 {$t('topbar.profile')}
+              </button>
+              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToNotificationSettings(); userMenuOpen = false; }} data-testid="user-menu-notification-settings">
+                {$t('topbar.notification_settings')}
               </button>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
                 {$t('topbar.api_token')}
@@ -1764,6 +1795,8 @@
           {/if}
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
+        {:else if mode === 'notification_settings'}
+          <NotificationSettings />
         {/if}
       </div>
     </main>

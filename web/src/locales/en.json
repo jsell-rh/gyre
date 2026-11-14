@@ -49,7 +49,8 @@
     "go_to_workspace_home": "Go to {name} home",
     "open_search": "Open search (Ctrl+K)",
     "navigation_drawer": "Navigation drawer",
-    "close_drawer": "Close navigation drawer"
+    "close_drawer": "Close navigation drawer",
+    "notification_settings": "Notification settings"
   },
   "workspace_home": {
     "select_workspace": "Select a workspace",
@@ -1933,6 +1934,7 @@
     "cancel": "Cancel",
     "close": "Close",
     "save": "Save",
+    "saving": "Saving…",
     "create": "Create",
     "creating": "Creating...",
     "loading": "Loading...",
@@ -2084,5 +2086,58 @@
     "prediction_applied_toast": "{count} predicted changes shown as ghost overlays.",
     "highlighted_nodes": "Highlighted {count} nodes from the answer on the canvas.",
     "spec_needs_repo": "Open a repo first to view specs inline."
+  },
+  "notifications": {
+    "bell": {
+      "unread": "{count} unread notifications",
+      "none": "Notifications"
+    },
+    "drawer": {
+      "title": "Notifications",
+      "live": "Live — connected",
+      "close": "Close notifications",
+      "empty": "No notifications",
+      "load_failed": "Failed to load notifications",
+      "mark_all_read": "Mark all read",
+      "mark_all_failed": "Failed to mark all read",
+      "mark_read": "Mark as read",
+      "mark_unread": "Mark as unread",
+      "mark_failed": "Failed to update read state",
+      "filter_type": "Type",
+      "filter_priority": "Priority",
+      "filter_workspace": "Workspace",
+      "filter_repo": "Repo",
+      "all": "All",
+      "preferences": "Notification preferences"
+    },
+    "settings": {
+      "title": "Notification settings",
+      "load_failed": "Failed to load notification settings",
+      "saved": "Notification settings saved",
+      "save_failed": "Failed to save notification settings",
+      "email_title": "Email",
+      "email_enable": "Email notifications",
+      "digest_frequency": "Digest frequency",
+      "digest_immediate": "Immediate (individual emails)",
+      "digest_hourly": "Hourly digest",
+      "digest_daily": "Daily digest",
+      "digest_off": "Off",
+      "min_priority": "Minimum priority",
+      "min_priority_hint": "Only notifications at or above this priority are emailed, filtering low-priority noise.",
+      "priority_low": "Low",
+      "priority_medium": "Medium",
+      "priority_high": "High",
+      "priority_urgent": "Urgent",
+      "per_type_title": "Email by notification type",
+      "per_type_hint": "Uncheck a type to unsubscribe from emails about it. Email unsubscribe links land here.",
+      "unsubscribed": "Unsubscribed from email notifications of type “{type}”. You can re-enable it below.",
+      "webhook_title": "Webhook",
+      "webhook_enable": "Deliver to webhook",
+      "webhook_secret": "Secret (signs payloads with HMAC-SHA256)",
+      "webhook_hint": "Payloads are signed with X-Gyre-Signature (HMAC-SHA256 of the body).",
+      "slack_title": "Slack",
+      "slack_enable": "Deliver to Slack",
+      "slack_channel": "Channel (optional, default: DM)"
+    }
   }
 }

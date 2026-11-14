@@ -8660,6 +8660,7 @@ specs:
                         enabled: true,
                         digest: gyre_domain::DigestFrequency::Immediate,
                         min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
                     },
                     webhook: None,
                     slack: None,
