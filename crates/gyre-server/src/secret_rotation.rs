@@ -718,7 +718,17 @@ mod tests {
 
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("user-admin"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
