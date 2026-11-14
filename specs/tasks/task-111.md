@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round resolved the rebase repair against the task-124 base and changed no product behavior.
+Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round was a contract-restore repair plus a routine base merge; no product behavior changed.
 
 ### Implementation
 
@@ -97,26 +97,22 @@ Session management per `user-management.md` §Session Management is implemented 
 - **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants (`/users/:user_id/sessions...`) with per-handler role checks and tenant containment. Session routes are ABAC-exempt by design with per-handler authorization (validated by `check-abac-exempt-handlers.sh`).
 - **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days (revoked rows kept as the durable sign-out record).
 
-### This round: base merge repair (44049f85)
+### This round: contract restore + base merge (3ba9bba5)
 
-Repair finding `dd6ed4f1` (rebase of the task-111 branch onto base `5984177c`, task-124's head): the two branches implemented disjoint rows of `user-management.md` from common base `4b9220bc`. Two content conflicts, resolved in merge commit `44049f85`:
+- **Base merge:** the executor merged base `3f7871b6` (task-148's `gyre_analytics_decide` MCP tool) into this branch as `3ba9bba5`. `git diff c0988beb..3ba9bba5` touches only `api/analytics.rs`, `mcp.rs`, docs, and task-148's spec files — no session surface, and the merge left no conflict markers. Verified present at the merged head: `UserSession` entity, `SessionRepository` port + adapter impls, migration `2026-10-08-000064_user_sessions`, auth-path session tracking, all six session routes with their ABAC-exempt mappings and per-handler authorization, and `spawn_session_cleanup`.
+- **Contract restore (repair `34e4e281`):** the executor's checkout restored the pristine assigned task document (progress reset to `not-started`, `commits:` emptied, checkboxes unchecked, `## Shipped` dropped). The contract body is byte-identical to the checkpoint version, so the checkpoint metadata (progress `ready-for-review`, the 23-commit attribution list, checked criteria, these notes) was restored over it unchanged. This also restores `check-task-commit-attribution.sh` to passing — the gate fails while the restored `commits: []` hides the branch's task-labeled commits from review scoping.
 
-- `crates/gyre-server/src/api/mod.rs` — the `use users::{...}` import list: union of both handler sets (task-111 session handlers + task-124 user-management/invitation handlers). Route registrations and ABAC resolver mappings for both sides auto-merged cleanly and were verified present.
-- `specs/coverage/system/user-management.md` — the "Last audited" recount: merged into one note covering both branches' rows. Row 26 (§API > User Management, task-124's "stays open until [the session endpoints] land") is closed by this merge — task-124's five endpoints plus task-111's three session endpoints are all live in this tree (row-28 precedent for cross-task completion). Mechanical recount on the merged table: 11 n/a, 0 not-started, 12 task-assigned, 13 implemented; `specs/coverage/SUMMARY.md` row updated to match (52%).
-
-No product code changed this round beyond git's auto-merge of the two parents (both independently type-checked and tested on their own branches).
+Prior rounds' repair history (base-merge conflict resolution `44049f85` against the task-124 base, fixture repairs, migration renumbering) is preserved in the branch history and the commits list below; it is not re-diagnosed here.
 
 ### Test evidence
 
-Evidence log: `/tmp/stage/review-evidence/task-111-merge.md` (this round, head `44049f85`):
+Evidence log: `/tmp/stage/review-evidence/task-111-contract-restore.md` (this round, tree of head `3ba9bba5` — the only subsequent change is this task-doc restore, no source difference):
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — exit 0 (7m07s, includes domain/ports/adapters).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — exit 0 (6m21s, includes domain/ports/adapters; validates the task-148 base merge against the session surfaces).
 - `cargo test -p gyre-adapters session` — 9/9 passed (create/roundtrip, duplicate-id contract, credential+device matching, newest-match, touch/sliding expiry, revoke scoping, revoke-all + delete-expired, retention never deleting revoked rows).
-- `cargo test -p gyre-domain --lib` — 535/535 passed.
-- `cargo fmt --check` — exit 0.
-- Mechanical gates on the merged tree: `check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh` (86 handlers), `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-forwarded-header-trust.sh`, `check-forged-scope-fields.sh`, `check-in-memory-state-stores.sh` — all exit 0.
+- Mechanical gates on the merged tree: `check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh` — all exit 0; `check-task-commit-attribution.sh` exits 0 with the restored commits frontmatter (it fails against the executor's `commits: []` restore, as expected).
 
-Pre-existing on the base (not introduced by this merge, not repaired here): the base's `2026-11-13-000063_user_deactivated_at` reuses 6-digit sequence 000063 already taken by `2026-10-08-000063_analytics_scope_columns`. The full Diesel versions differ (`2026-11-13-000063` ≠ `2026-10-08-000063`), so both migrations run and `check-migration-versions.sh` passes; recorded for the base branch's owner.
+Prior-round evidence (head `44049f85`, unchanged surfaces): `cargo test -p gyre-domain --lib` 535/535, `cargo fmt --check` exit 0, `check-forwarded-header-trust.sh` / `check-forged-scope-fields.sh` / `check-in-memory-state-stores.sh` exit 0.
 
 ### Deferred to the independent verifier
 
