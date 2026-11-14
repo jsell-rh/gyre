@@ -1700,6 +1700,7 @@ mod tests {
         // analytics.md §Auto-Emitted Events: mr.closed carries mr_id, repo_id,
         // reason; scope fields workspace_id/repo_id are attached for filtering.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Analytics close").await;
 
@@ -1740,6 +1741,7 @@ mod tests {
         // analytics.md §Auto-Emitted Events: mr.merged carries mr_id, repo_id,
         // gate_count, queue_wait_secs.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Analytics merge").await;
 
@@ -1969,6 +1971,7 @@ mod tests {
         // task_id claim (the gate id); nothing in the request body can
         // forge or suppress it.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Attribution test").await;
 
@@ -1994,8 +1997,9 @@ mod tests {
         // them: task_id carries the gate id, tenant resolved fail-closed
         // from the MR's workspace (task-130 hierarchy claims), persona slug
         // from the gate persona reference. The API-created MR binds to the
-        // bootstrap workspace because the mem repo store has no repo-1
-        // row, so seed that workspace row for the tenant resolution —
+        // seeded repo fixture's workspace (create_mr resolves the scope from
+        // the repository row), but the mem workspace store has no row for
+        // it, so seed that workspace row for the tenant resolution —
         // never a fabricated literal at the mint site.
         let mr = state
             .merge_requests
@@ -2094,6 +2098,7 @@ mod tests {
         // A regular (non-gate) reviewer gets no persona attribution — the
         // fields are gate-agent concepts, derived from the scoped token.
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "No attribution test").await;
 
