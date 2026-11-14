@@ -691,6 +691,12 @@ pub async fn resolve_impersonation_auth(
         user_id: Some(target.id.clone()),
         roles: target.roles.clone(),
         tenant_id: session.tenant_id.clone(),
+        // Impersonation targets a user principal: user tokens carry no
+        // §1 hierarchy claims (platform-model.md §1), so the resolved
+        // principal is gated by ABAC/RBAC, not token scope.
+        workspace_id: None,
+        repo_id: None,
+        scope: Vec::new(),
         jwt_claims: None,
         bearer_token: None,
         deprecated_token_auth: false,
