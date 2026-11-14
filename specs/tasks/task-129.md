@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["c459a69bb7af15825092f414e7de3603333f9282", "6e712b451a152eab71b9e3e9d53e69643424c25a", "a9f254b21b69ff07384f379502f5fc1cdff789b8", "1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["c459a69bb7af15825092f414e7de3603333f9282", "6e712b451a152eab71b9e3e9d53e69643424c25a", "a9f254b21b69ff07384f379502f5fc1cdff789b8", "1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61", "23454bedb4cea415385c953c7afd8687de2d15f0"]
 ---
 
 ## Spec Excerpt
@@ -188,53 +188,24 @@ Production code, in the listed commits:
 - **Merge-time attestation gate** (`merge_processor.rs`):
   `evaluate_attestation_abac` returns `Result` and FAILS CLOSED — a
   workspace/policy-store read error requeues the entry (never degrades
-  to a tenant-scope-less evaluation); a Deny fails the queue entry and
-  emits an `AbacDenied` audit event plus a warn-level decision log
-  (allowances at debug).
+  to a tenant-scope-less evaluation); a Deny fails the queue entry via
+  the shared `fail_queue_entry` helper (emitting the spec-required
+  `merge_queue.processed` failed analytics event) before the merge
+  commit is created, plus an `AbacDenied` audit event and a warn-level
+  decision log (allowances at debug).
 
-### Round-11 rebase repair (merge commit 56f8bbc3)
+### Verification repair (commit 23454bed)
 
-Main (task-146, bfc36c9c) refactored every merge-queue failure path
-through the new `fail_queue_entry` helper so the spec-required
-`merge_queue.processed` (outcome "failed") analytics event cannot
-diverge from the status change. The rebase conflicted in the
-attestation ABAC gate of `merge_processor.rs` (three regions).
-Resolution preserves both sides' invariants:
-
-- The task-129 fail-closed semantics are retained verbatim:
-  `evaluate_attestation_abac` still returns `anyhow::Result`; on `Err`
-  the entry is requeued with the "failing closed" reason (both the
-  branch-head and agent-task lookup paths).
-- Deny enforcement now flows through main's shared `denial` block,
-  which calls `fail_queue_entry(state, &entry, Some(&mr),
-  "attestation_abac", &reason)` — the failure still fails the queue
-  entry before the merge commit is created (task-077 F5), and now also
-  records the `merge_queue.processed` failed analytics event required
-  by analytics.md §Auto-Emitted Events (previously the direct
-  `update_status(Failed)` call on this path skipped it).
-- The §Audit Integration log-level contract inside
-  `evaluate_attestation_abac` keeps the task-129 shape: warn +
-  `record_abac_denied_service` AbacDenied audit event on Deny, debug on
-  Allow (main's interim single info! log dropped).
-
-All other task-146 changes (analytics port wiring, migration
-000063, `emit_queue_processed_terminal`, scope columns) merged clean.
-
-### Test evidence
-
-- `cargo check -p gyre-server` — clean (this sandbox, build wrapper).
-- `cargo check -p gyre-server --tests` — clean, including the
-  merge_processor attestation-ABAC tests (Result signature, fail-closed
-  workspace-read test) and the api_integration suite.
-- `cargo test -p gyre-domain --lib` — 510 passed, 0 failed.
-- `rustfmt --check` on the resolved file — clean.
-- `scripts/check-arch.sh` — passed.
-- `scripts/check-task-commit-attribution.sh` — passes with the restored
-  frontmatter commit list.
-- gyre-server test compilation exceeds this sandbox's 4 GiB cgroup
-  budget (established round 9), so the independent verifier must run:
-  - `cargo test --all --quiet`
-  - focused: `cargo test -p gyre-server --lib attestation_abac`
-  - focused: `cargo test -p gyre-server --lib evaluate_respects_policy_scope`
-  - focused: `cargo test -p gyre-server --lib merge_queue` (analytics
-    event on the attestation-deny failure path)
+The round-12 `cargo test --all` failure
+  (`merge_processor::tests::attestation_abac_deny_blocks_merge`: entry
+  `Merged` instead of `Failed`) was a test-fixture defect, not a product
+  defect: the fixture seeded its Deny policy at priority 100, below the
+  `builtin:attested-authorization` Allow (150) that the seeded startup
+  set contributes, so under §Policy Composition rule 2 ("higher
+  priority always wins") the builtin Allow legitimately matched first
+  for the attested chain and the merge proceeded. The fixture now uses
+  priority 250 — the documented user band (200–299) above the builtin
+  trust band, identical to the sibling `evaluate_attestation_abac` unit
+  tests — so the Deny decides and the `fail_queue_entry` enforcement
+  path the regression test exists to prove is actually exercised.
+  No production code changed in this round.
