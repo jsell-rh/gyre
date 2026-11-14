@@ -428,6 +428,53 @@ pub async fn budget_by_team(
 
 // ── Internal helpers (called from spawn handler and cost recording) ───────────
 
+/// Emit a `budget.warning` analytics event when a workspace budget metric
+/// crosses the warning threshold (analytics.md §Auto-Emitted Events).
+///
+/// Threshold: 80% of the configured limit. Emitted from the budget check and
+/// usage-recording paths; the event carries the metric, threshold pct, and
+/// current usage so consumers can trend consumption. Emission is best-effort.
+const BUDGET_WARNING_THRESHOLD_PCT: f64 = 80.0;
+
+async fn emit_budget_warning(
+    state: &AppState,
+    project_id: &str,
+    metric: &str,
+    used: f64,
+    limit: f64,
+) {
+    if limit <= 0.0 {
+        return;
+    }
+    let threshold_pct = BUDGET_WARNING_THRESHOLD_PCT;
+    let used_pct = (used / limit) * 100.0;
+    if used_pct < threshold_pct {
+        return;
+    }
+    let now = now_secs();
+    let ev = gyre_domain::AnalyticsEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        "budget.warning",
+        None,
+        serde_json::json!({
+            "workspace_id": project_id,
+            "metric": metric,
+            "threshold_pct": threshold_pct,
+            "used_pct": used_pct,
+            "used": used,
+            "limit": limit,
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&gyre_common::Id::new(project_id.to_string())),
+        None,
+    );
+    let _ = state.analytics.record(&ev).await;
+}
+
 /// Check if spawning another agent would exceed workspace/tenant budget limits.
 /// Uses the EFFECTIVE workspace limits (tighter of workspace config and the
 /// tenant ceiling) so a lowered tenant ceiling binds immediately.
@@ -443,6 +490,14 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
         .unwrap_or_else(|| new_ws_usage(project_id));
 
     if let Some(max) = config.max_concurrent_agents {
+        emit_budget_warning(
+            state,
+            project_id,
+            "agents",
+            usage.active_agents as f64,
+            max as f64,
+        )
+        .await;
         if usage.active_agents >= max {
             return Err(format!(
                 "workspace budget exceeded: max_concurrent_agents={max} ({} active)",
@@ -451,6 +506,14 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
         }
     }
     if let Some(max_tokens) = config.max_tokens_per_day {
+        emit_budget_warning(
+            state,
+            project_id,
+            "tokens",
+            usage.tokens_used_today as f64,
+            max_tokens as f64,
+        )
+        .await;
         if usage.tokens_used_today >= max_tokens {
             return Err(format!(
                 "workspace budget exceeded: max_tokens_per_day={max_tokens} (used {} today)",
@@ -459,6 +522,7 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
         }
     }
     if let Some(max_cost) = config.max_cost_per_day {
+        emit_budget_warning(state, project_id, "cost", usage.cost_today, max_cost).await;
         if usage.cost_today >= max_cost {
             return Err(format!(
                 "workspace budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${:.4})",
@@ -667,7 +731,8 @@ pub async fn decrement_active_agents(state: &AppState, project_id: &str) {
     let _ = state.budget_usages.decrement_active(tenant_key()).await;
 }
 
-/// Add token/cost usage to workspace and tenant budgets.
+/// Add token/cost usage to workspace and tenant budgets, then evaluate
+/// warning thresholds against the new totals.
 pub async fn record_budget_usage(state: &AppState, project_id: &str, tokens: u64, cost_usd: f64) {
     let ws_key = workspace_key(project_id);
     let now = now_secs();
@@ -679,6 +744,24 @@ pub async fn record_budget_usage(state: &AppState, project_id: &str, tokens: u64
         .budget_usages
         .add_tokens_cost(tenant_key(), "tenant", "global", now, tokens, cost_usd)
         .await;
+    emit_usage_warnings(state, project_id).await;
+}
+
+/// Evaluate warning thresholds against current workspace usage totals.
+async fn emit_usage_warnings(state: &AppState, project_id: &str) {
+    let key = workspace_key(project_id);
+    let Ok(Some(config)) = state.budget_configs.get_config(&key).await else {
+        return;
+    };
+    let Ok(Some(usage)) = state.budget_usages.get_usage(&key).await else {
+        return;
+    };
+    if let (Some(max_tokens), used) = (config.max_tokens_per_day, usage.tokens_used_today) {
+        emit_budget_warning(state, project_id, "tokens", used as f64, max_tokens as f64).await;
+    }
+    if let (Some(max_cost), used) = (config.max_cost_per_day, usage.cost_today) {
+        emit_budget_warning(state, project_id, "cost", used, max_cost).await;
+    }
 }
 
 /// Per-call LLM usage detail sufficient to append one `BudgetCallRecord`
@@ -1384,6 +1467,13 @@ pub async fn budget_stop_agent(state: &AppState, agent: &gyre_domain::Agent, rea
     crate::agent_audit::emit_killed(state, &stopped, reason, "budget-enforcement", killed_pid)
         .await;
 
+    // analytics.md §Auto-Emitted Events: agent.failed fires when an agent
+    // "fails or is killed" — the budget-enforcement kill is a kill, the
+    // same as the admin kill route and the stale-detector abort. Emitted
+    // after the Stopped transition persists, with the concrete budget
+    // stop reason (task-146 review F1).
+    crate::api::analytics::record_agent_failed(state, &stopped, reason).await;
+
     // Charge wall-clock compute minutes and release the budget slot.
     record_compute_minutes_for_agent(state, &stopped).await;
     decrement_active_agents(state, &stopped.workspace_id.to_string()).await;
@@ -1569,11 +1659,13 @@ async fn save_enforcement_marker(state: &AppState, key: &str, marker: &Enforceme
 /// or was filed by a different agent; the reporting agent's spawner is
 /// included explicitly (the reporter may have completed — Idle — by the
 /// time enforcement runs, but its spawner still triggered the crossing).
-/// Emitted at most once per user per budget period via
-/// `has_active_notification` so repeated usage reports within the same
-/// period do not spam the inbox. Returns the number of notifications
-/// newly created (0 when every recipient was already notified — the
-/// level-crossing signal the BudgetWarning bus event rides on).
+/// Emitted at most once per user per budget period (the dispatcher's
+/// budget helpers gate on `has_active_notification`) so repeated usage
+/// reports within the same period do not spam the inbox. Returns the
+/// number of notifications newly created (0 when every recipient was
+/// already notified — the level-crossing signal the BudgetWarning bus
+/// event rides on). Delivery fans out to the recipient's configured
+/// channels (email/webhook/Slack) via the notification dispatcher.
 async fn notify_budget_level(
     state: &AppState,
     workspace_id: &Id,
@@ -1595,76 +1687,33 @@ async fn notify_budget_level(
     };
     let tenant_id = ws.tenant_id.to_string();
 
-    let (ntype, title) = if exhausted {
-        (
-            gyre_common::NotificationType::AgentBudgetExhausted,
-            format!(
-                "Workspace budget exhausted — {:.0}% of the daily limit used",
-                (pct * 100.0).min(999.0)
-            ),
+    let title = if exhausted {
+        format!(
+            "Workspace budget exhausted — {:.0}% of the daily limit used",
+            (pct * 100.0).min(999.0)
         )
     } else {
-        (
-            gyre_common::NotificationType::AgentBudgetWarning,
-            format!("Workspace budget at {:.0}% of the daily limit", pct * 100.0),
-        )
+        format!("Workspace budget at {:.0}% of the daily limit", pct * 100.0)
     };
 
-    // Recipients: the spawning users of the affected agents (the active
-    // workspace agents the enforcement acts on, plus the reporting agent)
-    // and workspace Admins (warning) / Owner (exhausted).
-    let mut recipients: Vec<gyre_common::Id> = Vec::new();
+    // Routing + per-period de-duplication live in the dispatcher's budget
+    // helpers (user-management.md §Who Gets Notified budget rows) — the
+    // single implementation, so the routing contract cannot drift from
+    // the live emission path. The reporting agent's spawner is passed
+    // explicitly; the helpers resolve the full recipient set (the
+    // workspace's active agents' spawners plus the role members) and
+    // de-duplicate per budget period.
+    let mut spawned_by: Option<gyre_common::Id> = None;
     if let Some(agent_id) = agent_id {
         if let Ok(Some(agent)) = state.agents.find_by_id(agent_id).await {
-            if let Some(spawned_by) = agent.spawned_by {
-                recipients.push(gyre_common::Id::new(spawned_by));
+            if let Some(sb) = agent.spawned_by {
+                spawned_by = Some(gyre_common::Id::new(sb));
             }
         }
     }
-    if let Ok(agents) = state.agents.list_by_workspace(workspace_id).await {
-        recipients.extend(
-            agents
-                .into_iter()
-                .filter(|a| a.status == gyre_domain::AgentStatus::Active)
-                .filter_map(|a| a.spawned_by.map(gyre_common::Id::new)),
-        );
-    }
-    if let Ok(members) = state
-        .workspace_memberships
-        .list_by_workspace(workspace_id)
-        .await
-    {
-        recipients.extend(
-            members
-                .into_iter()
-                .filter(|m| {
-                    if exhausted {
-                        matches!(m.role, gyre_domain::WorkspaceRole::Owner)
-                    } else {
-                        matches!(m.role, gyre_domain::WorkspaceRole::Admin)
-                    }
-                })
-                .map(|m| m.user_id),
-        );
-    }
-    recipients.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    recipients.dedup_by(|a, b| a.as_str() == b.as_str());
-
-    // De-duplicate per period: the budget counters increment on every call,
-    // so without this guard each call past the threshold would re-notify.
-    let entity_ref = workspace_id.to_string();
-    let since = ws_usage.period_start as i64;
-    let mut created = 0usize;
-    for user_id in recipients {
-        let already_notified = state
-            .notifications
-            .has_active_notification(workspace_id, &user_id, ntype.as_str(), &entity_ref, since)
-            .await
-            .unwrap_or(false);
-        if already_notified {
-            continue;
-        }
-        let body = serde_json::json!({
+    let ctx = crate::notification_dispatcher::BudgetNotificationContext {
+        title,
+        body: serde_json::json!({
             "workspace_id": workspace_id.as_str(),
             "usage_pct": (pct * 100.0).round(),
             "tokens_used_today": ws_usage.tokens_used_today,
@@ -1673,24 +1722,30 @@ async fn notify_budget_level(
             "max_cost_per_day": config.max_cost_per_day,
             "agent_id": agent_id.map(|a| a.as_str()),
         })
-        .to_string();
-        crate::notifications::notify_rich(
+        .to_string(),
+        entity_ref: workspace_id.to_string(),
+        repo_id: repo_id.map(|r| r.to_string()),
+        period_start: ws_usage.period_start as i64,
+    };
+    if exhausted {
+        crate::notification_dispatcher::notify_agent_budget_exhausted(
             state,
-            workspace_id.clone(),
-            user_id,
-            ntype.clone(),
-            title.clone(),
+            workspace_id,
+            spawned_by.as_ref(),
             &tenant_id,
-            Some(body),
-            Some(entity_ref.clone()),
-            repo_id.map(|r| r.to_string()),
-            "budget",
-            None,
+            &ctx,
         )
-        .await;
-        created += 1;
+        .await
+    } else {
+        crate::notification_dispatcher::notify_agent_budget_warning(
+            state,
+            workspace_id,
+            spawned_by.as_ref(),
+            &tenant_id,
+            &ctx,
+        )
+        .await
     }
-    created
 }
 
 /// Apply the rolling 24-hour budget window (agent-runtime.md §4 Budget
@@ -2037,6 +2092,80 @@ mod tests {
         let result = super::check_spawn_budget(&state, "proj-x").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("max_concurrent_agents=0"));
+    }
+
+    #[tokio::test]
+    async fn budget_warning_emitted_when_threshold_crossed() {
+        // analytics.md §Auto-Emitted Events: budget.warning carries
+        // workspace_id, metric, threshold_pct. Emitted when a workspace
+        // budget metric crosses 80% of its configured limit.
+        let state = crate::mem::test_state();
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("proj-warn"),
+                &gyre_domain::BudgetConfig {
+                    max_concurrent_agents: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // 8 active agents = 80% of 10 → crosses the warning threshold.
+        for _ in 0..8 {
+            super::increment_active_agents(&state, "proj-warn").await;
+        }
+
+        // Any spawn-budget check now evaluates the threshold.
+        let result = super::check_spawn_budget(&state, "proj-warn").await;
+        assert!(result.is_ok(), "8/10 agents is under the hard limit");
+
+        let events = state
+            .analytics
+            .query(Some("budget.warning"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one budget.warning event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["workspace_id"], "proj-warn");
+        assert_eq!(ev.properties["metric"], "agents");
+        assert_eq!(ev.properties["threshold_pct"], 80.0);
+        // Scope field: the event is filterable by workspace.
+        assert_eq!(ev.workspace_id.as_deref(), Some("proj-warn"));
+    }
+
+    #[tokio::test]
+    async fn budget_warning_not_emitted_below_threshold() {
+        let state = crate::mem::test_state();
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("proj-quiet"),
+                &gyre_domain::BudgetConfig {
+                    max_concurrent_agents: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // 7 active agents = 70% of 10 → below the 80% threshold.
+        for _ in 0..7 {
+            super::increment_active_agents(&state, "proj-quiet").await;
+        }
+        let result = super::check_spawn_budget(&state, "proj-quiet").await;
+        assert!(result.is_ok());
+
+        let events = state
+            .analytics
+            .query(Some("budget.warning"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.is_empty(),
+            "no budget.warning below the 80% threshold"
+        );
     }
 
     #[tokio::test]
@@ -2658,6 +2787,86 @@ mod tests {
                 .iter()
                 .any(|t| t.parent_task_id.as_ref() == Some(&task_id)),
             "HardKill must create the reassignment task"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_kill_records_agent_failed_analytics_event() {
+        // analytics.md §Auto-Emitted Events: agent.failed fires when an
+        // agent "fails or is killed" — the budget-enforcement kill is a
+        // kill, same as the admin kill route. HardKill runs inline (no
+        // grace timer), so the analytics emission is observable
+        // deterministically. Fails on the old behavior where
+        // budget_stop_agent recorded no analytics event (task-146 review F1).
+        let (state, ws_id, agent_id, task_id) = enforcement_fixture("ws-enf-failed").await;
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key(ws_id.as_str()),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    enforcement_action: Some(gyre_domain::BudgetEnforcementAction::HardKill),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        state
+            .budget_usages
+            .add_tokens_cost(
+                &super::workspace_key(ws_id.as_str()),
+                "workspace",
+                ws_id.as_str(),
+                0,
+                1000,
+                0.0,
+            )
+            .await
+            .unwrap();
+        super::enforce_workspace_budget(
+            &state,
+            ws_id.as_str(),
+            None,
+            None,
+            60,
+            super::BudgetEnforcementCause::UsageReport,
+        )
+        .await;
+
+        let agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            agent.status,
+            gyre_domain::AgentStatus::Stopped,
+            "HardKill must terminate the agent"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "budget kill must record the agent.failed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "agent.failed");
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id.to_string());
+        assert_eq!(
+            ev.properties["reason"], "budget exhausted (hard_kill)",
+            "reason must be the concrete budget stop reason"
+        );
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+        assert_eq!(
+            ev.workspace_id.as_deref(),
+            Some(ws_id.as_str()),
+            "event must be scoped to the workspace for filtered queries"
         );
     }
 

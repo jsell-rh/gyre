@@ -1687,6 +1687,9 @@ async fn create_violation_notifications(
                     error = %e,
                     "failed to create constraint violation notification"
                 );
+            } else {
+                // Channel fan-out per user-management.md §Delivery Channels.
+                crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
             }
         }
     }

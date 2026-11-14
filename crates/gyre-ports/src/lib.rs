@@ -69,7 +69,7 @@ pub mod workspace_membership;
 
 pub use agent::AgentRepository;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
-pub use analytics::{AnalyticsRepository, CostRepository};
+pub use analytics::{AnalyticsGroupBy, AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
 pub use audit::{AuditQueryFilter, AuditRepository, CompressionStats};
 pub use breaking_change::BreakingChangeRepository;
@@ -133,7 +133,8 @@ pub use trace::{SpanPayload, TraceRepository};
 pub use trust_anchor::TrustAnchorRepository;
 pub use user::{ApiKeyRepository, UserRepository};
 pub use user_profile::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    UserNotificationPreferenceRepository, UserTokenRepository,
 };
 pub use user_workspace_state::UserWorkspaceStateRepository;
 pub use workspace::{PersonaRepository, WorkspaceRepository};

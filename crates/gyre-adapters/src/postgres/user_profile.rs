@@ -6,13 +6,94 @@ use gyre_domain::{
     AuditEventType, JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken,
 };
 use gyre_ports::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    UserNotificationPreferenceRepository, UserTokenRepository,
 };
 use std::sync::Arc;
 
 use super::audit::AuditEventRow;
 use super::PgStorage;
-use crate::schema::{user_notification_preferences, user_tokens};
+use crate::schema::{user_channel_preferences, user_notification_preferences, user_tokens};
+
+// ─── User Channel Preferences (task-112, user-management.md §Delivery Channels) ──
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = user_channel_preferences)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+struct ChannelPrefRow {
+    #[allow(dead_code)]
+    user_id: String,
+    channels: String,
+    #[allow(dead_code)]
+    updated_at: i64,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = user_channel_preferences)]
+struct ChannelPrefRecord<'a> {
+    user_id: &'a str,
+    channels: &'a str,
+    updated_at: i64,
+}
+
+#[async_trait]
+impl UserChannelPreferenceRepository for PgStorage {
+    async fn find(&self, user_id: &Id) -> Result<Option<gyre_domain::NotificationChannels>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        tokio::task::spawn_blocking(
+            move || -> Result<Option<gyre_domain::NotificationChannels>> {
+                let mut conn = pool.get().context("get db connection")?;
+                let row = user_channel_preferences::table
+                    .find(&uid)
+                    .first::<ChannelPrefRow>(&mut *conn)
+                    .optional()
+                    .context("find user channel preferences")?;
+                match row {
+                    Some(r) => serde_json::from_str(&r.channels)
+                        .map(Some)
+                        .map_err(|e| anyhow::anyhow!("corrupt channel preferences for {uid}: {e}")),
+                    None => Ok(None),
+                }
+            },
+        )
+        .await?
+    }
+
+    async fn upsert(
+        &self,
+        user_id: &Id,
+        channels: &gyre_domain::NotificationChannels,
+    ) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        let json = serde_json::to_string(channels).context("serialize channel preferences")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let record = ChannelPrefRecord {
+                user_id: &uid,
+                channels: &json,
+                updated_at: now,
+            };
+            diesel::insert_into(user_channel_preferences::table)
+                .values(&record)
+                .on_conflict(user_channel_preferences::user_id)
+                .do_update()
+                .set((
+                    user_channel_preferences::channels.eq(&json),
+                    user_channel_preferences::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .context("upsert user channel preferences")?;
+            Ok(())
+        })
+        .await?
+    }
+}
 
 // ─── User Notification Preferences ──────────────────────────────────────────
 
@@ -82,7 +163,7 @@ impl UserNotificationPreferenceRepository for PgStorage {
 
     async fn upsert_batch(&self, prefs: &[UserNotificationPreference]) -> Result<()> {
         for pref in prefs {
-            self.upsert(pref).await?;
+            UserNotificationPreferenceRepository::upsert(self, pref).await?;
         }
         Ok(())
     }
@@ -266,19 +347,16 @@ struct SpecApprovalJudgmentRow {
 /// the workspace join filter (a real SQL filter, never a stamped param),
 /// the since predicates — where a PG-side drift would otherwise surface
 /// only in production deployments.
-fn spec_approval_judgment_query<
-    'a,
->(
+fn spec_approval_judgment_query<'a>(
     approver: &'a str,
     workspace: Option<&'a str>,
     since: i64,
 ) -> impl diesel::query_dsl::LoadQuery<'a, diesel::pg::PgConnection, SpecApprovalJudgmentRow>
-   + diesel::query_builder::QueryFragment<diesel::pg::Pg> {
+       + diesel::query_builder::QueryFragment<diesel::pg::Pg> {
     use crate::schema::{spec_approvals, spec_ledger_entries};
     let mut query = spec_approvals::table
         .left_join(
-            spec_ledger_entries::table
-                .on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
+            spec_ledger_entries::table.on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
         )
         .filter(
             spec_approvals::approver_id
@@ -317,7 +395,7 @@ fn audit_judgment_query<'a>(
     workspace: Option<&'a str>,
     since: i64,
 ) -> impl diesel::query_dsl::LoadQuery<'a, diesel::pg::PgConnection, AuditEventRow>
-   + diesel::query_builder::QueryFragment<diesel::pg::Pg> {
+       + diesel::query_builder::QueryFragment<diesel::pg::Pg> {
     use crate::schema::audit_events;
     let mut query = audit_events::table
         .filter(audit_events::user_id.eq(approver))
@@ -452,9 +530,10 @@ impl JudgmentLedgerRepository for PgStorage {
             // transparently here too. Reading `detail` directly would
             // surface null details for every older judgment.
             if want_audit {
-                let rows: Vec<AuditEventRow> = audit_judgment_query(&approver, ws.as_deref(), since_i)
-                    .load(&mut *conn)
-                    .context("judgment ledger: audit_events")?;
+                let rows: Vec<AuditEventRow> =
+                    audit_judgment_query(&approver, ws.as_deref(), since_i)
+                        .load(&mut *conn)
+                        .context("judgment ledger: audit_events")?;
 
                 for row in rows {
                     let ev = row
@@ -546,9 +625,9 @@ mod tests {
     use super::*;
 
     fn spec_approval_sql(approver: &str, workspace: Option<&str>) -> String {
-        diesel::debug_query::<diesel::pg::Pg, _>(
-            &spec_approval_judgment_query(approver, workspace, 0),
-        )
+        diesel::debug_query::<diesel::pg::Pg, _>(&spec_approval_judgment_query(
+            approver, workspace, 0,
+        ))
         .to_string()
     }
 
@@ -558,7 +637,9 @@ mod tests {
     }
 
     fn where_clause(sql: &str) -> &str {
-        sql.split_once(" WHERE ").map(|(_, rest)| rest).unwrap_or("")
+        sql.split_once(" WHERE ")
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
     }
 
     #[test]

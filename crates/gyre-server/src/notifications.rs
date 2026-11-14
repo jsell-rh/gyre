@@ -97,7 +97,9 @@ pub async fn notify(
 
     if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
+        return;
     }
+    crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
 /// Create and persist a notification with structured body, source, and deep link
@@ -162,7 +164,11 @@ pub async fn notify_rich(
 
     if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
+        return;
     }
+    // Fan out to the recipient's configured channels (email/webhook/slack)
+    // per user-management.md §Delivery Channels.
+    crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
 /// Notify the spawning user that a gate failed on their MR.
@@ -201,7 +207,7 @@ pub async fn notify_gate_failure(
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
     let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
 
     let body_json = serde_json::json!({
@@ -403,7 +409,7 @@ pub async fn notify_mr_merged(
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
     let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
 
     let body_json = serde_json::json!({
@@ -437,6 +443,21 @@ pub async fn notify_mr_reverted(
     mr_id: &str,
     reason: &str,
 ) {
+    // Resolve the tenant from the workspace record — never fabricate a
+    // "default" scope identity on lookup failure (see
+    // scripts/check-fabricated-scope-defaults.sh).
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                mr_id,
+                workspace_id = %workspace_id,
+                "notify_mr_reverted: cannot resolve tenant for workspace — skipping notifications"
+            );
+            return;
+        }
+    };
+
     let spawned_by = state
         .agents
         .find_by_id(author_agent_id)
@@ -460,7 +481,7 @@ pub async fn notify_mr_reverted(
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
     let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
 
     let body_json = serde_json::json!({
@@ -473,17 +494,47 @@ pub async fn notify_mr_reverted(
     notify_rich(
         state,
         workspace_id.clone(),
-        user_id,
+        user_id.clone(),
         NotificationType::MrReverted,
         format!("MR {mr_label} was reverted: {reason}"),
-        "default",
-        Some(body_json),
+        tenant_id.clone(),
+        Some(body_json.clone()),
         Some(mr_id.to_string()),
         repo_id,
         "mr",
         None,
     )
     .await;
+
+    // user-management.md §Who Gets Notified — "MR reverted" also notifies the
+    // workspace Admins.
+    let admin_members = state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+    for member in admin_members {
+        if !matches!(member.role, gyre_domain::WorkspaceRole::Admin) {
+            continue;
+        }
+        if member.user_id == user_id {
+            continue; // already notified above
+        }
+        notify_rich(
+            state,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            NotificationType::MrReverted,
+            format!("MR {mr_label} was reverted: {reason}"),
+            tenant_id.clone(),
+            Some(body_json.clone()),
+            Some(mr_id.to_string()),
+            None,
+            "mr",
+            None,
+        )
+        .await;
+    }
 }
 
 // ─── Team references (user-management.md §Team Management) ──────────────────
@@ -542,6 +593,64 @@ pub async fn resolve_team_members(
             None
         }
     }
+}
+
+// ─── Spec-owner references (user-management.md §Who Gets Notified) ────────
+
+/// Resolve a spec-owner reference to concrete recipient user ids
+/// (user-management.md §Who Gets Notified: "Spec drift detected" → Spec
+/// owner). Owner refs carry the manifest forms `user:{name}` or
+/// `team:{slug}` (the same forms `human_approvers` uses — see
+/// `expand_team_approvers` in api/specs.rs):
+///
+/// - `team:{slug}` → the team's members (`resolve_team_members`).
+/// - `user:{name}` (or a bare id) → the user matching `name` by user id,
+///   username, or display name — the identifier forms an owner reference
+///   can record. Multiple forms may match different users only when the
+///   workspace genuinely has colliding identifiers; all matches are
+///   returned (never dropped silently), deduplicated.
+///
+/// Returns an empty vec when the reference resolves to nobody — the caller
+/// logs and continues with its other recipients rather than fabricating one.
+pub async fn resolve_owner_ref(state: &AppState, workspace_id: &Id, owner: &str) -> Vec<Id> {
+    if parse_team_ref(owner).is_some() {
+        return resolve_team_members(state, workspace_id, owner)
+            .await
+            .unwrap_or_default();
+    }
+    let name = owner.strip_prefix("user:").unwrap_or(owner);
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let mut resolved: Vec<Id> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |id: Id| {
+        if seen.insert(id.as_str().to_string()) {
+            resolved.push(id);
+        }
+    };
+    // Identifier forms an owner reference can carry: user id, username,
+    // display name (a display-name rename must not orphan the routing).
+    if let Ok(Some(user)) = state.users.find_by_id(&Id::new(name.to_string())).await {
+        push(user.id);
+    }
+    if let Ok(Some(user)) = state.users.find_by_username(name).await {
+        push(user.id);
+    }
+    if let Ok(users) = state.users.list().await {
+        for user in users {
+            if user.display_name == name {
+                push(user.id);
+            }
+        }
+    }
+    if resolved.is_empty() {
+        tracing::warn!(
+            owner,
+            "owner reference does not resolve to any user; skipping owner routing"
+        );
+    }
+    resolved
 }
 
 // ─── SSE fan-out wrapper (user-management.md §API > Notifications) ───────────

@@ -351,18 +351,34 @@ pub fn activity_event_document(event: &AnalyticsEvent) -> SearchDocument {
     } else {
         format!("{body}\nagent {agent_id}")
     };
+    // Scope facets (search.md §Searchable Entities: Activity Event is
+    // filterable by workspace/repo). Prefer the event's scope fields
+    // (analytics.md §Event Schema — every auto-emit site sets them via
+    // `with_scope`, derived server-side and validated against the caller);
+    // fall back to the properties copy for events recorded through paths
+    // that only carry scope as a property.
     let workspace = event
-        .properties
-        .get("workspace_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+        .workspace_id
+        .clone()
+        .or_else(|| {
+            event
+                .properties
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
     let repo = event
-        .properties
-        .get("repo_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+        .repo_id
+        .clone()
+        .or_else(|| {
+            event
+                .properties
+                .get("repo_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
     SearchDocument {
         entity_type: "activity_event".to_string(),
         entity_id: event.id.to_string(),

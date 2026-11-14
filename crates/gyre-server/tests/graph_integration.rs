@@ -1236,6 +1236,7 @@ async fn test_divergence_detection_creates_notifications() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1377,6 +1378,7 @@ async fn test_divergence_below_threshold_no_notifications() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1489,6 +1491,7 @@ async fn test_divergence_skips_reconciliation_agents() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1603,6 +1606,7 @@ async fn test_divergence_skips_same_agent() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
@@ -1717,6 +1721,7 @@ async fn test_divergence_skips_human_pushed_deltas() {
     let ports = DivergencePorts {
         notification_repo: ctx.state.notifications.as_ref(),
         membership_repo: ctx.state.workspace_memberships.as_ref(),
+        on_created: None,
     };
 
     check_divergence(
