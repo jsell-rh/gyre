@@ -3,11 +3,11 @@ title: "Implement analytics dashboard UI and data retention policy"
 spec_ref: "analytics.md §Analytics Dashboard (UI)"
 depends_on:
   - task-147
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "analytics.md §Analytics Dashboard (UI)"
   - "analytics.md §Data Retention"
-commits: ["cc026cc601699cedb121b668d2c02e2523685c2c", "af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7", "7e0fbc2aa6d30a56ebc06212d638559b7f3dd617"]
+commits: ["cc026cc601699cedb121b668d2c02e2523685c2c", "af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7", "7e0fbc2aa6d30a56ebc06212d638559b7f3dd617", "32882effeb9d00a6f2665b561383e8e7caf48853"]
 ---
 
 ## Spec Excerpt
@@ -181,53 +181,55 @@ the analytics-scoped retention configuration surface (§Data Retention).
 
 ### Test evidence
 
-- This round (merge of main @ 3f7871b + verification-finding repair
-  cc026cc6), run in this sandbox against the real adapters and the
-  serialized build wrapper:
-  - `cargo check -p gyre-server --all-targets` -- clean, exit 0. This
-    proves the repaired test imports: the previous verification round
-    failed with 8 errors (E0425 `new_id`/`now_secs`, E0433
-    `AnalyticsEvent`/`Id`) because the task-149 dashboard tests
-    referenced those names inside the tests module without importing
-    them; the tests module now imports them explicitly.
-  - `cargo clippy -p gyre-server --all-targets` -- no warnings in the
-    touched files; the flagged `clippy::unnecessary_sort_by` at the
-    /top ranking is now `sort_by_key(Reverse)`.
-  - `cargo fmt -p gyre-server -- --check` -- clean (the flagged changed
-    lines in api/analytics.rs and api/admin.rs are formatted).
-  - `cargo test -p gyre-adapters --lib sqlite::analytics::tests` --
-    17 passed, 0 failed (includes `aggregate_by_day` totals and the
-    property-filter paths the dashboard depends on).
-  - `npm ci` + `npx vitest run src/__tests__/AnalyticsView.test.js` --
-    13/13 pass (five-section render, 30 zero-filled bars, properties
-    expansion, filters, cursor pagination, decision evaluation,
-    funnel drop-off math, custom funnel, top-agent rates, retention
-    display).
-- Merge resolution: main's task-148 rows (gyre_analytics_decide MCP
-  tool, Ralph Loop pattern) combined with this branch's task-149 rows
-  in specs/coverage/system/analytics.md -- 12/12 implemented, audit
-  date kept at the later 2026-11-14.
+- This round (merge repair: published head c0a040a2 rebased onto current
+  main @ 44cf25bf — task-132 ABAC policy UI — merge commit 32882eff):
+  - Conflicted paths were exclusively generated web/dist assets
+    (rename/rename on the hashed bundle filenames); resolved to the
+    assignment-base (main) version — `git diff 44cf25bf -- web/dist` is
+    empty for both index and worktree — since final integration rebuilds
+    and publishes those assets remotely from the merged source.
+  - Source overlap was a single file, `web/src/lib/api.js`; the
+    resolution drops task-149's duplicate `adminRetention` object key
+    (the identical binding already ships alongside the other admin
+    endpoints) and keeps `setAnalyticsRetention`. `node --check` exit 0.
+  - `npm ci` then `vitest run src/__tests__/AnalyticsView.test.js
+    src/__tests__/abac.test.js src/__tests__/PolicyManager.test.js` —
+    3 files / 53 tests passed, exercising both sides of the merge
+    through the shared api.js (task-149 dashboard 13 + task-132 ABAC).
+  - `cargo check -p gyre-server` — exit 0 (crates changes are
+    file-disjoint between the two sides; main touched only
+    api/policies.rs).
+- Prior rounds' retained evidence: `cargo check/clippy/fmt -p
+  gyre-server --all-targets` clean; `cargo test -p gyre-adapters --lib
+  sqlite::analytics::tests` 17 passed; AnalyticsView component suite
+  13/13 (five-section render, 30 zero-filled bars, properties
+  expansion, filters, cursor pagination, decision evaluation, funnel
+  drop-off math, custom funnel, top-agent rates, retention display).
 - **gyre-server test compilation is blocked by the in-sandbox 4 GiB
-  build wrapper -- the independent verifier must run:**
+  build wrapper — the independent verifier must run:**
   `cargo test -p gyre-server --lib analytics::tests` (all dashboard,
   decide, top-agents, funnel-count, and retention handler suites,
-  including the previously-never-compiled top-agents tests:
-  `top_agents_dimension_ranks_and_computes_rates`,
+  including `top_agents_dimension_ranks_and_computes_rates`,
   `top_agents_workspace_scope_validated_against_caller_tenant`,
   `top_dimension_rejects_unknown`,
   `count_property_filter_matches_property_equality`,
   `daily_events_bare_days_form_returns_total_volume`,
   `admin_update_retention_analytics_form_updates_analytics_only`,
-  `admin_update_retention_rejects_invalid_analytics_form`).
-  Retention cleanup job behavior (deletes expired, preserves recent,
-  nightly schedule) is covered by the pre-existing task-207 suite
-  (`run_cleanup_purges_old_and_keeps_new`).
+  `admin_update_retention_rejects_invalid_analytics_form`),
+  `cargo test -p gyre-server --lib retention::tests`
+  (`run_cleanup_purges_old_and_keeps_new`, `run_cleanup_is_idempotent`,
+  `default_policies_present` — 365-day analytics default), and
+  `cargo test -p gyre-server --test api_integration --
+  analytics_record_and_query admin_retention_list_and_update`.
+- Merge-resolution bookkeeping for coverage: this round's main-side
+  rows (task-132 abac-policy-engine coverage) combined cleanly with
+  this branch's analytics rows — no coverage-file conflicts.
 
 ### Sandbox limitations recorded
 
 - The build wrapper hard-blocks gyre-server test compilation (code
-  generation exceeds the 4 GiB cgroup budget) -- server test binaries
+  generation exceeds the 4 GiB cgroup budget) — server test binaries
   are enumerated for the verifier above, not skipped silently;
-  `cargo check`/`clippy`/`fmt` (which fit) were run here instead.
+  `cargo check` (which fits) was run here instead.
 - No browser/listener probes were needed (component tests run in
   jsdom).
