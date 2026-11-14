@@ -305,7 +305,7 @@
   async function handleDismiss(n) {
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
-      await api.markNotificationRead(n.id);
+      await api.dismissNotification(n.id);
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, dismissed_at: new Date().toISOString() } : item
       );

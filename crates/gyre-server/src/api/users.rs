@@ -1725,7 +1725,8 @@ pub struct UpdateNotifPrefsRequest {
 /// Shared validation for a `NotificationChannels` update, whichever endpoint
 /// carries it (PUT /notifications/preferences or the `notification_channels`
 /// field of PUT /users/me): `in_app` is forced true ("Always true (can't
-/// disable)") and configured endpoints must be absolute URLs.
+/// disable)"), configured endpoints must be absolute URLs, and per-type
+/// email unsubscribe keys must name a real notification type.
 fn validate_channel_config(channels: &gyre_domain::NotificationChannels) -> Result<(), ApiError> {
     if !channels.in_app {
         return Err(ApiError::InvalidInput(
@@ -1745,6 +1746,13 @@ fn validate_channel_config(channels: &gyre_domain::NotificationChannels) -> Resu
             return Err(ApiError::InvalidInput(format!(
                 "slack.webhook_url is not a valid absolute URL: {}",
                 slack.webhook_url
+            )));
+        }
+    }
+    for ty in channels.email.type_overrides.keys() {
+        if gyre_common::NotificationType::parse(ty).is_none() {
+            return Err(ApiError::InvalidInput(format!(
+                "channels.email.type_overrides key is not a known notification type: {ty}"
             )));
         }
     }
