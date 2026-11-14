@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: ["25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab", "5eed7b0321d6b22191893f5b2266ec93a634ed1a"]
 ---
 
 ## Spec Excerpt
@@ -162,19 +162,28 @@ surface and the email template/digest layer).
   queue-and-hold: the durable outbox is left untouched, nothing silently
   dropped.
 
-### Contract-repair round (this checkpoint)
+### Review-repair round (this checkpoint)
 
-- The executor restored the assigned task document after the protected
-  task text drifted; this round re-records the commit attribution
-  (`8cc35749` implementation + `25f0bb2d` repair) and these Shipped notes
-  on top of the restored contract. The production fix itself was already
-  merged with the assignment base (merge `bd4ed7cf`) and is preserved
-  byte-for-byte for every task-113 file (verified:
-  `git diff e5b8ce55..HEAD -- <task-113 files>` is empty).
-- `25f0bb2d`: removed the never-read `details_label` field from the email
-  locale `Strings` struct (dead code in the task's own `email.rs` — the
-  only compiler warning in the merged tree). No rendered email output
-  changes.
+- Earlier rounds: `8cc35749` implementation (merged with the assignment
+  base), `25f0bb2d` dead-field removal (`details_label` in the email
+  locale `Strings` struct), and a contract-repair round re-recording
+  attribution/Shipped notes after the executor restored the drifted task
+  document.
+- `5eed7b03` (this round, review finding on `email.rs`): `read_reply()`
+  parsed the SMTP reply code with `line[..3]` — a fixed-byte-index
+  string slice that panics when byte 3 of a valid-UTF-8 reply falls
+  inside a multibyte character (relay reply `"üü\r\n"`: 4 bytes after
+  trim_end, so the `line.len() < 4` guard passes). The panic unwound
+  through `send_email` → `run_digest_once` → the spawned `email_digest`
+  job loop, permanently killing the digest drain until restart — the
+  availability class behind the repo's byte-slice-truncation invariant
+  (task-095); this site evaded the gate only because its regexes require
+  a leading `&`. Fix: parse the 3-digit code from raw bytes
+  (`std::str::from_utf8(&bytes[..3])` — byte slicing never hits a char
+  boundary, non-ASCII codes rejected with an error), returning `Err`
+  instead of panicking. `read_reply` generalized over
+  `AsyncRead + Unpin` so the new tests drive it via `tokio::io::duplex`.
+  No behavior change for well-formed replies.
 
 ### Test evidence
 
@@ -191,7 +200,14 @@ surface and the email template/digest layer).
 - Rust (in-sandbox): `cargo test -p gyre-domain` — **510 passed** (incl.
   `EmailConfig::type_overrides` serde compatibility);
   `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
-  — clean, zero warnings on the merged tree.
+  — clean, zero warnings on the merged tree (re-run this round after
+  the `5eed7b03` fix, still clean). Standalone probe
+  (`/tmp/stage/review-evidence/08-read-reply-repair-probe/output.txt`):
+  old logic panics with 'end byte index 3 is not a char boundary' on
+  the review's exact reply line; fixed logic returns
+  `Err("malformed SMTP reply code (non-ASCII)")` and `250 8BITMIME`
+  still parses as 250. `scripts/check-byte-slice-truncation.sh` on the
+  changed file: exit 0.
 - Local invariant checks (in-sandbox, exit 0): check-arch,
   check-abac-route-registry, check-fabricated-scope-defaults,
   check-inert-enforcement, check-task-commit-attribution (passes again
@@ -203,7 +219,9 @@ surface and the email template/digest layer).
     drain gating (type_overrides + min_priority), outbox parsing
     (embedded + flat task-112 shape), end-to-end digest drain against an
     in-process fake SMTP listener (one aggregate email, outbox cleared,
-    state stamped, no-relay → queue held).
+    state stamped, no-relay → queue held), and (new this round)
+    `read_reply_non_char_boundary_line_errors_not_panics` +
+    `read_reply_continuation_and_short_line`.
   - `cargo test -p gyre-server --lib notification_dispatcher::tests::email_queue_respects_per_type_unsubscribe`
     — per-type unsubscribe suppresses the queue entry.
   - Full gates: `cargo test --all`, `npm test` (full web suite), and the
