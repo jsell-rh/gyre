@@ -1721,8 +1721,7 @@ pub async fn accept_my_workspace_invitation(
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let invitation =
-        authorize_my_pending_invitation(&state, &auth, &workspace_id).await?;
+    let invitation = authorize_my_pending_invitation(&state, &auth, &workspace_id).await?;
     let now = now_secs();
     if invitation.is_expired(now) {
         state
@@ -1783,8 +1782,7 @@ pub async fn decline_my_workspace_invitation(
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let invitation =
-        authorize_my_pending_invitation(&state, &auth, &workspace_id).await?;
+    let invitation = authorize_my_pending_invitation(&state, &auth, &workspace_id).await?;
     let now = now_secs();
     if invitation.is_expired(now) {
         state
