@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: ["c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc"]
 ---
 
 ## Spec Excerpt
@@ -162,51 +162,36 @@ surface and the email template/digest layer).
   queue-and-hold: the durable outbox is left untouched, nothing silently
   dropped.
 
-### Review-repair round (this checkpoint)
+### Repair history
 
-- Earlier rounds: `8cc35749` implementation (merged with the assignment
-  base), `25f0bb2d` dead-field removal (`details_label` in the email
-  locale `Strings` struct), and a contract-repair round re-recording
-  attribution/Shipped notes after the executor restored the drifted task
-  document.
-- `5eed7b03` (this round, review finding on `email.rs`): `read_reply()`
-  parsed the SMTP reply code with `line[..3]` — a fixed-byte-index
-  string slice that panics when byte 3 of a valid-UTF-8 reply falls
-  inside a multibyte character (relay reply `"üü\r\n"`: 4 bytes after
-  trim_end, so the `line.len() < 4` guard passes). The panic unwound
-  through `send_email` → `run_digest_once` → the spawned `email_digest`
-  job loop, permanently killing the digest drain until restart — the
-  availability class behind the repo's byte-slice-truncation invariant
-  (task-095); this site evaded the gate only because its regexes require
-  a leading `&`. Fix: parse the 3-digit code from raw bytes
-  (`std::str::from_utf8(&bytes[..3])` — byte slicing never hits a char
-  boundary, non-ASCII codes rejected with an error), returning `Err`
-  instead of panicking. `read_reply` generalized over
-  `AsyncRead + Unpin` so the new tests drive it via `tokio::io::duplex`.
-  No behavior change for well-formed replies.
-
-### Verification-repair round (c945df27)
-
-- Independent verification of candidate `8f98d5f4` failed four checks
-  (findings.log): rustfmt on changed lines in `email.rs` and
-  `notification_dispatcher.rs`, `clippy::needless_borrow` at
-  `email.rs:484`, and `E0063` — the task-113 `EmailConfig::type_overrides`
-  domain field (8cc35749) had broken the pre-existing task-138 test
-  initializer in `sqlite/user_profile.rs`.
-- Fixes: `cargo fmt -p gyre-server` (semantics unchanged, verified via
-  `git diff -w`), `text.push_str(s.unsubscribe_note)` (the `&` made a
-  `&&str` off an `&'static str` field), and the initializer completed
-  with a real unsubscribe entry
-  (`type_overrides: [("AgentFailed".to_string(), true)]`) so the JSON
-  roundtrip assertion proves the field persists through the adapter.
-- Probes (in-sandbox, evidence:
-  `/tmp/stage/review-evidence/09-verification-repair/`):
-  `cargo fmt -p gyre-server -- --check` exit 0; `cargo clippy -p
-  gyre-server --lib` — zero warnings in `email.rs` (remaining
-  repo warnings in `api/specs.rs`/`explorer_ws.rs` are pre-existing on
-  assignment base `32c4faef`); `cargo clippy -p gyre-adapters
-  --all-targets` compiles; `cargo test -p gyre-adapters --lib
-  sqlite::user_profile` — 5 passed incl. the roundtrip.
+- `8cc35749` implementation (merged with the assignment base); `25f0bb2d`
+  dead-field removal (`details_label` in the email locale `Strings`
+  struct).
+- `5eed7b03` (review finding): `read_reply()` parsed the SMTP reply code
+  with `line[..3]` — a fixed-byte-index slice that panics when byte 3 of
+  a valid-UTF-8 reply falls inside a multibyte character, killing the
+  spawned `email_digest` job loop. Fixed by parsing the 3-digit code from
+  raw bytes and returning `Err` instead of panicking; covered by
+  `read_reply_non_char_boundary_line_errors_not_panics`.
+- `c945df27` (verification round): rustfmt on changed lines, a
+  `clippy::needless_borrow`, and `E0063` — the task-113
+  `EmailConfig::type_overrides` field had broken the task-138 test
+  initializer in `sqlite/user_profile.rs`; initializer completed with a
+  real unsubscribe entry.
+- `5b8d0974` (this round, verification of candidate `8999ad16` failed
+  `cargo test --all` with two email-test failures): both were
+  test-fixture defects against correct production behavior, not
+  production bugs. (1) `digest_aggregates_and_groups_by_priority`
+  asserted a Medium band but its fixture contained no Medium-band type
+  (MergeQueuePaused/AgentFailed are High, SuggestedSpecLink is Low) and
+  the digest correctly skips empty bands — fixture now includes
+  MetaSpecDrift (Medium), assertions strengthened (medium < low order,
+  ≥ 4 unsubscribe links, Medium item in the text body). (2)
+  `subject_encoding_and_dot_stuffing` asserted an RFC 2047 encoded-word
+  for `"Ihr Gyre-Digest (3)"`, which is pure ASCII and correctly passes
+  through unencoded — fixture is now genuinely non-ASCII with an ASCII
+  passthrough assert and a base64 decode round-trip added. Production
+  code unchanged.
 
 ### Test evidence
 
@@ -221,31 +206,22 @@ surface and the email template/digest layer).
   `notifications-store.test.js` (SSE frame parsing incl. split frames,
   unread-only counting, Authorization header, failed-stream fallback).
 - Rust (in-sandbox): `cargo test -p gyre-domain` — **510 passed** (incl.
-  `EmailConfig::type_overrides` serde compatibility);
-  `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
-  — clean, zero warnings on the merged tree (re-run this round after
-  the `5eed7b03` fix, still clean). Standalone probe
-  (`/tmp/stage/review-evidence/08-read-reply-repair-probe/output.txt`):
-  old logic panics with 'end byte index 3 is not a char boundary' on
-  the review's exact reply line; fixed logic returns
-  `Err("malformed SMTP reply code (non-ASCII)")` and `250 8BITMIME`
-  still parses as 250. `scripts/check-byte-slice-truncation.sh` on the
-  changed file: exit 0.
-- Local invariant checks (in-sandbox, exit 0): check-arch,
-  check-abac-route-registry, check-fabricated-scope-defaults,
-  check-inert-enforcement, check-task-commit-attribution (passes again
-  once this round's attribution lands).
+  `EmailConfig::type_overrides` serde compatibility). This round
+  (`5b8d0974`, evidence: `/tmp/stage/review-evidence/10-email-test-fixture-repair/`):
+  `cargo check -p gyre-server --tests` exit 0; `cargo fmt -p gyre-server
+  -- --check` exit 0; `cargo clippy -p gyre-server --lib --tests` exit 0
+  with zero diagnostics in `email.rs` (the package's 143 remaining
+  warnings are pre-existing elsewhere, unchanged by this round).
 - Rust (deferred to the independent verifier per the 4 GiB build
   wrapper — the server test binary must be compiled there):
   - `cargo test -p gyre-server --lib email::` — templates per type,
-    locale rendering, digest aggregation/grouping, RFC 2047/dot-stuffing,
-    drain gating (type_overrides + min_priority), outbox parsing
-    (embedded + flat task-112 shape), end-to-end digest drain against an
-    in-process fake SMTP listener (one aggregate email, outbox cleared,
-    state stamped, no-relay → queue held), and (new this round)
-    `read_reply_non_char_boundary_line_errors_not_panics` +
-    `read_reply_continuation_and_short_line`.
+    locale rendering, digest aggregation/grouping (repaired fixture),
+    RFC 2047/dot-stuffing (repaired fixture), drain gating (type_overrides
+    + min_priority), outbox parsing (embedded + flat task-112 shape),
+    end-to-end digest drain against an in-process fake SMTP listener,
+    and the `read_reply` non-char-boundary/continuation tests.
   - `cargo test -p gyre-server --lib notification_dispatcher::tests::email_queue_respects_per_type_unsubscribe`
     — per-type unsubscribe suppresses the queue entry.
-  - Full gates: `cargo test --all`, `npm test` (full web suite), and the
-    remaining `scripts/check-*.sh`.
+  - Full gates: `cargo test --all` (the command that failed on
+    `8999ad16`), `npm test` (full web suite), and the remaining
+    `scripts/check-*.sh`.
