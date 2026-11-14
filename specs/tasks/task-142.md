@@ -3,7 +3,7 @@ title: "Implement merge attestation bundle schema and multi-party signing"
 spec_ref: "agent-gates.md §Part 3 Merge Attestation Bundle"
 depends_on:
   - task-136
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-gates.md §Merge Attestation Bundle"
   - "agent-gates.md §What Gets Signed and By Whom"
