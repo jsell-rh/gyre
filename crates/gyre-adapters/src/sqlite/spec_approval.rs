@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_only_from_pending_and_closes_lifecycle() {
+    async fn reject_from_pending_and_from_approved_records_decliner() {
         let (_tmp, storage) = tmp_storage();
         let id = Id::new("apr-1");
         storage
@@ -514,7 +514,9 @@ mod tests {
         assert_eq!(reloaded.rejected_by.as_deref(), Some("user:reviewer"));
         assert!(!reloaded.is_active());
 
-        // Approved entries cannot be rejected (only revoked).
+        // Decline after approval (agent-gates.md §Spec Approval Ledger):
+        // the port contract mirrors the domain — Approved → Rejected records
+        // the declining human in rejected_by (HSI §12 judgment attribution).
         let id2 = Id::new("apr-2");
         storage
             .create(&SpecApproval::new(
@@ -526,10 +528,26 @@ mod tests {
             .await
             .unwrap();
         storage.approve(&id2, 1700000100).await.unwrap().unwrap();
-        let res = storage
+        storage
             .reject(&id2, "user:reviewer", "no", 1700000200)
+            .await
+            .unwrap()
+            .unwrap();
+        let reloaded = storage.find_by_id(&id2).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Rejected
+        );
+        assert_eq!(reloaded.rejected_by.as_deref(), Some("user:reviewer"));
+        assert_eq!(reloaded.approved_at, None, "mutual exclusivity");
+        assert_eq!(reloaded.rejected_at, Some(1700000200));
+        assert!(!reloaded.is_active());
+
+        // Terminal: a Rejected row cannot be rejected again.
+        let res = storage
+            .reject(&id2, "user:reviewer", "again", 1700000300)
             .await;
-        assert!(res.is_err(), "Approved → Rejected must be rejected");
+        assert!(res.is_err(), "Rejected → Rejected must be rejected");
     }
 
     #[tokio::test]
