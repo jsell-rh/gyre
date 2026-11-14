@@ -981,20 +981,34 @@ pub async fn decide(
     auth: AuthenticatedAgent,
     Query(params): Query<DecideParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let builtin = BuiltinDecision::parse(&params.decision).ok_or_else(|| {
-        ApiError::InvalidInput(format!(
-            "unknown decision {:?}: expected one of {}",
-            params.decision,
-            BuiltinDecision::all_names().join(", ")
-        ))
-    })?;
-
     // Context is a JSON object passed as a (URL-encoded) query string.
     let context: serde_json::Value = match params.context.as_deref() {
         None | Some("") => serde_json::json!({}),
         Some(raw) => serde_json::from_str(raw)
             .map_err(|e| ApiError::InvalidInput(format!("invalid context JSON: {e}")))?,
     };
+    let result = evaluate_builtin_decision(&state, &auth, &params.decision, context).await?;
+    Ok(Json(result))
+}
+
+/// Core built-in decision evaluation, shared by the HTTP `decide` handler
+/// above and the `gyre_analytics_decide` MCP tool (analytics.md §MCP Tool:
+/// `gyre_analytics_decide`) — the MCP tool is a thin wrapper that must never
+/// grow a second evaluator. Parses nothing transport-specific: callers hand
+/// over the decision name and an already-decoded context object.
+pub(crate) async fn evaluate_builtin_decision(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    decision_name: &str,
+    context: serde_json::Value,
+) -> Result<serde_json::Value, ApiError> {
+    let builtin = BuiltinDecision::parse(decision_name).ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "unknown decision {decision_name:?}: expected one of {}",
+            BuiltinDecision::all_names().join(", ")
+        ))
+    })?;
+
     if !context.is_object() {
         return Err(ApiError::InvalidInput(
             "context must be a JSON object".to_string(),
@@ -1006,7 +1020,7 @@ pub async fn decide(
     // leak another scope's aggregated analytics through the decision
     // outcome. Same validation as `record_event` (task-146 review F1).
     let (workspace_id, repo_id) =
-        super::audit::validate_decision_scope(&state, &context, &auth).await?;
+        super::audit::validate_decision_scope(state, &context, auth).await?;
 
     let now = now_secs();
 
@@ -1018,7 +1032,7 @@ pub async fn decide(
             )
         })?;
         let ws_key = super::budget::workspace_key(ws.as_str());
-        let config = super::budget::effective_workspace_config(&state, &ws_key).await;
+        let config = super::budget::effective_workspace_config(state, &ws_key).await;
         let usage = state.budget_usages.get_usage(&ws_key).await?;
         Some((config, usage))
     } else {
@@ -1069,7 +1083,7 @@ pub async fn decide(
         outcome,
         evaluated_at: now,
     };
-    Ok(Json(result.response_json()))
+    Ok(result.response_json())
 }
 
 /// `POST /api/v1/analytics/decide/custom` — evaluate a custom decision
@@ -1082,11 +1096,24 @@ pub async fn decide_custom(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let spec = CustomDecisionSpec::parse(&body).map_err(ApiError::InvalidInput)?;
+    let result = evaluate_custom_decision(&state, &auth, &spec).await?;
+    Ok(Json(result))
+}
 
+/// Core custom-decision evaluation, shared by the HTTP `decide_custom`
+/// handler above and the `gyre_analytics_decide` MCP tool (which accepts
+/// `custom_rules` tool arguments and assembles the spec itself). Takes an
+/// already-parsed `CustomDecisionSpec`; transport-specific parsing stays
+/// with each caller.
+pub(crate) async fn evaluate_custom_decision(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    spec: &CustomDecisionSpec,
+) -> Result<serde_json::Value, ApiError> {
     // Caller-scope validation on the spec's context (same rule as the
     // built-in decide handler above).
     let (workspace_id, repo_id) =
-        super::audit::validate_decision_scope(&state, &spec.context, &auth).await?;
+        super::audit::validate_decision_scope(state, &spec.context, auth).await?;
 
     let now = now_secs();
 
@@ -1111,7 +1138,7 @@ pub async fn decide_custom(
         events_by_metric.insert(metric, state.analytics.query_filtered(&filter).await?);
     }
 
-    let outcome = evaluate_custom(&spec, &events_by_metric, now);
+    let outcome = evaluate_custom(spec, &events_by_metric, now);
     let mut response = outcome;
     if let Some(obj) = response.as_object_mut() {
         obj.insert("decision".into(), serde_json::json!(spec.name));
@@ -1120,7 +1147,7 @@ pub async fn decide_custom(
             serde_json::json!(format_iso8601_utc(now)),
         );
     }
-    Ok(Json(response))
+    Ok(response)
 }
 
 // ─── Cost Entries ─────────────────────────────────────────────────────────────
