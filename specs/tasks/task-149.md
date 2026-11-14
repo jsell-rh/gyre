@@ -7,7 +7,7 @@ progress: complete
 coverage_sections:
   - "analytics.md §Analytics Dashboard (UI)"
   - "analytics.md §Data Retention"
-commits: ["7947e7562af8b70391ec557be173d99dd2fb5787", "c78037ad4b30f6a003b218b939d0d8773565e90d", "7e0fbc2aa6d30a56ebc06212d638559b7f3dd617", "cc026cc601699cedb121b668d2c02e2523685c2c", "af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7"]
+commits: ["7947e7562af8b70391ec557be173d99dd2fb5787", "c78037ad4b30f6a003b218b939d0d8773565e90d", "7e0fbc2aa6d30a56ebc06212d638559b7f3dd617", "cc026cc601699cedb121b668d2c02e2523685c2c", "af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7", "7fe3cf781b95a87c0c01d95dd35fc74dfc4beef5"]
 ---
 
 ## Spec Excerpt
