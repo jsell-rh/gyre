@@ -100,60 +100,59 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**This round: rebase repair onto current main head 1ee52c43** (durable
-finding 08005f87, merge_state DIRTY — the published PR head 6594708e
-conflicted with main after task-112 notification delivery channels and
-task-125 API rows landed). No product code changed: the invitation flow
-is the independently approved implementation from prior rounds (domain
-entities, ports, SQLite/Postgres/mem adapters, migrations
-2026-11-13-000063/64/65, the five tenant endpoints, workspace
-invitation lifecycle, CSPRNG + SHA-256 tokens, per-tenant
-`InvitationPolicy`, bulk invite, background expiry job, ABAC mappings),
-now merged with main 1ee52c43 as merge commit 104fc5e3.
+**This round: rebase repair onto assignment base 4b9220bc** (durable finding
+07881b6d, merge conflict in `crates/gyre-server/src/auth.rs`). Main advanced
+past the previously reconciled head 1ee52c43 with task-135 (gate chains),
+task-146 (analytics), task-011 (spec save write-through), task-129 (ABAC
+evaluation engine), and task-147 (analytics decision API). No product code
+changed beyond the one conflict resolution: the invitation flow is the
+independently approved implementation from prior rounds (domain entities,
+ports, SQLite/Postgres/mem adapters, migrations 2026-11-13-000063/64/65, the
+five tenant endpoints, workspace invitation lifecycle, CSPRNG + SHA-256
+tokens, per-tenant `InvitationPolicy`, bulk invite, background expiry job,
+ABAC mappings), now merged with base 4b9220bc as merge commit 88355447.
 
-### Conflicts resolved (source only)
+### Conflict resolved (source only)
 
-- `gyre-adapters/src/sqlite/mod.rs` — the `migration_000058_backfills_
-  unique_url_safe_usernames` test's exclusion set: both task-110's
-  `2026-11-13-000065_user_tenant_scope` (indexes 000058's tenant_id
-  column, so it cannot run pre-000058; runs in its deployed batch
-  position right after 000058) and task-112's
-  `2026-11-09-000060_user_preferences_channel_shape` (rewrites 000058's
-  flat backfill literal; runs after 000058 followed by the convergence
-  assert) are excluded from `pre` and run explicitly.
-- `specs/coverage/system/user-management.md` — header recomputed against
-  the auto-merged table: rows 5/6/7/25 (task-110) and 16/17/18
-  (task-112) are all implemented in the merged tree; counts 14/36
-  (11 n/a, 0 not-started, 11 task-assigned, 14 implemented, 0 verified).
-- `web/dist` took main's side verbatim (assignment-base state); no
-  rebuild — final integration regenerates and publishes those assets.
+- `gyre-server/src/auth.rs` — `find_or_create_user_tenant` was hit from both
+  sides: task-110 renamed `find_or_create_user` and added the invitation
+  email-link (verified-email claim of a local-mode invitation account);
+  task-129 added the reserved-system-identity provisioning rejection. The
+  resolution keeps both: task-129's `preferred_username ==
+  SYSTEM_ABAC_IDENTITY` fail-closed check runs *before* the invitation
+  email-link, so a spoofed reserved handle can drive neither new-user
+  provisioning nor invitation-account claiming. Task-129's
+  existing-user `display_name` check and its
+  `jwt_rejects_reserved_system_identity_provisioning` test auto-merged
+  intact; the reserved-identity ordering is enforced by control flow (the
+  bail precedes the link block).
 
 ### Merge-integrity and gate evidence (this head)
 
-- `cargo check --all` passes — the task-110 invitation/auth additions
-  and task-112's `NotificationDispatcher`/channel-preferences wiring
-  coexist type-safely.
-- `cargo fmt --all --check` clean; `cargo clippy -p gyre-adapters`
-  reports zero warnings in the hand-resolved file (remaining warnings
-  are pre-existing on both parents).
-- Mechanical checks pass: architecture lint, migration versions (no new
-  duplicate Diesel versions — 20261113000063/64/65 vs main's
-  20261109000060/61 are distinct), migration SQL portability, ABAC
-  route registry, ABAC exempt handlers.
-- Focused tests: `cargo test -p gyre-adapters` 524 passed / 0 failed —
-  includes the merged `migration_000058_backfills...` (pre + 000058 +
-  m65 + m60 ordering), `migration_000060_rewrites...`, the SQLite
+- `cargo check -p gyre-server` passes (7m19s, 4 GiB sandbox).
+- `cargo fmt --all --check` clean.
+- Mechanical checks pass: architecture lint, migration versions (base's
+  20261008000063 analytics_scope_columns and 20261112000062 gate_chain_config
+  are Diesel-distinct from task-110's 20261113000063/64/65), migration SQL
+  portability, ABAC route registry, ABAC exempt handlers, MCP write tools,
+  mem port contracts, and the remaining invariant lints (full sweep log in
+  `/tmp/stage/review-evidence/gate-*.log`).
+- Focused tests: `cargo test -p gyre-adapters` 532 passed / 0 failed —
+  includes the merged `migration_000058_backfills...` exclusion-set test
+  (both task-110's m65 and task-112's m60 exclusions kept), the SQLite
   invitation repositories, and the mem-port contract tests;
-  `-p gyre-domain -p gyre-ports -p gyre-common` 646 passed / 0 failed.
-- gyre-server test compilation is blocked by this sandbox's 4 GiB build
-  wrapper (environment restriction, not a defect): the independent
-  verifier must run `cargo nextest run --all` — in particular the 26
+  `-p gyre-domain -p gyre-ports -p gyre-common` 671 passed / 0 failed.
+- gyre-server test compilation is deferred to the independent verifier
+  (4 GiB cgroup build budget, environment restriction, not a defect). The
+  verifier must run the full workspace suite — in particular the 26
   `api::invitations` tests (tenant lifecycle, revocation blocks accept,
   expiry job marks expired, bulk invite, non-admin 403, local-mode accept
-  mints an authenticating API key, re-invite fresh key, SSO link,
-  workspace lifecycle, cross-tenant containment, `max_pending` cap,
-  `allow_re_invite`) and task-112's notification-dispatcher tests.
+  mints an authenticating API key, re-invite fresh key, SSO link, workspace
+  lifecycle, cross-tenant containment, `max_pending` cap, `allow_re_invite`)
+  plus `auth::tests::jwt_rejects_reserved_system_identity_provisioning`
+  (task-129, exercises the resolved conflict region) and task-110's
+  SSO-link auth tests in the same module.
 
 Coverage rows 5, 6, 7, and 25 in
-`specs/coverage/system/user-management.md` remain `implemented` and
-describe the merged tree accurately.
+`specs/coverage/system/user-management.md` remain `implemented` and describe
+the merged tree accurately; the audit header records this repair merge.
