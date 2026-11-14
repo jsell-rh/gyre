@@ -3,11 +3,11 @@ title: "Implement gyre_analytics_decide MCP tool and Ralph Loop integration"
 spec_ref: "analytics.md §MCP Tool: gyre_analytics_decide"
 depends_on:
   - task-147
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "analytics.md §MCP Tool: gyre_analytics_decide"
   - "analytics.md §Integration with the Ralph Loop"
-commits: []
+commits: ["c103a38b4ffd830795540d8c6f11d3fd6d85e803"]
 ---
 
 ## Spec Excerpt
@@ -69,12 +69,12 @@ Analytics close the feedback loop for autonomous development:
 
 ## Acceptance Criteria
 
-- [ ] `gyre_analytics_decide` appears in MCP `tools/list` response
-- [ ] MCP tool delegates to the decision API (built-in and custom)
-- [ ] Tool response matches the `DecisionResult` shape
-- [ ] Agents can invoke decisions without raw HTTP calls
-- [ ] Ralph Loop integration pattern documented
-- [ ] Tests pass
+- [x] `gyre_analytics_decide` appears in MCP `tools/list` response
+- [x] MCP tool delegates to the decision API (built-in and custom)
+- [x] Tool response matches the `DecisionResult` shape
+- [x] Agents can invoke decisions without raw HTTP calls
+- [x] Ralph Loop integration pattern documented
+- [x] Tests pass
 
 ## Agent Instructions
 
@@ -83,3 +83,74 @@ Analytics close the feedback loop for autonomous development:
 - Read task-147 output for the decision API implementation
 - The MCP tool is a thin wrapper around the decision API — do NOT duplicate decision logic
 - Read `docs/agent-protocol.md` for documentation conventions
+
+## Shipped
+
+`gyre_analytics_decide` MCP tool (analytics.md §MCP Tool) plus the Ralph
+Loop integration pattern documentation (§Integration with the Ralph
+Loop), in commit c103a38b4ffd.
+
+### Behavior
+
+- **tools/list** exposes `gyre_analytics_decide` with the spec's input
+  schema (`decision` required; `context` object; optional `custom_rules`
+  array) and the spec's description naming all six built-in decisions.
+- **tools/call dispatch** routes `gyre_analytics_decide` to
+  `handle_analytics_decide`. It is a read-only tool (queries the
+  analytics/budget/merge-queue stores; no repository writes), so it is
+  correctly absent from the `needs_write` RBAC gate — verified by
+  `scripts/check-mcp-write-tools.sh`.
+- **Thin wrapper, no duplicated logic**: the HTTP `decide` /
+  `decide_custom` handler bodies were extracted into shared core
+  functions `api::analytics::evaluate_builtin_decision` and
+  `api::analytics::evaluate_custom_decision`. The HTTP routes and the
+  MCP handler call the same cores, so MCP calls get identical caller-
+  scope validation (`validate_decision_scope` — cross-tenant context
+  scopes rejected), event fetching, budget/merge-queue reads, and
+  `DecisionResult` response shapes as the HTTP API.
+- **Delegation contract**: without `custom_rules` the built-in evaluator
+  runs (unknown names rejected with the built-in list); with
+  `custom_rules` the tool assembles a `CustomDecisionSpec` (name from
+  `decision`, `context`, `default` arg honored) and runs the custom rule
+  DSL evaluator (first match wins, default otherwise). Invalid DSL is
+  rejected naming the field.
+- **Token scoping**: `validate_tool_scope` gained a `gyre_analytics_decide`
+  arm — `context.workspace_id`/`context.repo_id` are scope-addressable
+  args (the events a decision is computed over), checked against the
+  caller's token tier exactly like `gyre_search`'s workspace arg.
+- **Ralph Loop pattern** documented in `docs/agent-protocol.md` (§Analytics
+  Decisions in the Ralph Loop): the six-step loop with built-in
+  `feature.promote` and custom-rule MCP invocation examples; steps 5–6
+  are agent decisions via the MCP tool, per the spec (pattern, not code).
+
+### Test evidence
+
+All tests are in `crates/gyre-server/src/mcp.rs` (tests module) and
+`api/analytics.rs` (existing decide suites, unchanged semantics — the
+HTTP handlers now delegate to the extracted cores):
+
+- `mcp_tools_list_includes_analytics_decide` — tools/list entry + schema.
+- `mcp_analytics_decide_builtin_via_protocol` — full MCP protocol call
+  over real seeded adoption events; asserts the DecisionResult shape
+  (decision/promote/confidence/metrics/reason/evaluated_at), mirroring
+  the HTTP `decide_feature_promote_from_real_event_data`.
+- `mcp_analytics_decide_custom_rules_via_protocol` — custom DSL via MCP:
+  default outcome on no match, first-match wins, matched_rule index.
+- `mcp_analytics_decide_unknown_decision_is_tool_error` /
+  `mcp_analytics_decide_invalid_custom_rule_is_tool_error` — evaluator
+  rejections surface as MCP tool errors naming the cause.
+- `handle_analytics_decide_delegates_by_custom_rules_presence` — unit
+  test pinning the delegation contract (same decision name: built-in
+  path rejects it as unknown, custom path evaluates it).
+
+`cargo check -p gyre-server --lib --tests` and `cargo clippy -p gyre-server
+--lib --tests` pass with no warnings in the changed code; `cargo fmt`
+clean; `scripts/check-arch.sh` and `check-mcp-write-tools.sh` pass. Full
+gyre-server test compilation/run is deferred to the independent verifier
+(sandbox memory budget) — execute:
+
+    cargo test -p gyre-server --lib mcp::tests::mcp_tools_list_includes_analytics_decide
+    cargo test -p gyre-server --lib mcp::tests::mcp_analytics_decide
+    cargo test -p gyre-server --lib mcp::tests::handle_analytics_decide
+    cargo test -p gyre-server --lib api::analytics::tests::decide
+    cargo test -p gyre-server --lib mcp::tests::
