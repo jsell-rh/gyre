@@ -69,12 +69,12 @@ Analytics close the feedback loop for autonomous development:
 
 ## Acceptance Criteria
 
-- [x] `gyre_analytics_decide` appears in MCP `tools/list` response
-- [x] MCP tool delegates to the decision API (built-in and custom)
-- [x] Tool response matches the `DecisionResult` shape
-- [x] Agents can invoke decisions without raw HTTP calls
-- [x] Ralph Loop integration pattern documented
-- [x] Tests pass
+- [ ] `gyre_analytics_decide` appears in MCP `tools/list` response
+- [ ] MCP tool delegates to the decision API (built-in and custom)
+- [ ] Tool response matches the `DecisionResult` shape
+- [ ] Agents can invoke decisions without raw HTTP calls
+- [ ] Ralph Loop integration pattern documented
+- [ ] Tests pass
 
 ## Agent Instructions
 
