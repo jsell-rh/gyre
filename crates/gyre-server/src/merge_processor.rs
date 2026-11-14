@@ -5072,12 +5072,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(mr_id),
             Id::new("repo-1"),
+            Id::new(workspace_id),
             format!("MR {mr_id}"),
             format!("feat/{mr_id}"),
             "main",
             1000,
         );
-        mr.workspace_id = Id::new(workspace_id);
         mr.depends_on = depends_on
             .into_iter()
             .map(|id| {
@@ -5240,24 +5240,24 @@ mod tests {
         let mut mr_first = gyre_domain::MergeRequest::new(
             Id::new("mr-first"),
             Id::new("repo-1"),
+            Id::new("ws-1"),
             "First in group",
             "feat/first",
             "main",
             1000,
         );
-        mr_first.workspace_id = Id::new("ws-1");
         mr_first.atomic_group = Some("bundle".to_string());
         state.merge_requests.create(&mr_first).await.unwrap();
 
         let mut mr_second = gyre_domain::MergeRequest::new(
             Id::new("mr-second"),
             Id::new("repo-1"),
+            Id::new("ws-1"),
             "Second in group",
             "feat/second",
             "main",
             1000,
         );
-        mr_second.workspace_id = Id::new("ws-1");
         mr_second.atomic_group = Some("bundle".to_string());
         state.merge_requests.create(&mr_second).await.unwrap();
 
@@ -5316,12 +5316,12 @@ mod tests {
             let mut mr = gyre_domain::MergeRequest::new(
                 Id::new(&mr_id),
                 Id::new("repo-1"),
+                Id::new("ws-1"),
                 format!("MR {mr_id}"),
                 format!("feat/{mr_id}"),
                 "main",
                 1000,
             );
-            mr.workspace_id = Id::new("ws-1");
             mr.depends_on = deps
                 .into_iter()
                 .map(|id| {
@@ -5407,12 +5407,12 @@ mod tests {
             let mut mr = gyre_domain::MergeRequest::new(
                 Id::new(&mr_id),
                 Id::new("repo-1"),
+                Id::new("ws-1"),
                 format!("MR {mr_id}"),
                 format!("feat/{mr_id}"),
                 "main",
                 1000,
             );
-            mr.workspace_id = Id::new("ws-1");
             mr.depends_on = deps
                 .into_iter()
                 .map(|id| {
@@ -5550,26 +5550,26 @@ mod tests {
         let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
 
         // Create two independent MRs (no dependencies between them).
-        let mut mr_a = gyre_domain::MergeRequest::new(
+        let mr_a = gyre_domain::MergeRequest::new(
             Id::new("mr-a"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR A (gates pending)",
             "feat/a",
             "main",
             1000,
         );
-        mr_a.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr_a).await.unwrap();
 
-        let mut mr_b = gyre_domain::MergeRequest::new(
+        let mr_b = gyre_domain::MergeRequest::new(
             Id::new("mr-b"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR B (gates passed)",
             "feat/b",
             "main",
             1000,
         );
-        mr_b.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr_b).await.unwrap();
 
         // Enqueue: mr-a with higher priority, mr-b with lower priority.
@@ -5677,26 +5677,26 @@ mod tests {
         let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
 
         // Create two independent MRs.
-        let mut mr_a = gyre_domain::MergeRequest::new(
+        let mr_a = gyre_domain::MergeRequest::new(
             Id::new("mr-a"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR A (gate failed)",
             "feat/a",
             "main",
             1000,
         );
-        mr_a.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr_a).await.unwrap();
 
-        let mut mr_b = gyre_domain::MergeRequest::new(
+        let mr_b = gyre_domain::MergeRequest::new(
             Id::new("mr-b"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR B (no gates)",
             "feat/b",
             "main",
             1000,
         );
-        mr_b.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr_b).await.unwrap();
 
         enqueue_mr(&state, "mr-a", 100, 1000).await;
@@ -5778,12 +5778,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-gate-fail"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR (gate failed)",
             "feat/gate-fail",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("agent-gate-fail"));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -6050,15 +6050,15 @@ mod tests {
             .await
             .unwrap();
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-no-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR (no spec_ref)",
             "feat/no-spec",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr).await.unwrap();
 
         enqueue_mr(&state, "mr-no-spec", 100, 2000).await;
@@ -6116,15 +6116,15 @@ mod tests {
         let state = test_state();
         let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-cb"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR (circuit breaker)",
             "feat/cb",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr).await.unwrap();
 
         enqueue_mr(&state, "mr-cb", 100, 2000).await;
@@ -6176,12 +6176,12 @@ mod tests {
         let mut mr_a = gyre_domain::MergeRequest::new(
             Id::new("mr-a"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR A (in atomic group)",
             "feat/a",
             "main",
             1000,
         );
-        mr_a.workspace_id = Id::new("ws-1");
         mr_a.atomic_group = Some("bundle".to_string());
         state.merge_requests.create(&mr_a).await.unwrap();
 
@@ -6190,25 +6190,25 @@ mod tests {
         let mut mr_c = gyre_domain::MergeRequest::new(
             Id::new("mr-c"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR C (group member, gates pending)",
             "feat/c",
             "main",
             1000,
         );
-        mr_c.workspace_id = Id::new("ws-1");
         mr_c.atomic_group = Some("bundle".to_string());
         state.merge_requests.create(&mr_c).await.unwrap();
 
         // MR B: no atomic group, low priority, all gates passed.
-        let mut mr_b = gyre_domain::MergeRequest::new(
+        let mr_b = gyre_domain::MergeRequest::new(
             Id::new("mr-b"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR B (no group)",
             "feat/b",
             "main",
             1000,
         );
-        mr_b.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr_b).await.unwrap();
 
         // Enqueue: mr-a (high priority), mr-b (low priority).
@@ -6319,12 +6319,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(mr_id),
             repo_id.clone(),
+            Id::new(workspace_id),
             format!("MR {mr_id}"),
             source_branch,
             "main",
             1000,
         );
-        mr.workspace_id = Id::new(workspace_id);
         mr.atomic_group = Some(group.to_string());
         mr.author_agent_id = author_agent_id.map(Id::new);
         state.merge_requests.create(&mr).await.unwrap();
@@ -6562,12 +6562,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-solo-merge"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Solo MR",
             "feat/solo-merge",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("agent-solo"));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -6635,15 +6635,15 @@ mod tests {
         create_mr_in_group(&state, "mr-g2", &repo.id, "ws-1", "bundle", "feat/g2", None).await;
 
         // Create a non-group MR with HIGHER priority than the group members.
-        let mut mr_solo = gyre_domain::MergeRequest::new(
+        let mr_solo = gyre_domain::MergeRequest::new(
             Id::new("mr-solo"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Solo MR",
             "feat/solo",
             "main",
             1000,
         );
-        mr_solo.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr_solo).await.unwrap();
 
         // Enqueue: group members first, solo with higher priority.
@@ -7109,12 +7109,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-promote"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR promote",
             "feat/promote",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.status = gyre_domain::MrStatus::Approved;
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-promote", 50, 1000).await;
@@ -7317,13 +7317,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-abac"),
                 repo.id.clone(),
+                Id::new("ws-abac"),
                 "ABAC test MR",
                 "feat/abac",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:worker-abac"));
-            mr.workspace_id = Id::new("ws-abac");
 
             let entry = MergeQueueEntry::new(Id::new("entry-abac"), mr.id.clone(), 50, 1000);
 
@@ -7422,13 +7422,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-shallow"),
                 repo.id.clone(),
+                Id::new("ws-shallow"),
                 "Shallow MR",
                 "feat/shallow",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:worker-shallow"));
-            mr.workspace_id = Id::new("ws-shallow");
 
             let entry = MergeQueueEntry::new(Id::new("entry-shallow"), mr.id.clone(), 50, 1000);
 
@@ -7525,13 +7525,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-signer"),
                 repo.id.clone(),
+                Id::new("ws-signer"),
                 "Signer MR",
                 "feat/signer",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:signer-worker"));
-            mr.workspace_id = Id::new("ws-signer");
 
             let entry = MergeQueueEntry::new(Id::new("entry-signer"), mr.id.clone(), 50, 1000);
 
@@ -7601,13 +7601,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-cc"),
                 repo.id.clone(),
+                Id::new("ws-cc"),
                 "CC MR",
                 "feat/cc",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:cc-worker"));
-            mr.workspace_id = Id::new("ws-cc");
 
             let entry = MergeQueueEntry::new(Id::new("entry-cc"), mr.id.clone(), 50, 1000);
 
@@ -7678,13 +7678,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-tenant"),
                 repo.id.clone(),
+                Id::new("ws-tenant"),
                 "Tenant MR",
                 "feat/tenant",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:tenant-worker"));
-            mr.workspace_id = Id::new("ws-tenant");
 
             let entry = MergeQueueEntry::new(Id::new("entry-tenant"), mr.id.clone(), 50, 1000);
 
@@ -7752,15 +7752,15 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap();
 
-            let mut mr = MergeRequest::new(
+            let mr = MergeRequest::new(
                 Id::new("mr-trust-audit"),
                 repo.id.clone(),
+                Id::new("ws-trust-audit"),
                 "trust audit MR",
                 "feat/trust-audit",
                 "main",
                 1000,
             );
-            mr.workspace_id = Id::new("ws-trust-audit");
 
             // Seed an explicit Allow for the merge-processor service identity
             // so the recorded decision carries a real matched policy — an
@@ -7857,13 +7857,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-att-audit"),
                 repo.id.clone(),
+                Id::new("ws-att-audit"),
                 "att audit MR",
                 "feat/att-audit",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:att-worker"));
-            mr.workspace_id = Id::new("ws-att-audit");
             let entry = MergeQueueEntry::new(Id::new("entry-att-audit"), mr.id.clone(), 50, 1000);
 
             // Deny: chain_depth > 0 → deny merge on attestation resources.
@@ -8008,13 +8008,13 @@ mod tests {
             let mut mr = MergeRequest::new(
                 Id::new("mr-fail-closed"),
                 repo.id.clone(),
+                Id::new("ws-fail-closed"),
                 "fail closed MR",
                 "feat/fail",
                 "main",
                 1000,
             );
             mr.author_agent_id = Some(Id::new("agent:fail-worker"));
-            mr.workspace_id = Id::new("ws-fail-closed");
             let entry = MergeQueueEntry::new(Id::new("entry-fail-closed"), mr.id.clone(), 50, 1000);
 
             let result =
@@ -8077,12 +8077,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-recov"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR recovery test",
             "feat/recov",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("agent-recov"));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -9223,12 +9223,12 @@ mod tests {
             let mut m = gyre_domain::MergeRequest::new(
                 Id::new(id),
                 repo.id.clone(),
+                Id::new("ws-1"),
                 "resubmitted work",
                 "feat/resub",
                 "main",
                 1000,
             );
-            m.workspace_id = Id::new("ws-1");
             m.spec_ref = Some(spec.to_string());
             m
         };
@@ -9368,12 +9368,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-merge-abac"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR merge ABAC enforcement",
             "feat/abac-merge",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("agent-merge-abac"));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -9825,12 +9825,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(mr_id),
             repo.id.clone(),
+            Id::new(ws_id),
             format!("MR {mr_id}"),
             "feat/drift",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new(ws_id);
         mr.author_agent_id = Some(agent_id);
         state.merge_requests.create(&mr).await.unwrap();
         mr
@@ -10060,15 +10060,15 @@ mod tests {
         bind_drift_set(&state, ws_id).await;
 
         // No author agent, no attestation anywhere.
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-noatt"),
             repo.id.clone(),
+            Id::new(ws_id),
             "MR no attestation",
             "feat/noatt",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new(ws_id);
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-drift-noatt", 50, 1000).await;
 
@@ -10148,15 +10148,15 @@ mod tests {
         bind_drift_set(&state, ws_a).await;
         create_drift_mr(&state, "mr-drift-starve-head", ws_a, &repo_a, "deadbeef").await;
         enqueue_mr(&state, "mr-drift-starve-head", 100, 1000).await;
-        let mut clean_same_ws = gyre_domain::MergeRequest::new(
+        let clean_same_ws = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-starve-clean"),
             repo_a.id.clone(),
+            Id::new(ws_a),
             "MR clean same workspace",
             "feat/starve-clean",
             "main",
             1000,
         );
-        clean_same_ws.workspace_id = Id::new(ws_a);
         state.merge_requests.create(&clean_same_ws).await.unwrap();
         enqueue_mr(&state, "mr-drift-starve-clean", 50, 1001).await;
         crate::merge_policy::set_merge_policy(
@@ -10172,15 +10172,15 @@ mod tests {
         // Workspace B: clean MR, lowest priority, enqueued last.
         let ws_b = "ws-drift-starve-other";
         let repo_b = create_repo_in_workspace(&state, "repo-drift-starve-other", ws_b).await;
-        let mut clean_other_ws = gyre_domain::MergeRequest::new(
+        let clean_other_ws = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-starve-other"),
             repo_b.id.clone(),
+            Id::new(ws_b),
             "MR clean other workspace",
             "feat/starve-other",
             "main",
             1000,
         );
-        clean_other_ws.workspace_id = Id::new(ws_b);
         state.merge_requests.create(&clean_other_ws).await.unwrap();
         enqueue_mr(&state, "mr-drift-starve-other", 10, 1002).await;
 
@@ -10310,15 +10310,15 @@ mod tests {
         // drift possible), lower priority, enqueued last.
         let ws_b = "ws-drift-group-later";
         let later_repo = create_repo_in_workspace(&state, "repo-drift-group-later", ws_b).await;
-        let mut later_mr = gyre_domain::MergeRequest::new(
+        let later_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-group-later"),
             later_repo.id.clone(),
+            Id::new(ws_b),
             "MR behind a drift-held atomic group",
             "feat/drift-group-later",
             "main",
             1002,
         );
-        later_mr.workspace_id = Id::new(ws_b);
         state.merge_requests.create(&later_mr).await.unwrap();
         enqueue_mr(&state, "mr-drift-group-later", 50, 1002).await;
 
@@ -10404,12 +10404,12 @@ mod tests {
         let mut merged_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-merged"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "merged work",
             "feat/merged",
             "main",
             1000,
         );
-        merged_mr.workspace_id = Id::new("ws-1");
         merged_mr.author_agent_id = Some(Id::new("agent-merged"));
         state.merge_requests.create(&merged_mr).await.unwrap();
 
@@ -10421,12 +10421,12 @@ mod tests {
         let mut inflight_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-inflight"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "in-flight work",
             "feat/inflight",
             "main",
             1000,
         );
-        inflight_mr.workspace_id = Id::new("ws-1");
         inflight_mr.author_agent_id = Some(Id::new("agent-inflight"));
         state.merge_requests.create(&inflight_mr).await.unwrap();
         let wt_dir = tempfile::tempdir().unwrap();
@@ -10618,12 +10618,12 @@ mod tests {
         let mut other_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-inflight-other"),
             other_repo.id.clone(),
+            Id::new("ws-1"),
             "same-named branch in another repo",
             "feat/inflight",
             "main",
             1000,
         );
-        other_mr.workspace_id = Id::new("ws-1");
         other_mr.author_agent_id = Some(Id::new("agent-inflight"));
         state.merge_requests.create(&other_mr).await.unwrap();
 
@@ -10731,12 +10731,12 @@ mod tests {
         let mut second_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-merged-2"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "second landed work",
             "feat/merged-2",
             "main",
             1000,
         );
-        second_mr.workspace_id = Id::new("ws-1");
         second_mr.author_agent_id = Some(Id::new("agent-merged-2"));
         state.merge_requests.create(&second_mr).await.unwrap();
 
@@ -11028,12 +11028,12 @@ mod tests {
                 .find(|r| r.name == "rebase-repo")
                 .unwrap()
                 .id,
+            Id::new("ws-1"),
             "second landed work",
             "feat/merged2",
             "main",
             1001,
         );
-        second_mr.workspace_id = Id::new("ws-1");
         second_mr.author_agent_id = Some(Id::new("agent-merged"));
         state.merge_requests.create(&second_mr).await.unwrap();
         enqueue_mr(&state, "mr-merged-2", 100, 1001).await;
@@ -11408,12 +11408,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-stale-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Stale spec MR",
             "feat/stale",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.spec_ref = Some(format!("system/identity.md@{stale_sha}"));
         state.merge_requests.create(&mr).await.unwrap();
         let entry = MergeQueueEntry::new(Id::new("entry-stale-spec"), mr.id.clone(), 50, 1000);
@@ -11453,12 +11453,12 @@ mod tests {
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-current-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Current spec MR",
             "feat/current",
             "main",
             1001,
         );
-        mr2.workspace_id = Id::new("ws-1");
         mr2.spec_ref = Some(format!("system/identity.md@{head_blob}"));
         state.merge_requests.create(&mr2).await.unwrap();
         let entry2 = MergeQueueEntry::new(Id::new("entry-current-spec"), mr2.id.clone(), 50, 1001);
@@ -11527,12 +11527,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-unsigned-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Unsigned spec approval MR",
             "feat/unsigned",
             "main",
             2000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("author-agent-1"));
         mr.spec_ref = Some(format!("system/signed.md@{sha}"));
         state.merge_requests.create(&mr).await.unwrap();
@@ -11611,12 +11611,12 @@ mod tests {
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-signed-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Signed spec approval MR",
             "feat/signed",
             "main",
             2001,
         );
-        mr2.workspace_id = Id::new("ws-1");
         mr2.spec_ref = Some(format!("system/signed.md@{sha2}"));
         state.merge_requests.create(&mr2).await.unwrap();
         let entry2 = MergeQueueEntry::new(Id::new("entry-signed-spec"), mr2.id.clone(), 50, 2001);
@@ -11720,12 +11720,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-warn-stale"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Stale spec (warn) MR",
             "feat/warn",
             "main",
             3000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
         state.merge_requests.create(&mr).await.unwrap();
         let entry = MergeQueueEntry::new(Id::new("entry-warn-stale"), mr.id.clone(), 50, 3000);
@@ -11793,12 +11793,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-no-spec-ref"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "No spec_ref MR",
             "feat/nospec",
             "main",
             4000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("author-agent-specref"));
         state.merge_requests.create(&mr).await.unwrap();
         let entry = MergeQueueEntry::new(Id::new("entry-no-spec-ref"), mr.id.clone(), 50, 4000);
@@ -11858,12 +11858,12 @@ mod tests {
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-with-spec-ref"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Spec_ref MR",
             "feat/withspec",
             "main",
             4001,
         );
-        mr2.workspace_id = Id::new("ws-1");
         mr2.spec_ref = Some(format!("system/identity.md@{}", "a".repeat(40)));
         state.merge_requests.create(&mr2).await.unwrap();
         let entry2 = MergeQueueEntry::new(Id::new("entry-with-spec-ref"), mr2.id.clone(), 50, 4001);
@@ -11927,12 +11927,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-unapproved-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Unapproved spec MR",
             "feat/unapproved",
             "main",
             5000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("author-agent-unapproved"));
         mr.spec_ref = Some(format!("system/unapproved.md@{sha}"));
         state.merge_requests.create(&mr).await.unwrap();
@@ -11973,12 +11973,12 @@ mod tests {
         let mut mr2 = gyre_domain::MergeRequest::new(
             Id::new("mr-approved-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Approved spec MR",
             "feat/approved",
             "main",
             5001,
         );
-        mr2.workspace_id = Id::new("ws-1");
         mr2.spec_ref = Some(format!("system/unapproved.md@{sha}"));
         state.merge_requests.create(&mr2).await.unwrap();
         let entry2 = MergeQueueEntry::new(Id::new("entry-approved-spec"), mr2.id.clone(), 50, 5001);
@@ -12041,15 +12041,15 @@ mod tests {
         .await;
         let repo = create_repo_in_workspace(&state, "sup-repo", "ws-sup").await;
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-sup"),
             repo.id.clone(),
+            Id::new("ws-sup"),
             "MR in supervised workspace",
             "feat/sup",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-sup");
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-sup", 50, 1000).await;
 
@@ -12110,12 +12110,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-sup-approved"),
             repo.id.clone(),
+            Id::new("ws-sup2"),
             "Approved MR in supervised workspace",
             "feat/sup-approved",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-sup2");
         mr.transition_status(MrStatus::Approved).unwrap();
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-sup-approved", 50, 1000).await;
@@ -12162,15 +12162,15 @@ mod tests {
         .await;
         let repo = create_repo_in_workspace(&state, "guided-repo", "ws-guided").await;
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-guided"),
             repo.id.clone(),
+            Id::new("ws-guided"),
             "MR in guided workspace",
             "feat/guided",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-guided");
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-guided", 50, 1000).await;
 
@@ -12207,15 +12207,15 @@ mod tests {
         .await;
         let repo = create_repo_in_workspace(&state, "sup-repo-fc", "ws-sup-fc").await;
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-sup-fc"),
             repo.id.clone(),
+            Id::new("ws-sup-fc"),
             "MR in supervised workspace with failing policy store",
             "feat/sup-fc",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-sup-fc");
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-sup-fc", 50, 1000).await;
 
@@ -12279,15 +12279,15 @@ mod tests {
         .await;
         let repo = create_repo_in_workspace(&state, "guided-repo-fc", "ws-guided-fc").await;
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-guided-fc"),
             repo.id.clone(),
+            Id::new("ws-guided-fc"),
             "MR in guided workspace with failing policy store",
             "feat/guided-fc",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-guided-fc");
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-guided-fc", 50, 1000).await;
 
@@ -12425,15 +12425,15 @@ mod tests {
         )
         .await;
         let sup_repo = create_repo_in_workspace(&state, "mixed-sup-repo", "ws-mixed-sup").await;
-        let mut sup_mr = gyre_domain::MergeRequest::new(
+        let sup_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-mixed-sup"),
             sup_repo.id.clone(),
+            Id::new("ws-mixed-sup"),
             "Held MR in supervised workspace",
             "feat/mixed-sup",
             "main",
             1000,
         );
-        sup_mr.workspace_id = Id::new("ws-mixed-sup");
         state.merge_requests.create(&sup_mr).await.unwrap();
         enqueue_mr(&state, "mr-mixed-sup", 50, 1000).await; // enqueued first
 
@@ -12447,15 +12447,15 @@ mod tests {
         .await;
         let guided_repo =
             create_repo_in_workspace(&state, "mixed-guided-repo", "ws-mixed-guided").await;
-        let mut guided_mr = gyre_domain::MergeRequest::new(
+        let guided_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-mixed-guided"),
             guided_repo.id.clone(),
+            Id::new("ws-mixed-guided"),
             "Merge-ready MR in guided workspace",
             "feat/mixed-guided",
             "main",
             1001,
         );
-        guided_mr.workspace_id = Id::new("ws-mixed-guided");
         state.merge_requests.create(&guided_mr).await.unwrap();
         enqueue_mr(&state, "mr-mixed-guided", 50, 1001).await; // enqueued later
 
@@ -12524,15 +12524,15 @@ mod tests {
         let repo = create_repo_in_workspace(&state, "escape-repo", "ws-escape").await;
 
         // OLDER unapproved MR — held for human review, sorts first.
-        let mut held_mr = gyre_domain::MergeRequest::new(
+        let held_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-escape-held"),
             repo.id.clone(),
+            Id::new("ws-escape"),
             "Unapproved MR awaiting human review",
             "feat/escape-held",
             "main",
             1000,
         );
-        held_mr.workspace_id = Id::new("ws-escape");
         state.merge_requests.create(&held_mr).await.unwrap();
         enqueue_mr(&state, "mr-escape-held", 50, 1000).await;
 
@@ -12541,12 +12541,12 @@ mod tests {
         let mut approved_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-escape-approved"),
             repo.id.clone(),
+            Id::new("ws-escape"),
             "Human-approved MR behind a held entry",
             "feat/escape-approved",
             "main",
             1001,
         );
-        approved_mr.workspace_id = Id::new("ws-escape");
         approved_mr.transition_status(MrStatus::Approved).unwrap();
         state.merge_requests.create(&approved_mr).await.unwrap();
         enqueue_mr(&state, "mr-escape-approved", 50, 1001).await;
@@ -12641,15 +12641,15 @@ mod tests {
         .await;
         let guided_repo =
             create_repo_in_workspace(&state, "group-guided-repo", "ws-group-guided").await;
-        let mut guided_mr = gyre_domain::MergeRequest::new(
+        let guided_mr = gyre_domain::MergeRequest::new(
             Id::new("mr-starve-guided"),
             guided_repo.id.clone(),
+            Id::new("ws-group-guided"),
             "Merge-ready MR behind a held atomic group",
             "feat/starve-guided",
             "main",
             1002,
         );
-        guided_mr.workspace_id = Id::new("ws-group-guided");
         state.merge_requests.create(&guided_mr).await.unwrap();
         enqueue_mr(&state, "mr-starve-guided", 50, 1002).await;
 
@@ -12721,15 +12721,15 @@ mod tests {
         .await;
         let repo = create_repo_in_workspace(&state, "guided-seeded-repo", "ws-guided-seeded").await;
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-guided-seeded"),
             repo.id.clone(),
+            Id::new("ws-guided-seeded"),
             "MR in seeded guided workspace",
             "feat/guided-seeded",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-guided-seeded");
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-guided-seeded", 50, 1000).await;
 
@@ -12776,15 +12776,15 @@ mod tests {
         .await;
         let repo = create_repo_in_workspace(&state, "sup-seeded-repo", "ws-sup-seeded").await;
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-sup-seeded"),
             repo.id.clone(),
+            Id::new("ws-sup-seeded"),
             "MR in seeded supervised workspace",
             "feat/sup-seeded",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-sup-seeded");
         state.merge_requests.create(&mr).await.unwrap();
         enqueue_mr(&state, "mr-sup-seeded", 50, 1000).await;
 

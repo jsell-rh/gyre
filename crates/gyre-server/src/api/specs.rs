@@ -5143,12 +5143,12 @@ specs:
         let mut mr = gyre_domain::MergeRequest::new(
             gyre_common::Id::new("mr-spec-edit-1"),
             gyre_common::Id::new("repo-1"),
+            gyre_common::Id::new("ws-1"),
             "Edit spec",
             "spec-edit/reject-mr",
             "main",
             1700000000,
         );
-        mr.workspace_id = gyre_common::Id::new("ws-1");
         mr.spec_ref =
             Some("system/reject-mr.md@0000000000000000000000000000000000000000".to_string());
         state.merge_requests.create(&mr).await.unwrap();
@@ -6904,13 +6904,13 @@ specs:
                 let mut mr = MergeRequest::new(
                     mr_id.clone(),
                     gyre_common::Id::new("repo-gate"),
+                    gyre_common::Id::new("ws1"),
                     "Test MR",
                     "feature/test",
                     "main",
                     1700000000,
                 );
                 mr.spec_ref = Some(spec_ref.to_string());
-                mr.workspace_id = gyre_common::Id::new("ws1");
                 state.merge_requests.create(&mr).await.unwrap();
 
                 // Enqueue the MR.

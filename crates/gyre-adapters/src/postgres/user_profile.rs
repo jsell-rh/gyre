@@ -3,17 +3,19 @@ use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::{
-    AuditEventType, JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken,
+    AuditEventType, JudgmentEntry, JudgmentType, UserNotificationPreference, UserSession, UserToken,
 };
 use gyre_ports::{
-    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    JudgmentLedgerRepository, SessionRepository, UserChannelPreferenceRepository,
     UserNotificationPreferenceRepository, UserTokenRepository,
 };
 use std::sync::Arc;
 
 use super::audit::AuditEventRow;
 use super::PgStorage;
-use crate::schema::{user_channel_preferences, user_notification_preferences, user_tokens};
+use crate::schema::{
+    user_channel_preferences, user_notification_preferences, user_sessions, user_tokens,
+};
 
 // ─── User Channel Preferences (task-112, user-management.md §Delivery Channels) ──
 
@@ -90,6 +92,241 @@ impl UserChannelPreferenceRepository for PgStorage {
                 .execute(&mut *conn)
                 .context("upsert user channel preferences")?;
             Ok(())
+        })
+        .await?
+    }
+}
+
+// The user_sessions / user_tokens / user_notification_preferences tables are
+// created by the shared migrations dir (runs on both SQLite and PostgreSQL),
+// so PgStorage implements the same contracts as SqliteStorage against the
+// same schema.
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = user_sessions)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+struct UserSessionRow {
+    id: String,
+    user_id: String,
+    token_hash: String,
+    ip_address: String,
+    user_agent: String,
+    created_at: i64,
+    last_active_at: i64,
+    expires_at: i64,
+    revoked: i32,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = user_sessions)]
+struct UserSessionRecord<'a> {
+    id: &'a str,
+    user_id: &'a str,
+    token_hash: &'a str,
+    ip_address: &'a str,
+    user_agent: &'a str,
+    created_at: i64,
+    last_active_at: i64,
+    expires_at: i64,
+    revoked: i32,
+}
+
+impl From<UserSessionRow> for UserSession {
+    fn from(r: UserSessionRow) -> Self {
+        UserSession {
+            id: Id::new(r.id),
+            user_id: Id::new(r.user_id),
+            token_hash: r.token_hash,
+            ip_address: r.ip_address,
+            user_agent: r.user_agent,
+            created_at: r.created_at as u64,
+            last_active_at: r.last_active_at as u64,
+            expires_at: r.expires_at as u64,
+            revoked: r.revoked != 0,
+        }
+    }
+}
+
+#[async_trait]
+impl SessionRepository for PgStorage {
+    async fn create(&self, session: &UserSession) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let s = session.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let record = UserSessionRecord {
+                id: s.id.as_str(),
+                user_id: s.user_id.as_str(),
+                token_hash: &s.token_hash,
+                ip_address: &s.ip_address,
+                user_agent: &s.user_agent,
+                created_at: s.created_at as i64,
+                last_active_at: s.last_active_at as i64,
+                expires_at: s.expires_at as i64,
+                revoked: if s.revoked { 1 } else { 0 },
+            };
+            diesel::insert_into(user_sessions::table)
+                .values(&record)
+                .execute(&mut *conn)
+                .context("insert user_session")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn list_for_user(&self, user_id: &Id) -> Result<Vec<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = user_sessions::table
+                .filter(user_sessions::user_id.eq(&uid))
+                .order(user_sessions::created_at.desc())
+                .load::<UserSessionRow>(&mut *conn)
+                .context("list user_sessions")?;
+            Ok(rows.into_iter().map(Into::into).collect())
+        })
+        .await?
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let row = user_sessions::table
+                .find(id.as_str())
+                .first::<UserSessionRow>(&mut *conn)
+                .optional()
+                .context("find user_session by id")?;
+            Ok(row.map(Into::into))
+        })
+        .await?
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let hash = token_hash.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let row = user_sessions::table
+                .filter(user_sessions::token_hash.eq(&hash))
+                // Newest first: a credential shared by several devices has
+                // several rows with the same hash.
+                .order(user_sessions::created_at.desc())
+                .then_order_by(user_sessions::id.desc())
+                .first::<UserSessionRow>(&mut *conn)
+                .optional()
+                .context("find user_session by token hash")?;
+            Ok(row.map(Into::into))
+        })
+        .await?
+    }
+
+    async fn find_by_credential_and_device(
+        &self,
+        user_id: &Id,
+        credential_hash: &str,
+        ip_address: &str,
+        user_agent: &str,
+    ) -> Result<Option<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        let cred = credential_hash.to_string();
+        let ip = ip_address.to_string();
+        let ua = user_agent.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Newest matching row first: after a re-mint (device
+            // returning after an idle expiry), both the stale expired
+            // row and the fresh row match this tuple; the fresh one
+            // must be found or the auth path would re-mint on every
+            // request.
+            let row = user_sessions::table
+                .filter(user_sessions::user_id.eq(&uid))
+                .filter(user_sessions::token_hash.eq(&cred))
+                .filter(user_sessions::ip_address.eq(&ip))
+                .filter(user_sessions::user_agent.eq(&ua))
+                .order(user_sessions::created_at.desc())
+                .then_order_by(user_sessions::id.desc())
+                .first::<UserSessionRow>(&mut *conn)
+                .optional()
+                .context("find user_session by credential+device")?;
+            Ok(row.map(Into::into))
+        })
+        .await?
+    }
+
+    async fn touch(&self, id: &Id, last_active_at: u64, expires_at: u64) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Sliding expiry: each throttled activity write also restarts
+            // the session TTL (port contract on `touch`).
+            diesel::update(user_sessions::table.find(id.as_str()))
+                .set((
+                    user_sessions::last_active_at.eq(last_active_at as i64),
+                    user_sessions::expires_at.eq(expires_at as i64),
+                ))
+                .execute(&mut *conn)
+                .context("touch user_session")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn revoke(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        let uid = user_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Scoped revoke: only mark revoked if the session belongs to the
+            // requesting user. Idempotent — already-revoked rows stay revoked.
+            diesel::update(
+                user_sessions::table
+                    .filter(user_sessions::id.eq(id.as_str()))
+                    .filter(user_sessions::user_id.eq(uid.as_str())),
+            )
+            .set(user_sessions::revoked.eq(1))
+            .execute(&mut *conn)
+            .context("revoke user_session")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn revoke_all_for_user(&self, user_id: &Id) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(
+                user_sessions::table
+                    .filter(user_sessions::user_id.eq(&uid))
+                    .filter(user_sessions::revoked.eq(0)),
+            )
+            .set(user_sessions::revoked.eq(1))
+            .execute(&mut *conn)
+            .context("revoke all user_sessions for user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn delete_expired_before(&self, cutoff: u64) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Port contract: revoked rows are never deleted — they are the
+            // durable record that keeps a signed-out credential rejected.
+            let n = diesel::delete(user_sessions::table)
+                .filter(user_sessions::expires_at.lt(cutoff as i64))
+                .filter(user_sessions::revoked.eq(0))
+                .execute(&mut *conn)
+                .context("delete expired user_sessions")?;
+            Ok(n as u64)
         })
         .await?
     }

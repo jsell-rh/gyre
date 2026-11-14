@@ -106,7 +106,7 @@ pub async fn evaluate_push_constraints(
                         event = "attestation.context_binding_mismatch",
                         binding = %child.label,
                         message = %child.message,
-                        "attestation.context_binding_mismatch (audit-only): {}",
+                        "attestation.context_binding_mismatch (audit-only): {}", // enforcement-mode:ok — audit-only mirror by design (Phase 2 observability); enforcement lives in enforce_push_constraints
                         child.message
                     );
                 }
@@ -876,7 +876,7 @@ pub async fn evaluate_merge_constraints(
                         event = "attestation.context_binding_mismatch",
                         binding = %child.label,
                         message = %child.message,
-                        "attestation.context_binding_mismatch (audit-only): {}",
+                        "attestation.context_binding_mismatch (audit-only): {}", // enforcement-mode:ok — audit-only mirror by design (Phase 2 observability); enforcement lives in enforce_push_constraints
                         child.message
                     );
                 }
