@@ -14,6 +14,7 @@ pub mod budget_call;
 pub mod budget_usage;
 pub mod call_graph;
 pub mod chain_attestation;
+pub mod commit_signature_repo;
 pub mod compute;
 pub mod compute_target_repository;
 pub mod container_audit_repo;
@@ -39,6 +40,7 @@ pub mod pre_accept;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rollout_policy;
@@ -51,6 +53,7 @@ pub mod spec_approval_event_repo;
 pub mod spec_assertion_result_repo;
 pub mod spec_ledger_repo;
 pub mod spec_lifecycle_repo;
+pub mod spec_link_repo;
 pub mod spec_policy_repo;
 pub mod storage;
 pub mod task;
@@ -75,6 +78,7 @@ pub use budget_call::BudgetCallRepository;
 pub use budget_usage::BudgetUsageRepository;
 pub use call_graph::CallGraphExtractor;
 pub use chain_attestation::ChainAttestationRepository;
+pub use commit_signature_repo::{CommitSignature, CommitSignatureRepository, SigstoreMode};
 pub use compute::{ComputeTarget, ProcessHandle, SpawnConfig};
 pub use compute_target_repository::ComputeTargetRepository;
 pub use container_audit_repo::ContainerAuditRepository;
@@ -95,7 +99,7 @@ pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;
 pub use message::{MessageConsumer, MessageRepository};
 pub use meta_spec_repository::{MetaSpecBindingRepository, MetaSpecFilter, MetaSpecRepository};
-pub use meta_spec_set::MetaSpecSetRepository;
+pub use meta_spec_set::{MetaSpecSetRepository, TenantMetaSpecSetRepository};
 pub use network::NetworkPeerRepository;
 pub use notification::NotificationRepository;
 pub use policy::PolicyRepository;
@@ -103,11 +107,15 @@ pub use pre_accept::{GateOutcome, PreAcceptGate, PushContext};
 pub use prompt_template::PromptRepository;
 pub use push_gate::PushGateRepository;
 pub use quality_gate::{GateResultRepository, QualityGateRepository};
+pub use repo_access::RepoAccessOverrideRepository;
 pub use repository::RepoRepository;
 pub use review::ReviewRepository;
 pub use rollout_policy::RolloutPolicyRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
-pub use search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
+pub use search::{
+    parse_query, FacetCounts, FacetFilter, ParsedQuery, SearchDocument, SearchPort, SearchQuery,
+    SearchResult, SearchSuggestion, TimeBounds, UPDATED_AT_KEY,
+};
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use spec_approval::SpecApprovalRepository;
@@ -115,6 +123,7 @@ pub use spec_approval_event_repo::SpecApprovalEventRepository;
 pub use spec_assertion_result_repo::SpecAssertionResultRepository;
 pub use spec_ledger_repo::SpecLedgerRepository;
 pub use spec_lifecycle_repo::SpecLifecycleRepository;
+pub use spec_link_repo::SpecLinkRepository;
 pub use spec_policy_repo::SpecPolicyRepository;
 pub use storage::StoragePort;
 pub use task::TaskRepository;
@@ -124,7 +133,8 @@ pub use trace::{SpanPayload, TraceRepository};
 pub use trust_anchor::TrustAnchorRepository;
 pub use user::{ApiKeyRepository, UserRepository};
 pub use user_profile::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    UserNotificationPreferenceRepository, UserTokenRepository,
 };
 pub use user_workspace_state::UserWorkspaceStateRepository;
 pub use workspace::{PersonaRepository, WorkspaceRepository};

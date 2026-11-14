@@ -123,7 +123,7 @@ impl From<Persona> for PersonaResponse {
 }
 
 pub async fn create_persona(
-    _auth: crate::auth::AuthenticatedAgent,
+    auth: crate::auth::AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePersonaRequest>,
 ) -> Result<(StatusCode, Json<PersonaResponse>), ApiError> {
@@ -142,77 +142,28 @@ pub async fn create_persona(
     persona.temperature = req.temperature;
     persona.max_tokens = req.max_tokens;
     persona.budget = req.budget;
+    // The creator owns the persona (its approval notifications route to the
+    // owner per user-management.md §Who Gets Notified). Use the
+    // authenticated user's id — `auth.agent_id` is only the display name
+    // for JWT/API-key auth (and "system" for the global dev token), which
+    // is not a real user inbox. Callers without a user identity (dev/
+    // agent tokens) leave the owner unset so the approval request routes
+    // to the workspace Admins/Owners (main's task-123 fallback) instead of
+    // a "system" inbox — the request stays visible to real approvers
+    // rather than a token-side inbox nobody reads.
+    persona.owner = auth.user_id.as_ref().map(|id| format!("user:{id}"));
     // Recompute hash now that capabilities are set.
     persona.refresh_content_hash();
     state.personas.create(&persona).await?;
+    // search.md §Searchable Entities: personas indexed by prompt content with
+    // a scope facet.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
 
-    // New personas start Pending approval: request it from the persona's
-    // owner, or when no owner is set, from the workspace Admins/Owners
-    // (user-management.md §Notification Entity: PersonaApprovalRequested;
-    // "Who Gets Notified" routes it to the persona's owner). Best-effort —
-    // the persona exists regardless of notification delivery.
-    if persona.approval_status == gyre_domain::PersonaApprovalStatus::Pending {
-        let (scope_workspace, tenant_id) = match &persona.scope {
-            gyre_domain::PersonaScope::Workspace(ws_id) => {
-                match state.workspaces.find_by_id(ws_id).await {
-                    Ok(Some(ws)) => (Some(ws_id.clone()), ws.tenant_id.to_string()),
-                    _ => (None, String::new()),
-                }
-            }
-            _ => (None, String::new()),
-        };
-        let mut recipients: Vec<Id> = Vec::new();
-        if let Some(owner) = persona.owner.as_deref().filter(|o| !o.is_empty()) {
-            recipients.push(Id::new(owner.to_string()));
-        } else if let Some(ws_id) = scope_workspace.as_ref() {
-            let members = state
-                .workspace_memberships
-                .list_by_workspace(ws_id)
-                .await
-                .unwrap_or_default();
-            recipients.extend(
-                members
-                    .into_iter()
-                    .filter(|m| {
-                        matches!(
-                            m.role,
-                            gyre_domain::WorkspaceRole::Admin | gyre_domain::WorkspaceRole::Owner
-                        )
-                    })
-                    .map(|m| m.user_id),
-            );
-        }
-        for user_id in &recipients {
-            if let Some(ws_id) = scope_workspace.as_ref() {
-                crate::notifications::notify_rich(
-                    state.as_ref(),
-                    ws_id.clone(),
-                    user_id.clone(),
-                    gyre_common::NotificationType::PersonaApprovalRequested,
-                    format!("Persona '{}' awaits approval", persona.name),
-                    &tenant_id,
-                    Some(
-                        serde_json::json!({
-                            "persona_id": persona.id.as_str(),
-                            "persona_name": persona.name,
-                        })
-                        .to_string(),
-                    ),
-                    Some(persona.id.to_string()),
-                    None,
-                    "persona",
-                    None,
-                )
-                .await;
-            }
-        }
-        if recipients.is_empty() {
-            tracing::info!(
-                persona_id = %persona.id,
-                "persona approval requested: no routable owner (no owner set, non-workspace scope)"
-            );
-        }
-    }
+    // Persona is created Pending; notify its owner that approval is
+    // requested (user-management.md §Who Gets Notified: "Persona approval
+    // requested" → Persona's `owner`).
+    crate::notification_dispatcher::notify_persona_approval_requested(state.as_ref(), &persona)
+        .await;
 
     Ok((StatusCode::CREATED, Json(PersonaResponse::from(persona))))
 }
@@ -289,6 +240,9 @@ pub async fn update_persona(
     persona.updated_at = now_secs();
     persona.refresh_content_hash();
     state.personas.update(&persona).await?;
+    // search.md §Index Updates: write paths re-index so prompt-content searches
+    // never serve stale text.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok(Json(PersonaResponse::from(persona)))
 }
 
@@ -302,7 +256,9 @@ pub async fn delete_persona(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("persona {id} not found")))?;
-    state.personas.delete(&Id::new(id)).await?;
+    state.personas.delete(&Id::new(&id)).await?;
+    // De-index so persona searches never return deleted personas.
+    crate::search_indexer::deindex(&state, "persona", &id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -323,6 +279,8 @@ pub async fn approve_persona(
     persona.approved_at = Some(now);
     persona.updated_at = now;
     state.personas.update(&persona).await?;
+    // search.md §Index Updates: write paths re-index.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok(Json(PersonaResponse::from(persona)))
 }
 
@@ -807,6 +765,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -825,6 +784,7 @@ mod tests {
             state.notifications.as_ref(),
             &Id::new("user-viewer"),
             Some(&ws_id),
+            None,
             None,
             None,
             None,

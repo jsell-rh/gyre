@@ -17,6 +17,7 @@ This document covers the full agent lifecycle: spawn, operation, and completion.
   "branch": "feat/my-feature",
   "parent_id": "<orchestrator-agent-uuid>",    // optional
   "compute_target_id": "<target-uuid>",        // optional -- remote compute target
+  "persona": "security",                       // optional -- bare persona name; recorded as the agent's persona (spec-registry.md §16) and injected as GYRE_PERSONA in the container env. Must resolve to an Approved persona in the repo/workspace/tenant chain (same fail-closed posture as persona_slug), else the spawn is rejected with 400
   "disconnected_behavior": "Pause"             // optional -- "Pause" (default) | "ContinueOffline" | "Abort"; controls stale-agent-detector behavior when agent loses connectivity
 }
 
@@ -79,6 +80,14 @@ When spawning an agent into a container compute target, the server pre-mints the
 | `GYRE_AGENT_ID` | Agent UUID | Identity for API calls |
 | `GYRE_TASK_ID` | Task UUID | Assigned task reference |
 | `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
+| `GYRE_META_SPEC_PROMPT` | _(when meta-specs apply)_ | Rendered meta-spec system prompt (agent-runtime.md §5): required tenant + workspace meta-specs and spec-level bindings at pinned versions |
+| `GYRE_META_SPEC_SET_SHA` | _(when meta-specs apply)_ | SHA-256 of the assembled prompt set (provenance; matches the spawn response's `meta_spec_set_sha`) |
+| `GYRE_PROTOCOL_PROMPT` | Protocol section text | System-managed protocol (agent-runtime.md §5): Ralph loop rules, MCP tools, heartbeat, escalation, completion — also served on demand via the MCP `system://protocol` prompt |
+| `GYRE_ITERATION` | `0`, `1`, ... | Ralph-loop iteration for this session (agent-runtime.md §1 Phase 7) |
+| `GYRE_PROMPT_PERSONA` | _(optional)_ | Persona system prompt | Persona prompt (Platform Model §4.3): the resolved persona's prompt, injected only when a persona is bound to the agent (spawn request `persona_slug`, resolved repo → workspace → tenant, must be approved). Note: the MCP `system://persona` prompt serves the assembled meta-spec set per agent-runtime.md §5 |
+| `GYRE_PROMPT_PROTOCOL` | Protocol norms text | `system://protocol` (Platform Model §4.3): interaction norms, Ralph loop definition, escalation rules |
+| `GYRE_PROMPT_CONTEXT` | Task/worktree context text | `system://context` (Platform Model §4.3): current task (title, spec ref, description), worktree branch/path, repo info |
+| `GYRE_PROMPT_CONSTRAINTS` | Constraints text | `system://constraints` (Platform Model §4.3): budget limits + remaining budget, agent lifetime cap, scope boundaries |
 | `GYRE_AGENT_COMMAND` | _(optional)_ | Command for the entrypoint to exec after setup (e.g. a CI script) |
 | `GYRE_CRED_{NAME}` | _(per secret)_ | Resolved secrets from the secrets repository (Platform Model §7): tenant/workspace/repo/task scoped, nearest scope wins on name collision, expired secrets excluded. Held in memory by the `cred-proxy` sidecar and scrubbed before the agent process starts -- raw values never appear in the agent process env |
 | `GYRE_CRED_PROXY` | `http://127.0.0.1:8765` | Address of the `cred-proxy` sidecar (M27); injected so entrypoint and agent-runner can reference the proxy address |
@@ -131,13 +140,25 @@ When the merge queue executes an `AgentReview` or `AgentValidation` gate, it spa
 | `GYRE_GATE_AGENT_ID` | Identity to use when submitting reviews via API |
 | `GYRE_DIFF_URL` | URL to fetch the MR diff |
 | `GYRE_SPEC_REF` | Spec reference bound to the MR (if any) |
+| `GYRE_SPEC_URL` | URL to fetch the spec content at the MR's **pinned** spec_ref SHA (not HEAD) — `GET /api/v1/merge-requests/{id}/spec`. Empty when the MR has no spec_ref. Spec-alignment review (agent-gates.md §Integration with Agent Gates) must compare the diff against this pinned version |
 | `GYRE_PERSONA` | Persona file path for the gate |
+| `GYRE_VALIDATION_TYPE` | AgentValidation only: domain-specific check identifier from the gate config (empty string when unset) |
 
 **`AgentReview` protocol:** exit with any code; server checks for an Approved/ChangesRequested review submitted by `GYRE_GATE_AGENT_ID` after the process exits.
 
 **`AgentValidation` protocol:** exit 0 = pass, non-zero = fail.
 
-**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents.
+**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents. Review tokens carry OIDC scope `review:submit` (read MR context, submit verdict, read-only -- push denied); validation tokens carry `validation:report` (read MR context only -- no review submission, push denied). Scope checks are exact-match on the capability string.
+
+**Manifest-declared gates (spec-registry.md §16, task-195):** when an MR's `spec_ref` names a spec whose `specs/manifest.yaml` entry declares `gates:` (e.g. `[security, accountability]`), the forge spawns a gate agent per persona at enqueue time instead of running a subprocess — no command is involved. For each manifest gate:
+
+1. The server creates a real `Agent` record (`gate-<persona>-<mr-id>`, workspace-scoped, `spawned_by: "server"`), records the persona in the `agent_personas` namespace, and registers a scoped EdDSA JWT in `agent_tokens` carrying OIDC scope `review:submit` (revoked when the gate resolves). Because the token is review:submit-scoped, `submit_review` binds the recorded reviewer to the verified token subject — the persona / `min_attestation_level` / `stack_hash` constraints are evaluated against the identity the server minted, never a request-body reviewer id.
+2. The gate agent's runtime process is launched through the platform's compute-target machinery — the same execution path `POST /api/v1/agents/spawn` uses (`api::spawn::launch_agent_workload`: workspace-assigned target → tenant default → local; command from the target config, `GYRE_AGENT_COMMAND`, or `/gyre/entrypoint.sh`). The launched runtime receives its scoped token via `GYRE_AUTH_TOKEN` (the credential delivery channel every spawned agent uses) plus its review context (`GYRE_MR_ID`, `GYRE_GATE_ID`, `GYRE_PERSONA`, `GYRE_REPO_ID`, `GYRE_DIFF_URL`, `GYRE_SPEC_REF`, `GYRE_MIN_ATTESTATION_LEVEL`, `GYRE_STACK_HASH`), and a workload attestation is recorded for the agent at launch — so its own reviews derive at attestation level ≥ 1 and can satisfy the manifest's constraints (higher levels follow the normal mechanisms: stack attestation for level 2, container id + image for level 3).
+3. A `ReviewRequest` message is dispatched to the agent carrying `{mr_id, repo_id, spec_path, spec_ref, persona, min_attestation_level, stack_hash}` — the gate agent runtime receives its review context directly in its launch env (`GYRE_MR_ID`, `GYRE_PERSONA`, `GYRE_SPEC_REF`, …) and can poll the message via the MCP surface (`gyre_message_poll`, which derives the inbox from the verified token subject — inherently own-inbox), fetch the MR diff, review, and submit its verdict via the standard review API (`POST /api/v1/merge-requests/{id}/reviews`, `reviewer_agent_id` = its own agent id — enforced by the reviewer identity binding, which applies to every agent-token principal, not just scoped gate agents). The REST inbox route (`GET /api/v1/agents/{id}/messages`) is kept off the reviewer allow-list as least privilege / defense in depth: the handler actually routed there (`messages::poll_messages`) does enforce own-inbox for non-admin callers, but a single-purpose review token has no need for it — its ReviewRequest delivery is the launch env plus `/mcp`. Reviews are attributed per reviewer; each reviewer's **latest** verdict is the one that counts.
+4. The gate passes only on an `Approved` review from an agent running the gate persona whose workload attestation satisfies `min_attestation_level` (and an exact `stack_hash` match when pinned); a final `ChangesRequested` from the persona fails it; otherwise it waits up to the gate timeout, then fails closed (blocking the merge).
+5. The gate agent is torn down after its gate resolves — its runtime process/container/Pod is killed through the compute backend that owns its handle (`spawned_backends` routing, the same invariant the admin kill path enforces: container ids go to `docker rm --force`, Pods to `kubectl delete pod`, remote pids to the remote host — never a local-only pid kill), the `spawned_backends` entry is removed, its token revoked with an `AgentTokenRevoked` audit event, and its status set to `Stopped` — ephemeral and single-purpose (agent-gates.md §Gate Agent Lifecycle). Re-enqueueing the MR reuses the still-running gate agent rather than double-spawning.
+
+A repo-level gate and a manifest gate targeting the same persona do not double-run: the manifest gate wins (it carries the manifest's attestation constraints) and the repo-level duplicate for that persona is skipped.
 
 **Merge processor dep failure handling (P5):** before processing each queued entry, the merge processor checks dependency health: if a dependency MR is `Closed`, the queue entry is marked `Failed` and a High-priority task `"Dependency MR-{id} was closed, reassess MR-{dependent}"` is auto-created; if a dependency has 3+ gate failures, an escalation warning is logged.
 

@@ -1,14 +1,17 @@
 //! GET /api/v1/search — full-text search across all entities.
+//! GET /api/v1/search/suggest — autocomplete suggestions (spec §API).
+//! GET /api/v1/search/facets — available facets and their value counts (§API).
 
 use axum::{
     extract::{Query, State},
     http::StatusCode,
     Json,
 };
-use gyre_ports::search::SearchQuery;
+use gyre_ports::search::{parse_query, FacetCounts, SearchQuery};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -26,6 +29,10 @@ fn default_limit() -> usize {
     20
 }
 
+fn default_suggest_limit() -> usize {
+    10
+}
+
 #[derive(Serialize)]
 pub struct SearchResultItem {
     pub entity_type: String,
@@ -41,9 +48,13 @@ pub struct SearchResponse {
     pub query: String,
     pub total: usize,
     pub results: Vec<SearchResultItem>,
+    /// Aggregated facet counts over the filtered match set (§Response Format):
+    /// `{"type": {"spec": 5, ...}, "workspace": {...}, "status": {...}}`.
+    pub facet_counts: FacetCounts,
 }
 
 pub async fn search_handler(
+    auth: AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse>, ApiError> {
@@ -53,17 +64,55 @@ pub async fn search_handler(
             query: q,
             total: 0,
             results: vec![],
+            facet_counts: FacetCounts::new(),
         }));
     }
     let limit = params.limit.min(100);
+    // §Query Language: parse `q` (terms, quoted phrases, facets) — the
+    // structured form is what the search port executes. The legacy
+    // entity_type / workspace_id params remain as backward-compatible
+    // shortcuts, but query-string facets take precedence: `type:` in `q`
+    // overrides entity_type, `workspace:` overrides workspace_id.
+    let parsed = parse_query(&q);
+    let entity_type = if parsed.facets.contains_key("type") {
+        None
+    } else {
+        params.entity_type
+    };
+    let workspace_id = if parsed.facets.contains_key("workspace") {
+        None
+    } else {
+        params.workspace_id
+    };
+    // §Access Scoping: tenant/workspace/repo scope is derived from the
+    // authenticated caller — never from client-supplied params. The
+    // client's `workspace_id` stays a narrowing filter that the adapter
+    // intersects with the accessible set: requesting an inaccessible
+    // workspace yields zero results, not an error that leaks its existence.
+    let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
+    let port_query = SearchQuery {
+        query: q.clone(),
+        parsed,
+        entity_type,
+        workspace_id,
+        limit,
+        tenant_id: scope.tenant_id,
+        accessible_workspace_ids: scope.accessible_workspace_ids,
+        accessible_repo_ids: scope.accessible_repo_ids,
+    };
     let results = state
         .search
-        .search(SearchQuery {
-            query: q.clone(),
-            entity_type: params.entity_type,
-            workspace_id: params.workspace_id,
-            limit,
-        })
+        .search(port_query.clone())
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // §Response Format: facet_counts aggregate the query's filtered match set
+    // (same terms + filters + the caller's scope), not the truncated result
+    // page and not the whole index — hence a second aggregation call with the
+    // limit ignored.
+    let facet_counts = state
+        .search
+        .facet_counts(port_query)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -84,16 +133,93 @@ pub async fn search_handler(
         query: q,
         total,
         results: items,
+        facet_counts,
     }))
 }
 
-/// POST /api/v1/search/reindex — force full reindex (Admin only).
+/// GET /api/v1/search/suggest — autocomplete suggestions (spec §API).
+#[derive(Deserialize)]
+pub struct SuggestParams {
+    pub q: Option<String>,
+    #[serde(default = "default_suggest_limit")]
+    pub limit: usize,
+}
+
+#[derive(Serialize)]
+pub struct SuggestResponse {
+    pub suggestions: Vec<gyre_ports::search::SearchSuggestion>,
+}
+
+pub async fn suggest_handler(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<SuggestParams>,
+) -> Result<Json<SuggestResponse>, ApiError> {
+    let q = params.q.unwrap_or_default();
+    // Empty prefix matches everything — autocomplete wants nothing instead.
+    if q.trim().is_empty() {
+        return Ok(Json(SuggestResponse {
+            suggestions: vec![],
+        }));
+    }
+    let limit = params.limit.min(50);
+    // §Access Scoping: suggestions are scoped exactly like search results —
+    // the caller never sees titles of entities outside their accessible
+    // workspaces/repos.
+    let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
+    let suggestions = state
+        .search
+        .suggest(
+            SearchQuery::parse(q)
+                .with_entity_type(None)
+                .with_workspace_id(None)
+                .with_limit(limit)
+                .with_scope(
+                    scope.tenant_id,
+                    scope.accessible_workspace_ids,
+                    scope.accessible_repo_ids,
+                ),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(SuggestResponse { suggestions }))
+}
+
+/// GET /api/v1/search/facets — available facets and their value counts (§API).
+#[derive(Serialize)]
+pub struct FacetsResponse {
+    pub facets: FacetCounts,
+}
+
+pub async fn facets_handler(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<FacetsResponse>, ApiError> {
+    // No text filter: aggregate the caller's entire accessible set — for an
+    // Admin that is the whole tenant index, for everyone else their scoped
+    // slice. Counts never include documents the caller cannot access
+    // (§Access Scoping: counts must not leak).
+    let scope = crate::search_scope::derive_search_scope(&state, &auth).await;
+    let facets = state
+        .search
+        .facet_counts(SearchQuery::parse("").with_limit(0).with_scope(
+            scope.tenant_id,
+            scope.accessible_workspace_ids,
+            scope.accessible_repo_ids,
+        ))
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(FacetsResponse { facets }))
+}
+
+/// POST /api/v1/admin/search/reindex — force full reindex (Admin only).
+/// Rebuilds the entire index from the domain repositories (specs, tasks, MRs,
+/// reviews, commits, agents, personas, activity events, audit events, files)
+/// and returns the true number of documents indexed.
 pub async fn reindex_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let count = state
-        .search
-        .reindex_all()
+    let count = crate::search_indexer::reindex_all(&state)
         .await
         .map_err(ApiError::Internal)?;
     Ok((

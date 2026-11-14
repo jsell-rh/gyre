@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+import { detectRiskAnomalies } from '../lib/risk-map.js';
+import { computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
 
 // Mock canvas context
 let mockCtx;
@@ -103,16 +105,24 @@ describe('ExplorerCanvas', () => {
     expect(stats?.textContent).toContain('7 nodes');
   });
 
-  it('renders toolbar with lens toggle and all five filter presets', () => {
+  it('renders toolbar with lens checkbox group and all five filter presets', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const lensButtons = container.querySelectorAll('.lens-group .tb-btn');
-    expect(lensButtons.length).toBe(3);
-    const lensLabels = Array.from(lensButtons).map(b => b.textContent.trim());
+    // Lens selector is a checkbox group (ui-navigation.md §3): Structural
+    // (always on, locked) + Evaluative (toggle) + Observable (future, locked).
+    const lensChecks = container.querySelectorAll('.lens-group input[type="checkbox"]');
+    expect(lensChecks.length).toBe(3);
+    // Structural/Evaluative wrap in <label>; Observable is a div[role=checkbox]
+    // (keyboard-operable wrapper around the disabled visual input).
+    const lensLabels = Array.from(lensChecks).map((i) => i.closest('.lens-check').textContent.trim());
     expect(lensLabels[0]).toContain('Structural');
     expect(lensLabels[1]).toContain('Evaluative');
     expect(lensLabels[2]).toContain('Observable');
+    expect(lensChecks[0].checked).toBe(true);
+    expect(lensChecks[0].disabled).toBe(true);
+    expect(lensChecks[1].checked).toBe(false);
+    expect(lensChecks[2].disabled).toBe(true);
     // Filter presets (explorer-implementation.md §25 Phase 1)
     const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
     const filterLabels = Array.from(filterButtons).map(b => b.textContent.trim());
@@ -121,13 +131,13 @@ describe('ExplorerCanvas', () => {
     expect(filterButtons[0].classList.contains('active')).toBe(true);
   });
 
-  it('renders lens toggle with structural active', () => {
+  it('renders lens checkbox group with structural checked and locked', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const lensButtons = container.querySelectorAll('.lens-group .tb-btn, .tb-btn');
-    const structural = Array.from(lensButtons).find(b => b.textContent === 'Structural');
-    expect(structural?.classList.contains('active')).toBe(true);
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('renders minimap', () => {
@@ -939,9 +949,9 @@ describe('ExplorerCanvas — lens switching', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const btns = Array.from(container.querySelectorAll('.tb-btn'));
-    const structural = btns.find(b => b.textContent === 'Structural');
-    expect(structural?.classList.contains('active')).toBe(true);
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('evaluative lens renders metric selector when trace data exists', () => {
@@ -1137,6 +1147,132 @@ describe('ExplorerCanvas — timeline scrubber', () => {
   });
 });
 
+describe('ExplorerCanvas — timeline ghost rendering (system-explorer.md §6)', () => {
+  // Historical graph as the server ?at= reconstruction returns it: the
+  // soft-deleted node (removed since the scrub time) is present with its
+  // REAL id — the client-side filter cannot contain it because it is derived
+  // from the current graph.
+  const HIST_NODES = [
+    { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+    { id: 'fn1', node_type: 'function', name: 'create_user', qualified_name: 'api.create_user', file_path: 'api/handlers.py', line_start: 10, line_end: 30, visibility: 'public', spec_confidence: 'high', test_node: false },
+    { id: 'gs1', node_type: 'type', name: 'OldService', qualified_name: 'api.OldService', file_path: 'api/old_service.py', line_start: 1, line_end: 40, visibility: 'public', spec_confidence: 'none', test_node: false },
+  ];
+  const HIST_EDGES = [
+    { id: 'e1', source_id: 'pkg1', target_id: 'fn1', edge_type: 'contains' },
+    { id: 'e2', source_id: 'pkg1', target_id: 'gs1', edge_type: 'contains' },
+  ];
+  // Current graph: OldService is gone, get_user is new (forward ghost).
+  const CURRENT_NODES = [
+    HIST_NODES[0],
+    HIST_NODES[1],
+    { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+  ];
+  const CURRENT_EDGES = [
+    { id: 'e1', source_id: 'pkg1', target_id: 'fn1', edge_type: 'contains' },
+    { id: 'e3', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+  ];
+  const TIMELINE = [
+    { id: 'd0', timestamp: 500, delta_json: JSON.stringify({ nodes_added: [
+      { name: 'api', node_type: 'package', qualified_name: 'api' },
+      { name: 'create_user', node_type: 'function', qualified_name: 'api.create_user' },
+      { name: 'OldService', node_type: 'type', qualified_name: 'api.OldService' },
+    ] }) },
+    { id: 'd1', timestamp: 1000, delta_json: JSON.stringify({ nodes_added: [], nodes_removed: [] }) },
+    { id: 'd2', timestamp: 1500, delta_json: JSON.stringify({ nodes_added: [
+      { name: 'get_user', node_type: 'function', qualified_name: 'api.get_user' },
+    ], nodes_removed: ['api.OldService'] }) },
+  ];
+
+  it('draws the red-dotted strikethrough for backward ghosts (F1 regression)', () => {
+    // The exact overlay set computeTimelineGhostOverlays produces for the
+    // historical scrub position (scrubIndex 1; OldService removed in d2).
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    const removeGhost = overlays.find(o => o.action === 'remove');
+    expect(removeGhost).toBeTruthy();
+    // The ghost must carry the historical node's real id so the canvas's
+    // layoutNodeMap.get(ghost.id) resolves — the pre-fix synthetic
+    // `removed:<qn>` key never matched and the strikethrough never drew.
+    expect(removeGhost.id).toBe('gs1');
+
+    // The canvas draws the scrubbed-time graph (ExplorerView passes the
+    // timeline-filtered graph as `nodes` during time travel).
+    render(ExplorerCanvas, { // dead-test-code:ok — render triggers canvas draw, container not needed
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    // drawGhostRemoveNode is the ONLY code path that dashes [4, 4] (red
+    // dotted border) — its guard is layoutNodeMap.get(ghost.id) resolving.
+    expect(mockCtx.setLineDash).toHaveBeenCalledWith([4, 4]);
+  });
+
+  it('draws the backward ghost as a red-dotted outline followed by the red strikethrough', () => {
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    // Track the dash pattern at each stroke() — drawGhostRemoveNode draws
+    // the red dotted border ([4,4]) and then the solid-red strikethrough
+    // ([]) in that order. Asserting strokeStyle after render would only see
+    // the LAST assignment (tautological), and '#ef4444' alone is not unique
+    // to this path.
+    let dash = [];
+    const strokes = [];
+    mockCtx.setLineDash.mockImplementation((d) => { dash = d; });
+    mockCtx.stroke.mockImplementation(() => {
+      strokes.push({ style: mockCtx.strokeStyle, dash: [...dash] });
+    });
+    render(ExplorerCanvas, { // dead-test-code:ok — render triggers canvas draw, container not needed
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    const dottedIdx = strokes.findIndex((s) => s.style === '#ef4444' && s.dash[0] === 4 && s.dash[1] === 4);
+    expect(dottedIdx).toBeGreaterThanOrEqual(0); // red dotted outline
+    // The strikethrough: a solid-red stroke right after the dotted border
+    // (same drawGhostRemoveNode body, no early return between them).
+    const strike = strokes
+      .slice(dottedIdx + 1)
+      .find((s) => s.style === '#ef4444' && s.dash.length === 0);
+    expect(strike).toBeTruthy();
+  });
+
+  it('shows the ghost-mode banner counting the historical changes', () => {
+    const overlays = computeTimelineGhostOverlays({
+      graph: { nodes: CURRENT_NODES, edges: CURRENT_EDGES },
+      timelineFilteredGraph: { nodes: HIST_NODES, edges: HIST_EDGES },
+      timeline: TIMELINE,
+      scrubIndex: 1,
+    });
+    const { container } = render(ExplorerCanvas, {
+      props: {
+        nodes: HIST_NODES,
+        edges: HIST_EDGES,
+        ghostOverlays: overlays,
+        timelineActive: true,
+      },
+    });
+    const banner = container.querySelector('.preview-mode-count');
+    expect(banner?.textContent).toContain('2 historical changes');
+    // The − Removed chip reflects the backward ghost
+    const chip = container.querySelector('.ghost-chip-remove');
+    expect(chip?.textContent).toContain('− Removed (1)');
+  });
+});
+
 describe('ExplorerCanvas — canvas search', () => {
   it('does not show search by default', () => {
     const { container } = render(ExplorerCanvas, {
@@ -1294,62 +1430,72 @@ describe('ExplorerCanvas — evaluative lens', () => {
 });
 
 describe('ExplorerCanvas — anomaly detection (evaluative)', () => {
+  // task-181: the patterns live in risk-map.js detectRiskAnomalies — the
+  // production function the canvas renders. These call it directly so a
+  // regression in the real detection logic fails the test (the previous
+  // mirror-logic versions re-implemented the check beside it and proved
+  // nothing about the shipped code).
   it('detects high complexity + low test coverage anomaly', () => {
-    const nodesWithMetrics = [
-      { id: 'fn1', node_type: 'function', name: 'complex_fn', complexity: 20, test_coverage: 0.1, test_node: false },
-    ];
-    const anomalies = [];
-    for (const n of nodesWithMetrics) {
-      if ((n.complexity ?? 0) > 15 && (n.test_coverage ?? 0) < 0.3) {
-        anomalies.push({ nodeId: n.id, severity: 'high' });
-      }
+    // 11 filler functions pin the distribution thresholds: p90(complexity)=10
+    // and p10(coverage)=0.4, so the target (42 / 0.23) is far outside both.
+    const nodes = [];
+    for (let i = 1; i <= 10; i++) {
+      nodes.push({ id: `filler${i}`, node_type: 'function', name: `filler${i}`, file_path: `src/f${i}.rs`, complexity: i, test_coverage: 0.9, test_node: false });
     }
-    expect(anomalies).toHaveLength(1);
-    expect(anomalies[0].severity).toBe('high');
+    nodes.push({ id: 'covhelper', node_type: 'function', name: 'covhelper', file_path: 'src/ch.rs', complexity: 3, test_coverage: 0.4, test_node: false });
+    nodes.push({ id: 'fn1', node_type: 'function', name: 'complex_fn', complexity: 42, test_coverage: 0.23, test_node: false });
+
+    const anomalies = detectRiskAnomalies({ nodes, edges: [] });
+    const hit = anomalies.find((a) => a.nodeId === 'fn1');
+    expect(hit).toBeTruthy();
+    expect(hit.severity).toBe('high');
+    expect(hit.message).toContain('High complexity (42');
+    expect(hit.message).toContain('23%');
   });
 
   it('detects orphan function (no callers) anomaly', () => {
-    const callCounts = new Map();
-    for (const e of EDGES) {
-      const et = (e.edge_type ?? '').toLowerCase();
-      if (et === 'calls') {
-        callCounts.set(e.target_id, (callCounts.get(e.target_id) ?? 0) + 1);
-      }
-    }
-
-    const orphans = [];
-    for (const n of NODES) {
-      if (n.node_type === 'function' && !n.test_node && (callCounts.get(n.id) ?? 0) === 0) {
-        orphans.push(n.id);
-      }
-    }
+    const anomalies = detectRiskAnomalies({ nodes: NODES, edges: EDGES });
+    const orphanIds = anomalies
+      .filter((a) => a.message.includes('possible dead code'))
+      .map((a) => a.nodeId);
 
     // fn2 (get_user) has no callers
-    expect(orphans).toContain('fn2');
+    expect(orphanIds).toContain('fn2');
     // fn1 is called by test1
-    expect(orphans).not.toContain('fn1');
+    expect(orphanIds).not.toContain('fn1');
   });
 
   it('detects heavily depended on node with no spec', () => {
-    const callCounts = new Map([['fn1', 8]]); // 8 callers
-    const node = { id: 'fn1', spec_path: undefined };
+    // 10 callers → hub has 10 calls, far above the p90-based call
+    // threshold; hub has no spec.
+    const nodes = [
+      { id: 'hub', node_type: 'function', name: 'hub', file_path: 'src/hub.rs', test_node: false },
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => ({ id: `caller${i}`, node_type: 'function', name: `caller${i}`, file_path: `src/c${i}.rs`, test_node: false })),
+    ];
+    const edges = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => ({ id: `c${i}`, source_id: `caller${i}`, target_id: 'hub', edge_type: 'calls' }));
 
-    const isHeavilyDepended = (callCounts.get(node.id) ?? 0) > 5 && !node.spec_path;
-    expect(isHeavilyDepended).toBe(true);
+    const anomalies = detectRiskAnomalies({ nodes, edges });
+    const hit = anomalies.find((a) => a.nodeId === 'hub');
+    expect(hit).toBeTruthy();
+    expect(hit.message).toContain('with no spec');
   });
 
   it('sorts anomalies by severity (high first)', () => {
-    const anomalies = [
-      { severity: 'low' },
-      { severity: 'high' },
-      { severity: 'medium' },
-    ];
-    const order = { high: 0, medium: 1, low: 2 };
-    anomalies.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
-
+    // The high-severity target plus the low-severity orphans the same
+    // fixture produces — the real sort must order high before low.
+    const nodes = [];
+    for (let i = 1; i <= 10; i++) {
+      nodes.push({ id: `filler${i}`, node_type: 'function', name: `filler${i}`, file_path: `src/f${i}.rs`, complexity: i, test_coverage: 0.9, test_node: false });
+    }
+    nodes.push({ id: 'covhelper', node_type: 'function', name: 'covhelper', file_path: 'src/ch.rs', complexity: 3, test_coverage: 0.4, test_node: false });
+    nodes.push({ id: 'fn1', node_type: 'function', name: 'complex_fn', file_path: 'src/a.rs', complexity: 42, test_coverage: 0.23, test_node: false });
+    const anomalies = detectRiskAnomalies({ nodes, edges: [] });
+    expect(anomalies.length).toBeGreaterThan(1);
     expect(anomalies[0].severity).toBe('high');
-    expect(anomalies[1].severity).toBe('medium');
-    expect(anomalies[2].severity).toBe('low');
+    const order = { high: 0, medium: 1, low: 2 };
+    for (let i = 1; i < anomalies.length; i++) {
+      expect(order[anomalies[i - 1].severity]).toBeLessThanOrEqual(order[anomalies[i].severity]);
+    }
   });
 });
 
@@ -1600,10 +1746,12 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'structural' },
     });
-    // Both "All" filter and "Structural" lens buttons are active by default
-    const activeButtons = container.querySelectorAll('.tb-btn.active');
-    const texts = [...activeButtons].map(b => b.textContent);
-    expect(texts).toContain('Structural');
+    // Both "All" filter is active and "Structural" lens checkbox is
+    // checked+locked by default
+    expect(container.querySelector('.filter-preset-group .tb-btn-filter.active')?.textContent).toBe('All');
+    const structural = container.querySelector('[data-testid="lens-checkbox-structural"] input');
+    expect(structural?.checked).toBe(true);
+    expect(structural?.disabled).toBe(true);
   });
 
   it('renders evaluative lens with metric buttons', () => {
@@ -1614,17 +1762,19 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     expect(metricGroup).toBeTruthy();
   });
 
-  it('observable button is aria-disabled with spec label, click shows banner', async () => {
+  it('observable checkbox is disabled with spec label, click shows banner', async () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const obsBtn = container.querySelector('.tb-btn-observable');
-    expect(obsBtn).toBeTruthy();
+    const obsLabel = container.querySelector('[data-testid="lens-checkbox-observable"]');
+    expect(obsLabel).toBeTruthy();
     // Lens stays disabled (spec: grayed out until production telemetry integration)
-    expect(obsBtn.getAttribute('aria-disabled')).toBe('true');
-    expect(obsBtn.textContent).toContain('requires production telemetry integration');
-    // Click is reachable (not a native disabled button) and shows the notice banner
-    await fireEvent.click(obsBtn);
+    const obsInput = obsLabel.querySelector('input');
+    expect(obsInput.disabled).toBe(true);
+    expect(obsInput.checked).toBe(false);
+    expect(obsLabel.textContent).toContain('requires production telemetry integration');
+    // Click is reachable (the label intercepts it) and shows the notice banner
+    await fireEvent.click(obsLabel);
     const banner = container.querySelector('.observable-banner');
     expect(banner).toBeTruthy();
     expect(banner.textContent).toContain('OpenTelemetry collector');
@@ -1655,8 +1805,8 @@ describe('ExplorerCanvas — accessibility', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    // Filter presets removed per spec — only lens toggle group remains
-    const lensGroup = container.querySelector('[role="group"][aria-label="Lens toggle"]');
+    // Filter presets removed per spec — only lens checkbox group remains
+    const lensGroup = container.querySelector('[role="group"][aria-label="Lens selector"]');
     expect(lensGroup).toBeTruthy();
   });
 
@@ -2427,10 +2577,9 @@ describe('ExplorerCanvas — HSI §3 Three Lenses (evaluative overlay)', () => {
     expect(structuralPos).not.toBeNull(); // fixture guard: the node is drawn
 
     drawn.length = 0;
-    const evaluativeBtn = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
-      .find(b => b.textContent.trim() === 'Evaluative');
-    expect(evaluativeBtn).toBeTruthy();
-    await fireEvent.click(evaluativeBtn);
+    const evaluativeCheck = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
+    expect(evaluativeCheck).toBeTruthy();
+    await fireEvent.click(evaluativeCheck);
     flush();
 
     const evaluativePos = positionOf('create_user');

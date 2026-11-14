@@ -1,33 +1,67 @@
-"""Per-task compute budgets. Escalation requires an observed OOM, never a timeout."""
-import json
+"""Thin defaults with an operator-bounded retry after authoritative OOM."""
+BUILD_DISK_MIN_GIB=30
 
-WORKSPACE_GIB=30
+
+def memory_ceiling(store):
+    value = store.setting('worker_memory_max_gib',6)
+    return 6 if type(value) is int and value == 6 else 4
+
+
+def oom_limit(evidence):
+    """Unknown limits and generic process exits do not authorize escalation."""
+    try:
+        if int((evidence.get('memory.events') or {}).get('oom_kill',0)) > 0:
+            return int(evidence['memory.max']) / 1024**3
+        if evidence.get('reason') == 'OOMKilled' and evidence.get('exit_code') == 137:
+            memory = evidence['resources']['limits']['memory']
+            if memory.endswith('Gi'):return float(memory[:-2])
+            if memory.endswith('Mi'):return float(memory[:-2]) / 1024
+    except (KeyError,TypeError,ValueError):
+        pass
+    return None
+
 
 def profile(store, task, stage):
-    memory = store.setting(f'compute_memory:{task}:{stage}', 4)
-    if memory not in (4, 8):
-        raise ValueError('unsupported compute memory tier')
-    return {'cpu': '1', 'memory': f'{memory}Gi', 'memory_gib': memory, 'build_jobs': 1, 'workspace_gib':WORKSPACE_GIB}
+    memory = 4
+    if memory_ceiling(store) == 6:
+        # Bind historical evidence through its owned allocation and work record,
+        # so another task, stage or requirements generation cannot raise memory.
+        records = store.db.execute("""SELECT e.detail FROM events e
+            JOIN resources r ON r.name=json_extract(e.detail,'$.evidence.sandbox')
+            JOIN work w ON w.id=r.work JOIN tasks t ON t.name=w.task AND t.generation=w.generation
+            WHERE e.kind='compute_oom' AND e.task=? AND w.task=e.task AND w.stage=?
+                AND json_extract(e.detail,'$.stage')=w.stage
+                AND r.kind='sandbox' AND json_extract(e.detail,'$.observed_gib')=4""",(task,stage))
+        import json
+        if any(oom_limit(json.loads(row['detail']).get('evidence') or {}) == 4 for row in records):
+            memory = 6
+    # Historical ad-hoc 8 GiB settings are never consulted.
+    return {'cpu':'1','memory':f'{memory}Gi','memory_gib':memory,'build_jobs':1,'build_disk_min_gib':BUILD_DISK_MIN_GIB}
+
+
+def assigned_profile(store, claim):
+    row=store.db.execute('SELECT data FROM resources WHERE name=?',
+                        (store.admission_name(claim['id'],claim['token']),)).fetchone()
+    if row:
+        import json
+        budget=json.loads(row['data']).get('compute')
+        if budget and budget.get('memory') in ('4Gi','6Gi') and budget.get('cpu')=='1' and budget.get('build_jobs')==1:
+            return budget
+    return profile(store,claim['task'],claim['stage'])
 
 
 def record_oom(store, task, stage, observed_gib, evidence):
-    """Persist a bounded increase, scoped to this task/stage, with its evidence."""
-    from .execution import Retry, Attention
-    desired = 4 if observed_gib < 4 else 8
-    with store.transaction():
-        if observed_gib >= 8:
-            error = Attention('Sandbox exceeded the maximum 8 GiB tier; inspect OOM evidence instead of repeating the assignment')
-        else:
-            key = f'compute_memory:{task}:{stage}'
-            previous = store.setting(key, 4)
-            desired = max(previous, desired)
-            store.db.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key,json.dumps(desired)))
-            store.event('compute_memory_escalated', {'stage':stage,'observed_gib':observed_gib,'next_gib':desired,'evidence':evidence},task)
-            error = Retry(f'Sandbox OOM at {observed_gib:g} GiB; next {stage} assignment uses {desired} GiB with one build job')
-        if observed_gib < 8:
-            error.retry_delay = 0  # New resource configuration, not another identical failed attempt.
-        error.category = 'sandbox_oom'
-        error.diagnostic = evidence
+    from .execution import Attention, Retry
+    ceiling = memory_ceiling(store)
+    store.event('compute_oom',{'stage':stage,'observed_gib':observed_gib,'budget_gib':ceiling,'evidence':evidence},task)
+    allocation = store.db.execute("SELECT json_extract(data,'$.compute.memory_gib') FROM resources WHERE name=?",
+                                  (evidence.get('sandbox'),)).fetchone()
+    requested = allocation[0] if allocation else None
+    if observed_gib == 4 and requested != 6 and oom_limit(evidence) == 4 and profile(store,task,stage)['memory_gib'] == 6:
+        error=Retry('Sandbox exhausted 4 GiB; after cleanup retry this task stage at the authorized 6 GiB ceiling')
+    else:
+        error=Attention(f'Sandbox exhausted its {observed_gib:g} GiB allocation (ceiling {ceiling} GiB); inspect retained evidence before retrying')
+    error.category='sandbox_oom';error.diagnostic=evidence
     return error
 
 

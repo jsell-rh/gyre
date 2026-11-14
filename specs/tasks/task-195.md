@@ -2,10 +2,10 @@
 title: "Manifest-driven gate selection for MRs referencing a spec"
 spec_ref: "spec-registry.md §16 Agent Gates Integration"
 depends_on: [task-193]
-progress: not-started
+progress: complete
 coverage_sections:
   - "spec-registry.md §16"
-commits: []
+commits: ["ab29555ff27f63eb95d919b7456eb7017626e43f", "950d9e8e8a6495bdf0d7dfcf82ed54ccaf889717", "9068ca910fc7c5202502a1fdae4a52045ac00361", "a57e032679e848ccc93aa95077d5d961c7fd9958", "055a41aef2b67d752795487e944d5a71bd1a2c27", "53b89baa96361836507800e9871b496a11037fd8", "a689c9f05ce4529e1d5691b32dc1b1e2ea58534d", "3c2c5462c1bb3cea490cc1033b0bc00d9b319a67", "58f28dfdd06aa5bc6372c737db94297b0d1fed51", "159b7408a12cef7990486878ffa33bf07c880c61", "fac8540c419d5a08a99c9601234ef1154274cad8", "42d995b061382af73d162321b960fede5527ba6b", "d11ffee85d3ccff5158300d113dbf82241aaf7c8", "a3e0a875ab383c2630868139e30837835b4d1a69", "4494a058f44b4c14f26ce39839ff0b952d3939d6", "a65ae04d808bdfb43bfc726a7e591fa7fad93589", "35b4dc9914d8ec050e2e8d6ede0e03e86206d6f9", "bb9dfd83ce2e7725ae4784ee0a0003d5e827c33d", "014dd612670898cf3da8672adb7ac1706cd6be73"]
 ---
 
 ## Spec Excerpt
@@ -57,3 +57,24 @@ Hollow. `trigger_gates_for_mr()` (`crates/gyre-server/src/gate_executor.rs:23-60
 - Do NOT satisfy the manifest gate with the auto-pass stub when a persona is configured; run the real persona gate.
 - Extract gate selection into a pure, unit-testable helper; assert on the resolved gate set, not merely that "some gate ran".
 - Run only touched-crate tests plus `scripts/check-arch.sh`; skip formatters and the full suite.
+
+## Shipped
+
+All behavior lives in `crates/gyre-server/src/gate_executor.rs` (initial `bb9dfd83c`, review/verification repairs through `a57e0326`), with supporting changes in `api/spawn.rs`, `api/merge_requests.rs` / `api/reviews.rs`, and `spec_registry.rs` (task-193's `read_manifest` reused — no second reader). It reuses the existing `GateResult`/`check_gates_for_mr` flow — no parallel results table.
+
+### What actually runs
+
+- **Selection (pure):** `manifest_gates_for_mr(manifest, spec_ref)` resolves the manifest `SpecEntry` whose path matches the MR's `spec_ref` path (normalizing a leading `specs/` prefix and bare no-`@sha` paths) and returns its `gates:` entries as `ManifestGateSpec {persona, min_attestation_level (default 1), stack_hash, spec_path}`. Empty for no manifest / no spec_ref / no matching entry / no gates; repeated personas within an entry dedupe (first wins). Unit tests assert on the resolved gate set directly.
+- **Sourcing:** `resolve_manifest_gates_for_mr` reads `specs/manifest.yaml` for the MR's repo at HEAD via task-193's `read_manifest` — HEAD because the SHA in `spec_ref` is the spec ledger's blob SHA, not a treeish, matching task-193's policy source.
+- **Union + dedup (manifest wins):** `trigger_gates_for_mr` runs every repo-level gate except those whose persona is covered by a manifest gate, plus each manifest gate. On persona overlap the manifest gate wins because the manifest is the reviewed per-spec policy artifact carrying the `min_attestation_level`/`stack_hash` constraints; the persona runs exactly once.
+- **Real persona path (never the stub):** each manifest gate becomes an `AgentReview` `QualityGate` (`manifest-gate:<repo>:<spec_path>:<persona>`, not persisted to the repo gate store). `run_agent_review_gate` routes it to `run_persona_review_gate`, which passes only on an `Approved` review from a persona-matching agent whose workload attestation satisfies `min_attestation_level` and, when pinned, an exact `stack_hash` match; otherwise it fails closed naming the missing constraints. Unknown gate ids default to `required = true` in `check_gates_for_mr`, so failures block the merge.
+- **Forge-spawned gate agents (spec §16):** for each manifest gate, `spawn_manifest_gate_agent` creates the `Agent` record, persona KV entry, a `review:submit`-scoped EdDSA token, and dispatches a `ReviewRequest`; the runtime launches through the compute-target machinery with the scoped token and review context env (`GYRE_PERSONA`, `GYRE_MR_ID`, `GYRE_SPEC_REF`, `GYRE_MIN_ATTESTATION_LEVEL`, `GYRE_STACK_HASH`, …), recording a workload attestation. The ReviewRequest reaches the runtime via the launch env and `/mcp gyre_message_poll` — not via a REST inbox route (denied to review-scoped tokens as least privilege). Teardown kills the runtime via the owning backend and revokes the token.
+- **Reviewer identity:** `submit_review` binds the reviewer to the verified token subject for agent principals; human principals may use a body `reviewer_agent_id` only when it equals their own verified `user_id` (Admin may record on behalf).
+
+### This round: rebase repair against current main (task-159 head)
+
+The published PR (head `3509e16b`) conflicted with current main `7daca25d` (task-159: meta-spec drift warnings in merge gates). Resolved by merge `bc9ebff8`: since merge base `f764bc00` our side touched only the task-195 gate surface while main never touched `gate_executor.rs` or `api/merge_queue.rs`, so the Rust union is non-overlapping — main's `merge_processor.rs` calls `check_gates_for_mr` / `run_post_merge_gates` with their unchanged pre-existing signatures. The task-195 implementation is carried forward byte-identical (`git diff 3509e16b bc9ebff8 -- gate_executor.rs spawn.rs merge_requests.rs reviews.rs spec_registry.rs merge_queue.rs` is empty). The conflicting generated `web/dist` assets were restored exactly to the assignment base (`git diff 7daca25d -- web/dist` is empty); final integration rebuilds and publishes those assets remotely.
+
+### Test evidence
+
+Probes run in this sandbox (build wrapper `/tmp/stage/bin/cargo`) at merge result `bc9ebff8`, recorded in `/tmp/stage/review-evidence/rebase-7daca25d-round.md`: `cargo check -p gyre-server --tests` exit 0; `check-arch.sh`, `check-abac-route-registry.sh`, `check-mcp-write-tools.sh`, `check-dead-message-kinds.sh`, `check-abac-exempt-handlers.sh`, `check-byte-slice-truncation.sh`, `check-migration-versions.sh` all exit 0; `web: npm ci` + `npm test` exit 0 (113 files, 2308 passed / 41 skipped — covers the merged task-159 MergeQueueGraph surface and this task's web review flows). The wrapper blocks gyre-server test builds in this sandbox (4 GiB budget) — the verifier must execute: `cargo test -p gyre-server --test task134_review_probe` (including `scoped_review_token_cannot_read_agent_inbox_route`), `cargo test -p gyre-server --lib gate_executor` (manifest_gates selection tests, `trigger_gates_runs_manifest_gates_for_spec_ref_mr`, `trigger_gates_failed_manifest_gate_blocks_merge`, `trigger_gates_manifest_gate_wins_over_repo_gate_for_same_persona`, `trigger_gates_spawns_gate_agents_for_manifest_gates`, `trigger_gates_launches_gate_agent_runtime_with_token`, `gate_agent_token_is_scoped_reviewer_jwt`, teardown and `check_gates_*` scopes), the `submit_review`/`spawn` scopes, `cargo build --all`, and `cargo test --all`.

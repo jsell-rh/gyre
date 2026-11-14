@@ -13,6 +13,22 @@ COMMANDS = [['bash', '/tmp/stage/checks.sh'], ['cargo', 'test', '--all', '--quie
             ['npm', 'test', '--', '--no-file-parallelism']]
 
 
+POLICY_FILES=('pipeline-verify.py','dev-static-gate.py','check-rustfmt-diff.py',
+              'check-clippy-diff.py','verifier-script-overlay.py','pipeline-artifacts.py',
+              'pipeline-build-env.py','pipeline-cache.py','dev-cargo-clean.py','pipeline-usage.py')
+
+
+def policy(store, bundle=None, image=None):
+    """Hash the actual uploaded verifier, rather than a later host revision."""
+    image=image or store.setting('fullsend_image',json.loads((ROOT/'.fullsend/toolchain.json').read_text())['worker_image'])
+    if '@sha256:' not in image:return None
+    files={name:hashlib.sha256(((bundle/name) if bundle else (ROOT/'scripts'/name)).read_bytes()).hexdigest() for name in POLICY_FILES}
+    gate=(bundle/'checks.sh').read_bytes() if bundle else (ROOT/'scripts/dev-check.sh').read_text().replace('/tmp/gyre','/sandbox/workspace/checkout').encode()
+    files['checks.sh']=hashlib.sha256(gate).hexdigest()
+    files['worker.yaml']=hashlib.sha256(((bundle/'worker-policy.yaml') if bundle else ROOT/'.fullsend/policies/worker.yaml').read_bytes()).hexdigest()
+    return hashlib.sha256(json.dumps({'image':image,'commands':COMMANDS,'files':files},sort_keys=True).encode()).hexdigest()
+
+
 def deadline_error():
     error=Attention('Verification exhausted its deadline; inspect retained logs or raise the budget before retrying the same build')
     error.category='verification_timeout'
@@ -70,6 +86,19 @@ def retire(execution, name):
         execution.store.resource_state(name, 'absent')
 
 
+def prepare_bundle(execution, path, identity, destination):
+    destination.unlink(missing_ok=True)
+    if identity['head']==identity['base']:return False
+    if execution.command('git','rev-parse','HEAD',cwd=path).stdout.strip()!=identity['head']:
+        raise ValueError('candidate bundle checkout differs from assigned head')
+    ancestor=execution.command('git','merge-base','--is-ancestor',identity['head'],identity['base'],cwd=path,check=False)
+    if ancestor.returncode==0:
+        return False  # Fetching base already supplies this exact historical head.
+    if ancestor.returncode!=1:raise Retry('Cannot establish candidate bundle ancestry')
+    execution.command('git','bundle','create',str(destination),'HEAD','^'+identity['base'],cwd=path,timeout=300)
+    return True
+
+
 def run(execution, path, identity, probe=None):
     if probe is not None:
         import re
@@ -87,29 +116,30 @@ def run(execution, path, identity, probe=None):
         image = store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image'])
         bundle = execution.directory / 'verification-input'
         bundle.mkdir(exist_ok=True)
-        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py', 'pipeline-usage.py'):
+        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py', 'pipeline-usage.py', 'pipeline-build-env.py', 'pipeline-cache.py', 'dev-cargo-clean.py'):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
+        (bundle/'worker-policy.yaml').write_bytes((ROOT/'.fullsend/policies/worker.yaml').read_bytes())
+        assigned_policy=policy(store,bundle,image)
         timeout=store.setting('verification_timeout',14400)
         job = identity | {'image': image, 'timeout_seconds':timeout, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'),
-                          'task':execution.claim['task'],'publication_branch':f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"}
+                          'cache_enabled':store.setting('build_cache_enabled',True),'task':execution.claim['task'],'publication_branch':f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"}
         if probe is not None:
             job['probe'] = probe
         (bundle / 'verify-job.json').write_text(json.dumps(job))
-        if identity['head'] != identity['base']:
-            execution.command('git', 'bundle', 'create', str(bundle / 'candidate.bundle'), 'HEAD', '^' + identity['base'], cwd=path, timeout=300)
+        prepare_bundle(execution,path,identity,bundle/'candidate.bundle')
         execution.phase('Provisioning', sandbox=name, engine='verification')
         # The reservation precedes create, so even an uncertain response is
         # owned and charged. Readiness polling retains the same allocation.
-        from .compute import profile
-        budget=profile(store,execution.claim['task'],'verify')
+        from .compute import assigned_profile
+        budget=assigned_profile(store,execution.claim)
         resources=['--cpu',budget['cpu'],'--memory',budget['memory']]
         record=store.db.execute('SELECT data,state FROM resources WHERE name=?',(name,)).fetchone()
         store.resource_state(name,record['state'],json.loads(record['data']) | {'compute':budget})
         try:
             created = execution.os('sandbox', 'create', '--name', name, '--from', image,
-                                  '--policy', str(ROOT / '.fullsend/policies/worker.yaml'),
+                                  '--policy', str(bundle / 'worker-policy.yaml'),
                                   '--provider', store.setting('verification_provider', 'github'), '--no-auto-providers',
                                   *resources,
                                   '--label', 'gyre.dev/pipeline=' + store.setting('owner'),
@@ -146,6 +176,7 @@ def run(execution, path, identity, probe=None):
             execution.os('sandbox', 'upload', name, str(source), '/tmp/stage/' + source.name, '--no-git-ignore', timeout=180)
         execution.phase('Verifying', sandbox=name, engine='verification')
         offset, failures, launched = 0, 0, False
+        cache_handled=False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             execution.current()
@@ -155,6 +186,10 @@ def run(execution, path, identity, probe=None):
                     launched=True
                 result = execution.remote(name, 'python3', '/tmp/stage/pipeline-verify.py', 'poll', '--offset', str(offset), timeout=30)
                 value = decode_poll(result.stdout)
+                if value.get('cache_request') and not cache_handled:
+                    from . import build_cache
+                    build_cache.restore(execution,name,value['cache_request'],identity['base'])
+                    cache_handled=True
                 if value.get('usage'):
                     (execution.directory/'remote-usage.json').write_text(json.dumps(value['usage']))
                     from .compute import from_usage
@@ -179,8 +214,12 @@ def run(execution, path, identity, probe=None):
                     validate_receipt(receipt, identity, [probe] if probe is not None else None)
                     if receipt.get('passed') and probe is None and not isinstance(receipt.get('publication'),dict):
                         raise Retry('verification receipt lacks the rebuilt artifact publication')
+                    receipt['policy'] = assigned_policy
                     receipt['sandbox'] = name
                     (execution.directory / 'remote-verification.json').write_text(json.dumps(receipt))
+                    if receipt.get('passed') and probe is None:
+                        from . import build_cache
+                        build_cache.save(execution,name,receipt)
                     return receipt
                 if not value.get('alive') and not data:
                     raise Retry('remote verifier exited without a complete receipt')
@@ -205,7 +244,7 @@ def run(execution, path, identity, probe=None):
                             for source in sorted(bundle.iterdir()):
                                 execution.os('sandbox','upload',name,str(source),'/tmp/stage/'+source.name,'--no-git-ignore',timeout=180)
                             execution.remote(name,'python3','/tmp/stage/pipeline-verify.py','launch','--resume-after-stop',timeout=30)
-                            offset=0;failures=0
+                            offset=0;failures=0;cache_handled=False
                     elif phase in ('error','failed','deleted','deleting'):
                         error=Attention('Verifier sandbox entered terminal phase '+phase);error.category='sandbox_stopped';raise error
                     elif failures>=6 and phase!='ready':

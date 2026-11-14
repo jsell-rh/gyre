@@ -106,7 +106,17 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/merge-requests${qs ? '?' + qs : ''}`);
   },
+  // Workspace-scoped MR list (GET /workspaces/:id/merge-requests). Supports
+  // `has_trace` + `limit` (HSI §3 MR ID discovery for flow-layout
+  // trace_source) — the has_trace filter uses the same get_by_mr lookup
+  // GET /merge-requests/:id/trace serves, so the list cannot drift from
+  // what the trace endpoint returns.
+  workspaceMergeRequests: (workspaceId, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/workspaces/${workspaceId}/merge-requests${qs ? '?' + qs : ''}`);
+  },
   mergeRequest: (id) => request(`/merge-requests/${id}`),
+  mrStatus: (id, status) => request(`/merge-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   mrReviews: (id) => request(`/merge-requests/${id}/reviews`),
   mrComments: (id) => request(`/merge-requests/${id}/comments`),
   submitComment: (mrId, data) =>
@@ -139,6 +149,15 @@ export const api = {
     }),
   cancelQueueEntry: (id) =>
     request(`/merge-queue/${id}`, { method: 'DELETE' }),
+  pauseMergeQueue: (repoId, reason) =>
+    request(`/repos/${repoId}/queue/pause`, {
+      method: 'PUT',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
+  resumeMergeQueue: (repoId) =>
+    request(`/repos/${repoId}/queue/resume`, {
+      method: 'PUT',
+    }),
   // jj VCS operations
   jjInit: (repoId) =>
     request(`/repos/${repoId}/jj/init`, { method: 'POST' }),
@@ -306,6 +325,8 @@ export const api = {
   repoGates: (id) => request(`/repos/${id}/gates`),
   createRepoGate: (id, data) =>
     request(`/repos/${id}/gates`, { method: 'POST', body: JSON.stringify(data) }),
+  updateRepoGate: (id, gateId, data) =>
+    request(`/repos/${id}/gates/${gateId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteRepoGate: (id, gateId) =>
     request(`/repos/${id}/gates/${gateId}`, { method: 'DELETE' }),
   repoPushGates: (id) => request(`/repos/${id}/push-gates`),
@@ -568,12 +589,24 @@ export const api = {
   repoGraphModules: (id) => request(`/repos/${id}/graph/modules`),
   repoGraphRisks: (id) => request(`/repos/${id}/graph/risks`),
   getGraphConcept: (repoId, name) => request(`/repos/${repoId}/graph/concept/${encodeURIComponent(name)}`),
+  repoGraphConcepts: (repoId) => request(`/repos/${repoId}/graph/concepts`),
   repoGraphTimeline: (id, since, until) => {
     const params = new URLSearchParams();
     if (since != null) params.set('since', since);
     if (until != null) params.set('until', until);
     const qs = params.toString();
     return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
+  },
+  // Point-in-time knowledge graph (system-explorer.md §6 Architectural
+  // Timeline): `at` is unix epoch seconds or an RFC 3339 timestamp. The
+  // server reconstructs nodes/edges that existed at that instant,
+  // including ones soft-deleted since.
+  repoGraphAt: (id, at) => request(`/repos/${id}/graph?at=${encodeURIComponent(at)}`),
+  // Workspace message bus — GET lists messages, optionally filtered by
+  // kind (?kind=reconciliation_completed for timeline key moments).
+  workspaceMessages: (workspaceId, params) => {
+    const qs = params ? new URLSearchParams(params).toString() : '';
+    return request(`/workspaces/${workspaceId}/messages${qs ? '?' + qs : ''}`);
   },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
   // Meta-spec preview loop (S4.6)
@@ -626,6 +659,14 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
+  // Conversational exploration Q&A (system-explorer.md §8): grounded text
+  // answer with server-validated entity refs, optional view spec ("show me
+  // X") and structural prediction ("what would happen if…").
+  explorerAsk: (workspaceId, body) =>
+    request(`/workspaces/${workspaceId}/explorer-views/ask`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   // Specs View (S4.5)
   specsForWorkspace: (workspaceId) =>
     request(`/specs${workspaceId ? '?workspace_id=' + encodeURIComponent(workspaceId) : ''}`),
@@ -660,10 +701,19 @@ export const api = {
       },
       body: JSON.stringify(body),
     }),
-  // Server does not have POST /specs/assist — only POST /repos/:id/specs/assist.
-  // Return a failed Response so callers fall through gracefully.
-  specsAssistGlobal: (_body) =>
-    Promise.resolve(new Response(null, { status: 404, statusText: 'Not available without repo context' })),
+  // Workspace-scoped meta-spec assist (ui-layout.md §9 State 1 chat): same
+  // SSE {diff, explanation} protocol as specsAssist, but no repo — the
+  // effective content is the in-editor draft (or the stored registry prompt
+  // when only meta_spec_id is given).
+  metaSpecsAssist: (workspaceId, body) =>
+    fetch(`${API_BASE}/workspaces/${workspaceId}/meta-specs/assist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(body),
+    }),
   // Spec save with optimistic-concurrency conflict handling (HSI §7).
   // On 409 (stale base_sha), resolves to { conflict: <body> } instead of
   // throwing, so callers can render the conflict resolution dialog.
@@ -739,6 +789,7 @@ export const api = {
   // Workspace-scope concept search
   workspaceGraphConcept: (wsId, name) =>
     request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),
+  workspaceGraphConcepts: (wsId) => request(`/workspaces/${wsId}/graph/concepts`),
   // API token management
   createApiToken: (data) =>
     request('/users/me/tokens', { method: 'POST', body: JSON.stringify(data) }),
@@ -782,3 +833,22 @@ export const api = {
       body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
     }),
 };
+
+// Reviewer identity binding (spec-registry.md §16 manifest gates): a human
+// caller may record an MR review only under their own verified identity —
+// the server rejects a request-body reviewer_agent_id naming anyone else for
+// non-admin principals. Resolves the caller's user id once per session and
+// caches it. Falls back to the legacy pseudo-id, which the server rejects
+// (fail closed, surfaced as an error toast) rather than silently
+// re-attributing the review; a failed lookup is not cached so a transient
+// error can recover on the next submission.
+let selfReviewerIdPromise = null;
+export async function selfReviewerId() {
+  if (!selfReviewerIdPromise) {
+    selfReviewerIdPromise = api.me().then(me => me?.id ?? null).catch(() => null);
+  }
+  const id = await selfReviewerIdPromise;
+  if (id) return id;
+  selfReviewerIdPromise = null;
+  return 'human-reviewer';
+}

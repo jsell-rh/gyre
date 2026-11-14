@@ -119,6 +119,10 @@
     BudgetWarning: 'budget_warning',
     SpecChanged: 'spec_changed',
     MetaSpecDrift: 'meta_spec_drift',
+    PersonaApprovalRequested: 'persona_approval_requested',
+    MergeQueuePaused: 'merge_queue_paused',
+    BudgetExhausted: 'budget_exhausted',
+    SecurityFinding: 'security_finding',
     SpecAssertionFailure: 'spec_assertion_failure',
   };
 
@@ -308,11 +312,12 @@
   let wsAgents = $state([]);
 
   // Workspace orchestrator agent — recipient for the scoped priority chat (HSI §4).
-  // Agents carry no role field; the orchestrator is identified by naming
-  // convention (seed "orchestrator", persona "workspace-orchestrator"), preferring
-  // an active instance.
+  // Selected by orchestration role (`AgentResponse.orchestrator_type`,
+  // platform-model.md §3), never by name convention: a repo orchestrator or
+  // a worker whose name merely contains "orchestrator" must not receive
+  // workspace priority steering. Prefers a live (active) instance.
   let orchestratorAgent = $derived.by(() => {
-    const matches = wsAgents.filter((a) => (a.name ?? '').toLowerCase().includes('orchestrator'));
+    const matches = wsAgents.filter((a) => a.orchestrator_type === 'workspace_orchestrator');
     if (matches.length === 0) return null;
     return matches.find((a) => a.status === 'active') ?? matches[0];
   });
@@ -1046,6 +1051,7 @@
             'gate_failure': 'gate_failed',
             'agent_clarification': 'agent_clarification',
             'budget_warning': 'budget_warning',
+            'SecurityFinding': 'security_finding',
           };
           // Build a human-readable description — never show raw JSON
           const rawDesc = n.message ?? n.description ?? body.description ?? '';
@@ -1169,6 +1175,11 @@
     'GateFailure': 'Gate failed',
     'TaskCreated': 'Task created',
     'BudgetWarning': 'Budget warning',
+    'SecurityFinding': 'Security finding',
+    'PersonaApprovalRequested': 'Persona approval requested',
+    'MergeQueuePaused': 'Merge queue paused',
+    'BudgetExhausted': 'Budget exhausted',
+    'MrReverted': 'MR reverted',
     'MetaSpecDrift': 'Agent rules drifted',
     'spec_created': 'Spec created',
     'spec_updated': 'Spec updated',
@@ -1178,6 +1189,11 @@
     'SuggestedSpecLink': 'Spec link suggested',
     'merged': 'MR merged',
     'budget_warning': 'Budget warning',
+    'security_finding': 'Security finding',
+    'persona_approval_requested': 'Persona approval requested',
+    'merge_queue_paused': 'Merge queue paused',
+    'budget_exhausted': 'Budget exhausted',
+    'mr_reverted': 'MR reverted',
     'agent_clarification': 'Agent needs input',
   };
 
@@ -1560,6 +1576,7 @@
                   edges={depGraphEdges}
                   scope={depGraphScope}
                   onScopeChange={handleDepScopeChange}
+                  onRefresh={() => handleDepScopeChange(depGraphScope)}
                   onNodeClick={(node) => {
                     const repo = repos.find(r => r.id === node.repo_id);
                     if (repo) {

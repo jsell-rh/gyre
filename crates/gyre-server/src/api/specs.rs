@@ -554,12 +554,17 @@ pub async fn approve_spec(
     let (approver_type, approver_id, attestation_level, stack_hash) = if let Some(claims) =
         auth.jwt_claims.as_ref()
     {
-        // Gyre agent JWT (scope="agent"): capture the verified workload claims
-        // so §9 agent-approval validity (attestation_level >= manifest minimum,
-        // stack_hash exact match) can be evaluated from the recorded event.
-        // Keycloak user JWTs do not carry agent workload claims; their scope
-        // is not "agent", so they are treated as human approvals.
-        let is_agent = claims.get("scope").and_then(|s| s.as_str()) == Some("agent");
+        // Gyre agent JWT (scope is a non-empty fine-grained list per §1
+        // Token Scoping — see `is_agent_jwt` in mcp.rs): capture the verified
+        // workload claims so §9 agent-approval validity (attestation_level
+        // >= manifest minimum, stack_hash exact match) can be evaluated from
+        // the recorded event. Keycloak user JWTs carry no scope array and
+        // legacy UUID agent tokens carry no claims at all — both fall to the
+        // human path below.
+        let is_agent = claims
+            .get("scope")
+            .and_then(|s| s.as_array())
+            .is_some_and(|arr| !arr.is_empty());
         if is_agent {
             // Stack hash: from the verified JWT `wl_stack_hash` claim
             // (spec §5: "the forge verifies the agent's OIDC token contains
@@ -717,11 +722,9 @@ pub async fn approve_spec(
                 // Populate meta_spec_set_sha from the workspace's current
                 // meta-spec set (§2.2). When no set is configured, remains
                 // empty string (graceful fallback).
-                let meta_spec_set_sha = crate::compute_meta_spec_set_sha(
-                    state.meta_spec_sets.as_ref(),
-                    &gyre_common::Id::new(&workspace_id),
-                )
-                .await;
+                let meta_spec_set_sha =
+                    crate::compute_meta_spec_set_sha(&state, &gyre_common::Id::new(&workspace_id))
+                        .await;
 
                 let input_content = gyre_common::InputContent {
                     spec_path: spec_path.clone(),
@@ -947,6 +950,52 @@ pub async fn approve_spec(
     Ok((StatusCode::CREATED, Json(event.into())))
 }
 
+/// Expand `team:{slug}` entries in a manifest's `human_approvers` list into
+/// the approver-id strings those members' human approvals record
+/// (user-management.md §Team Management — spec ownership: "this spec is
+/// owned by team:platform"). Non-team entries pass through unchanged.
+///
+/// A human approval records `user:{agent_id}`, and every human auth path
+/// resolves `agent_id` from the approving user's stored identity, so each
+/// member contributes the identifier forms their approval can carry
+/// (display name, username, user id — a display-name rename between the
+/// approval and this resolution must not orphan the approval).
+///
+/// A team reference that does not resolve — no such team, or a team with
+/// no members — is kept verbatim in the approver list: no human approval
+/// ever records a `team:{slug}` approver id, so the §9 resolver can never
+/// match it and the approval stays Pending (fail-closed). Dropping it
+/// instead would leave an empty `human_approvers` list, which the resolver
+/// treats as "any human may approve" — a fail-open.
+async fn expand_team_approvers(
+    state: &crate::AppState,
+    workspace_id: &gyre_common::Id,
+    human_approvers: &[String],
+) -> Vec<String> {
+    let mut expanded = Vec::with_capacity(human_approvers.len());
+    for approver in human_approvers {
+        if crate::notifications::parse_team_ref(approver).is_some() {
+            let resolved =
+                crate::notifications::resolve_team_members(state, workspace_id, approver).await;
+            match resolved {
+                Some(member_ids) if !member_ids.is_empty() => {
+                    for uid in member_ids {
+                        if let Ok(Some(user)) = state.users.find_by_id(&uid).await {
+                            expanded.push(format!("user:{}", user.display_name));
+                            expanded.push(format!("user:{}", user.username));
+                        }
+                        expanded.push(format!("user:{}", uid));
+                    }
+                }
+                _ => expanded.push(approver.clone()),
+            }
+        } else {
+            expanded.push(approver.clone());
+        }
+    }
+    expanded
+}
+
 /// Resolve the ledger `approval_status` for a spec from its manifest policy
 /// and recorded approval history (spec-registry.md §9).
 ///
@@ -978,7 +1027,11 @@ async fn resolve_new_approval_status(
         // same relative form (e.g. "system/design-principles.md") — the same
         // normalization `sync_spec_ledger` uses when keying the ledger.
         let spec_entry = manifest.specs.iter().find(|e| e.path == spec_path)?;
-        Some((spec_entry.clone(), manifest.defaults.clone()))
+        Some((
+            spec_entry.clone(),
+            manifest.defaults.clone(),
+            repo.workspace_id.clone(),
+        ))
     }
     .await;
 
@@ -988,7 +1041,7 @@ async fn resolve_new_approval_status(
         .await
         .unwrap_or_default();
 
-    let Some((manifest_entry, defaults)) = resolved else {
+    let Some((manifest_entry, defaults, workspace_id)) = resolved else {
         tracing::debug!(
             spec_path,
             "spec-approval: no manifest entry for spec — falling back to single-approval status"
@@ -1005,6 +1058,22 @@ async fn resolve_new_approval_status(
             ApprovalStatus::Pending
         };
     };
+
+    // Spec ownership via teams (user-management.md §Team Management): a
+    // `team:{slug}` entry in `human_approvers` counts every member of that
+    // team as an approver. Expanded before the pure §9 resolver so the
+    // resolver's membership check stays repository-free.
+    let mut manifest_entry = manifest_entry;
+    if let Some(approval) = manifest_entry.approval.as_mut() {
+        if approval
+            .human_approvers
+            .iter()
+            .any(|a| crate::notifications::parse_team_ref(a).is_some())
+        {
+            approval.human_approvers =
+                expand_team_approvers(state, &workspace_id, &approval.human_approvers).await;
+        }
+    }
 
     crate::spec_registry::resolve_approval_status(
         &manifest_entry,
@@ -1675,6 +1744,45 @@ pub async fn patrol_spec_links(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/v1/patrol/spec-lifecycle — spec-lifecycle accountability patrol
+// spec-lifecycle.md §Accountability Integration (task-204)
+// ---------------------------------------------------------------------------
+
+/// Run the three spec-lifecycle accountability checks and escalate every
+/// finding to the workspace orchestrator.
+///
+/// Checks: `spec-drift-review` tasks older than one loop cycle,
+/// `spec-implementation` tasks parked in Backlog beyond N days, and watched
+/// specs modified with no corresponding task. Thresholds come from the request
+/// body so per-repo configuration (task-109) can drive them; omitted fields use
+/// the documented defaults.
+///
+/// A storage failure is a 500, never an empty finding list: a patrol that
+/// cannot read tasks/specs must not report "no accountability gaps".
+pub async fn patrol_spec_lifecycle(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::spec_lifecycle_patrol::SpecLifecyclePatrolRequest>,
+) -> Result<Json<crate::spec_patrol::PatrolResponse>, ApiError> {
+    let now = now_secs();
+    let drift_review_max_age = req
+        .drift_review_max_age_secs
+        .unwrap_or(crate::spec_lifecycle_patrol::DEFAULT_DRIFT_REVIEW_MAX_AGE_SECS);
+    let implementation_backlog_max_age = req
+        .implementation_backlog_max_age_secs
+        .unwrap_or(crate::spec_lifecycle_patrol::DEFAULT_IMPLEMENTATION_BACKLOG_MAX_AGE_SECS);
+
+    crate::spec_lifecycle_patrol::run_and_escalate(
+        &state,
+        now,
+        drift_review_max_age,
+        implementation_backlog_max_age,
+    )
+    .await
+    .map(Json)
+    .map_err(ApiError::Internal)
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/specs/:path/progress — tasks and MRs linked to a spec
 // ---------------------------------------------------------------------------
 
@@ -2012,8 +2120,7 @@ pub async fn dry_run_constraints(
     });
 
     // Build a representative agent context from workspace state.
-    let meta_spec_set_sha =
-        crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+    let meta_spec_set_sha = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
 
     let agent_ctx = AgentContext {
         id: "dry-run-preview".to_string(),
@@ -2422,6 +2529,9 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1_000_000,
             updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
         };
         state.repos.create(&repo).await.unwrap();
 
@@ -3013,6 +3123,23 @@ specs:
     /// files. Returns (tempdir, map of spec path → blob SHA at HEAD).
     async fn make_manifest_repo() -> (tempfile::TempDir, std::collections::HashMap<String, String>)
     {
+        make_manifest_repo_with(
+            E2E_APPROVAL_MANIFEST,
+            &[
+                "system/both.md",
+                "system/agent-min.md",
+                "system/agent-pinned.md",
+            ],
+        )
+        .await
+    }
+
+    /// Parameterized manifest-repo builder — the E2E approval tests above
+    /// and the team-approver (spec ownership) tests below share it.
+    async fn make_manifest_repo_with(
+        manifest: &str,
+        specs: &[&str],
+    ) -> (tempfile::TempDir, std::collections::HashMap<String, String>) {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path();
         let run = |args: &[&str]| {
@@ -3033,24 +3160,17 @@ specs:
         run(&["config", "user.name", "Test"]);
 
         std::fs::create_dir_all(path.join("specs/system")).unwrap();
-        std::fs::write(path.join("specs/manifest.yaml"), E2E_APPROVAL_MANIFEST).unwrap();
-        for spec in [
-            "system/both.md",
-            "system/agent-min.md",
-            "system/agent-pinned.md",
-        ] {
+        std::fs::write(path.join("specs/manifest.yaml"), manifest).unwrap();
+        for spec in specs {
             std::fs::write(path.join("specs").join(spec), format!("# {}\n", spec)).unwrap();
         }
+
         run(&["add", "."]);
         run(&["commit", "-m", "manifest + specs"]);
 
         // Blob SHA for each spec file at HEAD — the ledger's current_sha.
         let mut shas = std::collections::HashMap::new();
-        for spec in [
-            "system/both.md",
-            "system/agent-min.md",
-            "system/agent-pinned.md",
-        ] {
+        for spec in specs {
             let out = std::process::Command::new("git")
                 .args(["rev-parse", &format!("HEAD:specs/{spec}")])
                 .current_dir(path)
@@ -3137,6 +3257,12 @@ specs:
                 "system",
                 &state.base_url,
                 3600,
+                "default", // tenant of ws-e2e (seed_e2e_specs)
+                "ws-e2e",
+                "repo-e2e",
+                "e2e-repo",
+                None,                         // persona
+                Some(level),                  // attestation_level
                 None,                         // wl_pid
                 None,                         // wl_hostname
                 Some("local".to_string()),    // wl_compute_target
@@ -3231,16 +3357,23 @@ specs:
     /// API-key auth path and resolves to `user:jsell` — matching the
     /// manifest's `human_approvers` list. Returns the raw API key.
     async fn register_e2e_human(state: &crate::AppState) -> String {
+        register_e2e_human_as(state, "user-jsell", "jsell").await
+    }
+
+    /// Register a real human user (Admin) with an API key, bound to the
+    /// seeded specs' tenant. Parameterized so team-approver tests can
+    /// register several distinct humans.
+    async fn register_e2e_human_as(state: &crate::AppState, user_id: &str, name: &str) -> String {
         let mut user = gyre_domain::User::new(
-            gyre_common::Id::new("user-jsell"),
-            "local:jsell",
-            "jsell",
+            gyre_common::Id::new(user_id),
+            format!("local:{name}"),
+            name,
             0,
         );
         user.roles = vec![gyre_domain::UserRole::Admin];
         // API-key auth resolves the tenant scope from the user's stored
         // binding and fail-closes when it is absent (task-099 F1), so the
-        // fixture binds jsell to the seeded specs' tenant ("default", the
+        // fixture binds the user to the seeded specs' tenant ("default", the
         // tenant of ws-e2e) for the approval to authenticate.
         user.tenant_id = Some(gyre_common::Id::new("default"));
         state.users.create(&user).await.unwrap();
@@ -3256,6 +3389,143 @@ specs:
             .await
             .unwrap();
         raw_key
+    }
+
+    /// user-management.md §Team Management — spec ownership ("this spec is
+    /// owned by team:platform"): a `team:{slug}` entry in a manifest's
+    /// `human_approvers` counts every member of that team as an approver.
+    ///
+    /// Real git manifest repo, real ledger, real team + membership created
+    /// through the team API, real API-key human approvals. The negative
+    /// arms kill the fail-open classes: a non-member's approval must leave
+    /// the spec Pending, and an unresolvable team reference must fail
+    /// closed (Pending), never open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn team_slug_human_approvers_resolve_through_membership_e2e() {
+        let manifest = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/team-owned.md
+    title: Team Owned
+    owner: team:platform
+    approval:
+      mode: human_only
+      human_approvers:
+        - team:platform
+  - path: system/team-missing.md
+    title: Team Missing
+    owner: team:nonexistent
+    approval:
+      mode: human_only
+      human_approvers:
+        - team:nonexistent
+"#;
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo_with(
+            manifest,
+            &["system/team-owned.md", "system/team-missing.md"],
+        )
+        .await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Humans: the team lead (jsell, also the team's only approver
+        // source), a team member (asmith), and a non-member workspace
+        // member (bob).
+        let lead_key = register_e2e_human_as(&state, "user-jsell", "jsell").await;
+        let member_key = register_e2e_human_as(&state, "user-asmith", "asmith").await;
+        let outsider_key = register_e2e_human_as(&state, "user-bob", "bob").await;
+
+        // Give all three workspace membership in ws-e2e (teams never expand
+        // access beyond workspace membership — members must be workspace
+        // members first).
+        for uid in ["user-jsell", "user-asmith", "user-bob"] {
+            let m = gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new(format!("mem-{uid}")),
+                gyre_common::Id::new(uid),
+                gyre_common::Id::new("ws-e2e"),
+                gyre_domain::WorkspaceRole::Developer,
+                gyre_common::Id::new("system"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        // Create the team and add asmith — through the real team API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-e2e/teams")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "Platform", "lead": "user-jsell"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team = serde_json::from_slice::<serde_json::Value>(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(team["slug"], "platform");
+        let team_id = team["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/ws-e2e/teams/{team_id}/members"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": "user-asmith"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Negative: a non-member's (bob's) approval must NOT approve the
+        // team-owned spec.
+        let spec = "system/team-owned.md";
+        let resp = approve_via_api(&app, &outsider_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, spec).await,
+            ApprovalStatus::Pending,
+            "a non-team-member's approval must not approve a team-owned spec"
+        );
+
+        // Positive: a team member's (asmith's) approval approves it.
+        let resp = approve_via_api(&app, &member_key, spec, &shas[spec], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, spec).await,
+            ApprovalStatus::Approved,
+            "a team member's approval must approve a team-owned spec"
+        );
+
+        // Fail-closed: `team:nonexistent` does not resolve, so even the
+        // lead's approval cannot approve the spec.
+        let missing = "system/team-missing.md";
+        let resp = approve_via_api(&app, &lead_key, missing, &shas[missing], None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(
+            ledger_status(&state, missing).await,
+            ApprovalStatus::Pending,
+            "an unresolvable team reference must fail closed"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3478,6 +3748,7 @@ specs:
             id: "child-implements-parent".to_string(),
             source_path: "system/child.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::Implements,
             target_path: "system/parent.md".to_string(),
             target_repo_id: None,
@@ -3533,6 +3804,7 @@ specs:
             id: "child-implements-parent".to_string(),
             source_path: "system/child.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::Implements,
             target_path: "system/parent.md".to_string(),
             target_repo_id: None,
@@ -3589,6 +3861,7 @@ specs:
             id: "new-conflicts-old".to_string(),
             source_path: "system/new.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::ConflictsWith,
             target_path: "system/old.md".to_string(),
             target_repo_id: None,
@@ -3638,6 +3911,7 @@ specs:
             id: "new-conflicts-old".to_string(),
             source_path: "system/new.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::ConflictsWith,
             target_path: "system/old.md".to_string(),
             target_repo_id: None,
@@ -3698,6 +3972,7 @@ specs:
             id: "dependent-depends-dependency".to_string(),
             source_path: "system/dependent.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::DependsOn,
             target_path: "system/dependency.md".to_string(),
             target_repo_id: None,
@@ -3754,6 +4029,7 @@ specs:
             id: "dependent-depends-dependency".to_string(),
             source_path: "system/dependent.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::DependsOn,
             target_path: "system/dependency.md".to_string(),
             target_repo_id: None,
@@ -3810,6 +4086,7 @@ specs:
             id: "new-supersedes-old".to_string(),
             source_path: "system/new-spec.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::Supersedes,
             target_path: "system/old-spec.md".to_string(),
             target_repo_id: None,
@@ -3892,6 +4169,7 @@ specs:
             id: "a-depends-b".to_string(),
             source_path: "system/a.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::DependsOn,
             target_path: "system/b.md".to_string(),
             target_repo_id: None,
@@ -3946,6 +4224,7 @@ specs:
             id: "b-implements-a".to_string(),
             source_path: "system/b.md".to_string(),
             source_repo_id: None,
+            source_sha: "src-sha".to_string(),
             link_type: SpecLinkType::Implements,
             target_path: "system/a.md".to_string(),
             target_repo_id: None,
@@ -3991,7 +4270,7 @@ specs:
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
-        let ledger: crate::spec_registry::SpecLedger =
+        let ledger: Arc<tokio::sync::Mutex<std::collections::HashMap<String, SpecLedgerEntry>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
         let now = 1700000000u64;
@@ -4032,9 +4311,15 @@ specs:
             for entry in &manifest.specs {
                 for link in &entry.links {
                     new_links.push(crate::spec_registry::SpecLinkEntry {
-                        id: format!("{}-{}-{}", entry.path, link.link_type, link.target),
+                        id: gyre_domain::spec_links::spec_link_id(
+                            None,
+                            &entry.path,
+                            &link.link_type,
+                            &link.target,
+                        ),
                         source_path: entry.path.clone(),
                         source_repo_id: None,
+                        source_sha: "src-sha".to_string(),
                         link_type: link.link_type.clone(),
                         target_path: link.target.clone(),
                         target_repo_id: None,
@@ -4417,6 +4702,7 @@ specs:
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -4675,11 +4961,44 @@ specs:
             .await
             .unwrap();
 
-        // Seed a meta-spec set for the workspace.
-        let meta_set_json = r#"{"workspace_id":"ws-meta-test","personas":{"security":{}}}"#;
+        // Seed the workspace (the effective-set resolution reads the workspace
+        // record to find its tenant for §8 inheritance) and a canonical
+        // meta-spec set for it.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace {
+                id: gyre_common::Id::new(ws_id),
+                tenant_id: gyre_common::Id::new("default"),
+                name: "meta-test".to_string(),
+                slug: "meta-test".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: gyre_domain::TrustLevel::Autonomous,
+                llm_model: None,
+                created_at: 1_700_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
+        let meta_set = crate::api::meta_specs::MetaSpecSet {
+            workspace_id: ws_id.to_string(),
+            personas: [(
+                "security".to_string(),
+                crate::api::meta_specs::MetaSpecPinnedEntry {
+                    path: "meta/security.md".to_string(),
+                    sha: "a1b2c3".to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let meta_set_json = serde_json::to_string(&meta_set).unwrap();
         state
             .meta_spec_sets
-            .upsert(&gyre_common::Id::new(ws_id), meta_set_json)
+            .upsert(&gyre_common::Id::new(ws_id), &meta_set_json)
             .await
             .unwrap();
 
@@ -5509,6 +5828,7 @@ specs:
                     id: "link-1".to_string(),
                     source_path: "system/auth.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::DependsOn,
                     target_path: "system/core.md".to_string(),
                     target_repo_id: None,
@@ -5523,6 +5843,7 @@ specs:
                     id: "link-2".to_string(),
                     source_path: "system/ui.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::Implements,
                     target_path: "system/core.md".to_string(),
                     target_repo_id: None,
@@ -5537,6 +5858,7 @@ specs:
                     id: "link-3".to_string(),
                     source_path: "system/core.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::ConflictsWith,
                     target_path: "system/ui.md".to_string(),
                     target_repo_id: None,
@@ -5551,6 +5873,7 @@ specs:
                     id: "link-4".to_string(),
                     source_path: "system/auth.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::Supersedes,
                     target_path: "system/old.md".to_string(),
                     target_repo_id: None,
@@ -5748,6 +6071,7 @@ specs:
                     id: "link-pending-conflict".to_string(),
                     source_path: "system/alpha.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: crate::spec_registry::SpecLinkType::ConflictsWith,
                     target_path: "system/beta.md".to_string(),
                     target_repo_id: None,
@@ -5869,6 +6193,7 @@ specs:
                     id: "supersedes-1".to_string(),
                     source_path: "system/new.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::Supersedes,
                     target_path: "system/old.md".to_string(),
                     target_repo_id: None,
@@ -5954,6 +6279,7 @@ specs:
                     id: "conflict-1".to_string(),
                     source_path: "system/spec-a.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::ConflictsWith,
                     target_path: "system/spec-b.md".to_string(),
                     target_repo_id: None,
@@ -6036,6 +6362,7 @@ specs:
                     id: "dep-1".to_string(),
                     source_path: "system/consumer.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::DependsOn,
                     target_path: "system/dependency.md".to_string(),
                     target_repo_id: None,
@@ -6136,6 +6463,7 @@ specs:
                     id: "conflict-reverse-1".to_string(),
                     source_path: "system/spec-a.md".to_string(),
                     source_repo_id: Some("repo1".to_string()),
+                    source_sha: "src-sha".to_string(),
                     link_type: SpecLinkType::ConflictsWith,
                     target_path: "system/spec-b.md".to_string(),
                     target_repo_id: None,
@@ -6195,6 +6523,7 @@ specs:
                 id: "patrol-dangling".to_string(),
                 source_path: "system/impl.md".to_string(),
                 source_repo_id: Some("repo1".to_string()),
+                source_sha: "src-sha".to_string(),
                 link_type: crate::spec_registry::SpecLinkType::Implements,
                 target_path: "system/deleted.md".to_string(),
                 target_repo_id: None,
@@ -6261,5 +6590,138 @@ specs:
         let json = body_json(resp).await;
         let findings = json["findings"].as_array().unwrap();
         assert!(findings.is_empty(), "no links → no findings");
+    }
+
+    // -----------------------------------------------------------------------
+    // task-204: POST /api/v1/patrol/spec-lifecycle — accountability patrol
+    // spec-lifecycle.md §Accountability Integration
+    // -----------------------------------------------------------------------
+
+    /// Seed a `spec-drift-review` task of the given age (all other patrol
+    /// inputs left empty, so the finding count is attributable).
+    async fn seed_drift_review_task(state: &crate::AppState, age_secs: u64) {
+        let mut task = gyre_domain::Task::new(
+            gyre_common::Id::new("drift-stale"),
+            "spec change drift review",
+            crate::api::now_secs() - age_secs,
+        );
+        task.labels = vec!["spec-drift-review".to_string(), "auto-created".to_string()];
+        task.workspace_id = gyre_common::Id::new("ws1");
+        task.repo_id = gyre_common::Id::new("repo1");
+        task.spec_path = Some("specs/system/agent-runtime.md".to_string());
+        state.tasks.create(&task).await.unwrap();
+    }
+
+    async fn post_spec_lifecycle_patrol(
+        state: std::sync::Arc<crate::AppState>,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/patrol/spec-lifecycle")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// A stale drift-review task is reported AND escalated to the workspace
+    /// orchestrator as a persisted message (not merely returned/logged).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_patrol_endpoint_flags_and_escalates() {
+        let state = test_state();
+        // `emit_event` resolves the tenant scope from the workspace record
+        // and skips persisting when it is missing; seed "ws1" so the
+        // persisted-escalation assert below proves real emission.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace {
+                id: gyre_common::Id::new("ws1"),
+                tenant_id: gyre_common::Id::new("default"),
+                name: "ws-ws1".to_string(),
+                slug: "ws-ws1".to_string(),
+                description: None,
+                budget: None,
+                max_repos: None,
+                max_agents_per_repo: None,
+                trust_level: gyre_domain::TrustLevel::Guided,
+                llm_model: None,
+                created_at: 1_000_000,
+                compute_target_id: None,
+            })
+            .await
+            .unwrap();
+        // 2 days: past the 24h default drift threshold, inside the 7d backlog one.
+        seed_drift_review_task(&state, 2 * 86_400).await;
+
+        let (status, json) = post_spec_lifecycle_patrol(state.clone(), "{}").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let findings = json["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "exactly the stale task: {json}");
+        let stale = &findings[0];
+        assert_eq!(stale["type"], "stale_drift_review_task");
+        assert_eq!(stale["severity"], "warning");
+        assert_eq!(stale["task_id"], "drift-stale");
+        assert_eq!(stale["workspace_id"], "ws1");
+        assert_eq!(stale["spec_path"], "specs/system/agent-runtime.md");
+
+        let escalated = state
+            .messages
+            .list_by_workspace(
+                &gyre_common::Id::new("ws1"),
+                Some("escalation"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            escalated.len(),
+            1,
+            "one escalation per finding: {escalated:?}"
+        );
+        let payload = escalated[0].payload.as_ref().expect("payload");
+        assert_eq!(payload["finding_type"], "stale_drift_review_task");
+        assert_eq!(payload["task_id"], "drift-stale");
+        assert_eq!(payload["source"], "spec_lifecycle_patrol");
+    }
+
+    /// Request-body thresholds reach the checks (a serde field-name drift would
+    /// silently fall back to defaults, so assert both directions).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_patrol_endpoint_honours_thresholds() {
+        let state = test_state();
+        seed_drift_review_task(&state, 2 * 86_400).await;
+
+        // 30-day limit: the 2-day-old task is not a gap.
+        let (status, json) = post_spec_lifecycle_patrol(
+            state.clone(),
+            r#"{"drift_review_max_age_secs":2592000,"implementation_backlog_max_age_secs":2592000}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["findings"].as_array().unwrap().is_empty(),
+            "2 days is inside a 30-day limit: {json}"
+        );
+
+        // 1-hour limit: the same task is a gap.
+        let (_, json) =
+            post_spec_lifecycle_patrol(state.clone(), r#"{"drift_review_max_age_secs":3600}"#)
+                .await;
+        let findings = json["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "2 days exceeds a 1h limit: {json}");
+        assert_eq!(findings[0]["type"], "stale_drift_review_task");
     }
 }

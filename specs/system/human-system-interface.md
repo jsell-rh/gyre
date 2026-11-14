@@ -239,7 +239,7 @@ This policy is **immutable** — it exists at every trust level, including Custo
 
 The Custom trust editor grays out immutable policies with tooltip: "This policy cannot be removed or overridden." Per `platform-model.md` §2, agents cannot approve specs that define their own behavior.
 
-Budget warnings (priority 7 in the Inbox) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
+Budget warnings (High priority, rank 4 in the Inbox per the unified notification taxonomy in `user-management.md` §Notification Entity) remain visible at Autonomous trust because `platform-model.md` §5 defines budget exhaustion as requiring human action.
 
 **Custom:** opens the ABAC policy editor within the **Admin** view at workspace scope (a new "Policies" tab alongside "Workspace settings, budget, trust level, teams"). The editor queries `GET /api/v1/policies?scope=Workspace&scope_id=<workspace_id>` to list policies for this workspace. The editor uses the Full-Width layout (per `ui-layout.md` §2) with three sections: (1) a policy list table grouped by prefix (`builtin:` / `trust:` / user-created), (2) a visual condition builder panel (form-based, not raw YAML) for creating/editing policies, (3) a dry-run simulator panel where users can test "would this request be allowed?" against the current policy set. Immutable policies are grayed out with tooltip. Layout details follow the standard Full-Width pattern — no custom layout needed.
 
@@ -1369,10 +1369,16 @@ These are architectural constraints, not implementation work. They ensure we don
 |---|---|---|
 | Briefing | `gyre briefing [--workspace <slug>] [--since <epoch>]` | Resource: `briefing://` |
 | Inbox | `gyre inbox [--workspace <slug>] [--priority <min>-<max>]` | Resource: `notifications://` |
-| Explorer (concept search) | `gyre explore <concept> [--repo <name>]` | Tool: `graph.concept` |
+| Explorer (concept search) | `gyre explore <concept> [--repo <name>]` | Tool: `graph_concept` |
 | System Trace | `gyre trace <mr-id>` | Resource: `trace://<mr-id>` |
-| Spec editing assist | `gyre spec assist <path> "<instruction>"` | Tool: `spec.assist` |
+| Spec editing assist | `gyre spec assist <path> "<instruction>"` | Tool: `spec_assist` |
 | Divergence alerts | `gyre divergence [--workspace <slug>]` | (via notifications) |
+
+**Tool naming:** MCP tool names use snake_case (`graph_concept`, `spec_assist`),
+the convention for every tool the MCP server exposes. Earlier revisions of
+this table showed dotted shorthand (`graph.concept`, `spec.assist`), which
+was editorial, not an API contract; the table was amended to name the
+shipped tools (2026-09-29 §11 coverage audit resolution).
 
 This table is not exhaustive — it establishes the pattern. The REST API is the single source of truth; the UI, CLI, and MCP are all consumers. No data surface should be UI-only.
 

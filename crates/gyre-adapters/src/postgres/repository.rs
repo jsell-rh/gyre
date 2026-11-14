@@ -10,6 +10,34 @@ use std::sync::Arc;
 use super::PgStorage;
 use crate::schema::repositories;
 
+/// Deserialize a repo budget override from the `budget_json` column.
+/// A corrupt budget document must not take the repo read path down: the
+/// repo then inherits the workspace limit — the coarser ceiling still
+/// bounds spending, and the warn names the row for repair.
+fn parse_budget_json(json: &Option<String>, repo_id: &str) -> Option<gyre_domain::BudgetConfig> {
+    json.as_deref().and_then(
+        |json| match serde_json::from_str::<gyre_domain::BudgetConfig>(json) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                tracing::warn!(
+                    repo_id,
+                    error = %e,
+                    "corrupt repositories.budget_json; repo inherits workspace budget"
+                );
+                None
+            }
+        },
+    )
+}
+
+/// Serialize a repo budget override for the `budget_json` column.
+/// `None` (inherit the workspace limit) stays NULL.
+fn budget_to_json(budget: &Option<gyre_domain::BudgetConfig>) -> Option<String> {
+    budget
+        .as_ref()
+        .map(|b| serde_json::to_string(b).expect("BudgetConfig is always JSON-serializable"))
+}
+
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = repositories)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -29,10 +57,14 @@ struct RepositoryRow {
     description: Option<String>,
     status: String,
     updated_at: i64,
+    max_agents: Option<i32>,
+    max_agent_iterations: Option<i32>,
+    budget_json: Option<String>,
 }
 
 impl From<RepositoryRow> for Repository {
     fn from(r: RepositoryRow) -> Self {
+        let budget = parse_budget_json(&r.budget_json, &r.id);
         Repository {
             id: Id::new(r.id),
             name: r.name,
@@ -50,6 +82,9 @@ impl From<RepositoryRow> for Repository {
                 RepoStatus::Active
             }),
             updated_at: r.updated_at as u64,
+            max_agents: r.max_agents.map(|v| v as u32),
+            max_agent_iterations: r.max_agent_iterations.map(|v| v as u32),
+            budget,
         }
     }
 }
@@ -71,6 +106,9 @@ struct NewRepositoryRow<'a> {
     description: Option<&'a str>,
     status: &'a str,
     updated_at: i64,
+    max_agents: Option<i32>,
+    max_agent_iterations: Option<i32>,
+    budget_json: Option<String>,
 }
 
 #[async_trait]
@@ -78,6 +116,9 @@ impl RepoRepository for PgStorage {
     async fn create(&self, repo: &Repository) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let r = repo.clone();
+        // Tenant scope resolved on the storage handle (single-tenant default,
+        // or the request's tenant via `with_tenant`) — not a fabricated literal.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let status_str = r.status.to_string();
@@ -91,11 +132,14 @@ impl RepoRepository for PgStorage {
                 mirror_url: r.mirror_url.as_deref(),
                 mirror_interval_secs: r.mirror_interval_secs.map(|v| v as i64),
                 last_mirror_sync: r.last_mirror_sync.map(|v| v as i64),
-                tenant_id: "default",
+                tenant_id: &tenant,
                 workspace_id: r.workspace_id.as_str(),
                 description: r.description.as_deref(),
                 status: &status_str,
                 updated_at: r.updated_at as i64,
+                max_agents: r.max_agents.map(|v| v as i32),
+                max_agent_iterations: r.max_agent_iterations.map(|v| v as i32),
+                budget_json: budget_to_json(&r.budget),
             };
             diesel::insert_into(repositories::table)
                 .values(&row)
@@ -113,6 +157,9 @@ impl RepoRepository for PgStorage {
                     repositories::description.eq(row.description),
                     repositories::status.eq(row.status),
                     repositories::updated_at.eq(row.updated_at),
+                    repositories::max_agents.eq(row.max_agents),
+                    repositories::max_agent_iterations.eq(row.max_agent_iterations),
+                    repositories::budget_json.eq(row.budget_json.as_deref()),
                 ))
                 .execute(&mut *conn)
                 .context("insert repository")?;
@@ -172,6 +219,9 @@ impl RepoRepository for PgStorage {
                     repositories::description.eq(r.description.as_deref()),
                     repositories::status.eq(&status_str),
                     repositories::updated_at.eq(r.updated_at as i64),
+                    repositories::max_agents.eq(r.max_agents.map(|v| v as i32)),
+                    repositories::max_agent_iterations.eq(r.max_agent_iterations.map(|v| v as i32)),
+                    repositories::budget_json.eq(budget_to_json(&r.budget)),
                 ))
                 .execute(&mut *conn)
                 .context("update repository")?;

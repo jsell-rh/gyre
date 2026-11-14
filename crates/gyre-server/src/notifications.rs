@@ -3,6 +3,9 @@
 
 use crate::AppState;
 use gyre_common::{Id, Notification, NotificationType};
+use gyre_ports::NotificationRepository;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// Resolve a deep-link URL for a notification source
 /// (user-management.md §Notification Entity: "Deep link to relevant page").
@@ -92,9 +95,11 @@ pub async fn notify(
         now,
     );
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
+        return;
     }
+    crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
 /// Create and persist a notification with structured body, source, and deep link
@@ -157,9 +162,13 @@ pub async fn notify_rich(
         }
     };
 
-    if let Err(e) = state.notifications.create(&notif).await {
+    if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
+        return;
     }
+    // Fan out to the recipient's configured channels (email/webhook/slack)
+    // per user-management.md §Delivery Channels.
+    crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
 /// Notify the spawning user that a gate failed on their MR.
@@ -198,7 +207,7 @@ pub async fn notify_gate_failure(
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
     let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
 
     let body_json = serde_json::json!({
@@ -214,6 +223,73 @@ pub async fn notify_gate_failure(
         user_id,
         NotificationType::GateFailure,
         format!("Gate '{gate_name}' failed on MR {mr_label}"),
+        tenant_id,
+        Some(body_json),
+        Some(mr_id.to_string()),
+        repo_id,
+        "gate",
+        None,
+    )
+    .await;
+}
+
+/// Notify the MR author's spawning user that a spec enforcement policy
+/// blocked the merge (agent-gates.md §Forge Enforcement Policies —
+/// enforcement errors are reported clearly to the author, not just logged
+/// on the queue entry).
+pub async fn notify_spec_policy_violation(
+    state: &AppState,
+    author_agent_id: &Id,
+    workspace_id: &Id,
+    mr_id: &str,
+    reason: &str,
+    tenant_id: &str,
+) {
+    let spawned_by = state
+        .agents
+        .find_by_id(author_agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|a| a.spawned_by);
+
+    let user_id = if let Some(ref sb) = spawned_by {
+        Id::new(sb.clone())
+    } else {
+        author_agent_id.clone()
+    };
+
+    // Resolve MR title for human-friendly notification
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten();
+    let mr_label = mr
+        .as_ref()
+        .map(|mr| format!("'{}'", mr.title))
+        .unwrap_or_else(|| {
+            // Char-boundary truncation: a fixed byte index can split a
+            // multibyte UTF-8 id and panic (byte-slice truncation check).
+            mr_id.chars().take(8).collect::<String>()
+        });
+    let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
+
+    let body_json = serde_json::json!({
+        "mr_id": mr_id,
+        "agent_id": author_agent_id.as_str(),
+        "policy": "spec_enforcement",
+        "reason": reason,
+    })
+    .to_string();
+
+    notify_rich(
+        state,
+        workspace_id.clone(),
+        user_id,
+        NotificationType::GateFailure,
+        format!("Spec policy blocked merge on MR {mr_label}: {reason}"),
         tenant_id,
         Some(body_json),
         Some(mr_id.to_string()),
@@ -333,7 +409,7 @@ pub async fn notify_mr_merged(
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
     let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
 
     let body_json = serde_json::json!({
@@ -367,6 +443,21 @@ pub async fn notify_mr_reverted(
     mr_id: &str,
     reason: &str,
 ) {
+    // Resolve the tenant from the workspace record — never fabricate a
+    // "default" scope identity on lookup failure (see
+    // scripts/check-fabricated-scope-defaults.sh).
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                mr_id,
+                workspace_id = %workspace_id,
+                "notify_mr_reverted: cannot resolve tenant for workspace — skipping notifications"
+            );
+            return;
+        }
+    };
+
     let spawned_by = state
         .agents
         .find_by_id(author_agent_id)
@@ -390,7 +481,7 @@ pub async fn notify_mr_reverted(
     let mr_label = mr
         .as_ref()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
     let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
 
     let body_json = serde_json::json!({
@@ -403,17 +494,332 @@ pub async fn notify_mr_reverted(
     notify_rich(
         state,
         workspace_id.clone(),
-        user_id,
+        user_id.clone(),
         NotificationType::MrReverted,
         format!("MR {mr_label} was reverted: {reason}"),
-        "default",
-        Some(body_json),
+        tenant_id.clone(),
+        Some(body_json.clone()),
         Some(mr_id.to_string()),
         repo_id,
         "mr",
         None,
     )
     .await;
+
+    // user-management.md §Who Gets Notified — "MR reverted" also notifies the
+    // workspace Admins.
+    let admin_members = state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+    for member in admin_members {
+        if !matches!(member.role, gyre_domain::WorkspaceRole::Admin) {
+            continue;
+        }
+        if member.user_id == user_id {
+            continue; // already notified above
+        }
+        notify_rich(
+            state,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            NotificationType::MrReverted,
+            format!("MR {mr_label} was reverted: {reason}"),
+            tenant_id.clone(),
+            Some(body_json.clone()),
+            Some(mr_id.to_string()),
+            None,
+            "mr",
+            None,
+        )
+        .await;
+    }
+}
+
+// ─── Team references (user-management.md §Team Management) ──────────────────
+
+/// Parse a `team:{slug}` reference. Returns the slug when `reference` is a
+/// team reference; None for any other reference form (e.g. `user:jsell`).
+pub fn parse_team_ref(reference: &str) -> Option<&str> {
+    let slug = reference.strip_prefix("team:")?;
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
+/// Resolve a `team:{slug}` reference to the team's member user ids
+/// (user-management.md §Team Management — notification routing: "notify the
+/// platform team" resolves to the members of the team with that slug).
+///
+/// Returns None when the reference is not a `team:` reference or the slug
+/// does not resolve to a team in the workspace — the caller skips (the
+/// resolution failure is logged) rather than fabricating recipients.
+pub async fn resolve_team_members(
+    state: &AppState,
+    workspace_id: &Id,
+    reference: &str,
+) -> Option<Vec<Id>> {
+    let slug = parse_team_ref(reference)?;
+    let team = match state.teams.find_by_slug(workspace_id, slug).await {
+        Ok(Some(team)) => team,
+        Ok(None) => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                slug,
+                "team reference does not resolve to a team; skipping team routing"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                slug,
+                "team lookup failed; skipping team routing: {e}"
+            );
+            return None;
+        }
+    };
+    match state.teams.list_members(&team.id).await {
+        Ok(members) => Some(members.into_iter().map(|m| m.user_id).collect()),
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                slug,
+                "team member lookup failed; skipping team routing: {e}"
+            );
+            None
+        }
+    }
+}
+
+// ─── Spec-owner references (user-management.md §Who Gets Notified) ────────
+
+/// Resolve a spec-owner reference to concrete recipient user ids
+/// (user-management.md §Who Gets Notified: "Spec drift detected" → Spec
+/// owner). Owner refs carry the manifest forms `user:{name}` or
+/// `team:{slug}` (the same forms `human_approvers` uses — see
+/// `expand_team_approvers` in api/specs.rs):
+///
+/// - `team:{slug}` → the team's members (`resolve_team_members`).
+/// - `user:{name}` (or a bare id) → the user matching `name` by user id,
+///   username, or display name — the identifier forms an owner reference
+///   can record. Multiple forms may match different users only when the
+///   workspace genuinely has colliding identifiers; all matches are
+///   returned (never dropped silently), deduplicated.
+///
+/// Returns an empty vec when the reference resolves to nobody — the caller
+/// logs and continues with its other recipients rather than fabricating one.
+pub async fn resolve_owner_ref(state: &AppState, workspace_id: &Id, owner: &str) -> Vec<Id> {
+    if parse_team_ref(owner).is_some() {
+        return resolve_team_members(state, workspace_id, owner)
+            .await
+            .unwrap_or_default();
+    }
+    let name = owner.strip_prefix("user:").unwrap_or(owner);
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let mut resolved: Vec<Id> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |id: Id| {
+        if seen.insert(id.as_str().to_string()) {
+            resolved.push(id);
+        }
+    };
+    // Identifier forms an owner reference can carry: user id, username,
+    // display name (a display-name rename must not orphan the routing).
+    if let Ok(Some(user)) = state.users.find_by_id(&Id::new(name.to_string())).await {
+        push(user.id);
+    }
+    if let Ok(Some(user)) = state.users.find_by_username(name).await {
+        push(user.id);
+    }
+    if let Ok(users) = state.users.list().await {
+        for user in users {
+            if user.display_name == name {
+                push(user.id);
+            }
+        }
+    }
+    if resolved.is_empty() {
+        tracing::warn!(
+            owner,
+            "owner reference does not resolve to any user; skipping owner routing"
+        );
+    }
+    resolved
+}
+
+// ─── SSE fan-out wrapper (user-management.md §API > Notifications) ───────────
+
+/// [`NotificationRepository`] decorator that fans every `create` out to the
+/// SSE broadcast channel behind `/notifications/stream`.
+///
+/// This is the single fan-out point: `AppState::create_notification` routes
+/// through it, and background paths that persist notifications without an
+/// `&AppState` at hand (the `DivergencePorts` feeders in git_http, mirror_sync,
+/// and repo import) must wrap their repository with
+/// [`AppState::broadcasting_notifications`] instead of passing the bare repo —
+/// a bare repo persists fine but a connected stream client never sees the
+/// notification (task-125 review finding).
+///
+/// Broadcast is fire-and-forget: no subscribers, or a lagged one, must never
+/// fail the persist. Every non-`create` method delegates to the inner
+/// repository unchanged.
+pub struct BroadcastingNotificationRepo {
+    inner: Arc<dyn NotificationRepository>,
+    tx: broadcast::Sender<String>,
+}
+
+impl BroadcastingNotificationRepo {
+    /// Build a broadcasting decorator over a repository and an SSE channel.
+    /// Production callers should prefer `AppState::broadcasting_notifications`,
+    /// which wires the state's own channel; this constructor exists for
+    /// callers (and tests) that own a separate channel.
+    pub fn new(inner: Arc<dyn NotificationRepository>, tx: broadcast::Sender<String>) -> Self {
+        Self { inner, tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationRepository for BroadcastingNotificationRepo {
+    async fn create(&self, notification: &Notification) -> anyhow::Result<()> {
+        self.inner.create(notification).await?;
+        if let Ok(json) = serde_json::to_string(notification) {
+            let _ = self.tx.send(json);
+        }
+        Ok(())
+    }
+
+    async fn get(&self, id: &Id, user_id: &Id) -> anyhow::Result<Option<Notification>> {
+        self.inner.get(id, user_id).await
+    }
+
+    #[allow(clippy::too_many_arguments)] // filter + pagination; mirrors the port signature
+    async fn list_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_type: Option<&str>,
+        repo_id: Option<&Id>,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<Notification>> {
+        self.inner
+            .list_for_user(
+                user_id,
+                workspace_id,
+                min_priority,
+                max_priority,
+                notification_type,
+                repo_id,
+                limit,
+                offset,
+            )
+            .await
+    }
+
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> anyhow::Result<u64> {
+        self.inner
+            .update_body_by_entity_ref(entity_ref, notification_type, body)
+            .await
+    }
+
+    async fn dismiss(&self, id: &Id, user_id: &Id) -> anyhow::Result<()> {
+        self.inner.dismiss(id, user_id).await
+    }
+
+    async fn resolve(
+        &self,
+        id: &Id,
+        user_id: &Id,
+        action_taken: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.inner.resolve(id, user_id, action_taken).await
+    }
+
+    async fn mark_read(&self, id: &Id, user_id: &Id, read: bool) -> anyhow::Result<()> {
+        self.inner.mark_read(id, user_id, read).await
+    }
+
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+    ) -> anyhow::Result<u64> {
+        self.inner.count_unresolved(user_id, workspace_id).await
+    }
+
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> anyhow::Result<u64> {
+        self.inner.count_unread(user_id, workspace_id).await
+    }
+
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> anyhow::Result<u64> {
+        self.inner.mark_all_read(user_id, workspace_id).await
+    }
+
+    async fn list_recent(&self, limit: usize) -> anyhow::Result<Vec<Notification>> {
+        self.inner.list_recent(limit).await
+    }
+
+    async fn has_recent_dismissal(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        days: u32,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .has_recent_dismissal(workspace_id, user_id, notification_type, days)
+            .await
+    }
+
+    async fn has_active_notification(
+        &self,
+        workspace_id: &Id,
+        user_id: &Id,
+        notification_type: &str,
+        entity_ref: &str,
+        since: i64,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .has_active_notification(workspace_id, user_id, notification_type, entity_ref, since)
+            .await
+    }
+
+    async fn delete_older_than(
+        &self,
+        read_cutoff_secs: u64,
+        unread_cutoff_secs: u64,
+    ) -> anyhow::Result<u64> {
+        self.inner
+            .delete_older_than(read_cutoff_secs, unread_cutoff_secs)
+            .await
+    }
+}
+
+impl AppState {
+    /// A notification repository whose `create` both persists and broadcasts
+    /// to live `/notifications/stream` subscribers — the exact fan-out
+    /// `AppState::create_notification` routes through. Background paths
+    /// building `DivergencePorts` use this instead of the bare
+    /// `state.notifications` so their notifications reach the stream.
+    pub fn broadcasting_notifications(&self) -> BroadcastingNotificationRepo {
+        BroadcastingNotificationRepo {
+            inner: Arc::clone(&self.notifications),
+            tx: self.notification_broadcast_tx.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -459,7 +865,7 @@ mod tests {
     async fn notifs_for(state: &crate::AppState, user: &str) -> Vec<gyre_common::Notification> {
         state
             .notifications
-            .list_for_user(&Id::new(user), None, None, None, None, 50, 0)
+            .list_for_user(&Id::new(user), None, None, None, None, None, 50, 0)
             .await
             .unwrap()
     }

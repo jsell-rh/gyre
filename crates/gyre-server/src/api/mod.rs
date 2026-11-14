@@ -1,7 +1,6 @@
 pub mod activity;
 pub mod admin;
 pub mod agent_logs;
-pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
 pub mod aibom;
@@ -37,10 +36,12 @@ pub mod network;
 pub mod orchestrator;
 pub mod personas;
 pub mod policies;
+pub mod prompts;
 pub mod provenance;
 pub mod push_gates;
 pub mod recovery;
 pub mod release;
+pub mod repo_access;
 pub mod repos;
 pub mod saved_views;
 pub mod scim;
@@ -95,11 +96,13 @@ use impersonation::{
 };
 use std::sync::Arc;
 use users::{
-    create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
-    get_judgments, get_me, get_my_notifications, get_notification_count,
-    get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
-    mark_notification_read, mark_notification_unread, remove_member, resolve_notification,
-    update_me, update_member_role, update_notification_preferences, update_team,
+    add_team_member, create_team, create_token, create_user, delete_team, delete_token,
+    dismiss_notification, get_judgments, get_me, get_my_notifications, get_notification_count,
+    get_notification_preferences, get_unread_count, invite_member, list_members,
+    list_my_notifications, list_teams, list_tokens, mark_all_read_notifications,
+    mark_notification_read, mark_notification_unread, notification_stream, remove_member,
+    remove_team_member, resolve_notification, update_me, update_member_role,
+    update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -127,6 +130,20 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/diff", get(repos::diff))
         .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
         .route("/api/v1/repos/:id/sync-specs", post(repos::sync_specs))
+        // Repo access overrides (user-management.md §Repo Access)
+        .route(
+            "/api/v1/repos/:id/access-overrides",
+            get(repo_access::list_repo_access_overrides),
+        )
+        .route(
+            "/api/v1/repos/:id/access-overrides/:user_id",
+            put(repo_access::set_repo_access_override)
+                .delete(repo_access::delete_repo_access_override),
+        )
+        .route(
+            "/api/v1/repos/:id/access/:user_id",
+            get(repo_access::get_repo_access),
+        )
         // Commit provenance (M13.2)
         .route(
             "/api/v1/repos/:id/provenance",
@@ -174,7 +191,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/repos/:id/gates/:gate_id",
-            delete(gates::delete_gate),
+            put(gates::update_gate).delete(gates::delete_gate),
         )
         // Pre-accept push gates
         .route(
@@ -247,6 +264,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/commits/:sha/signature",
             get(jj::get_commit_signature),
+        )
+        .route(
+            "/api/v1/repos/:id/commits/:sha/signature/verification",
+            get(jj::get_commit_signature_verification),
         )
         // Agents
         .route(
@@ -340,6 +361,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(merge_requests::get_diff),
         )
         .route(
+            "/api/v1/merge-requests/:id/spec",
+            get(merge_requests::get_spec),
+        )
+        .route(
             "/api/v1/merge-requests/:id/attestation",
             get(merge_requests::get_attestation),
         )
@@ -392,6 +417,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/conflicts", get(specs::get_conflicts))
         // TASK-023: Accountability agent patrol (spec-links.md §Accountability Agent Integration)
         .route("/api/v1/patrol/spec-links", post(specs::patrol_spec_links))
+        // task-204: spec-lifecycle accountability patrol (spec-lifecycle.md
+        // §Accountability Integration) — findings escalate to the orchestrator.
+        .route(
+            "/api/v1/patrol/spec-lifecycle",
+            post(specs::patrol_spec_lifecycle),
+        )
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(
@@ -435,6 +466,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/specs/assist",
             post(specs_assist::assist_spec),
+        )
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/assist",
+            post(specs_assist::assist_meta_spec),
         )
         .route(
             "/api/v1/repos/:id/specs/save",
@@ -497,6 +532,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        .route(
+            "/api/v1/admin/orphaned-workspaces",
+            get(admin::admin_orphaned_workspaces),
+        )
         // Admin user impersonation (identity-security.md §Impersonation).
         // Approve/deny are called by the TARGET user (any role) and are
         // ABAC-exempt with per-handler authorization — see
@@ -652,8 +691,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(budget::get_workspace_budget).put(budget::set_workspace_budget),
         )
         .route("/api/v1/budget/summary", get(budget::budget_summary))
+        .route(
+            "/api/v1/workspaces/:id/budget/by-team",
+            get(budget::budget_by_team),
+        )
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
+        .route("/api/v1/search/suggest", get(search::suggest_handler))
+        .route("/api/v1/search/facets", get(search::facets_handler))
         // Tenants (M34)
         .route(
             "/api/v1/tenants",
@@ -675,6 +720,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(trust_anchors::get_trust_anchor)
                 .put(trust_anchors::update_trust_anchor)
                 .delete(trust_anchors::delete_trust_anchor),
+        )
+        // Tenant-level meta-spec sets (meta-spec-reconciliation.md §8)
+        .route(
+            "/api/v1/tenants/:id/meta-specs/set",
+            get(meta_specs::get_tenant_meta_spec_set).put(meta_specs::put_tenant_meta_spec_set),
         )
         // Workspaces (M22.1)
         .route(
@@ -708,6 +758,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
+        )
+        // Workspace merge policy (meta-spec-reconciliation.md §9)
+        .route(
+            "/api/v1/workspaces/:id/merge-policy",
+            get(workspaces::get_merge_policy).put(workspaces::set_merge_policy),
         )
         // Rollout policy (meta-spec-reconciliation.md §7)
         .route(
@@ -860,7 +915,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(list_tokens).post(create_token),
         )
         .route("/api/v1/users/me/tokens/:id", delete(delete_token))
-        // Notification Preferences (HSI §12) — per-handler auth, ABAC-exempt
+        // Notification Preferences (HSI §12 + user-management.md §Delivery
+        // Channels) — per-type preferences and delivery channel config,
+        // per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/notification-preferences",
             get(get_notification_preferences).put(update_notification_preferences),
@@ -873,6 +930,21 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/users/me/notifications/count",
             get(get_notification_count),
         )
+        // Spec paths (user-management.md §API > Notifications). Same handlers
+        // and per-handler scoping as the legacy /users/me routes above.
+        .route("/api/v1/notifications", get(list_my_notifications))
+        .route("/api/v1/notifications/unread-count", get(get_unread_count))
+        .route(
+            "/api/v1/notifications/mark-all-read",
+            post(mark_all_read_notifications),
+        )
+        // Preferences (per-type + delivery channels, task-112 §Delivery
+        // Channels) — same combined handlers as /users/me/notification-preferences
+        .route(
+            "/api/v1/notifications/preferences",
+            get(get_notification_preferences).put(update_notification_preferences),
+        )
+        .route("/api/v1/notifications/stream", get(notification_stream))
         .route(
             "/api/v1/notifications/:id/dismiss",
             post(dismiss_notification),
@@ -883,7 +955,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/notifications/:id/read",
-            post(mark_notification_read),
+            // Spec (user-management.md §API > Notifications) names PUT;
+            // POST is kept for the pre-existing clients of the same handler.
+            put(mark_notification_read).post(mark_notification_read),
         )
         .route(
             "/api/v1/notifications/:id/unread",
@@ -898,6 +972,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
         )
+        // Spec-named alias (user-management.md §Ownership Transfer &
+        // Reclamation and §API: `PUT .../members/{user_id}/role`) for the
+        // M22.8 member path above — same handler, same authorization.
+        .route(
+            "/api/v1/workspaces/:id/members/:user_id/role",
+            put(update_member_role),
+        )
         // Teams (M22.8)
         .route(
             "/api/v1/workspaces/:id/teams",
@@ -906,6 +987,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/teams/:team_id",
             put(update_team).delete(delete_team),
+        )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id/members",
+            post(add_team_member),
+        )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id/members/:user_id",
+            delete(remove_team_member),
         )
         // ── SCIM 2.0 Provisioning ─────────────────────────────────────────
         .route(
@@ -944,6 +1033,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::get_graph_concept),
         )
         .route(
+            "/api/v1/repos/:id/graph/concepts",
+            get(graph::list_graph_concepts),
+        )
+        .route(
             "/api/v1/repos/:id/graph/timeline",
             get(graph::get_graph_timeline),
         )
@@ -979,6 +1072,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::get_workspace_graph_concept),
         )
         .route(
+            "/api/v1/workspaces/:id/graph/concepts",
+            get(graph::list_workspace_graph_concepts),
+        )
+        .route(
             "/api/v1/workspaces/:id/briefing",
             get(graph::get_workspace_briefing),
         )
@@ -1007,6 +1104,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/explorer-views/generate",
             post(explorer_views::generate_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/ask",
+            post(explorer_views::ask_explorer),
         )
         .route(
             "/api/v1/workspaces/:id/explorer-views/:view_id",

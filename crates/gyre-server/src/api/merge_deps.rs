@@ -80,6 +80,16 @@ pub struct GraphDependencyEdge {
     pub source: String,
 }
 
+/// A recorded meta-spec drift warning for a queued MR
+/// (meta-spec-reconciliation.md §9).
+#[derive(Serialize)]
+pub struct MetaSpecDriftWarning {
+    /// Meta-spec set SHA under which the MR's code was produced.
+    pub produced_set_sha: String,
+    /// The workspace's current meta-spec set SHA when the drift was recorded.
+    pub current_set_sha: String,
+}
+
 #[derive(Serialize)]
 pub struct GraphNode {
     pub mr_id: String,
@@ -88,6 +98,9 @@ pub struct GraphNode {
     pub priority: u32,
     pub depends_on: Vec<GraphDependencyEdge>,
     pub atomic_group: Option<String>,
+    /// Meta-spec drift warning recorded on the MR's gate results, if any
+    /// (§9 merge gate behavior — warn, don't block).
+    pub meta_spec_drift: Option<MetaSpecDriftWarning>,
 }
 
 #[derive(Serialize)]
@@ -321,6 +334,22 @@ pub async fn get_queue_graph(
                 MrStatus::Closed => "closed",
                 MrStatus::Reverted => "reverted",
             };
+            // §9: surface a recorded meta-spec drift warning gate result on
+            // the node — same source the MR detail view reads gate results
+            // from, so the graph cannot disagree with the gate results.
+            let meta_spec_drift = state
+                .gate_results
+                .list_by_mr_id(mr.id.as_str())
+                .await
+                .unwrap_or_default()
+                .iter()
+                .find(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID)
+                .and_then(|r| r.output.as_deref())
+                .and_then(crate::reconciliation::parse_meta_spec_drift_warning)
+                .map(|d| MetaSpecDriftWarning {
+                    produced_set_sha: d.produced_set_sha,
+                    current_set_sha: d.current_set_sha,
+                });
             nodes.push(GraphNode {
                 mr_id: mr.id.to_string(),
                 title: mr.title,
@@ -342,6 +371,7 @@ pub async fn get_queue_graph(
                     })
                     .collect(),
                 atomic_group: mr.atomic_group,
+                meta_spec_drift,
             });
         }
     }
@@ -796,7 +826,17 @@ mod tests {
         // Mint an agent JWT and register it in the agent_tokens store.
         let agent_jwt = state
             .agent_signing_key
-            .mint("agent-42", "task-1", "system", &state.base_url, 3600)
+            .mint(
+                "agent-42",
+                "task-1",
+                "system",
+                &state.base_url,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-42",
+                "merge-deps",
+            )
             .unwrap();
         state
             .kv_store

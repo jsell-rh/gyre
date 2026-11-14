@@ -389,6 +389,13 @@ pub async fn scim_delete_user(
     // SCIM DELETE = deactivate, not hard delete. We delete from store here;
     // production deployments with SSO should soft-delete via `active=false`.
     state.users.delete(&user.id).await?;
+
+    // user-management.md §Ownership Transfer & Reclamation: when a workspace
+    // Owner leaves (account deactivated/removed), TenantAdmins are notified
+    // and the workspace is tracked as ownerless. Runs inline for immediacy;
+    // the daily orphaned_workspace_check job is the backstop.
+    crate::workspace_ownership::on_user_removed(&state, &user.id).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -737,7 +744,15 @@ mod tests {
 
     #[tokio::test]
     async fn scim_unauthorized_without_token() {
-        std::env::set_var("GYRE_SCIM_TOKEN", "secret");
+        // Configure the SAME token value every other SCIM test writes:
+        // GYRE_SCIM_TOKEN is process-global and the lib tests run in parallel,
+        // so pointing it at a divergent value here races the in-flight
+        // handlers of the other SCIM tests (their bearer token no longer
+        // matches the configured one, their creates turn into 403s, and
+        // scim_delete_user panics on the missing "id"). The rejection under
+        // test comes from the missing Authorization header, which fails
+        // against any configured token value.
+        std::env::set_var("GYRE_SCIM_TOKEN", "test-scim-token");
         let resp = app()
             .oneshot(
                 Request::builder()

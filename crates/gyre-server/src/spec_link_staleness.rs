@@ -77,9 +77,8 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 current = %current_sha,
                 "spec_link_staleness: SHA mismatch — marking stale"
             );
-
             // Create notifications for workspace members.
-            if let Some(ref source_repo_id) = link.source_repo_id {
+            if let Some(source_repo_id) = &link.source_repo_id {
                 notify_workspace_members(
                     state,
                     source_repo_id,
@@ -89,6 +88,10 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 )
                 .await;
             }
+
+            // user-management.md §Who Gets Notified — "Spec drift detected"
+            // also notifies the spec owner.
+            notify_spec_owner_of_drift(state, &link.source_path, &link.target_path).await;
         }
     }
 
@@ -104,13 +107,23 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Mark a link's status and stale_since in the spec links store.
+/// Mark a link's status and stale_since in the spec links store and persist
+/// the mutation to the durable graph (spec-links.md §Forge-Maintained Spec
+/// Graph — the SQL table is authoritative).
 async fn mark_link_status(state: &AppState, link_id: &str, status: &str, now: u64) {
-    let mut store = state.spec_links_store.lock().await;
-    if let Some(link) = store.iter_mut().find(|l| l.id == link_id) {
-        link.status = status.to_string();
-        if status == "stale" {
-            link.stale_since = Some(now);
+    let updated: Option<crate::spec_registry::SpecLinkEntry> = {
+        let mut store = state.spec_links_store.lock().await;
+        store.iter_mut().find(|l| l.id == link_id).map(|link| {
+            link.status = status.to_string();
+            if status == "stale" {
+                link.stale_since = Some(now);
+            }
+            link.clone()
+        })
+    };
+    if let Some(entry) = updated {
+        if let Err(e) = state.spec_link_repo.save(&entry).await {
+            warn!(link_id = %link_id, "spec_link_staleness: failed to persist link status: {e}");
         }
     }
 }
@@ -171,14 +184,22 @@ async fn resolve_unresolved_cross_workspace_links(
         };
 
         if let Some(repo_id) = resolved_repo_id {
-            let mut store = state.spec_links_store.lock().await;
-            if let Some(entry) = store.iter_mut().find(|l| l.id == link.id) {
-                entry.target_repo_id = Some(repo_id);
-                entry.status = "active".to_string();
-                info!(
-                    link_id = %link.id,
-                    "spec_link_staleness: cross-workspace link resolved"
-                );
+            let updated: Option<crate::spec_registry::SpecLinkEntry> = {
+                let mut store = state.spec_links_store.lock().await;
+                store.iter_mut().find(|l| l.id == link.id).map(|entry| {
+                    entry.target_repo_id = Some(repo_id);
+                    entry.status = "active".to_string();
+                    entry.clone()
+                })
+            };
+            if let Some(entry) = updated {
+                if let Err(e) = state.spec_link_repo.save(&entry).await {
+                    warn!(
+                        link_id = %link.id,
+                        "spec_link_staleness: failed to persist resolved link: {e}"
+                    );
+                }
+                info!(link_id = %link.id, "spec_link_staleness: cross-workspace link resolved");
             }
         }
     }
@@ -254,14 +275,82 @@ async fn notify_workspace_members(
         notif.source.entity_type = "spec".to_string();
         notif.source.entity_id = source_path.to_string();
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
                 user = %member.user_id,
                 error = %e,
                 "spec_link_staleness: failed to create notification"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
+}
+
+/// Notify the drifted spec's owner (user-management.md §Who Gets Notified:
+/// "Spec drift detected" → Spec owner). The owner comes from the source
+/// spec's ledger entry (`owner`, `user:<name>` form); the workspace scope
+/// also comes from the entry. No-op when the spec has no ledger entry or
+/// no owner.
+async fn notify_spec_owner_of_drift(state: &AppState, source_path: &str, target_path: &str) {
+    let Some(entry) = state
+        .spec_ledger
+        .find_by_path(source_path)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    let owner = entry.owner.strip_prefix("user:").unwrap_or(&entry.owner);
+    if owner.is_empty() {
+        return;
+    }
+    let Some(ws_id) = entry.workspace_id.clone() else {
+        return;
+    };
+    let workspace_id = Id::new(ws_id);
+    // Resolve tenant_id from the workspace (skip + log when unresolvable —
+    // never fabricate a scope identity, see check-fabricated-scope-defaults).
+    let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            warn!(
+                spec_path = %source_path,
+                workspace_id = %workspace_id,
+                "spec_link_staleness: cannot resolve workspace for spec-owner drift notification — skipping"
+            );
+            return;
+        }
+    };
+    let owner_id = Id::new(owner.to_string());
+
+    let notif_body = serde_json::json!({
+        "source_path": source_path,
+        "target_path": target_path,
+        "link_status": "stale",
+        "reason": "spec_drift",
+    })
+    .to_string();
+    // Channel fan-out per user-management.md §Delivery Channels.
+    crate::notifications::notify_rich(
+        state,
+        workspace_id.clone(),
+        owner_id,
+        NotificationType::CrossWorkspaceSpecChange,
+        format!(
+            "Spec drift detected: '{}' → '{}' — target spec has changed",
+            source_path, target_path
+        ),
+        tenant_id,
+        Some(notif_body),
+        Some(source_path.to_string()),
+        None,
+        "spec",
+        None,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -301,6 +390,7 @@ mod tests {
             id: id.to_string(),
             source_path: source.to_string(),
             source_repo_id: Some("repo1".to_string()),
+            source_sha: "src-sha".to_string(),
             link_type,
             target_path: target.to_string(),
             target_repo_id: None,
@@ -358,6 +448,9 @@ mod tests {
             status: gyre_domain::RepoStatus::Active,
             created_at: 1_000_000,
             updated_at: 1_000_000,
+            max_agents: None,
+            max_agent_iterations: None,
+            budget: None,
         }
     }
 
@@ -494,6 +587,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -511,6 +605,7 @@ mod tests {
             .list_for_user(
                 &Id::new("dev1"),
                 Some(&Id::new("ws1")),
+                None,
                 None,
                 None,
                 None,
@@ -534,6 +629,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 10,
                 0,
             )
@@ -544,6 +640,63 @@ mod tests {
                 .iter()
                 .any(|n| n.notification_type == NotificationType::CrossWorkspaceSpecChange),
             "Viewer should NOT receive stale link notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn staleness_job_notifies_spec_owner_of_drift() {
+        let state = test_state();
+
+        let ws = make_workspace("ws1");
+        state.workspaces.create(&ws).await.unwrap();
+
+        // The SOURCE spec's ledger entry names the owner; its SHA-mismatched
+        // target triggers drift.
+        let mut source = make_ledger_entry("system/source.md", "src_sha", ApprovalStatus::Approved);
+        source.owner = "user:spec-owner".to_string();
+        state.spec_ledger.save(&source).await.unwrap();
+
+        let target = make_ledger_entry("system/target.md", "new_sha", ApprovalStatus::Approved);
+        state.spec_ledger.save(&target).await.unwrap();
+
+        let link = make_link(
+            "link7",
+            "system/source.md",
+            "system/target.md",
+            SpecLinkType::DependsOn,
+            Some("old_sha"),
+        );
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(link);
+        }
+
+        run_once(&state).await.unwrap();
+
+        // The spec owner receives a drift notification even though they hold
+        // no workspace membership (user-management.md §Who Gets Notified:
+        // "Spec drift detected" → Spec owner).
+        let owner_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("spec-owner"),
+                Some(&Id::new("ws1")),
+                None,
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            owner_notifs.iter().any(|n| {
+                n.notification_type == NotificationType::CrossWorkspaceSpecChange
+                    && n.title.starts_with("Spec drift detected")
+            }),
+            "spec owner should receive a drift notification, got {:?}",
+            owner_notifs.iter().map(|n| &n.title).collect::<Vec<_>>()
         );
     }
 
