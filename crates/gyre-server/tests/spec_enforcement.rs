@@ -981,11 +981,24 @@ async fn unauthorized_approver_is_denied_by_abac() {
         .await
         .unwrap();
 
-    // An agent identity with a valid, registered JWT.
+    // An agent identity with a valid, registered JWT. Hierarchy claims
+    // (task-130 §1 token scoping) are minted from a self-consistent rogue
+    // scope — the denial under test is role-based (subject.type != "user"),
+    // so any registered agent JWT must be refused.
     let rogue_agent_id = "agent-rogue-approver";
     let agent_token = state
         .agent_signing_key
-        .mint(rogue_agent_id, "task-rogue", "forge", &server.base_url, 600)
+        .mint(
+            rogue_agent_id,
+            "task-rogue",
+            "forge",
+            &server.base_url,
+            600,
+            "default",
+            "ws-rogue",
+            "repo-rogue",
+            "repo-rogue",
+        )
         .unwrap();
     state
         .kv_store
