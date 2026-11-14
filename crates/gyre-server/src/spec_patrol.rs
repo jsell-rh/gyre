@@ -354,10 +354,15 @@ fn dfs_longest_path<'a>(
 // ---------------------------------------------------------------------------
 
 /// Create priority-3 notifications for workspace Admin/Developer members
-/// when error-severity findings are detected.
+/// when error-severity findings are detected, plus the drifted spec's
+/// owner (user-management.md §Who Gets Notified: "Spec drift detected" →
+/// Spec owner — the owner comes from the spec's ledger entry, `user:` /
+/// `team:` reference forms).
 ///
 /// spec-links.md §Accountability Agent Integration: error-severity findings
 /// (unresolved conflicts, dangling implementations) warrant notifications.
+/// The Admin/Developer members remain recipients (accountability superset —
+/// misses no specced recipient); the owner is added on top, deduplicated.
 pub async fn create_notifications_for_error_findings(
     state: &AppState,
     findings: &[PatrolFinding],
@@ -403,6 +408,13 @@ pub async fn create_notifications_for_error_findings(
         }
     }
 
+    // Owner per spec path (ledger `owner` field, `user:{name}` / `team:{slug}`
+    // forms) — the "Spec drift detected" routing recipient.
+    let spec_owners: HashMap<&str, &str> = all_entries
+        .iter()
+        .map(|e| (e.path.as_str(), e.owner.as_str()))
+        .collect();
+
     // Create notifications per finding — each error finding creates a notification
     // for every Admin/Developer member in the relevant workspace.
     for finding in &error_findings {
@@ -435,11 +447,30 @@ pub async fn create_notifications_for_error_findings(
 
         let now_i64 = now_secs as i64;
 
+        // Recipients: Admin/Developer members (spec-links.md accountability)
+        // plus the drifted spec's owner (user-management.md §Who Gets
+        // Notified), deduplicated by user id.
+        let mut recipients: Vec<Id> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for member in &members {
             if !matches!(member.role, WorkspaceRole::Admin | WorkspaceRole::Developer) {
                 continue;
             }
+            if seen.insert(member.user_id.as_str().to_string()) {
+                recipients.push(member.user_id.clone());
+            }
+        }
+        if let Some(owner) = spec_owners.get(finding.spec_path.as_str()) {
+            for owner_id in
+                crate::notifications::resolve_owner_ref(state, &Id::new(workspace_id), owner).await
+            {
+                if seen.insert(owner_id.as_str().to_string()) {
+                    recipients.push(owner_id);
+                }
+            }
+        }
 
+        for user_id in &recipients {
             let id = Id::new(uuid::Uuid::new_v4().to_string());
             let title = match finding.finding_type.as_str() {
                 "unresolved_conflict" => format!("Spec graph patrol: {}", finding.detail),
@@ -450,7 +481,7 @@ pub async fn create_notifications_for_error_findings(
             let mut notif = Notification::new(
                 id,
                 Id::new(workspace_id),
-                member.user_id.clone(),
+                user_id.clone(),
                 // Spec-drift finding (user-management.md §Notification Entity:
                 // SpecDriftDetected — patrol findings are spec-graph drift:
                 // unresolved conflicts and dangling implementations), not a
@@ -479,10 +510,13 @@ pub async fn create_notifications_for_error_findings(
 
             if let Err(e) = state.create_notification(&notif).await {
                 warn!(
-                    user = %member.user_id,
+                    user = %user_id,
                     error = %e,
                     "spec_patrol: failed to create notification"
                 );
+            } else {
+                // Channel fan-out per user-management.md §Delivery Channels.
+                crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
             }
         }
     }
@@ -1140,6 +1174,232 @@ mod tests {
             viewer_notifs.len(),
             0,
             "Viewer should NOT receive notification"
+        );
+    }
+
+    /// user-management.md §Who Gets Notified: "Spec drift detected" → the
+    /// spec's owner. The owner comes from the ledger entry's `owner` field
+    /// and must receive the notification even when they hold no
+    /// Admin/Developer role (owner routing is orthogonal to the
+    /// accountability member set); an owner who IS an Admin gets exactly
+    /// one notification (dedup).
+    #[tokio::test]
+    async fn spec_drift_notification_routes_to_spec_owner() {
+        let state = test_state();
+        let now = 2_000_000u64;
+
+        let ws = make_workspace("ws1");
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = make_repo("repo1", "ws1");
+        state.repos.create(&repo).await.unwrap();
+
+        // The spec's owner: a plain Viewer (NOT Admin/Developer — proving
+        // the notification comes from owner routing, not role routing).
+        let mut owner = gyre_domain::User::new(
+            Id::new("owner-viewer"),
+            "ext-owner-viewer",
+            "owner-viewer",
+            1_000_000,
+        );
+        owner.username = "owner-viewer".to_string();
+        state.users.create(&owner).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&make_membership(
+                "owner-viewer",
+                "ws1",
+                WorkspaceRole::Viewer,
+            ))
+            .await
+            .unwrap();
+        // An Admin who is ALSO the owner of a second drifted spec — must
+        // get exactly one notification per finding (dedup, no double-send).
+        let mut admin_owner =
+            gyre_domain::User::new(Id::new("admin1"), "ext-admin1", "admin1", 1_000_000);
+        admin_owner.username = "admin1".to_string();
+        state.users.create(&admin_owner).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&make_membership("admin1", "ws1", WorkspaceRole::Admin))
+            .await
+            .unwrap();
+
+        let mut spec_a =
+            make_ledger_entry("system/spec-owner.md", "sha1", ApprovalStatus::Approved);
+        spec_a.owner = "user:owner-viewer".to_string();
+        state.spec_ledger.save(&spec_a).await.unwrap();
+        let mut spec_b = make_ledger_entry(
+            "system/spec-admin-owned.md",
+            "sha2",
+            ApprovalStatus::Approved,
+        );
+        spec_b.owner = "user:admin1".to_string();
+        state.spec_ledger.save(&spec_b).await.unwrap();
+
+        let findings = vec![
+            PatrolFinding {
+                finding_type: "unresolved_conflict".to_string(),
+                severity: "error".to_string(),
+                spec_path: "system/spec-owner.md".to_string(),
+                detail: "Conflicts with 'system/spec-b.md'".to_string(),
+                suggested_action: "Resolve the conflict".to_string(),
+                task_id: None,
+                workspace_id: None,
+            },
+            PatrolFinding {
+                finding_type: "dangling_implementation".to_string(),
+                severity: "error".to_string(),
+                spec_path: "system/spec-admin-owned.md".to_string(),
+                detail: "Implements a deleted spec".to_string(),
+                suggested_action: "Update the link".to_string(),
+                task_id: None,
+                workspace_id: None,
+            },
+        ];
+
+        create_notifications_for_error_findings(&state, &findings, now).await;
+
+        // The Viewer owner is notified despite holding no accountability
+        // role — this is the row's specced recipient.
+        let owner_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("owner-viewer"),
+                Some(&Id::new("ws1")),
+                None,
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            owner_notifs.len(),
+            1,
+            "the spec's owner must receive the drift notification (§Who Gets Notified)"
+        );
+        assert_eq!(
+            owner_notifs[0].notification_type,
+            NotificationType::SpecDriftDetected
+        );
+
+        // The Admin-who-is-owner: one notification for the finding on the
+        // spec they own…
+        let admin_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("admin1"),
+                Some(&Id::new("ws1")),
+                None,
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            admin_notifs.len(),
+            2,
+            "Admin gets one notification per finding (owner of spec-b, accountability for both)"
+        );
+        assert!(admin_notifs
+            .iter()
+            .all(|n| n.notification_type == NotificationType::SpecDriftDetected));
+    }
+
+    /// `team:{slug}` owner references resolve to the team's members — a
+    /// spec owned by a team notifies that team's members (user-management.md
+    /// §Team Management: ownership address teams as `team:{slug}`).
+    #[tokio::test]
+    async fn spec_drift_notification_routes_to_team_owner_ref() {
+        let state = test_state();
+        let now = 2_000_000u64;
+
+        let ws = make_workspace("ws1");
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = make_repo("repo1", "ws1");
+        state.repos.create(&repo).await.unwrap();
+
+        // A team owning the drifted spec; its member is a Viewer (no
+        // accountability role — only team ownership routes the notification).
+        let team = gyre_domain::Team::new(
+            Id::new("team-platform"),
+            Id::new("ws1"),
+            "Platform",
+            "platform",
+            Id::new("lead-user"),
+            1_000_000,
+        );
+        state.teams.create(&team).await.unwrap();
+        state
+            .teams
+            .add_member(&gyre_domain::TeamMembership::new(
+                Id::new("team-platform"),
+                Id::new("team-member-viewer"),
+                1_000_000,
+            ))
+            .await
+            .unwrap();
+        let mut member = gyre_domain::User::new(
+            Id::new("team-member-viewer"),
+            "ext-team-member",
+            "team-member-viewer",
+            1_000_000,
+        );
+        member.username = "team-member-viewer".to_string();
+        state.users.create(&member).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&make_membership(
+                "team-member-viewer",
+                "ws1",
+                WorkspaceRole::Viewer,
+            ))
+            .await
+            .unwrap();
+
+        let mut spec = make_ledger_entry(
+            "system/spec-team-owned.md",
+            "sha1",
+            ApprovalStatus::Approved,
+        );
+        spec.owner = "team:platform".to_string();
+        state.spec_ledger.save(&spec).await.unwrap();
+
+        let findings = vec![PatrolFinding {
+            finding_type: "unresolved_conflict".to_string(),
+            severity: "error".to_string(),
+            spec_path: "system/spec-team-owned.md".to_string(),
+            detail: "Conflicts with 'system/spec-b.md'".to_string(),
+            suggested_action: "Resolve the conflict".to_string(),
+            task_id: None,
+            workspace_id: None,
+        }];
+
+        create_notifications_for_error_findings(&state, &findings, now).await;
+
+        let member_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("team-member-viewer"),
+                Some(&Id::new("ws1")),
+                None,
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            member_notifs.len(),
+            1,
+            "a team-owned spec's drift must notify the team's members"
         );
     }
 

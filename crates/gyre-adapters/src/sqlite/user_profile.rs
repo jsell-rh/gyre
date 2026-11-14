@@ -2,14 +2,17 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
+use gyre_domain::{
+    JudgmentEntry, JudgmentType, NotificationChannels, UserNotificationPreference, UserToken,
+};
 use gyre_ports::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    UserNotificationPreferenceRepository, UserTokenRepository,
 };
 use std::sync::Arc;
 
 use super::SqliteStorage;
-use crate::schema::{user_notification_preferences, user_tokens};
+use crate::schema::{user_channel_preferences, user_notification_preferences, user_tokens};
 
 // ─── User Notification Preferences ──────────────────────────────────────────
 
@@ -79,7 +82,7 @@ impl UserNotificationPreferenceRepository for SqliteStorage {
 
     async fn upsert_batch(&self, prefs: &[UserNotificationPreference]) -> Result<()> {
         for pref in prefs {
-            self.upsert(pref).await?;
+            UserNotificationPreferenceRepository::upsert(self, pref).await?;
         }
         Ok(())
     }
@@ -333,6 +336,80 @@ impl JudgmentLedgerRepository for SqliteStorage {
     }
 }
 
+// ─── User Channel Preferences (task-112) ────────────────────────────────────
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = user_channel_preferences)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct ChannelPrefRow {
+    #[allow(dead_code)]
+    user_id: String,
+    channels: String,
+    #[allow(dead_code)]
+    updated_at: i64,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = user_channel_preferences)]
+struct ChannelPrefRecord<'a> {
+    user_id: &'a str,
+    channels: &'a str,
+    updated_at: i64,
+}
+
+#[async_trait]
+impl UserChannelPreferenceRepository for SqliteStorage {
+    async fn find(&self, user_id: &Id) -> Result<Option<NotificationChannels>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<NotificationChannels>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let row = user_channel_preferences::table
+                .find(&uid)
+                .first::<ChannelPrefRow>(&mut *conn)
+                .optional()
+                .context("find user channel preferences")?;
+            match row {
+                Some(r) => serde_json::from_str(&r.channels)
+                    .map(Some)
+                    .map_err(|e| anyhow::anyhow!("corrupt channel preferences for {uid}: {e}")),
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    async fn upsert(&self, user_id: &Id, channels: &NotificationChannels) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        let json = serde_json::to_string(channels).context("serialize channel preferences")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let record = ChannelPrefRecord {
+                user_id: &uid,
+                channels: &json,
+                updated_at: now,
+            };
+            diesel::insert_into(user_channel_preferences::table)
+                .values(&record)
+                .on_conflict(user_channel_preferences::user_id)
+                .do_update()
+                .set((
+                    user_channel_preferences::channels.eq(&json),
+                    user_channel_preferences::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .context("upsert user channel preferences")?;
+            Ok(())
+        })
+        .await?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +468,66 @@ mod tests {
             .unwrap();
         assert_eq!(prefs.len(), 1);
         assert!(!prefs[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn channel_prefs_roundtrip_and_upsert_replaces() {
+        let (_tmp, s) = setup();
+        let u = make_user("u6");
+
+        // No row for an unknown user → None (callers apply defaults).
+        assert!(UserChannelPreferenceRepository::find(&s, &u.id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let mut channels = NotificationChannels {
+            in_app: true,
+            email: gyre_domain::EmailConfig {
+                enabled: true,
+                digest: gyre_domain::DigestFrequency::Daily,
+                min_priority: gyre_domain::NotificationPriority::High,
+            },
+            webhook: Some(gyre_domain::WebhookConfig {
+                url: "https://hooks.example.test/g".to_string(),
+                secret: "s3cret".to_string(),
+                min_priority: gyre_domain::NotificationPriority::Medium,
+            }),
+            slack: None,
+        };
+        UserChannelPreferenceRepository::upsert(&s, &u.id, &channels)
+            .await
+            .unwrap();
+
+        let stored = UserChannelPreferenceRepository::find(&s, &u.id)
+            .await
+            .unwrap()
+            .expect("row must exist after upsert");
+        assert_eq!(
+            serde_json::to_string(&stored).unwrap(),
+            serde_json::to_string(&channels).unwrap(),
+            "round-trip must preserve the config"
+        );
+
+        // Upsert replaces the whole config (no stale webhook).
+        channels.webhook = None;
+        channels.slack = Some(gyre_domain::SlackConfig {
+            webhook_url: "https://hooks.slack.test/T/B/X".to_string(),
+            channel: Some("#ops".to_string()),
+            min_priority: gyre_domain::NotificationPriority::Low,
+        });
+        UserChannelPreferenceRepository::upsert(&s, &u.id, &channels)
+            .await
+            .unwrap();
+        let stored = UserChannelPreferenceRepository::find(&s, &u.id)
+            .await
+            .unwrap()
+            .expect("row must exist after second upsert");
+        assert_eq!(
+            serde_json::to_string(&stored).unwrap(),
+            serde_json::to_string(&channels).unwrap()
+        );
+        assert!(stored.webhook.is_none(), "upsert must replace, not merge");
     }
 
     #[tokio::test]

@@ -363,6 +363,46 @@ pub enum NotificationPriority {
     Urgent,    // Needs attention now (security finding, agent escalation, MR reverted)
 }
 
+> **Priority band membership (amended 2026-11, task-112 review):** The band
+> comments above classify notification types by example. The full
+> type→band mapping (implemented as `NotificationPriority::for_notification_type`
+> in `gyre-domain/src/user.rs`) is:
+>
+> | Band | Notification types |
+> |---|---|
+> | Urgent | SecurityFinding, AgentEscalation, MrReverted, AgentNeedsClarification, MergeQueueEscalation, BudgetExhausted, ImpersonationAlert³ |
+> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, PersonaChangePendingApproval², MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure, SecretExpiring¹, ImpersonationRequest³ |
+> | Medium | MetaSpecDrift, CrossWorkspaceSpecChange, ConflictingInterpretations, DependencyChainTooDeep, SpecAssertionFailure |
+> | Low | AgentCompleted, TrustSuggestion, AbandonedBranch, SuggestedSpecLink, CascadeTestTriggered |
+>
+> The HSI §8 1–10 numeric priority is an Inbox-ordering concern and is
+> deliberately **not** threshold-mapped onto these bands: SecurityFinding and
+> GateFailure share numeric priority 3 yet sit in different bands, AgentEscalation
+> is numeric 5 yet Urgent, and BudgetWarning is numeric 7 yet High — no numeric
+> threshold can reproduce the specced membership. Channel `min_priority`
+> filtering and the §Notification Routing for Agent Escalations Urgent check
+> therefore derive the band from the notification type, never from the numeric
+> priority.
+>
+> ¹ SecretExpiring is defined by platform-model.md §7 (secret rotation); it is
+> banded High here (recorded 2026-11, task-112 merge with main) as the same
+> approaching-deadline class as BudgetWarning — the resource still works but
+> will fail at expiry, so it needs attention soon rather than eventually.
+>
+> ² PersonaChangePendingApproval is defined by meta-spec-reconciliation.md
+> (spec-lifecycle push hook); it is banded High here (recorded 2026-11,
+> task-112 merge with main's task-116) as the same pending-approval decision
+> class as SpecPendingApproval and PersonaApprovalRequested — work continues
+> until the deadline, but the decision stalls progress soon, so it needs
+> attention soon rather than eventually.
+>
+> ³ ImpersonationRequest/ImpersonationAlert are defined by
+> identity-security.md §Impersonation; they are banded here (recorded
+> 2026-11, task-112 merge with main's task-109) as, respectively, the same
+> pending-consent decision class as SpecPendingApproval (High) and an active
+> security alert on the user's own account (Urgent — an admin is acting as
+> this user right now).
+
 pub struct NotificationSource {
     pub entity_type: String,  // "agent", "mr", "spec", "gate", "budget"
     pub entity_id: String,
@@ -415,10 +455,28 @@ pub enum DigestFrequency { Immediate, Hourly, Daily, Off }
 | MR merged | MR author (if human) |
 | MR reverted | MR author + workspace Admin |
 | Merge queue paused | All workspace Admins/Owners |
-| Breaking change detected | Dependent repo team leads |
+| Breaking change detected | Dependent repo team leads (see note below) |
 | Spec drift detected | Spec owner |
 | Security finding (Critical/High) | Workspace Owner + tenant Admin |
 | Invitation | Invited user |
+
+> **Team-lead routing note (amended 2026-11, task-112 review; corrected
+> after the 1cae4a25 review round):** `Team` carries a `lead` field
+> (user-management.md §Team Management; migration
+> `2026-11-13-000062_team_slug_lead_membership` backfills it to the
+> workspace Owner), so the lead concept exists. The genuine gap is the
+> **repo→team mapping**: no spec models which team owns a repo, so "the
+> repo's team lead" (Agent escalation row) and "dependent repo team
+> leads" (Breaking change row) cannot be resolved to a `Team.lead` —
+> there is no repo↔team link to resolve through. Until a repo→team
+> ownership mapping lands (task-122's default-reviewers bullet already
+> tracks the same missing association), the interim production routing is
+> the closest available concept, a superset: agent escalations follow the
+> §Notification Routing for Agent Escalations chain (spawning user →
+> workspace Admins if offline → workspace Owners if Urgent), and breaking
+> changes notify all members of the dependent repo's workspace
+> (`process_breaking_changes` in `git_http.rs`). When the repo→team
+> mapping lands, narrow both rows to the specced recipients.
 
 ### Notification Routing for Agent Escalations
 
@@ -664,8 +722,8 @@ The following features are **not yet implemented** (future milestones):
 | SCIM 2.0 provisioning endpoints (`/scim/v2/*`) | Spec in `identity-security.md`; no implementation |
 | Tenant invitation flow (`POST /api/v1/tenant/invite`) | Specced above; not yet implemented |
 | Session management (`GET/DELETE /api/v1/users/me/sessions`) | Specced above; not yet implemented |
-| Notification channels (email digest, Slack webhook) | Spec complete; backend delivery not implemented |
+| Notification channels (Slack webhook, generic webhook) | ✅ Implemented (task-112) — `NotificationDispatcher` fans out per-channel with `min_priority` filtering; HMAC-SHA256-signed webhooks, Slack incoming-webhook POST, durable email outbox queue. Email digest emission/SMTP transport remains task-113 |
 | User profile pages (`/@username`) | Specced; UI not built |
-| Notification preferences (`GET/PUT /api/v1/notifications/preferences`) | Specced; not yet implemented |
+| Notification preferences (`GET/PUT /api/v1/notifications/preferences`) | ✅ Implemented (task-112) — self-scope per-handler-authorized API over the `user_channel_preferences` table |
 | User deactivation (`PUT /api/v1/users/{id}/deactivate`) | Specced; not yet implemented |
-| Impersonation | Specced in `identity-security.md`; not yet implemented |
+| Impersonation | ✅ Implemented (task-108) — approval-gated flow, short-lived EdDSA impersonation JWT, full audit attribution; see `identity-security.md` coverage |

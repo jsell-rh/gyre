@@ -808,6 +808,9 @@ async fn deliver_approval_code(
 
     if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation request notification");
+    } else {
+        // Channel fan-out per user-management.md §Delivery Channels.
+        crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
     }
     push_notification_to_user(state, &target.id, &notif).await;
 }
@@ -857,6 +860,9 @@ async fn notify_impersonation_alert(
 
     if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation alert notification");
+    } else {
+        // Channel fan-out per user-management.md §Delivery Channels.
+        crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
     }
     push_notification_to_user(state, &target_id, &notif).await;
 }
@@ -921,4 +927,115 @@ pub fn require_admin_actor(auth: &AuthenticatedAgent) -> Result<Id, ApiError> {
                 .to_string(),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn approval_code_and_alert_fan_out_to_configured_channels() {
+        // Emitter-path guard (task-112 review F1): both impersonation
+        // notification-creation paths must go through the channel
+        // dispatcher — a configured email channel queues outbox entries
+        // for the approval code AND the impersonation-start alert.
+        let state = crate::mem::test_state();
+
+        // Target user with a workspace membership (routing scope).
+        let target = User::new(Id::new("user-target"), "ext-target", "target", 0);
+        state.users.create(&target).await.unwrap();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-imp"),
+            Id::new("tenant-1"),
+            "Impersonation WS",
+            "imp-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let m = gyre_domain::WorkspaceMembership::new(
+            Id::new("mem-imp"),
+            target.id.clone(),
+            ws.id.clone(),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("inviter"),
+            0,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+        // Email channel configured (Immediate, all bands).
+        state
+            .user_channel_prefs
+            .upsert(
+                &target.id,
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let req = ImpersonationRequest {
+            request_id: "req-1".to_string(),
+            impersonator_id: "admin-1".to_string(),
+            impersonator_name: "Admin One".to_string(),
+            target_user_id: "user-target".to_string(),
+            approval_code_hash: "hash".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            created_at: 0,
+            expires_at: 900,
+            status: ImpersonationRequestStatus::Pending,
+        };
+        deliver_approval_code(&state, &target, &req, "123456").await;
+
+        let session = ImpersonationSession {
+            session_id: "sess-1".to_string(),
+            request_id: req.request_id.clone(),
+            impersonator_id: req.impersonator_id.clone(),
+            impersonator_name: req.impersonator_name.clone(),
+            target_user_id: req.target_user_id.clone(),
+            tenant_id: req.tenant_id.clone(),
+            started_at: 0,
+            expires_at: 900,
+            actions_taken: 0,
+            ended: false,
+            ended_at: None,
+            end_reason: None,
+        };
+        notify_impersonation_alert(&state, &req, &session).await;
+
+        // In-app records exist for both events …
+        let notifs = state
+            .notifications
+            .list_for_user(&target.id, None, None, None, None, None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(notifs.len(), 2, "approval code + start alert");
+        assert!(notifs
+            .iter()
+            .any(|n| n.notification_type == NotificationType::ImpersonationRequest));
+        assert!(notifs
+            .iter()
+            .any(|n| n.notification_type == NotificationType::ImpersonationAlert));
+        // … and the configured email channel fired for BOTH (the alert is
+        // Urgent-band; the request High-band — both pass a Low threshold).
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert_eq!(
+            outbox
+                .iter()
+                .filter(|(k, _)| k.starts_with("user-target:"))
+                .count(),
+            2,
+            "both impersonation notifications must reach the configured email channel"
+        );
+    }
 }
