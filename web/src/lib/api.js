@@ -744,6 +744,32 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/analytics/events${qs ? '?' + qs : ''}`);
   },
+  // Analytics daily event counts (analytics.md §Analytics Dashboard bar chart)
+  analyticsDaily: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/daily${qs ? '?' + qs : ''}`);
+  },
+  // Analytics event count, optionally property-filtered for funnel steps
+  // (analytics.md §Analytics Dashboard funnel view)
+  analyticsCount: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/count${qs ? '?' + qs : ''}`);
+  },
+  // Decision API (analytics.md §Decision API) — interactive evaluator
+  analyticsDecide: (decision, context = {}) => {
+    const qs = new URLSearchParams({
+      decision,
+      context: JSON.stringify(context),
+    }).toString();
+    return request(`/analytics/decide?${qs}`);
+  },
+  // Retention policies (analytics.md §Data Retention)
+  adminRetention: () => request('/admin/retention'),
+  setAnalyticsRetention: (retentionDays) =>
+    request('/admin/retention', {
+      method: 'PUT',
+      body: JSON.stringify({ retention_days: retentionDays }),
+    }),
   // Presence
   workspacePresence: (workspaceId) =>
     request(`/workspaces/${workspaceId}/presence`),

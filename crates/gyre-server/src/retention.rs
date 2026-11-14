@@ -600,6 +600,15 @@ mod tests {
             .unwrap();
         assert_eq!(notif.max_age_days, 365);
         assert_eq!(notif.max_age_days_read, Some(90));
+        // Analytics events: 365d default (analytics.md §Data Retention).
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "analytics_events")
+                .unwrap()
+                .max_age_days,
+            365
+        );
         // Attestations and snapshots are never age-purged.
         assert_eq!(
             policies

@@ -371,25 +371,41 @@ impl AnalyticsRepository for SqliteStorage {
 
     async fn aggregate_by_day(
         &self,
-        event_name: &str,
+        event_name: Option<&str>,
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
-        let event_name = event_name.to_string();
+        let event_name = event_name.map(str::to_string);
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
             let mut conn = pool.get().context("get db connection")?;
-            let rows = diesel::sql_query(
-                "SELECT date(timestamp, 'unixepoch') as day, COUNT(*) as cnt \
-                 FROM analytics_events \
-                 WHERE event_name = ? AND timestamp >= ? AND timestamp <= ? \
-                 GROUP BY day ORDER BY day",
-            )
-            .bind::<Text, _>(event_name)
-            .bind::<BigInt, _>(since as i64)
-            .bind::<BigInt, _>(until as i64)
-            .load::<DayCount>(&mut *conn)
-            .context("aggregate analytics_events by day")?;
+            // `None` event_name aggregates across ALL event names — the
+            // total daily event volume form (analytics.md §Analytics
+            // Dashboard). Same GROUP BY either way; only the name
+            // predicate differs.
+            let rows = match event_name {
+                Some(name) => diesel::sql_query(
+                    "SELECT date(timestamp, 'unixepoch') as day, COUNT(*) as cnt \
+                     FROM analytics_events \
+                     WHERE event_name = ? AND timestamp >= ? AND timestamp <= ? \
+                     GROUP BY day ORDER BY day",
+                )
+                .bind::<Text, _>(name)
+                .bind::<BigInt, _>(since as i64)
+                .bind::<BigInt, _>(until as i64)
+                .load::<DayCount>(&mut *conn)
+                .context("aggregate analytics_events by day")?,
+                None => diesel::sql_query(
+                    "SELECT date(timestamp, 'unixepoch') as day, COUNT(*) as cnt \
+                     FROM analytics_events \
+                     WHERE timestamp >= ? AND timestamp <= ? \
+                     GROUP BY day ORDER BY day",
+                )
+                .bind::<BigInt, _>(since as i64)
+                .bind::<BigInt, _>(until as i64)
+                .load::<DayCount>(&mut *conn)
+                .context("aggregate analytics_events by day")?,
+            };
             Ok(rows.into_iter().map(|r| (r.day, r.cnt as u64)).collect())
         })
         .await?
@@ -638,12 +654,40 @@ mod tests {
         AnalyticsRepository::record(&s, &make_event("e3", "ev", day2))
             .await
             .unwrap();
-        let agg = AnalyticsRepository::aggregate_by_day(&s, "ev", 0, day2 + 86400)
+        let agg = AnalyticsRepository::aggregate_by_day(&s, Some("ev"), 0, day2 + 86400)
             .await
             .unwrap();
         assert_eq!(agg.len(), 2);
         let d1 = agg.iter().find(|(d, _)| d == "2024-01-01").unwrap();
         assert_eq!(d1.1, 2);
+        let d2 = agg.iter().find(|(d, _)| d == "2024-01-02").unwrap();
+        assert_eq!(d2.1, 1);
+    }
+
+    #[tokio::test]
+    async fn analytics_aggregate_by_day_no_event_name_totals_across_names() {
+        // `None` event_name is the Analytics Dashboard bar-chart form
+        // (analytics.md §Analytics Dashboard: total daily event volume).
+        // It must sum across ALL event names, not just one — a day with
+        // events from two different names counts both.
+        let (_tmp, s) = setup();
+        let day1: u64 = 1704067200;
+        let day2: u64 = 1704067200 + 86400;
+        AnalyticsRepository::record(&s, &make_event("t1", "ev.a", day1))
+            .await
+            .unwrap();
+        AnalyticsRepository::record(&s, &make_event("t2", "ev.b", day1 + 3600))
+            .await
+            .unwrap();
+        AnalyticsRepository::record(&s, &make_event("t3", "ev.a", day2))
+            .await
+            .unwrap();
+        let agg = AnalyticsRepository::aggregate_by_day(&s, None, 0, day2 + 86400)
+            .await
+            .unwrap();
+        assert_eq!(agg.len(), 2);
+        let d1 = agg.iter().find(|(d, _)| d == "2024-01-01").unwrap();
+        assert_eq!(d1.1, 2, "day 1 totals across ev.a and ev.b");
         let d2 = agg.iter().find(|(d, _)| d == "2024-01-02").unwrap();
         assert_eq!(d2.1, 1);
     }

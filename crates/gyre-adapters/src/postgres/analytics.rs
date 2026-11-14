@@ -384,28 +384,43 @@ impl AnalyticsRepository for PgStorage {
 
     async fn aggregate_by_day(
         &self,
-        event_name: &str,
+        event_name: Option<&str>,
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
-        let event_name = event_name.to_string();
+        let event_name = event_name.map(str::to_string);
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
             let mut conn = pool.get().context("get db connection")?;
-            let rows = diesel::sql_query(
-                // UTC calendar day (task-146 review R4): pin the rendering
-                // to UTC, not the server session TimeZone — same key as
-                // the SQLite/mem adapters and the port contract doc.
-                "SELECT to_char(to_timestamp(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as day, COUNT(*) as cnt \
-                 FROM analytics_events \
-                 WHERE event_name = $1 AND timestamp >= $2 AND timestamp <= $3 \
-                 GROUP BY day ORDER BY day",
-            )
-            .bind::<Text, _>(event_name)
-            .bind::<BigInt, _>(since as i64)
-            .bind::<BigInt, _>(until as i64)
-            .load::<DayCount>(&mut *conn)
-            .context("aggregate analytics_events by day")?;
+            // `None` event_name aggregates across ALL event names — the
+            // total daily event volume form (analytics.md §Analytics
+            // Dashboard).
+            let rows = match event_name {
+                Some(name) => diesel::sql_query(
+                    // UTC calendar day (task-146 review R4): pin the rendering
+                    // to UTC, not the server session TimeZone — same key as
+                    // the SQLite/mem adapters and the port contract doc.
+                    "SELECT to_char(to_timestamp(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as day, COUNT(*) as cnt \
+                     FROM analytics_events \
+                     WHERE event_name = $1 AND timestamp >= $2 AND timestamp <= $3 \
+                     GROUP BY day ORDER BY day",
+                )
+                .bind::<Text, _>(name)
+                .bind::<BigInt, _>(since as i64)
+                .bind::<BigInt, _>(until as i64)
+                .load::<DayCount>(&mut *conn)
+                .context("aggregate analytics_events by day")?,
+                None => diesel::sql_query(
+                    "SELECT to_char(to_timestamp(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as day, COUNT(*) as cnt \
+                     FROM analytics_events \
+                     WHERE timestamp >= $1 AND timestamp <= $2 \
+                     GROUP BY day ORDER BY day",
+                )
+                .bind::<BigInt, _>(since as i64)
+                .bind::<BigInt, _>(until as i64)
+                .load::<DayCount>(&mut *conn)
+                .context("aggregate analytics_events by day")?,
+            };
             Ok(rows.into_iter().map(|r| (r.day, r.cnt as u64)).collect())
         })
         .await?

@@ -225,15 +225,55 @@ pub async fn admin_list_retention(
 
 /// PUT /api/v1/admin/retention — update retention policies (Admin only).
 ///
-/// The body must be a complete, valid policy list: all 7 spec data types
-/// (`validate_policies`); an omitted type would silently disable
-/// enforcement for it. The store persists durably before the 204 is
-/// returned — a KV write failure fails the request instead of acking a
-/// change that would be silently lost on restart.
+/// Two body forms are accepted:
+///
+/// - The complete policy list (business-continuity.md §5): all 7 spec
+///   data types (`validate_policies`); an omitted type would silently
+///   disable enforcement for it.
+/// - The analytics-scoped form `{ "retention_days": N }`
+///   (analytics.md §Data Retention): updates only the `analytics_events`
+///   policy, leaving every other data type's policy untouched.
+///
+/// The store persists durably before the 204 is returned — a KV write
+/// failure fails the request instead of acking a change that would be
+/// silently lost on restart.
 pub async fn admin_update_retention(
     State(state): State<Arc<AppState>>,
-    Json(policies): Json<Vec<RetentionPolicy>>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, ApiError> {
+    if let Some(days) = body.get("retention_days").and_then(|v| v.as_u64()) {
+        // analytics.md §Data Retention form: `{ retention_days: u32 }`.
+        if days < 1 {
+            return Err(ApiError::BadRequest(
+                "retention_days must be >= 1 (0 would purge every analytics event on the \
+                 next nightly run)"
+                    .to_string(),
+            ));
+        }
+        let mut policies = state.retention_store.list();
+        let analytics = policies
+            .iter_mut()
+            .find(|p| p.data_type == "analytics_events")
+            .ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "analytics_events retention policy is missing from the store",
+                ))
+            })?;
+        analytics.max_age_days = days;
+        state.retention_store.update(policies).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    if !body.is_array() {
+        return Err(ApiError::BadRequest(
+            "body must be a complete policy list (all 7 data types) or the analytics form \
+             { \"retention_days\": <days> }"
+                .to_string(),
+        ));
+    }
+
+    let policies: Vec<RetentionPolicy> = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid retention policy list: {e}")))?;
     validate_policies(&policies).map_err(ApiError::BadRequest)?;
     state.retention_store.update(policies).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1723,6 +1763,15 @@ mod tests {
             .map(|p| p["data_type"].as_str().unwrap())
             .collect();
         assert!(types.contains(&"activity_events"));
+        // analytics.md §Data Retention: analytics events default to 365
+        // days.
+        let analytics = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["data_type"] == "analytics_events")
+            .unwrap();
+        assert_eq!(analytics["max_age_days"], 365);
     }
 
     #[tokio::test]
@@ -1803,6 +1852,113 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // Policies unchanged — the rejected list was not applied.
+        assert_eq!(state.retention_store.list(), before);
+    }
+
+    #[tokio::test]
+    async fn admin_update_retention_analytics_form_updates_analytics_only() {
+        // analytics.md §Data Retention: `PUT /api/v1/admin/retention` with
+        // `{ "retention_days": N }` re-configures the analytics event
+        // retention without touching the other data types' policies.
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "retention_days": 30 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let policies = state.retention_store.list();
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "analytics_events")
+                .unwrap()
+                .max_age_days,
+            30
+        );
+        // Sibling policies are untouched — the analytics form must not
+        // silently reset the rest of the retention configuration.
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "audit_events")
+                .unwrap()
+                .max_age_days,
+            365
+        );
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "notifications")
+                .unwrap()
+                .max_age_days,
+            365
+        );
+
+        // The change is visible through the GET (the configured value,
+        // not just the in-memory store).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let analytics = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["data_type"] == "analytics_events")
+            .unwrap();
+        assert_eq!(analytics["max_age_days"], 30);
+    }
+
+    #[tokio::test]
+    async fn admin_update_retention_rejects_invalid_analytics_form() {
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+        let before = state.retention_store.list();
+
+        // 0 days would purge every analytics event on the next nightly
+        // run — rejected, policies untouched.
+        for body in [
+            serde_json::json!({ "retention_days": 0 }),
+            serde_json::json!({ "retention_days": "30" }),
+            serde_json::json!({ "something_else": 30 }),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/admin/retention")
+                        .header("Authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body was {body}");
+        }
         assert_eq!(state.retention_store.list(), before);
     }
 
