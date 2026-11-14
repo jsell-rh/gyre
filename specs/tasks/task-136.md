@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Merge Processor Integration"
-commits: ["a05c7286ac53a17c2bd6957e3285c191c10fae1b"]
+commits: ["a05c7286ac53a17c2bd6957e3285c191c10fae1b", "bfae8b786ac08cf87f081f2c77f5d9dbeb2868eb"]
 ---
 
 ## Spec Excerpt
@@ -112,21 +112,33 @@ still hollow:
   skipped (logged) when unresolvable — the call site previously passed a
   hardcoded fabricated `"default"` tenant.
 
+### Review repair (round 1, F1 — test-only flake)
+
+- `failing_gate_notifies_author_with_gate_result_payload` indexed
+  `notifs[1]` to reach the attempt-2 notification, but `list_for_user`
+  returns newest-first within a priority band at `created_at` (epoch-second)
+  granularity, so when the two GateFailure creations straddled a
+  wall-clock second boundary the attempt-2 notification was `notifs[0]`
+  and the assertion failed intermittently against correct production
+  code. The test now selects the notification by its payload's `attempt`
+  field and asserts the full GateResult payload (type, mr_id, gate
+  name/type, status, spec_ref, attempt, gate_agent_id, agent_id) and
+  title, mirroring the attempt-1 assertions. No production code changed
+  in this round.
+
 ### Test evidence
 
-- This sandbox: `cargo check -p gyre-server --lib --tests` exit 0,
-  `cargo test -p gyre-adapters sqlite::quality_gate` exit 0 (4 passed,
-  including the new pair-scoped delete test), `rustfmt --check` clean,
-  clippy clean vs. baseline, and all mechanical guards (arch,
-  mem-port-contracts, fabricated-scope-defaults, scope-literal-defaults,
-  task-commit-attribution, …) OK. Evidence:
+- This sandbox: `cargo check -p gyre-server --tests` exit 0 after the
+  repair (8m22s, includes the edited test target). Evidence:
   `/tmp/stage/review-evidence/task-136.md`.
 - The build wrapper refuses gyre-server test compilation here (4 GiB
   budget — infrastructure restriction, not a code defect). The verifier
-  must run `cargo test --all`, in particular the new tests
+  must run `cargo test --all`, in particular the new/repaired tests
   `gate_executor::tests::reenqueue_replaces_failed_gate_result_and_waits`,
   `gate_executor::tests::failing_gate_notifies_author_with_gate_result_payload`,
   `notifications::tests::gate_failure_notification_carries_deep_link`,
   `notifications::tests::gate_failure_notification_skipped_when_workspace_unresolvable`,
   plus the full `gate_executor`, `merge_queue`, `merge_processor`, and
   `ralph_loop` modules that exercise the changed trigger/decision paths.
+  The flake fix is order-independent by construction (selection is by
+  payload field, not position), so no loop-run is required to prove it.
