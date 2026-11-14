@@ -2,7 +2,7 @@
 title: "Implement notification delivery channels & routing"
 spec_ref: "user-management.md §Delivery Channels"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §Delivery Channels"
   - "user-management.md §Who Gets Notified"
