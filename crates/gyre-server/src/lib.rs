@@ -13,6 +13,7 @@ pub(crate) mod constraint_check;
 pub mod container_audit;
 pub mod dep_staleness;
 pub mod domain_events;
+pub mod email;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
@@ -598,16 +599,18 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
-    /// Persist a notification and broadcast it to live SSE stream subscribers
-    /// (user-management.md §API > Notifications: real-time stream).
+    /// Persist a notification and fan it out to both realtime channels
+    /// (user-management.md §API > Notifications): the `/notifications/stream`
+    /// SSE subscribers and the live `/ws` connections authenticated as the
+    /// notification's owner (the in-app bell).
     ///
     /// Single fan-out point for notification creation: every production
     /// emitter goes through here (or through the
     /// [`BroadcastingNotificationRepo`](crate::notifications::BroadcastingNotificationRepo)
     /// this delegates to, which background paths without an `&AppState` use)
-    /// so a connected `/notifications/stream` client sees every notification
-    /// the moment it is stored. Broadcast is fire-and-forget (no subscribers,
-    /// or a lagged one, must never fail the persist).
+    /// so a connected client sees every notification the moment it is
+    /// stored. Fan-out is fire-and-forget (no subscribers, a lagged one, or
+    /// an offline owner must never fail the persist).
     pub async fn create_notification(
         &self,
         notification: &gyre_common::Notification,
