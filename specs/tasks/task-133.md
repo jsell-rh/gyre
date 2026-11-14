@@ -4,7 +4,7 @@ spec_ref: "abac-policy-engine.md §MCP Integration"
 depends_on:
   - task-128
   - task-129
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "abac-policy-engine.md §MCP Integration"
 commits: ["1b63ee4eb590e181e45e06f5a07aeb62574a55cd", "cd372a6cab32dbc7e0ba8ac33600416591ca64e8"]
