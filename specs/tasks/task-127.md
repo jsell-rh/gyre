@@ -99,10 +99,14 @@ Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `
 
 All acceptance-criterion pages shipped as real Svelte 5 (runes) components against
 the task-124/125 endpoints. Product commit: `1a32b4e6` (plus asset build
-`4de47315`); this round (merge commit `67eb6ac1`) rebased the branch onto
-current main (`8d07a41a`, task-126 CLI) — sole conflict was the coverage-matrix
-rows 30/31 in `specs/coverage/system/user-management.md`, resolved by keeping
-both sides' notes (main's task-126 CLI note + this task's UI Pages note).
+`4de47315`); this round (merge commit `7c838821`) rebased the branch onto
+current main (`9bfab36`, task-149 analytics dashboard) — sole conflict was in
+`web/src/App.svelte`, where both sides had extended the SPA mode list: resolved
+by unioning them (`public_profile`/`invite_accept` from this task + `analytics`
+from main) in all three spots (mode comment, popstate restore, parseUrl
+dispatch); `web/src/lib/api.js` auto-merged cleanly (analytics endpoints
+added, no duplicate keys). Rust sides were disjoint (this branch touched only
+`api/users.rs`; main touched only analytics/admin/mem/retention/search_sync).
 
 ### Pages
 
@@ -159,10 +163,10 @@ change.
 
 ### Test evidence
 
-- This round (post-merge, tree at `67eb6ac1`): `cd web && npm ci && npm test` —
-  **2382 passed, 41 skipped, 0 failed** (118 files); `cargo check -p gyre-cli`
-  (merged task-126 code) — clean; `scripts/check-task-commit-attribution.sh`
-  — clean after this file's `commits:` frontmatter lists `1a32b4e6`.
+- This round (post-merge, tree at `7c838821`): `cd web && npm ci && npm test` —
+  **2395 passed, 41 skipped, 0 failed** (119 files; includes the merged
+  AnalyticsView suite); `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean;
+  `scripts/check-abac-route-registry.sh` and `scripts/check-arch.sh` — clean.
 - Server tests the independent verifier must execute (4 GiB budget blocks
   server test compilation in-sandbox):
   - `cargo test -p gyre-server invitee_can_decline_own_pending_invitation`
