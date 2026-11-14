@@ -12,6 +12,9 @@ vi.mock('../lib/api.js', () => ({
     markNotificationRead: vi.fn(),
     getNotificationPreferences: vi.fn(),
     updateNotificationPreferences: vi.fn(),
+    userByUsername: vi.fn(),
+    acceptWorkspaceInvitation: vi.fn(),
+    revokeWorkspaceInvitation: vi.fn(),
   },
 }));
 
@@ -62,6 +65,9 @@ beforeEach(() => {
   api.markNotificationRead.mockResolvedValue({});
   api.getNotificationPreferences.mockResolvedValue({});
   api.updateNotificationPreferences.mockResolvedValue({});
+  api.userByUsername.mockResolvedValue({ id: 'u-1', username: 'jsell', memberships: [] });
+  api.acceptWorkspaceInvitation.mockResolvedValue({ accepted: true });
+  api.revokeWorkspaceInvitation.mockResolvedValue(null);
 });
 
 describe('UserProfile', () => {
@@ -90,11 +96,11 @@ describe('UserProfile', () => {
     expect(adminEls.length).toBeGreaterThan(0);
   });
 
-  it('exposes exactly the six permitted tabs — HSI §12 forbids My Agents/Tasks/MRs', async () => {
+  it('exposes exactly the seven permitted tabs — HSI §12 forbids My Agents/Tasks/MRs', async () => {
     const { container, findAllByText } = r();
     await findAllByText('James Sell');
     const ids = [...container.querySelectorAll('[role="tab"]')].map((el) => el.dataset.id);
-    expect(ids).toEqual(['info', 'tokens', 'memberships', 'ledger', 'notif-prefs', 'notifications']);
+    expect(ids).toEqual(['info', 'tokens', 'memberships', 'invitations', 'ledger', 'notif-prefs', 'notifications']);
     // HSI §12 "What the Profile Is NOT": tasks are agent work units, MRs are
     // judged not authored, agents are machinery — none is a per-user surface.
     for (const forbidden of ['my-agents', 'my-tasks', 'my-mrs']) {
@@ -204,7 +210,64 @@ describe('UserProfile', () => {
     await fireEvent.click(saveBtn);
     expect(api.updateNotificationPreferences).toHaveBeenCalled();
     const arg = api.updateNotificationPreferences.mock.calls[0][0];
-    expect(arg.SpecApproval).toBe(true);
+    // Real PUT /notifications/preferences contract (task-112/125):
+    // per-type items + delivery channels — not a flat type→bool map.
+    expect(Array.isArray(arg.preferences)).toBe(true);
+    const specApproval = arg.preferences.find((p) => p.notification_type === 'SpecApproval');
+    expect(specApproval).toEqual({ notification_type: 'SpecApproval', enabled: true });
+    expect(arg.channels.in_app).toBe(true);
+    expect(arg.channels.email).toEqual({ enabled: false, digest: 'Off', min_priority: 'Medium' });
+  });
+
+  it('lists pending invitations and accepts one via the API', async () => {
+    api.userByUsername.mockResolvedValue({
+      id: 'u-1', username: 'jsell',
+      memberships: [
+        { id: 'inv-1', user_id: 'u-1', workspace_id: 'ws-9', role: 'Developer', accepted: false, created_at: 1700000000 },
+      ],
+    });
+    const { container, findByText } = r();
+    const invitationsTab = await findByText('Invitations');
+    await fireEvent.click(invitationsTab);
+    const acceptBtn = await waitFor(() => container.querySelector('[data-testid="invitation-accept-inv-1"]'));
+    expect(container.querySelector('[data-testid="invitation-decline-inv-1"]')).toBeTruthy();
+    await fireEvent.click(acceptBtn);
+    await waitFor(() => {
+      expect(api.acceptWorkspaceInvitation).toHaveBeenCalledWith('ws-9');
+    });
+  });
+
+  it('declines a pending invitation via the revoke endpoint', async () => {
+    api.userByUsername.mockResolvedValue({
+      id: 'u-1', username: 'jsell',
+      memberships: [
+        { id: 'inv-2', user_id: 'u-1', workspace_id: 'ws-9', role: 'Developer', accepted: false, created_at: 1700000000 },
+      ],
+    });
+    const { container, findByText } = r();
+    const invitationsTab = await findByText('Invitations');
+    await fireEvent.click(invitationsTab);
+    const declineBtn = await waitFor(() => container.querySelector('[data-testid="invitation-decline-inv-2"]'));
+    await fireEvent.click(declineBtn);
+    await waitFor(() => {
+      expect(api.revokeWorkspaceInvitation).toHaveBeenCalledWith('ws-9', 'inv-2');
+    });
+  });
+
+  it('edit form saves user preferences (theme/density/diff view) via PUT /users/me', async () => {
+    api.me.mockResolvedValue({ ...ME, preferences: { theme: 'Dark', ui_density: 'Comfortable', diff_view: 'Unified' } });
+    api.updateMe.mockResolvedValue({ ...ME });
+    const { findAllByText, findByText, findByDisplayValue, container } = r();
+    await findAllByText('James Sell');
+    await fireEvent.click(await findByText('Edit'));
+    expect(await findByDisplayValue('Dark')).toBeTruthy();
+    await fireEvent.change(container.querySelector('[data-testid="prefs-theme"]'), { target: { value: 'System' } });
+    await fireEvent.click(container.querySelector('[data-testid="prefs-save-btn"]'));
+    await waitFor(() => {
+      expect(api.updateMe).toHaveBeenCalledWith(expect.objectContaining({
+        preferences: expect.objectContaining({ theme: 'System', diff_view: 'Unified' }),
+      }));
+    });
   });
 
   it('shows notifications in Notifications tab', async () => {
