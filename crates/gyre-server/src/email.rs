@@ -527,10 +527,38 @@ pub fn smtp_config_from_env() -> Option<SmtpConfig> {
     Some(SmtpConfig { host, port, from })
 }
 
+/// Strip characters that can break out of an RFC 5322 header value:
+/// CR, LF, and NUL. Any of these inside a header line lets the value
+/// terminate the header and forge additional ones (e.g. a `Bcc:` copied
+/// to an attacker) once the relay parses the message.
+fn strip_header_controls(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\r' | '\n' | '\0'))
+        .collect()
+}
+
+/// A mailbox usable in SMTP envelopes and RFC 5322 headers: non-empty,
+/// contains `@`, and every char is printable ASCII with no spaces. CR/LF
+/// (header AND SMTP command injection — the value is interpolated into
+/// `MAIL FROM:<...>` / `RCPT TO:<...>`), NUL, and every other C0 control
+/// are rejected outright rather than stripped: a stripped address is not
+/// the address the user or operator configured, so delivery must fail
+/// loudly at the gate instead of silently retargeting.
+fn valid_address(addr: &str) -> bool {
+    addr.contains('@') && addr.chars().all(|c| c.is_ascii_graphic())
+}
+
 /// RFC 2047 encoded-word for non-ASCII subjects (`=?UTF-8?B?...?=`).
+/// CR/LF/NUL are stripped first (task-113 review finding: SMTP header
+/// injection): subjects embed notification titles, which embed
+/// user-controlled free text (display names via `PUT /users/me`,
+/// workspace names at creation) — a raw CR/LF in an otherwise-ASCII
+/// subject survives into the header block verbatim and lets the title
+/// forge additional headers at the relay.
 fn encode_subject(subject: &str) -> String {
+    let subject = strip_header_controls(subject);
     if subject.is_ascii() {
-        subject.to_string()
+        subject
     } else {
         format!("=?UTF-8?B?{}?=", B64.encode(subject.as_bytes()))
     }
@@ -550,9 +578,13 @@ fn wrap_base64(data: &[u8]) -> String {
 }
 
 /// Build the full RFC 5322 message (multipart/alternative: text + html).
+/// `from`/`to` are control-stripped here as defense in depth; the
+/// authoritative gate is `send_email`'s `valid_address` rejection.
 fn build_message(cfg: &SmtpConfig, to: &str, email: &RenderedEmail) -> String {
+    let from = strip_header_controls(&cfg.from);
+    let to = strip_header_controls(to);
     let mut msg = String::new();
-    msg.push_str(&format!("From: {}\r\n", cfg.from));
+    msg.push_str(&format!("From: {}\r\n", from));
     msg.push_str(&format!("To: {}\r\n", to));
     msg.push_str(&format!("Subject: {}\r\n", encode_subject(&email.subject)));
     msg.push_str("MIME-Version: 1.0\r\n");
@@ -637,6 +669,16 @@ async fn write_cmd(writer: &mut tokio::net::tcp::OwnedWriteHalf, cmd: &str) -> a
 /// Send one email through the configured relay. Minimal but real RFC 5321:
 /// greeting → EHLO → MAIL FROM → RCPT TO → DATA (dot-stuffed, CRLF) → QUIT.
 pub async fn send_email(cfg: &SmtpConfig, to: &str, email: &RenderedEmail) -> anyhow::Result<()> {
+    // Injection gate (task-113 review finding): `from` and `to` flow into
+    // RFC 5322 headers AND raw SMTP envelope commands — a CR/LF in either
+    // forges headers or injects SMTP commands at the relay. Reject before
+    // any socket is opened.
+    if !valid_address(&cfg.from) {
+        anyhow::bail!("invalid SMTP from address: {:?}", cfg.from);
+    }
+    if !valid_address(to) {
+        anyhow::bail!("invalid SMTP recipient address: {:?}", to);
+    }
     let stream = tokio::time::timeout(
         std::time::Duration::from_secs(SMTP_TIMEOUT_SECS),
         TcpStream::connect((cfg.host.as_str(), cfg.port)),
@@ -817,6 +859,19 @@ pub async fn run_digest_once(state: &AppState) -> anyhow::Result<()> {
             }
             continue;
         };
+        // An address that can never pass the injection gate can also never
+        // deliver — drop the entries loudly instead of retrying forever.
+        if !valid_address(&to) {
+            tracing::warn!(
+                user_id = %user_id,
+                to = %to,
+                "email digest: stored user email is not a valid mailbox — dropping queued entries"
+            );
+            for e in &entries {
+                let _ = state.kv_store.kv_remove(EMAIL_OUTBOX_NS, &e.key).await;
+            }
+            continue;
+        }
         let channels = resolve_channels(state, &user_id).await;
 
         // Re-check gating against the CURRENT config: entries queued under an
@@ -1003,6 +1058,115 @@ mod tests {
         // No CRLF is appended when the body does not end in one — the
         // caller writes the terminating `.` line itself.
         assert_eq!(dot_stuff("a\r\n.b"), "a\r\n..b");
+    }
+
+    /// Task-113 review finding (SMTP header injection): notification
+    /// titles embed user-controlled free text (display names via
+    /// PUT /users/me, workspace names at creation), and the review repro
+    /// showed a CRLF-laden ImpersonationRequest title surviving into the
+    /// Subject header verbatim — the injected `Bcc:` line made the relay
+    /// copy the victim's approval-code email to the attacker. The CRLF
+    /// must be stripped: the header block stays exactly five lines, the
+    /// injected text survives only as in-line subject content, and no
+    /// forged header line exists anywhere in the header block.
+    #[test]
+    fn crlf_in_title_cannot_forge_header_lines() {
+        let notif = make_notif(
+            NotificationType::ImpersonationRequest,
+            "Admin Ada\r\nBcc: admin@evil.example",
+            0,
+        );
+        let email = render_notification_email(&notif, Locale::En, "https://gyre.example");
+        let cfg = SmtpConfig {
+            host: "relay.local".to_string(),
+            port: 25,
+            from: "gyre@localhost".to_string(),
+        };
+        let msg = build_message(&cfg, "victim@example.com", &email);
+
+        let header_block = msg.split("\r\n\r\n").next().unwrap();
+        let header_lines: Vec<&str> = header_block.split("\r\n").collect();
+        assert_eq!(
+            header_lines.len(),
+            5,
+            "header block must stay exactly 5 header lines, got {header_block:?}"
+        );
+        assert!(
+            header_lines
+                .iter()
+                .all(|l| ["From:", "To:", "Subject:", "MIME-Version:", "Content-Type:"]
+                    .iter()
+                    .any(|p| l.starts_with(p))),
+            "unexpected header line in block: {header_block:?}"
+        );
+        assert_eq!(
+            header_lines[2],
+            "Subject: [Gyre] Impersonation requested: Admin AdaBcc: admin@evil.example",
+            "CRLF must be stripped from the title, not relocated"
+        );
+
+        // Unit-level: encode_subject itself never emits a line break.
+        assert_eq!(encode_subject("a\r\nBcc: x"), "aBcc: x");
+        assert_eq!(encode_subject("nul\0"), "nul");
+    }
+
+    /// The injection gate on addresses (same finding): `from`/`to` are
+    /// interpolated into both RFC 5322 headers and raw SMTP envelope
+    /// commands, so CR/LF (header AND command injection), NUL, spaces,
+    /// and non-@ values are rejected before any socket is opened —
+    /// send_email must fail with the gate error, not a connection error.
+    #[test]
+    fn addresses_with_controls_are_rejected_at_the_gate() {
+        assert!(valid_address("user@example.com"));
+        assert!(!valid_address(""));
+        assert!(!valid_address("no-at-sign"));
+        assert!(!valid_address("a@b c.d"));
+        assert!(!valid_address("a@b\r\nBcc: evil@example.com"));
+        assert!(!valid_address("a@b\0"));
+        assert!(!valid_address("a@b\nDATA"));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let email = render_notification_email(
+                &make_notif(NotificationType::GateFailure, "lint failed", 0),
+                Locale::En,
+                "https://gyre.example",
+            );
+            // Port 1 refuses instantly; the assertion is that the GATE
+            // error surfaces, proving rejection happens before connect.
+            let cfg = SmtpConfig {
+                host: "127.0.0.1".to_string(),
+                port: 1,
+                from: "gyre@localhost".to_string(),
+            };
+            let err = send_email(
+                &cfg,
+                "victim@example.com\r\nBcc: evil@example.com",
+                &email,
+            )
+            .await
+            .expect_err("CRLF recipient must be rejected");
+            assert!(
+                err.to_string().contains("invalid SMTP recipient"),
+                "unexpected error: {err:#}"
+            );
+
+            let bad_from = SmtpConfig {
+                host: "127.0.0.1".to_string(),
+                port: 1,
+                from: "gyre@localhost\r\nBcc: evil@example.com".to_string(),
+            };
+            let err = send_email(&bad_from, "victim@example.com", &email)
+                .await
+                .expect_err("CRLF from address must be rejected");
+            assert!(
+                err.to_string().contains("invalid SMTP from"),
+                "unexpected error: {err:#}"
+            );
+        });
     }
 
     /// Gating: a per-type unsubscribe drops the entry even when the global
