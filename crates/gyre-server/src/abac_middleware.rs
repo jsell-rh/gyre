@@ -3,8 +3,15 @@
 //! Runs after `require_auth_middleware` (which identifies the caller) and before
 //! any handler. Uses the existing `policy_engine` and `PolicyRepository`.
 //!
-//! System tokens (global `GYRE_AUTH_TOKEN`) bypass ABAC entirely — they are the
-//! superuser escape hatch for bootstrap and emergency access.
+//! The global `GYRE_AUTH_TOKEN` is allowed BY POLICY, not by a bypass: the
+//! genuine system principal (`is_system_principal()`: agent_id "system" AND no
+//! backing user row) is mapped to the reserved ABAC identity
+//! [`gyre_domain::SYSTEM_ABAC_IDENTITY`] ("gyre-system-token"), which the
+//! `system-full-access` builtin (priority 1000) allows — above
+//! tenant-isolation (950) and every role band. The reserved identity is
+//! rejected at every display_name write path and denied at evaluation time
+//! for any non-system principal that still presents it, so it cannot be
+//! spoofed.
 //!
 //! Pipeline position (per hierarchy-enforcement.md §4):
 //! ```text
@@ -1340,6 +1347,37 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Priority 860: Policy management is Admin-only (§API: "Create
+        // policy (Admin only)"). The create/update/delete handlers on
+        // /api/v1/policies mutate the authorization surface itself, so a
+        // Developer's blanket write Allow (developer-write-access, 800)
+        // must not reach them — same pattern as builtin:secret-admin-only.
+        // Reads (list/get/decisions/effective) and the dry-run `evaluate`
+        // action stay role-permitted.
+        Policy {
+            id: Id::new("builtin-policy-admin-only"),
+            name: "builtin:policy-admin-only".to_string(),
+            description:
+                "Policy management (create/update/delete) is restricted to the Admin role"
+                    .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 860,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::NotEquals,
+                value: ConditionValue::String("Admin".to_string()),
+            }],
+            actions: vec!["write".to_string(), "delete".to_string()],
+            resource_types: vec!["policy".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Priority 800: Developer role → allow read + write + agent actions.
         Policy {
             id: Id::new("builtin-developer-write-access"),
@@ -1637,14 +1675,34 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
 /// TASK-077 (HSI §2): the immutable `builtin:require-human-spec-approval`
 /// policy lives in the domain builtin set
 /// (`gyre_domain::builtin_policies`) — that set is the single source of truth
-/// for its definition. Only this policy is spliced into the startup seed:
-/// the remaining domain-set policies are owned by their own task-specific
-/// seeding flows and enabling them here would change authorization behavior
-/// beyond TASK-077's scope.
-fn domain_builtin_policies() -> Vec<Policy> {
+/// for its definition.
+///
+/// TASK-129 (§Built-In Policies): the full spec-table builtin set is now
+/// spliced into the startup seed — `system-full-access`,
+/// `tenant-isolation`, `workspace-membership-required`,
+/// `persona-human-approval`, `agent-repo-scope` (seeded ENABLED with the
+/// §Policy Examples conditions — `subject.repo_scope not_equals
+/// $resource.repo_id` dynamic reference — at priority 750, above the m34
+/// `agent-scoped-access` role Allow at 700, so the containment actually
+/// wins under "higher priority always wins" composition; see its
+/// definition in the domain set), and
+/// `builtin:require-human-spec-approval`.
+/// Excluded from the domain set: `developer-generate-access` (the m34 list
+/// owns the `builtin-developer-generate-access` id with the richer,
+/// workspace-role-keyed definition) and `viewer-no-spawn` (a §Policy
+/// Examples policy, not a §Built-In Policies table row).
+pub(crate) fn domain_builtin_policies() -> Vec<Policy> {
+    const SEEDED_DOMAIN_BUILTINS: [&str; 6] = [
+        "system-full-access",
+        "tenant-isolation",
+        "workspace-membership-required",
+        "persona-human-approval",
+        "agent-repo-scope",
+        "builtin:require-human-spec-approval",
+    ];
     gyre_domain::builtin_policies("system")
         .into_iter()
-        .filter(|p| p.name == "builtin:require-human-spec-approval")
+        .filter(|p| SEEDED_DOMAIN_BUILTINS.contains(&p.name.as_str()))
         .collect()
 }
 
@@ -1863,6 +1921,36 @@ fn budget_tokens_remaining(
     Some(max.saturating_sub(used) as i64)
 }
 
+/// The concrete addressed entity id for the decision audit trail (§Audit
+/// Integration, review round 6 task-129).
+///
+/// The PolicyDecision's `resource_id` must name the ADDRESSED ENTITY
+/// ("which concrete resource was allowed/denied"), not the route pattern:
+/// a trail full of `/api/v1/tasks/:id` cannot answer the compliance
+/// query "every time someone was denied access to X". The evaluation
+/// context carries `resource.id` (extracted from the request path);
+/// collection routes and unresolvable paths fall back to the pattern so
+/// the trail still identifies the route.
+fn addressed_resource_id(ctx: &AttributeContext, pattern: &str) -> String {
+    match ctx.get("resource.id") {
+        Some(AttrValue::Single(s)) if !s.is_empty() => s.clone(),
+        _ => pattern.to_string(),
+    }
+}
+
+/// Extract just the addressed resource id from the request path for the
+/// pre-evaluation denial paths (reserved identity, scoped gate tokens),
+/// which reject before the full attribute context is built. Same
+/// extraction rules as the evaluation context (`extract_path_attributes`),
+/// on a scratch context.
+fn path_resource_id(pattern: &str, path: &str, resource_type: &str) -> String {
+    // Scratch context for resource-id extraction only; never evaluates
+    // policies, so no subject baseline attributes are set.
+    let mut scratch = AttributeContext::default(); // abac-context:ok
+    extract_path_attributes(&mut scratch, pattern, path, resource_type);
+    addressed_resource_id(&scratch, pattern)
+}
+
 /// ABAC middleware — evaluates access policy for every authenticated API request.
 ///
 /// Must be applied AFTER `require_auth_middleware` and BEFORE route handlers.
@@ -1929,12 +2017,47 @@ pub async fn abac_middleware(
         None => method_to_action(&method),
     };
 
-    // System token bypasses ABAC entirely. `is_system_principal()` (not an
-    // agent_id string match): API-key/JWT auth sets agent_id from the user's
-    // display_name, so a user named "system" would otherwise spoof this
-    // bypass (task-099 F1 revision).
-    if auth.is_system_principal() {
-        return next.run(req).await;
+    // Reserved-identity containment (review round 3, task-129): the ABAC
+    // identity "gyre-system-token" is matched by `system-full-access`
+    // (priority 1000 — above tenant-isolation 950 and every role band), so a
+    // NON-system principal carrying it would match that Allow and gain full
+    // access. Every supported write path rejects the string (PUT /users/me
+    // display_name, admin user creation, SSO provisioning), but a
+    // pre-existing row or direct DB edit can still produce it — deny it
+    // here, before evaluation. `is_system_principal()` (agent_id "system"
+    // AND no user row) is the only legitimate source of the identity: an
+    // attacker's key/JWT resolves to their own user id, so
+    // `user_id.is_none()` cannot be forged.
+    if auth.agent_id == gyre_domain::SYSTEM_ABAC_IDENTITY && !auth.is_system_principal() {
+        let subject_type = if auth.roles.contains(&gyre_domain::UserRole::Agent) {
+            "agent"
+        } else {
+            "user"
+        };
+        tracing::warn!(
+            subject_id = %auth.agent_id,
+            pattern = %pattern,
+            "ABAC denied request: non-system principal carrying the reserved system ABAC identity"
+        );
+        let decision = policy_engine::build_decision(
+            &policy_engine::EvalResult {
+                effect: gyre_domain::PolicyEffect::Deny,
+                matched_policy: None,
+                evaluated_count: 0,
+                evaluation_ms: 0.0,
+            },
+            &auth.agent_id,
+            subject_type,
+            action,
+            resource_type,
+            &path_resource_id(&pattern, req.uri().path(), resource_type),
+        );
+        policy_engine::record_decision_audit(&state, &decision).await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "reserved system identity"})),
+        )
+            .into_response();
     }
 
     // Task-134 (agent-gates.md §Gate Agent Lifecycle): scoped tokens are
@@ -1986,9 +2109,9 @@ pub async fn abac_middleware(
                 "agent",
                 action,
                 resource_type,
-                &pattern,
+                &path_resource_id(&pattern, req.uri().path(), resource_type),
             );
-            let _ = state.policies.record_decision(&decision).await;
+            policy_engine::record_decision_audit(&state, &decision).await;
             let error = if is_reviewer {
                 "review-scoped token is limited to review routes"
             } else {
@@ -2010,14 +2133,50 @@ pub async fn abac_middleware(
     // Subject identity from the auth context: the authenticated identity
     // string (JWT display name, agent-token id, or API-key subject).
     ctx.set("subject.id", &auth.agent_id);
-
-    let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
-    ctx.set("subject.global_role", global_role);
     // Tenant identity from the auth context (§Attributes: subject.tenant_id,
     // source "Auth context / OIDC"). Set for every auth path — agent and
     // API-key callers do not carry JWT claims, so they get tenant_id only
     // from here.
     ctx.set("subject.tenant_id", &auth.tenant_id);
+    // TASK-129 (§Built-In Policies): the genuine system principal (the
+    // global GYRE_AUTH_TOKEN — `is_system_principal` requires
+    // agent_id == "system" AND no user identity, so a user merely NAMED
+    // "system" does not match) carries the reserved ABAC identity
+    // `SYSTEM_ABAC_IDENTITY` ("gyre-system-token"). There is no early
+    // bypass — the system principal flows through evaluation like every
+    // other subject, and `system-full-access` (priority 1000, matched BY
+    // ID, not by subject.type) is the policy that allows it: above
+    // tenant-isolation (950), below only immutable Deny. The reserved
+    // string is non-spoofable: every display_name write path rejects it
+    // (PUT /users/me, admin creation, SSO provisioning) and the guard above
+    // denies any non-system principal that still presents it. The AUDIT
+    // identity (agent_id in PolicyDecision / audit events) stays "system"
+    // — only the ABAC attribute changes. This also keeps the merge
+    // processor (subject.id "merge-processor") OUTSIDE
+    // system-full-access, per HSI §2.
+    if auth.is_system_principal() {
+        ctx.set("subject.id", gyre_domain::SYSTEM_ABAC_IDENTITY);
+    }
+
+    // §Attributes: subject.global_role — the caller's role SET, not an
+    // arbitrary single element (review round 6, task-129). The previous
+    // `roles.first().unwrap_or("ReadOnly")` had two flaws: a role-less
+    // caller got a FABRICATED ReadOnly attribute (matching the
+    // builtin-readonly-get-only Allow at 600 and granting read access no
+    // store ever assigned), and a multi-role caller got an arbitrary
+    // `first()` pick. Empty roles now leave the attribute UNSET — a
+    // missing attribute never matches, so a role-less caller falls
+    // through to default-deny (fail closed). Multi-role callers get a
+    // list-valued attribute; `eval_condition` evaluates Equals/NotEquals
+    // on list values with set (membership) semantics.
+    match auth.roles.as_slice() {
+        [] => {}
+        [only] => ctx.set("subject.global_role", only.as_str()),
+        many => ctx.set_list(
+            "subject.global_role",
+            many.iter().map(|r| r.as_str().to_string()).collect(),
+        ),
+    }
     // OIDC-claim-sourced subject attributes (§Attributes: persona, stack_hash,
     // attestation_level, repo_scope — source "Agent OIDC claim"), for AGENT
     // subjects only. Claim merging is allowlisted to those four names
@@ -2066,50 +2225,79 @@ pub async fn abac_middleware(
     // matches), which is the safe direction.
     if let Some(user_id) = &auth.user_id {
         match state.workspace_memberships.list_by_user(user_id).await {
-            Ok(memberships) if !memberships.is_empty() => {
-                let workspace_ids: Vec<String> = memberships
-                    .iter()
-                    .map(|m| m.workspace_id.to_string())
-                    .collect();
-                ctx.set_list("subject.workspace_ids", workspace_ids);
-
-                // Team memberships: the team store's per-user lookup
-                // (list_for_user — teams in the workspace that count the
-                // user as a member, via the TeamMembership store).
-                let mut team_ids: Vec<String> = Vec::new();
-                for membership in &memberships {
-                    if let Ok(teams) = state
-                        .teams
-                        .list_for_user(&membership.workspace_id, user_id)
-                        .await
-                    {
-                        for team in teams {
-                            team_ids.push(team.id.to_string());
-                        }
-                    }
-                }
-                if !team_ids.is_empty() {
-                    ctx.set_list("subject.team_ids", team_ids);
-                }
-
-                // `subject.workspace_role` (source "Membership") is the role
-                // the caller holds in the workspace being addressed. When the
-                // path names a workspace, use that membership's role; agents
-                // and workspace-less requests have none.
+            Ok(memberships) => {
+                // TASK-129 (§Built-In Policies `workspace-membership-required`):
+                // derived membership boolean, set whenever the request
+                // addresses a workspace (directly or via the entity/repo
+                // scope chain backfilled above) — true for a member, FALSE
+                // for a non-member, so the builtin Deny can key on it. Set
+                // from the REAL membership store, never from claims.
                 if let Some(ws_id) = ctx.get("resource.workspace_id").and_then(|v| match v {
                     AttrValue::Single(s) => Some(s.clone()),
                     _ => None,
                 }) {
-                    if let Some(m) = memberships
+                    let is_member = memberships
                         .iter()
-                        .find(|m| m.workspace_id.to_string() == ws_id)
-                    {
-                        ctx.set("subject.workspace_role", m.role.as_str());
+                        .any(|m| m.workspace_id.to_string() == ws_id);
+                    ctx.set_bool("subject.member_of_resource_workspace", is_member);
+                }
+
+                if memberships.is_empty() {
+                    // no memberships — list attributes stay unset (the
+                    // boolean above is still set when a workspace is
+                    // addressed: a membership-less caller is a non-member).
+                } else {
+                    let workspace_ids: Vec<String> = memberships
+                        .iter()
+                        .map(|m| m.workspace_id.to_string())
+                        .collect();
+                    ctx.set_list("subject.workspace_ids", workspace_ids);
+
+                    // Team memberships: the team store's per-user lookup
+                    // (list_for_user — teams in the workspace that count the
+                    // user as a member, via the TeamMembership store).
+                    let mut team_ids: Vec<String> = Vec::new();
+                    for membership in &memberships {
+                        if let Ok(teams) = state
+                            .teams
+                            .list_for_user(&membership.workspace_id, user_id)
+                            .await
+                        {
+                            for team in teams {
+                                team_ids.push(team.id.to_string());
+                            }
+                        }
+                    }
+                    if !team_ids.is_empty() {
+                        ctx.set_list("subject.team_ids", team_ids);
+                    }
+
+                    // `subject.workspace_role` (source "Membership") is the role
+                    // the caller holds in the workspace being addressed. When the
+                    // path names a workspace, use that membership's role; agents
+                    // and workspace-less requests have none.
+                    if let Some(ws_id) = ctx.get("resource.workspace_id").and_then(|v| match v {
+                        AttrValue::Single(s) => Some(s.clone()),
+                        _ => None,
+                    }) {
+                        if let Some(m) = memberships
+                            .iter()
+                            .find(|m| m.workspace_id.to_string() == ws_id)
+                        {
+                            ctx.set("subject.workspace_role", m.role.as_str());
+                        }
                     }
                 }
             }
-            Ok(_) => {} // no memberships — attributes stay unset
             Err(e) => {
+                // Fail closed for the membership boolean: the builtin
+                // `workspace-membership-required` Deny keys on `false`, so
+                // leaving it unset on a store failure would turn a store
+                // outage into a fail-open (non-membership cannot be
+                // established → deny). List attributes stay unset as before.
+                if ctx.has("resource.workspace_id") {
+                    ctx.set_bool("subject.member_of_resource_workspace", false);
+                }
                 tracing::warn!(
                     user_id = %user_id,
                     err = %e,
@@ -2161,11 +2349,15 @@ pub async fn abac_middleware(
     }
 
     // Load policies and evaluate.
-    // Policies are loaded from the shared store on EVERY request — there is
-    // no ABAC policy-result cache in gyre-server (only JWKS / graph /
-    // dep-staleness caches exist, none of which cache policy decisions).
-    // Trust-level transitions write workspace row + trust: policies through
-    // this same store in one transaction, so any transition is visible to the
+    // §Performance: `state.policies` is the read-through caching decorator
+    // (policy_cache::CachedPolicyRepository) — the first `list()` after a
+    // change loads from the store; every subsequent request is served from
+    // the cached set until a policy mutation (or an out-of-band
+    // apply_trust_transition, invalidated by its handlers) clears it.
+    // §Evaluation Flow step 5 (review round 4): the engine's `evaluate`
+    // applies the canonical scope filter (`policy_engine::scope_applies`)
+    // against the resource scope chain extracted above — a policy scoped
+    // to another workspace/repo/tenant is not part of the applicable set.
     let policies = state.policies.list().await.unwrap_or_default();
     let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
 
@@ -2184,19 +2376,37 @@ pub async fn abac_middleware(
         );
     }
 
-    // Record decision to audit log.
+    // Record decision to audit log. `resource_id` is the CONCRETE
+    // addressed entity (from the evaluation context's `resource.id`, set
+    // by path extraction / entity lookup), falling back to the route
+    // pattern on collection routes — review round 6: a trail of route
+    // patterns cannot answer “which entity was denied access to X”.
+    let resource_id = addressed_resource_id(&ctx, &pattern);
     let decision = policy_engine::build_decision(
         &result,
         &auth.agent_id,
         subject_type,
         action,
         resource_type,
-        &pattern,
+        &resource_id,
     );
-    let _ = state.policies.record_decision(&decision).await;
+    policy_engine::record_decision_audit(&state, &decision).await;
 
     match result.effect {
-        PolicyEffect::Allow => next.run(req).await,
+        PolicyEffect::Allow => {
+            // §Audit Integration: allowed decisions are logged at debug
+            // level (denials at warn, below). The full decision record is
+            // persisted to the queryable audit log above, regardless.
+            tracing::debug!(
+                subject_id = %auth.agent_id,
+                action = %action,
+                resource_type = %resource_type,
+                pattern = %pattern,
+                matched_policy = ?result.matched_policy,
+                "ABAC allowed request"
+            );
+            next.run(req).await
+        }
         PolicyEffect::Deny => {
             tracing::warn!(
                 subject_id = %auth.agent_id,
@@ -2271,6 +2481,53 @@ pub async fn record_abac_denied(
     crate::api::audit::emit_server_audit_event(state, event).await;
 }
 
+/// Record an `AbacDenied` audit event for a service-internal evaluation
+/// path that has no `AuthenticatedAgent` (review round 6, task-129): the
+/// merge processor's attestation gate and the git push-time attestation
+/// evaluation deny in the name of an agent/service subject, outside the
+/// HTTP request pipeline. Same event shape as [`record_abac_denied`]
+/// minus the caller claims; `enforced` records whether the Deny actually
+/// rejected the operation (the merge gate) or was audit-only (the
+/// push-time evaluation, TASK-006 Phase 1).
+pub async fn record_abac_denied_service(
+    state: &AppState,
+    subject_id: &str,
+    resource: &str,
+    action: &str,
+    policy_id: Option<&str>,
+    endpoint: &str,
+    enforced: bool,
+) {
+    let event = gyre_domain::AuditEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        gyre_domain::AuditEventType::AbacDenied,
+        if subject_id.is_empty() {
+            None
+        } else {
+            Some(gyre_common::Id::new(subject_id.to_string()))
+        },
+        None,
+        None,
+        None,
+        None,
+        "policy".to_string(),
+        None,
+        gyre_domain::AuditOutcome::Blocked,
+        serde_json::json!({
+            "agent_id": subject_id,
+            "policy_id": policy_id,
+            "resource": resource,
+            "action": action,
+            "endpoint": endpoint,
+            "enforced": enforced,
+        }),
+        None,
+        None,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2326,10 +2583,16 @@ pub mod tests {
         state
     }
 
+    /// The global GYRE_AUTH_TOKEN is allowed BY the seeded
+    /// `system-full-access` policy (priority 1000), not by a middleware
+    /// bypass: the decision audit trail must record the match. Killing
+    /// directions: removing the subject.id mapping (or the policy, or its
+    /// priority 1000) makes this fail — with no other Allow above the role
+    /// bands and tenant-isolation, the token falls through to default-deny.
     #[tokio::test(flavor = "multi_thread")]
-    async fn system_token_bypasses_abac() {
+    async fn system_token_allowed_by_system_full_access_policy() {
         let state = setup_state_with_policies();
-        let app = build_test_app(state);
+        let app = build_test_app(state.clone());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -2341,6 +2604,83 @@ pub mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
+        // The 200 must be a system-full-access policy match, not a bypass:
+        // the decision audit trail names the matched policy. The audit
+        // subject identity is the agent_id ("system"), not the reserved
+        // ABAC identity.
+        let decisions = state
+            .policies
+            .list_decisions(Some("system"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().any(|d| {
+                d.decision == gyre_domain::PolicyEffect::Allow
+                    && d.matched_policy
+                        .as_ref()
+                        .map(|p| p.as_str() == "builtin-system-access")
+                        .unwrap_or(false)
+            }),
+            "the global token's 200 must come from the system-full-access \
+             policy match recorded in the decision audit trail"
+        );
+    }
+
+    /// Review round 3 (privilege escalation): the reserved ABAC identity
+    /// "gyre-system-token" is matched by `system-full-access` (priority
+    /// 1000, above tenant-isolation 950). A NON-system principal carrying
+    /// it — a user row no supported write path can produce anymore
+    /// (pre-existing row, direct DB edit) — must be DENIED before
+    /// evaluation, never allowed by the builtin. API-key auth resolves
+    /// agent_id from the user's display_name, so this key authenticates as
+    /// the reserved identity with a real user backing it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spoofed_system_identity_denied_before_evaluation() {
+        let state = setup_state_with_policies();
+
+        let mut user = gyre_domain::User::new(Id::new("u-spoof"), "local:spoof", "spoof", 0);
+        user.display_name = gyre_domain::SYSTEM_ABAC_IDENTITY.to_string();
+        user.roles = vec![gyre_domain::UserRole::Developer];
+        user.tenant_id = Some(Id::new("default"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre-spoof-reserved-identity";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "spoof")
+            .await
+            .unwrap();
+
+        let app = build_test_app(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-system principal carrying the reserved system ABAC identity \
+             must be denied before policy evaluation"
+        );
+
+        // The denial is audited under the spoofed identity.
+        let decisions = state
+            .policies
+            .list_decisions(Some(gyre_domain::SYSTEM_ABAC_IDENTITY), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            decisions
+                .iter()
+                .any(|d| d.decision == gyre_domain::PolicyEffect::Deny),
+            "the reserved-identity denial must be recorded in the decision audit trail"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2535,6 +2875,7 @@ pub mod tests {
         // the middleware layer permissive for the caller (Developer write /
         // Admin all) so the per-handler guard is the only denial source.
         async fn denied_state(scope_key: &str) -> Arc<AppState> {
+            use gyre_domain::{User, WorkspaceMembership, WorkspaceRole};
             let state = make_test_state_with_jwt();
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
@@ -2555,6 +2896,45 @@ pub mod tests {
                     scope_key,
                     serde_json::to_string(&policies).unwrap(),
                 )
+                .await
+                .unwrap();
+            // TASK-129: seed the JWT callers as real users with workspace
+            // memberships matching the fixtures below (dev-sub in ws-1 for
+            // the repo-addressed cases; admin-sub in ws-briefing for the
+            // briefing case) so the builtin workspace-membership-required
+            // policy passes them through the middleware and the PER-HANDLER
+            // G6 guard remains the denial source this test asserts on.
+            // Roles are irrelevant to the G6 claim check (team=infra).
+            let dev_user_id = gyre_common::Id::new("44444444-4444-4444-4444-444444444444");
+            let mut dev_user = User::new(dev_user_id.clone(), "dev-sub", "dev-user", 0);
+            dev_user.roles = vec![gyre_domain::UserRole::Developer];
+            state.users.create(&dev_user).await.unwrap();
+            state
+                .workspace_memberships
+                .create(&WorkspaceMembership::new(
+                    gyre_common::Id::new("m-dev-sub-ws1"),
+                    dev_user_id,
+                    gyre_common::Id::new("ws-1"),
+                    WorkspaceRole::Developer,
+                    gyre_common::Id::new("inviter"),
+                    0,
+                ))
+                .await
+                .unwrap();
+            let admin_user_id = gyre_common::Id::new("55555555-5555-5555-5555-555555555555");
+            let mut admin_user = User::new(admin_user_id.clone(), "admin-sub", "admin-user", 0);
+            admin_user.roles = vec![gyre_domain::UserRole::Admin];
+            state.users.create(&admin_user).await.unwrap();
+            state
+                .workspace_memberships
+                .create(&WorkspaceMembership::new(
+                    gyre_common::Id::new("m-admin-sub-briefing"),
+                    admin_user_id,
+                    gyre_common::Id::new("ws-briefing"),
+                    WorkspaceRole::Admin,
+                    gyre_common::Id::new("inviter"),
+                    0,
+                ))
                 .await
                 .unwrap();
             state
@@ -2609,7 +2989,11 @@ pub mod tests {
 
         // Keycloak-style Developer JWT: builtin policies allow read/write/
         // spawn at the middleware layer, but it carries jwt_claims, so the
-        // per-handler G6 evaluation must still apply (and deny).
+        // per-handler G6 evaluation must still apply (and deny). TASK-129:
+        // the caller is a member of ws-1 (seeded below in denied_state) so
+        // the builtin workspace-membership-required policy does not fire at
+        // the middleware layer — the per-handler G6 guard must be the
+        // denial source this test asserts on.
         let developer_jwt = sign_test_jwt(
             &serde_json::json!({
                 "sub": "dev-sub",
@@ -2622,11 +3006,15 @@ pub mod tests {
         // allow-list, so an Admin caller (allowed everywhere at the
         // middleware layer) isolates the per-handler guard as the denial
         // source — same construction as briefing_ask_repo_scope_abac_denied
-        //_returns_403 in graph.rs.
+        //_returns_403 in graph.rs. TASK-129: tenant-1 claim + ws-briefing
+        // membership (seeded below) so the builtin tenant-isolation and
+        // workspace-membership-required policies do not fire at the
+        // middleware layer — the per-handler G6 guard is the denial source.
         let admin_jwt = sign_test_jwt(
             &serde_json::json!({
                 "sub": "admin-sub",
                 "preferred_username": "admin-user",
+                "tenant_id": "tenant-1",
                 "realm_access": { "roles": ["admin"] }
             }),
             3600,
@@ -3359,6 +3747,11 @@ pub mod tests {
             &serde_json::json!({
                 "sub": "dev-llm-sub",
                 "preferred_username": "developer",
+                // TASK-129: the caller's tenant matches some-ws's tenant so
+                // the builtin tenant-isolation policy (950) stays out of this
+                // test's scope (it isolates the generate Allow's
+                // workspace-role keying).
+                "tenant_id": "tenant-1",
                 "realm_access": { "roles": ["developer"] },
                 "workspace_role": "Developer"
             }),
@@ -3397,6 +3790,7 @@ pub mod tests {
             &serde_json::json!({
                 "sub": "viewer-llm-sub",
                 "preferred_username": "viewer",
+                "tenant_id": "tenant-1",
                 "realm_access": { "roles": ["developer"] },
                 "workspace_role": "Viewer"
             }),
@@ -3561,6 +3955,266 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "workspace Viewer membership must override global Developer allow"
+        );
+    }
+
+    /// Review round 4 (scope applicability, live): a Workspace-scoped
+    /// policy with `scope_id` = ANOTHER workspace must not apply to a
+    /// request addressing ws-1. Before the canonical `scope_applies`
+    /// filter the middleware fed the entire policy store to the engine, so
+    /// a ws-other Deny restricted (or a ws-other Allow granted) requests in
+    /// EVERY workspace. Both directions are asserted live:
+    ///
+    /// - out-of-scope Deny must NOT fire (the member's write stays allowed);
+    /// - the SAME policy re-scoped to ws-1 MUST fire (403, and the decision
+    ///   audit records it as the matched policy).
+    ///
+    /// Killing direction: reverting the scope filter makes leg 1 return 403.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scoped_workspace_deny_does_not_apply_out_of_scope_live() {
+        use axum::routing::post;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Unconditional high-priority Deny scoped to ws-other (a workspace
+        // the request does not address; the caller is not even a member).
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("test-ws-scoped-deny"),
+                name: "ws-other-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Workspace,
+                scope_id: Some(Id::new("ws-other")),
+                priority: 960,
+                effect: PolicyEffect::Deny,
+                conditions: vec![],
+                actions: vec!["*".to_string()],
+                resource_types: vec!["*".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // Leg 1: the member (global Developer, ws-1 member) writes in ws-1.
+        // The ws-other Deny is OUT OF SCOPE and must not fire — the request
+        // stays allowed by the seeded developer allow.
+        let token = member_jwt();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a ws-other-scoped Deny must not restrict a ws-1 request"
+        );
+
+        // Leg 2: re-scope the SAME policy to ws-1 — now it is in scope and
+        // must fire.
+        let mut p = state
+            .policies
+            .find_by_id("test-ws-scoped-deny")
+            .await
+            .unwrap()
+            .unwrap();
+        p.scope_id = Some(Id::new("ws-1"));
+        state.policies.update(&p).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the same Deny re-scoped to ws-1 must restrict the ws-1 request"
+        );
+
+        // The 403 must be a match of the scoped policy recorded in the
+        // decision audit trail (not a default deny).
+        let decisions = state
+            .policies
+            .list_decisions(Some("member-user"), None, 50)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().any(|d| {
+                d.decision == PolicyEffect::Deny
+                    && d.matched_policy
+                        .as_ref()
+                        .map(|p| p.as_str() == "test-ws-scoped-deny")
+                        .unwrap_or(false)
+            }),
+            "the in-scope Deny's 403 must be recorded as a test-ws-scoped-deny \
+             match in the decision audit trail"
+        );
+    }
+
+    /// Review round 4 (scope applicability, live, Allow direction — the
+    /// reviewer's exact repro): a Workspace-scoped Allow for ws-other must
+    /// NOT grant a write in ws-1. The caller's global role is downgraded to
+    /// Viewer so no seeded role-band allow covers the write — only the
+    /// scoped policy could. Out of scope → 403 (default deny); the SAME
+    /// policy re-scoped to ws-1 → 200 via a recorded policy match.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scoped_workspace_allow_does_not_escalate_across_workspaces_live() {
+        use axum::routing::post;
+
+        let (state, user_id) = setup_membership_state().await;
+
+        // Downgrade the global role so nothing else allows the write
+        // (UserRole has no Viewer; ReadOnly is the read-only global role).
+        let mut user = state.users.find_by_id(&user_id).await.unwrap().unwrap();
+        user.roles = vec![gyre_domain::UserRole::ReadOnly];
+        state.users.update(&user).await.unwrap();
+
+        // Unconditional high-priority Allow scoped to ws-other.
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("test-ws-scoped-allow"),
+                name: "ws-other-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Workspace,
+                scope_id: Some(Id::new("ws-other")),
+                priority: 900,
+                effect: PolicyEffect::Allow,
+                conditions: vec![],
+                actions: vec!["*".to_string()],
+                resource_types: vec!["*".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // Leg 1: out-of-scope Allow must not grant — default deny stands.
+        let token = member_jwt();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a ws-other-scoped Allow must not grant a ws-1 write"
+        );
+
+        // The denial must NOT be attributed to the out-of-scope policy.
+        let decisions = state
+            .policies
+            .list_decisions(Some("member-user"), None, 50)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().all(|d| d
+                .matched_policy
+                .as_ref()
+                .map(|p| p.as_str() != "test-ws-scoped-allow")
+                .unwrap_or(true)),
+            "the out-of-scope Allow must never be recorded as the matched policy"
+        );
+
+        // Leg 2: re-scope the SAME policy to ws-1 — now it grants.
+        let mut p = state
+            .policies
+            .find_by_id("test-ws-scoped-allow")
+            .await
+            .unwrap()
+            .unwrap();
+        p.scope_id = Some(Id::new("ws-1"));
+        state.policies.update(&p).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(WS_TASKS_URI)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the same Allow re-scoped to ws-1 must grant the ws-1 write"
+        );
+
+        // The 200 must be a recorded match of the scoped policy.
+        let decisions = state
+            .policies
+            .list_decisions(Some("member-user"), None, 50)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().any(|d| {
+                d.decision == PolicyEffect::Allow
+                    && d.matched_policy
+                        .as_ref()
+                        .map(|p| p.as_str() == "test-ws-scoped-allow")
+                        .unwrap_or(false)
+            }),
+            "the in-scope Allow's 200 must be recorded as a test-ws-scoped-allow \
+             match in the decision audit trail"
         );
     }
 
@@ -5643,7 +6297,48 @@ pub mod tests {
             .await
             .unwrap();
 
+        // TASK-129: a tenant t-1 Developer who is a MEMBER of ws-e — the
+        // tenant- and membership-consistent caller for the entity-attribute
+        // tests. The builtin `tenant-isolation` (950) and
+        // `workspace-membership-required` (940) policies now deny
+        // cross-tenant / non-member access by default, so the allow-path
+        // halves of those tests must use a caller whose scope matches the
+        // seeded entities (the deny-path halves keep `member_jwt`, whose
+        // tenant is "default").
+        let entity_member_id = gyre_common::Id::new("33333333-3333-3333-3333-333333333333");
+        let mut entity_member =
+            gyre_domain::User::new(entity_member_id.clone(), "entity-sub", "entity-user", 0);
+        entity_member.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&entity_member).await.unwrap();
         state
+            .workspace_memberships
+            .create(&gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new("m-entity-member"),
+                entity_member_id,
+                gyre_common::Id::new("ws-e"),
+                gyre_domain::WorkspaceRole::Developer,
+                gyre_common::Id::new("inviter"),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        state
+    }
+
+    /// JWT for the tenant t-1 Developer member of ws-e seeded by
+    /// [`setup_entity_state`] — see the seeding comment there.
+    fn entity_member_jwt() -> String {
+        use crate::auth::test_helpers::sign_test_jwt;
+        sign_test_jwt(
+            &serde_json::json!({
+                "sub": "entity-sub",
+                "preferred_username": "entity-user",
+                "tenant_id": "t-1",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        )
     }
 
     /// `resource.owner` and `resource.approval_status` must come from the
@@ -5696,13 +6391,16 @@ pub mod tests {
             .with_state(state.clone());
 
         // The seeded spec's owner IS user:alice → the NotEquals deny does not
-        // match → the Developer read allow (800) grants.
+        // match → the Developer read allow (800) grants. TASK-129: the caller
+        // is the t-1 ws-e member (`entity_member_jwt`) so the builtin
+        // tenant-isolation / workspace-membership-required policies stay out
+        // of the way — this test isolates the OWNER attribute.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri(SPEC_DOC_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5729,7 +6427,7 @@ pub mod tests {
             .oneshot(
                 Request::builder()
                     .uri(SPEC_DOC_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5813,7 +6511,7 @@ pub mod tests {
             .oneshot(
                 Request::builder()
                     .uri(SPEC_DOC_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5840,11 +6538,13 @@ pub mod tests {
             .await
             .unwrap();
 
+        // TASK-129: t-1 ws-e member caller — keeps the builtin
+        // tenant/membership containment policies out of this test's scope.
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri(SPEC_DOC_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5903,7 +6603,10 @@ pub mod tests {
             ))
             .with_state(state.clone());
 
-        let token = member_jwt();
+        // TASK-129: t-1 ws-e member caller — the builtin tenant/membership
+        // containment policies must stay out of this test's scope (it
+        // isolates the approval_status attribute).
+        let token = entity_member_jwt();
         let req = || {
             Request::builder()
                 .method("POST")
@@ -5944,21 +6647,26 @@ pub mod tests {
     /// not name any scope ids. The dynamic-reference form
     /// (`$subject.tenant_id`) must compare against it.
     ///
-    /// Discriminating form: a Deny at priority 810 (above the builtin
-    /// developer-write-access Allow at 800) keyed on cross-tenant mismatch.
-    /// `member_jwt()` carries no `tenant_id` claim → `subject.tenant_id`
-    /// is "default", while the seeded chain resolves the spec's tenant to
-    /// t-1 — so the deny must match. A Deny (not a same-tenant Allow) is
-    /// required here: a non-matching Allow would fall through to the
-    /// builtin Developer Allow at 800, which grants read regardless of
-    /// tenant, masking both a correct lookup and a fabricated one.
+    /// Discriminating form: a Deny at priority 960 — above the builtin
+    /// `tenant-isolation` policy (950, TASK-129) so THIS policy is the one
+    /// that fires, keeping the test's discrimination on its own condition —
+    /// keyed on cross-tenant mismatch. `member_jwt()` carries no
+    /// `tenant_id` claim → `subject.tenant_id` is "default", while the
+    /// seeded chain resolves the spec's tenant to t-1 — so the deny must
+    /// match. A Deny (not a same-tenant Allow) is required here: a
+    /// non-matching Allow would fall through to the builtin Developer Allow
+    /// at 800, which grants read regardless of tenant, masking both a
+    /// correct lookup and a fabricated one. (Without the 960 priority the
+    /// builtin tenant-isolation at 950 would fire first — it keys on the
+    /// same resolved attribute, but the custom policy would be dead.)
     #[tokio::test(flavor = "multi_thread")]
     async fn spec_resource_tenant_resolves_via_scope_chain() {
         let state = setup_entity_state().await;
 
         // Deny spec reads when the resource's tenant differs from the
         // subject's tenant (cross-tenant read → deny, outranking the
-        // builtin Developer read allow at 800).
+        // builtin Developer read allow at 800 AND the builtin
+        // tenant-isolation policy at 950).
         state
             .policies
             .create(&Policy {
@@ -5967,7 +6675,7 @@ pub mod tests {
                 description: String::new(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 810,
+                priority: 960,
                 effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
                     attribute: "resource.tenant_id".to_string(),
@@ -6076,11 +6784,15 @@ pub mod tests {
             ))
             .with_state(state.clone());
 
+        // TASK-129: the t-1 ws-e member caller keeps the builtin
+        // tenant-isolation (950) out of the way so THIS test's t-1-keyed
+        // Deny at 810 is the operative policy (the task is in ws-e → the
+        // member's workspace → membership containment also stays out).
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/tasks/task-e")
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6162,12 +6874,18 @@ pub mod tests {
             ))
             .with_state(state.clone());
 
+        // TASK-129: the t-1 ws-e member caller — the persona lives in ws-e
+        // (tenant t-1), so the builtin tenant-isolation /
+        // workspace-membership-required policies stay out of this test's
+        // scope (it isolates owner + approval_status attributes). The
+        // caller's username ("entity-user") still differs from the owner
+        // ("user:alice"), so the pending+non-owner Deny fires as before.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri(PERSONA_E_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6189,7 +6907,7 @@ pub mod tests {
             .oneshot(
                 Request::builder()
                     .uri(PERSONA_E_URI)
-                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .header("Authorization", format!("Bearer {}", entity_member_jwt()))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6225,6 +6943,583 @@ pub mod tests {
             policies.is_empty(),
             "no policies should be persisted when seeding fails, got {}",
             policies.len()
+        );
+    }
+
+    // --- TASK-129: §Built-In Policies live enforcement -------------------------
+
+    /// Every §Built-In Policies table row must be seeded on startup, marked
+    /// built-in, and — where the table says so — immutable. The delete guard
+    /// (built-ins cannot be deleted) is exercised through the port the API
+    /// uses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_table_builtins_seeded_on_startup() {
+        let state = test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        let policies = state.policies.list().await.unwrap();
+        for (name, must_be_immutable) in [
+            ("system-full-access", false),
+            ("tenant-isolation", false),
+            ("agent-repo-scope", false),
+            ("workspace-membership-required", false),
+            ("persona-human-approval", false),
+            ("builtin:require-human-spec-approval", true),
+            ("default-deny", false),
+        ] {
+            let p = policies
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("§Built-In Policies row '{name}' must be seeded"));
+            assert!(p.built_in, "'{name}' must be marked built_in");
+            assert_eq!(
+                p.immutable, must_be_immutable,
+                "'{name}' immutable flag must match the spec table"
+            );
+            // Built-ins cannot be deleted — the port the API delete handler
+            // uses refuses.
+            let err = state.policies.delete(p.id.as_str()).await;
+            assert!(
+                err.is_err(),
+                "built-in '{name}' must not be deletable through the policy repository"
+            );
+        }
+    }
+
+    /// `tenant-isolation` (live): a default-tenant user reading a t-1 spec
+    /// is denied by the SEEDED builtin alone — no custom policy. The same
+    /// request under the global GYRE_AUTH_TOKEN is allowed BY the
+    /// `system-full-access` policy (there is no bypass — the system
+    /// principal flows through evaluation): its reserved ABAC identity
+    /// ("gyre-system-token") matches system-full-access at priority 1000,
+    /// above tenant-isolation at 950. Killing directions: without the
+    /// subject.id mapping the global token would be denied (it resolves the
+    /// bootstrap tenant "default" while the spec lives in t-1); without the
+    /// builtin the member_jwt request would be allowed by
+    /// developer-write-access (800); without the decision-audit assertion
+    /// the 200 could silently regress to a bypass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_tenant_isolation_denies_cross_tenant_live() {
+        let state = setup_entity_state().await;
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(SPECS_PATH_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // Cross-tenant member (default) reading the t-1 spec → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(SPEC_DOC_URI)
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the seeded tenant-isolation builtin must deny cross-tenant reads"
+        );
+
+        // The same request under the global token → 200 via
+        // system-full-access (priority 1000 > 950).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(SPEC_DOC_URI)
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the global GYRE_AUTH_TOKEN identity must be allowed across tenants \
+             (system-full-access at 1000 outranks tenant-isolation at 950)"
+        );
+
+        // The 200 must be a system-full-access policy match recorded in
+        // the decision audit trail (subject "system" — the audit identity),
+        // proving the allow came from evaluation, not a middleware bypass.
+        let decisions = state
+            .policies
+            .list_decisions(Some("system"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            decisions.iter().any(|d| {
+                d.decision == gyre_domain::PolicyEffect::Allow
+                    && d.matched_policy
+                        .as_ref()
+                        .map(|p| p.as_str() == "builtin-system-access")
+                        .unwrap_or(false)
+            }),
+            "the global token's cross-tenant 200 must be a system-full-access \
+             policy match in the decision audit trail, not a bypass"
+        );
+    }
+
+    /// `workspace-membership-required` (live): a user who is a member of
+    /// ws-1 (setup_membership_state) is denied on a DIFFERENT workspace's
+    /// route by the seeded builtin alone — no custom policy. The member's
+    /// own workspace still passes through to the Developer allow (covered
+    /// by the generate/membership tests above).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_workspace_membership_required_denies_non_member_live() {
+        use axum::routing::get;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        // member-sub is a member of ws-1 ONLY; ws-other is a different
+        // workspace → member_of_resource_workspace = false → 403.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/ws-other/tasks")
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the seeded workspace-membership-required builtin must deny non-members"
+        );
+    }
+
+    /// `persona-human-approval` (live): an agent token POSTing the persona
+    /// approve route is denied by the seeded builtin alone — no custom
+    /// policy, and despite the agent role allow at 700 covering `approve`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_persona_human_approval_denies_agent_live() {
+        use axum::routing::post;
+
+        let state = crate::mem::test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        // Mint and register a real agent token (same path as
+        // agent_jwt_claims_reach_live_evaluation).
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-persona-approve",
+                "task-1",
+                "spawner",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-x",
+                "repo-x",
+                "repo-x",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-persona-approve", token.clone())
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/personas/:id/approve", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/personas/persona-x/approve")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the seeded persona-human-approval builtin must deny agent persona approvals"
+        );
+    }
+
+    /// `agent-repo-scope` (live): a worker agent's JWT carries its spawn
+    /// repo (`subject.repo_scope`, §Attributes "Agent OIDC claim"); the
+    /// SEEDED builtin alone must deny access to a DIFFERENT repo's
+    /// resources while leaving access to the agent's own repo intact
+    /// (the m34 agent-scoped-access role Allow at 700 grants the in-scope
+    /// read). Killing directions: the pre-fix seed (enabled: false) lets
+    /// BOTH reads through (200/200 — the role Allow at 700 wins); an
+    /// Exists-condition seed denies BOTH (403/403 — worker tokens always
+    /// carry a repo_id claim).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_agent_repo_scope_denies_out_of_scope_agent_live() {
+        let state = test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        // Workspace under the bootstrap tenant "default" — the tenant
+        // agent tokens resolve to (auth.rs `system_principal_tenant`) —
+        // so tenant-isolation (950) does not confound the containment
+        // assertion with a same-for-both-cases denial.
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-agent-scope"),
+            gyre_common::Id::new("default"),
+            "ws-agent-scope".to_string(),
+            "ws-agent-scope".to_string(),
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        for repo_id in ["repo-scope-a", "repo-scope-b"] {
+            let repo = gyre_domain::Repository::new(
+                gyre_common::Id::new(repo_id),
+                gyre_common::Id::new("ws-agent-scope"),
+                format!("repo-{repo_id}"),
+                format!("/repos/repo-{repo_id}"),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+
+        // Mint and register a real worker JWT scoped to repo-scope-a
+        // (same path as agent_jwt_claims_reach_live_evaluation).
+        let token = state
+            .agent_signing_key
+            .mint_worker_scoped(
+                "agent-repo-scope-1",
+                "task-1",
+                "spawner",
+                &state.base_url,
+                3600,
+                "default",
+                "ws-agent-scope",
+                "repo-scope-a",
+                "repo-repo-scope-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-repo-scope-1", token.clone())
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(REPOS_ID_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // In-scope read: the agent's own repo — the containment Deny does
+        // not match (repo_scope == resource.repo_id) and the role Allow
+        // (700) grants.
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-scope-a")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "an agent reading its own scoped repo must stay allowed"
+        );
+
+        // Out-of-scope read: a different repo in the same workspace —
+        // denied by the seeded builtin alone (no custom policy).
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-scope-b")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            denied.status(),
+            StatusCode::FORBIDDEN,
+            "the seeded agent-repo-scope builtin must deny cross-repo agent access"
+        );
+
+        // The denial is attributed to the containment builtin (matched by
+        // id), not the default-deny catchall — through the same decisions
+        // port the GET /policies/decisions audit endpoint queries.
+        let decisions = state
+            .policies
+            .list_decisions(Some("agent-repo-scope-1"), Some("repo"), 100)
+            .await
+            .unwrap();
+        let containment = decisions.iter().find(|d| {
+            d.matched_policy
+                .as_ref()
+                .is_some_and(|p| p.as_str() == "builtin-agent-repo-scope")
+        });
+        assert!(
+            containment.is_some(),
+            "the denial must be recorded with matched_policy \
+             builtin-agent-repo-scope, got {:?}",
+            decisions
+                .iter()
+                .map(|d| d.matched_policy.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `builtin:policy-admin-only` (§API "Create policy (Admin only)"):
+    /// a Developer JWT POSTing /api/v1/policies is denied by the seeded
+    /// builtin — the blanket developer write Allow (800) must not reach the
+    /// authorization surface itself. An Admin JWT passes through to the
+    /// handler.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn policy_management_is_admin_only_live() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::post;
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state)).expect("seed");
+        });
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/policies", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let developer_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-pol-sub",
+                "preferred_username": "dev-pol",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("Authorization", format!("Bearer {developer_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "policy creation must be Admin-only (§API): a Developer's blanket write Allow \
+             (800) must not reach the policy resource"
+        );
+
+        let admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "admin-pol-sub",
+                "preferred_username": "admin-pol",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("Authorization", format!("Bearer {admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Admin role must pass through to the policy create handler"
+        );
+    }
+
+    /// Review round 6 (task-129, §Attributes subject.global_role): a
+    /// role-less caller must NOT get a fabricated ReadOnly attribute.
+    /// The previous `roles.first().unwrap_or("ReadOnly")` matched the
+    /// builtin-readonly-get-only Allow (600) and granted read access no
+    /// store ever assigned. Killing direction: with the fabrication
+    /// restored, this request returns 200 and the recorded decision names
+    /// builtin-readonly-get-only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roleless_caller_gets_no_fabricated_readonly_role() {
+        let state = setup_state_with_policies();
+
+        // API-key auth backed by a user row with NO roles — the extractor
+        // resolves `roles: user.roles` (empty), and subject.id resolves to
+        // the user's display_name.
+        let mut user =
+            gyre_domain::User::new(Id::new("u-roleless"), "local:roleless", "roleless-user", 0);
+        user.roles = vec![];
+        user.tenant_id = Some(Id::new("default"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre-roleless-user-key";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "roleless")
+            .await
+            .unwrap();
+
+        let app = build_test_app(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a role-less caller has no role Allow to match — default deny, \
+             never a fabricated ReadOnly read grant"
+        );
+
+        // The denial is NOT the readonly builtin — the fabricated
+        // attribute is what would have matched it. The only policy that
+        // may match a role-less subject is the default-deny catchall
+        // (priority 1, no conditions) — or the engine's no-match default.
+        let decisions = state
+            .policies
+            .list_decisions(Some("roleless-user"), Some("task"), 10)
+            .await
+            .unwrap();
+        let decision = decisions
+            .iter()
+            .find(|d| d.decision == gyre_domain::PolicyEffect::Deny)
+            .expect("the denial is recorded in the decision audit trail");
+        let matched = decision.matched_policy.as_ref().map(|p| p.as_str());
+        assert_ne!(
+            matched,
+            Some("builtin-readonly-get-only"),
+            "no role Allow may match a role-less subject — the fabricated ReadOnly \
+             attribute is what matched this builtin before the fix"
+        );
+        assert!(
+            matched.is_none_or(|m| m == "builtin-default-deny"),
+            "the only match for a role-less subject is the default-deny catchall, \
+             got {matched:?}"
+        );
+    }
+
+    /// Review round 6 (task-129, §Audit Integration): the PolicyDecision's
+    /// `resource_id` must be the CONCRETE addressed entity id, not the
+    /// route pattern — a trail of `/api/v1/repos/:id` cannot answer
+    /// "which repo was denied access to X". Killing direction: with the
+    /// pattern recorded, resource_id is "/api/v1/repos/:id".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn decision_records_concrete_resource_id() {
+        let state = setup_state_with_policies();
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(REPOS_ID_ROUTE, get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-audit-42")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let decisions = state
+            .policies
+            .list_decisions(Some("system"), Some("repo"), 10)
+            .await
+            .unwrap();
+        let decision = decisions
+            .iter()
+            .find(|d| d.decision == gyre_domain::PolicyEffect::Allow)
+            .expect("the allowed decision is recorded");
+        assert_eq!(
+            decision.resource_id, "repo-audit-42",
+            "resource_id must name the addressed entity, not the route pattern"
         );
     }
 }
