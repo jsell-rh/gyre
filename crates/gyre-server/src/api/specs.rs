@@ -22,9 +22,12 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use gyre_common::Id;
+use gyre_domain::AnalyticsEvent;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::gate_executor::truncate_bytes;
 use crate::spec_registry::{
     ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry, SpecLinkEntry, SpecLinkType,
 };
@@ -321,9 +324,9 @@ pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::R
         md.push_str("| Spec | Status | SHA |\n");
         md.push_str("|------|--------|-----|\n");
         for e in entries {
-            // char-boundary-safe truncation: `get(..8)` returns None when the
-            // index falls inside a multibyte character (task-095 F4 flaw class).
-            let short_sha = e.current_sha.get(..8).unwrap_or(&e.current_sha);
+            // Char-boundary-safe truncation (gate output and spec SHAs may
+            // round-trip non-ASCII; a fixed byte index would panic).
+            let short_sha = truncate_bytes(&e.current_sha, 8);
             md.push_str(&format!(
                 "| [{title}](specs/{path}) | {status} | `{sha}` |\n",
                 title = e.title,
@@ -841,6 +844,45 @@ pub async fn approve_spec(
                 let _ = state.spec_ledger.save(&entry).await;
             }
 
+            // Auto-track spec approval (analytics.md §Auto-Emitted Events).
+            {
+                let approver_agent_id = if event.approver_type == "agent" {
+                    event
+                        .approver_id
+                        .strip_prefix("agent:")
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
+                let approver_user_id = if event.approver_type == "human" {
+                    Some(Id::new(
+                        event.approver_id.trim_start_matches("user:").to_string(),
+                    ))
+                } else {
+                    None
+                };
+                let ws_id = entry.workspace_id.as_deref().map(Id::new);
+                let repo_id = entry.repo_id.as_deref().map(Id::new);
+                let ev = AnalyticsEvent::new(
+                    new_id(),
+                    "spec.approved",
+                    approver_agent_id,
+                    serde_json::json!({
+                        "spec_path": spec_path,
+                        "approver_type": event.approver_type,
+                        "approval_mode": entry.approval_mode,
+                    }),
+                    now,
+                )
+                .with_scope(
+                    approver_user_id.as_ref(),
+                    None,
+                    ws_id.as_ref(),
+                    repo_id.as_ref(),
+                );
+                let _ = state.analytics.record(&ev).await;
+            }
+
             // Emit SpecApproved event on the message bus (agent-runtime.md §1)
             // only when the entry transitions INTO Approved — i.e. all required
             // approvals are now present. Partial approvals (e.g. the human half
@@ -1326,6 +1368,22 @@ pub async fn reject_spec(
                     e
                 );
             }
+            // mr.closed analytics event (analytics.md §Auto-Emitted Events:
+            // "MR closed without merge") — spec rejection closes its
+            // spec-edit MRs; this is one of the close paths.
+            let ev = AnalyticsEvent::new(
+                new_id(),
+                "mr.closed",
+                mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                serde_json::json!({
+                    "mr_id": mr.id.to_string(),
+                    "repo_id": mr.repository_id.to_string(),
+                    "reason": "spec_rejected",
+                }),
+                now,
+            )
+            .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+            let _ = state.analytics.record(&ev).await;
         }
     }
 
@@ -1346,8 +1404,20 @@ pub async fn reject_spec(
             ) {
                 continue;
             }
+            let pre_cancel_status = task.status.clone();
             let _ = task.cancel(Some(cancel_reason.clone()), now);
             let _ = state.tasks.update(&task).await;
+            // task.status_changed analytics event (analytics.md §Auto-Emitted
+            // Events: "Task transitions status") — the spec-rejection
+            // cancellation is a production transition.
+            if task.status != pre_cancel_status {
+                crate::api::analytics::record_task_status_changed(
+                    &state,
+                    &task,
+                    &pre_cancel_status,
+                )
+                .await;
+            }
 
             // If an agent is working on this task, stop it.
             let agents = state.agents.list().await.unwrap_or_default();
@@ -1357,6 +1427,28 @@ pub async fn reject_spec(
                 {
                     let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);
                     let _ = state.agents.update(&agent).await;
+                    // agent.failed analytics event (analytics.md §Auto-Emitted
+                    // Events: "Agent fails or is killed") — the spec-rejection
+                    // stop is a kill path, like stop_agent/admin kill/stale
+                    // abort, and must record with the same properties.
+                    let ev = AnalyticsEvent::new(
+                        new_id(),
+                        "agent.failed",
+                        Some(agent.id.to_string()),
+                        serde_json::json!({
+                            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                            "reason": format!("killed: {cancel_reason}"),
+                            "duration_secs": now.saturating_sub(agent.spawned_at),
+                        }),
+                        now,
+                    )
+                    .with_scope(
+                        None,
+                        None,
+                        Some(&agent.workspace_id),
+                        agent.repo_id.as_ref(),
+                    );
+                    let _ = state.analytics.record(&ev).await;
 
                     // Platform Model §7: the task is cancelled and the agent
                     // stopped (terminal) — its task-scoped one-time secrets
@@ -1388,10 +1480,10 @@ pub async fn reject_spec(
     if let Some(ws_id) = &entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
         // Resolve the tenant from the workspace record — never fabricate a
-        // "default" scope identity when it cannot be determined (task-097 F3).
+        // "default" tenant identity on lookup failure (task-097 F3). If the
+        // scope cannot be determined, skip the notification fanout and log.
         match state.workspaces.find_by_id(&ws_id).await {
             Ok(Some(ws)) => {
-                let tenant_id = ws.tenant_id.to_string();
                 if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
                     for member in &members {
                         if matches!(
@@ -1406,7 +1498,7 @@ pub async fn reject_spec(
                                 member.user_id.clone(),
                                 gyre_common::NotificationType::SpecRejected,
                                 format!("Spec '{}' rejected: {}", spec_path, req.reason),
-                                tenant_id.clone(),
+                                ws.tenant_id.to_string(),
                             )
                             .await;
                         }
@@ -1414,14 +1506,10 @@ pub async fn reject_spec(
                 }
             }
             Ok(None) => {
-                tracing::warn!(
-                    "reject_spec: workspace {ws_id} not found; skipping spec-rejected notifications"
-                );
+                tracing::warn!("spec_reject: workspace {ws_id} not found; skipping notifications");
             }
             Err(e) => {
-                tracing::warn!(
-                    "reject_spec: failed to resolve workspace tenant for {ws_id}: {e}; skipping spec-rejected notifications"
-                );
+                tracing::warn!("spec_reject: failed to resolve workspace tenant for {ws_id}: {e}");
             }
         }
     }
@@ -3033,6 +3121,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: spec.approved carries spec_path,
+        // approver_type, approval_mode.
+        let (app, state) = app_with_spec();
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .analytics
+            .query(Some("spec.approved"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one spec.approved event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["spec_path"], "system/design-principles.md");
+        // test-token is the global token → human approver.
+        assert_eq!(ev.properties["approver_type"], "human");
+        assert_eq!(ev.properties["approval_mode"], "human_only");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn approve_then_revoke() {
         let (app, state) = app_with_spec();
         let sha = "a".repeat(40);
@@ -4417,6 +4539,118 @@ specs:
         // Agent should be stopped.
         let updated_agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
         assert_eq!(updated_agent.status, gyre_domain::AgentStatus::Stopped);
+
+        // analytics.md §Auto-Emitted Events: task.status_changed — the
+        // spec-rejection cancellation is a production transition and must
+        // record. Regression: previously only the HTTP status endpoint and
+        // MCP update_task recorded.
+        let status_events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            status_events.len(),
+            1,
+            "spec-rejection cancellation must record task.status_changed"
+        );
+        let sev = &status_events[0];
+        assert_eq!(sev.properties["task_id"], "reject-task-1");
+        assert_eq!(sev.properties["old_status"], "InProgress");
+        assert_eq!(sev.properties["new_status"], "Cancelled");
+
+        // analytics.md §Auto-Emitted Events: agent.failed ("Agent fails or
+        // is killed") — the spec-rejection agent stop is a kill path, like
+        // stop_agent/admin kill/stale abort. Regression: this fourth kill
+        // path previously recorded no event.
+        let failed_events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            failed_events.len(),
+            1,
+            "spec-rejection agent stop must record agent.failed"
+        );
+        let fev = &failed_events[0];
+        assert_eq!(fev.agent_id.as_deref(), Some("reject-agent-1"));
+        assert_eq!(fev.properties["task_id"], "reject-task-1");
+        assert_eq!(
+            fev.properties["reason"],
+            "killed: spec rejected: spec is invalid"
+        );
+        assert!(
+            fev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+    }
+
+    /// analytics.md §Auto-Emitted Events: rejecting a spec closes its open
+    /// spec-edit MRs, and each close must record an `mr.closed` event with
+    /// the spec-required properties (`mr_id`, `repo_id`, `reason`).
+    /// Regression: the spec-reject close path previously recorded nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_records_mr_closed_analytics_events() {
+        let state = test_state();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/reject-mr.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        // An open spec-edit MR referencing the spec.
+        let mut mr = gyre_domain::MergeRequest::new(
+            gyre_common::Id::new("mr-spec-edit-1"),
+            gyre_common::Id::new("repo-1"),
+            "Edit spec",
+            "spec-edit/reject-mr",
+            "main",
+            1700000000,
+        );
+        mr.workspace_id = gyre_common::Id::new("ws-1");
+        mr.spec_ref =
+            Some("system/reject-mr.md@0000000000000000000000000000000000000000".to_string());
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "spec is invalid" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Freject-mr.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&gyre_common::Id::new("mr-spec-edit-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, gyre_domain::MrStatus::Closed);
+
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.closed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-spec-edit-1");
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert_eq!(ev.properties["reason"], "spec_rejected");
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

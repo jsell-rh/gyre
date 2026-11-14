@@ -284,6 +284,16 @@ pub async fn update_agent_status(
         AgentStatus::Dead | AgentStatus::Failed | AgentStatus::Stopped
     ) {
         crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
+        // Auto-track the death (analytics.md §Auto-Emitted Events:
+        // agent.failed covers "fails or is killed" — this endpoint is the
+        // operator/orchestrator kill path for Failed/Dead/Stopped, the
+        // same event the dedicated fail/stop endpoints emit).
+        crate::api::analytics::record_agent_failed(
+            &state,
+            &agent,
+            &format!("agent status set to {} via agent status API", req.status),
+        )
+        .await;
     }
     state
         .emit_event(

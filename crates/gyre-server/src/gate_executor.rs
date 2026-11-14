@@ -810,6 +810,52 @@ async fn run_gate(
         "gate execution complete"
     );
 
+    // Auto-track gate outcome (analytics.md §Auto-Emitted Events).
+    let gate_type_str = format!("{:?}", gate.gate_type);
+    let duration_secs = finished_at.saturating_sub(started_at);
+    let (event_name, props) = if status == GateStatus::Failed {
+        (
+            "gate.failed",
+            serde_json::json!({
+                "gate_id": gate.id.to_string(),
+                "gate_type": gate_type_str,
+                "mr_id": mr_id.to_string(),
+                "output_snippet": truncate_bytes(&output, 512),
+            }),
+        )
+    } else {
+        (
+            "gate.passed",
+            serde_json::json!({
+                "gate_id": gate.id.to_string(),
+                "gate_type": gate_type_str,
+                "mr_id": mr_id.to_string(),
+                "duration_secs": duration_secs,
+            }),
+        )
+    };
+    let scope = state
+        .merge_requests
+        .find_by_id(&mr_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| (mr.workspace_id, mr.repository_id));
+    let ev = gyre_domain::AnalyticsEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        event_name,
+        None,
+        props,
+        finished_at,
+    )
+    .with_scope(
+        None,
+        None,
+        scope.as_ref().map(|(ws, _)| ws),
+        scope.as_ref().map(|(_, repo)| repo),
+    );
+    let _ = state.analytics.record(&ev).await;
+
     // Emit GateFailure event so the MR's author agent can react immediately.
     if status == GateStatus::Failed {
         let gate_type_str = format!("{:?}", gate.gate_type);
@@ -2325,6 +2371,14 @@ async fn run_command_in_dir(
 /// (platform-model.md §6). Non-required gates are advisory: failures are
 /// logged but do not fail validation.
 ///
+/// `mr_id` attributes the validation to the MR in scope when there is one
+/// (single-entry merge, single-entry revert decision); atomic-group
+/// validation and the recovery HEAD health check pass `None` — those runs
+/// are attributable to a repo HEAD, not one MR, and the emitted gate
+/// analytics events record a null mr_id rather than a fabricated one.
+/// Every evaluated command gate records a `gate.passed`/`gate.failed`
+/// analytics event (analytics.md §Auto-Emitted Events).
+///
 /// Gates run inside a detached git worktree checked out at `head_sha`, so
 /// they validate the exact merged tree (platform-model.md §6, task-095
 /// R2-1). If worktree preparation fails (e.g. mem mode without a repo on
@@ -2333,6 +2387,7 @@ pub async fn run_post_merge_gates(
     state: &AppState,
     repo: &gyre_domain::Repository,
     head_sha: &str,
+    mr_id: Option<&Id>,
 ) -> Result<(), String> {
     let gates = state
         .quality_gates
@@ -2375,7 +2430,7 @@ pub async fn run_post_merge_gates(
         }
     };
     let cwd: Option<std::path::PathBuf> = gate_dir.as_ref().map(|(p, _)| p.clone());
-    let result = run_post_merge_gate_commands(&gates, cwd.as_deref()).await;
+    let result = run_post_merge_gate_commands(state, repo, mr_id, &gates, cwd.as_deref()).await;
 
     // Remove the detached gate worktree (if created) after gates finish:
     // deregister it from the repo's worktree list; the tempdir is removed
@@ -2400,6 +2455,9 @@ pub async fn run_post_merge_gates(
 }
 
 async fn run_post_merge_gate_commands(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    mr_id: Option<&Id>,
     gates: &[gyre_domain::QualityGate],
     cwd: Option<&std::path::Path>,
 ) -> Result<(), String> {
@@ -2407,9 +2465,52 @@ async fn run_post_merge_gate_commands(
         match &gate.gate_type {
             GateType::TestCommand | GateType::LintCommand => {
                 let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
+                let started_at = now_secs();
                 let (status, output) =
                     run_command_in_dir(gate.command.as_deref().unwrap_or("true"), cwd, timeout)
                         .await;
+                let finished_at = now_secs();
+                // Auto-track the post-merge gate outcome (analytics.md
+                // §Auto-Emitted Events — task-146 review R4: post-merge
+                // evaluations are quality-gate runs too; a required
+                // post-merge failure that triggers the revert/recovery
+                // protocol must be visible to gate analytics, exactly like
+                // the pre-merge run_gate path). `mr_id` is the MR this
+                // validation is attributable to when one is in scope —
+                // atomic-group validation and the recovery HEAD health
+                // check run against a repo HEAD, not a single MR, and
+                // record a null mr_id rather than a fabricated one.
+                let gate_type_str = format!("{:?}", gate.gate_type);
+                let (event_name, props) = if status == GateStatus::Failed {
+                    (
+                        "gate.failed",
+                        serde_json::json!({
+                            "gate_id": gate.id.to_string(),
+                            "gate_type": gate_type_str,
+                            "mr_id": mr_id.map(|id| id.to_string()),
+                            "output_snippet": truncate_bytes(&output, 512),
+                        }),
+                    )
+                } else {
+                    (
+                        "gate.passed",
+                        serde_json::json!({
+                            "gate_id": gate.id.to_string(),
+                            "gate_type": gate_type_str,
+                            "mr_id": mr_id.map(|id| id.to_string()),
+                            "duration_secs": finished_at.saturating_sub(started_at),
+                        }),
+                    )
+                };
+                let ev = gyre_domain::AnalyticsEvent::new(
+                    gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                    event_name,
+                    None,
+                    props,
+                    finished_at,
+                )
+                .with_scope(None, None, Some(&repo.workspace_id), Some(&repo.id));
+                let _ = state.analytics.record(&ev).await;
                 if status == GateStatus::Failed {
                     if gate.required {
                         return Err(format!(
@@ -5225,5 +5326,92 @@ specs:
         let results = state.gate_results.list_by_mr_id("mr-mg-4").await.unwrap();
         assert_eq!(results.len(), 1, "no spurious gates: {results:?}");
         assert_eq!(results[0].gate_id.as_str(), "repo-gate-lint");
+    }
+
+    // ─── Auto-emitted analytics events (analytics.md §Auto-Emitted Events) ────
+
+    async fn analytics_events(
+        state: &Arc<crate::AppState>,
+        name: &str,
+    ) -> Vec<gyre_domain::AnalyticsEvent> {
+        // state.analytics is an Arc<dyn AnalyticsRepository>; method calls
+        // resolve through the trait object without importing the trait here.
+        state.analytics.query(Some(name), None, 10).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn passing_gate_emits_gate_passed_analytics_event() {
+        // gate.passed must carry gate_id, gate_type, mr_id, duration_secs.
+        let state = crate::mem::test_state();
+        let gate = make_gate(GateType::TestCommand, Some("true".to_string()));
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        // Store a pending result first (run_gate updates it).
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id: gate.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Pending,
+                output: None,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone(), None).await;
+
+        let events = analytics_events(&state, "gate.passed").await;
+        assert_eq!(events.len(), 1, "one gate.passed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["gate_id"], gate.id.to_string());
+        assert_eq!(ev.properties["gate_type"], "TestCommand");
+        assert_eq!(ev.properties["mr_id"], mr_id.to_string());
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_gate_emits_gate_failed_analytics_event() {
+        // gate.failed must carry gate_id, gate_type, mr_id, output_snippet.
+        let state = crate::mem::test_state();
+        let gate = make_gate(GateType::TestCommand, Some("false".to_string()));
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id: gate.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Pending,
+                output: None,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone(), None).await;
+
+        let events = analytics_events(&state, "gate.failed").await;
+        assert_eq!(events.len(), 1, "one gate.failed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["gate_id"], gate.id.to_string());
+        assert_eq!(ev.properties["gate_type"], "TestCommand");
+        assert_eq!(ev.properties["mr_id"], mr_id.to_string());
+        assert!(
+            ev.properties["output_snippet"].as_str().is_some(),
+            "output_snippet must be present (failure output)"
+        );
+        // No gate.passed event for a failing gate.
+        let passed = analytics_events(&state, "gate.passed").await;
+        assert!(passed.is_empty(), "failed gate must not emit gate.passed");
     }
 }
