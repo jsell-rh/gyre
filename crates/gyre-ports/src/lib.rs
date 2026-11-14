@@ -69,10 +69,10 @@ pub mod workspace;
 pub mod workspace_membership;
 
 pub use agent::AgentRepository;
-pub use attestation_signer::AttestationSigner;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
 pub use analytics::{AnalyticsGroupBy, AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
+pub use attestation_signer::AttestationSigner;
 pub use audit::{AuditQueryFilter, AuditRepository, CompressionStats};
 pub use breaking_change::BreakingChangeRepository;
 pub use budget::BudgetRepository;

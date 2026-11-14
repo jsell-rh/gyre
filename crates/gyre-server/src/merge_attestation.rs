@@ -225,10 +225,7 @@ async fn agent_stack_attestation(state: &AppState, agent_id: &str) -> Option<Str
 /// spec version. Returns `None` when the MR carries no spec_ref or the
 /// version has no active approval — an approval is attested only when
 /// the ledger actually holds one.
-async fn build_spec_approval(
-    state: &AppState,
-    spec_ref: &str,
-) -> Option<SpecRefAttestation> {
+async fn build_spec_approval(state: &AppState, spec_ref: &str) -> Option<SpecRefAttestation> {
     let (path, sha) = spec_ref.rsplit_once('@')?;
     let mut approvals = state
         .spec_approvals
@@ -305,9 +302,8 @@ fn build_gate_attestation(
                 ReviewDecision::Approved => "Approved".to_string(),
                 ReviewDecision::ChangesRequested => "ChangesRequested".to_string(),
             });
-            attestation.review_body_hash = Some(sha256_hex(
-                review.body.as_deref().unwrap_or("").as_bytes(),
-            ));
+            attestation.review_body_hash =
+                Some(sha256_hex(review.body.as_deref().unwrap_or("").as_bytes()));
         }
     }
 
@@ -331,7 +327,10 @@ pub async fn generate_merge_attestation_bundle(
 
     let author = build_author_attestation(state, mr).await;
     let (spec_ref, spec_approval) = match mr.spec_ref.as_deref() {
-        Some(spec_ref) => (Some(spec_ref.to_string()), build_spec_approval(state, spec_ref).await),
+        Some(spec_ref) => (
+            Some(spec_ref.to_string()),
+            build_spec_approval(state, spec_ref).await,
+        ),
         None => (None, None),
     };
 
@@ -340,10 +339,11 @@ pub async fn generate_merge_attestation_bundle(
 
     let mut gates = Vec::with_capacity(gate_results.len());
     for result in &gate_results {
-        let gate = state.quality_gates.find_by_id(result.gate_id.as_str()).await?;
-        let review = gate
-            .as_ref()
-            .and_then(|g| review_for_gate(&reviews, &g.id));
+        let gate = state
+            .quality_gates
+            .find_by_id(result.gate_id.as_str())
+            .await?;
+        let review = gate.as_ref().and_then(|g| review_for_gate(&reviews, &g.id));
         // The reviewing gate agent's stack fingerprint, from the same
         // workload_attestations namespace the author's comes from
         // (identity-security.md §Layer 2: record which stack produced
@@ -367,7 +367,10 @@ pub async fn generate_merge_attestation_bundle(
         ) {
             (true, Some(reviewer_id)) => {
                 attestation.signed_by = format!("agent:{reviewer_id}");
-                Box::new(GateAgentSigner::derive(&state.agent_signing_key, &reviewer_id))
+                Box::new(GateAgentSigner::derive(
+                    &state.agent_signing_key,
+                    &reviewer_id,
+                ))
             }
             _ => Box::new(ForgeSigner::new(state.agent_signing_key.clone())),
         };
@@ -561,7 +564,7 @@ pub fn verify_merge_attestation_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gyre_domain::{GateStatus, GateResult, QualityGate, Review};
+    use gyre_domain::{GateResult, GateStatus, QualityGate, Review};
 
     fn test_state() -> Arc<AppState> {
         crate::build_state("gyre-test-token", "http://localhost:0", None)
@@ -601,14 +604,17 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-attest"),
             Id::new("repo-1"),
+            Id::new("ws-1"),
             "MR attestation",
             "feat/x",
             "main",
             1_700_000_000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("agent-author"));
-        mr.spec_ref = Some("specs/system/identity-security.md@abc123def456abc123def456abc123def456abc1".to_string());
+        mr.spec_ref = Some(
+            "specs/system/identity-security.md@abc123def456abc123def456abc123def456abc1"
+                .to_string(),
+        );
         mr
     }
 
@@ -740,13 +746,19 @@ mod tests {
         let author = bundle.author.as_ref().unwrap();
         assert_eq!(author.agent_id, "agent-author");
         assert_eq!(author.oidc_sub, "agent:agent-author");
-        assert_eq!(author.stack_attestation.as_deref(), Some("sha256:stack-fingerprint"));
+        assert_eq!(
+            author.stack_attestation.as_deref(),
+            Some("sha256:stack-fingerprint")
+        );
         // Canonical derivation (supply-chain.md §2): a workload record
         // with a stack fingerprint but no container/image is level 2
         // (CLI-attested stack) — the same rule spec-approval validation
         // applies, not a bundle-local rule.
         assert_eq!(author.attestation_level, Some(2));
-        assert_eq!(author.conversation_sha.as_deref(), Some("sha256:conversation"));
+        assert_eq!(
+            author.conversation_sha.as_deref(),
+            Some("sha256:conversation")
+        );
 
         // Multi-party signing: forge signs command gates, the gate agent
         // signs its AgentReview.
@@ -762,7 +774,10 @@ mod tests {
         let sec = by_name("security-review");
         assert_eq!(sec.signed_by, "agent:security-gate-7");
         assert_eq!(sec.reviewer_agent_id.as_deref(), Some("security-gate-7"));
-        assert_eq!(sec.reviewer_oidc_sub.as_deref(), Some("agent:security-gate-7"));
+        assert_eq!(
+            sec.reviewer_oidc_sub.as_deref(),
+            Some("agent:security-gate-7")
+        );
         // The reviewer's stack is recorded from its workload attestation
         // (identity-security.md §Layer 2).
         assert_eq!(
@@ -790,8 +805,7 @@ mod tests {
         );
 
         // Serializes to valid JSON with the spec's field names.
-        let json: serde_json::Value =
-            serde_json::to_value(&bundle).expect("bundle must serialize");
+        let json: serde_json::Value = serde_json::to_value(&bundle).expect("bundle must serialize");
         assert!(json.get("merge_attestation_version").is_some());
         assert!(json.get("bundle_signature").is_some());
         assert!(json["gates"].is_array());
@@ -804,7 +818,10 @@ mod tests {
         let mut bundle = generate_merge_attestation_bundle(&state, &mr, "789abc", 1_774_000_000)
             .await
             .unwrap();
-        assert!(verify_merge_attestation_bundle(&bundle, &state.agent_signing_key));
+        assert!(verify_merge_attestation_bundle(
+            &bundle,
+            &state.agent_signing_key
+        ));
 
         // Tamper with a gate status: the gate signature must fail.
         bundle.gates[0].status = "Failed".to_string();
@@ -854,13 +871,19 @@ mod tests {
             .unwrap();
 
         bundle.bundle_signature = None;
-        assert!(!verify_merge_attestation_bundle(&bundle, &state.agent_signing_key));
+        assert!(!verify_merge_attestation_bundle(
+            &bundle,
+            &state.agent_signing_key
+        ));
 
         let mut bundle2 = generate_merge_attestation_bundle(&state, &mr, "789abc", 1_774_000_000)
             .await
             .unwrap();
         bundle2.gates[0].signature = None;
-        assert!(!verify_merge_attestation_bundle(&bundle2, &state.agent_signing_key));
+        assert!(!verify_merge_attestation_bundle(
+            &bundle2,
+            &state.agent_signing_key
+        ));
     }
 
     /// F1 regression: the bundle's `author.attestation_level` must equal
@@ -978,7 +1001,9 @@ mod tests {
         mr.spec_ref = None;
         state.merge_requests.create(&mr).await.unwrap();
 
-        let bundle = generate_merge_attestation_bundle(&state, &mr, "abc", 1).await.unwrap();
+        let bundle = generate_merge_attestation_bundle(&state, &mr, "abc", 1)
+            .await
+            .unwrap();
         assert!(
             bundle.author.is_none(),
             "no author agent → no author attestation"
@@ -986,6 +1011,9 @@ mod tests {
         assert!(bundle.spec_ref.is_none());
         assert!(bundle.spec_approval.is_none());
         // Still a valid signed bundle.
-        assert!(verify_merge_attestation_bundle(&bundle, &state.agent_signing_key));
+        assert!(verify_merge_attestation_bundle(
+            &bundle,
+            &state.agent_signing_key
+        ));
     }
 }

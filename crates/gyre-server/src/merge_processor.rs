@@ -9648,9 +9648,7 @@ mod tests {
 
         // Gates for the MR's repo: a forge-run test gate and an
         // AgentReview gate whose gate agent submitted an approval.
-        let mk_gate = |gate_type: gyre_domain::GateType,
-                       name: &str|
-         -> QualityGate {
+        let mk_gate = |gate_type: gyre_domain::GateType, name: &str| -> QualityGate {
             QualityGate {
                 id: Id::new(uuid::Uuid::new_v4().to_string()),
                 repo_id: repo.id.clone(),
@@ -9683,7 +9681,11 @@ mod tests {
                 finished_at: Some(1_700_000_060),
             }
         };
-        state.gate_results.save(&mk_result(&test_gate.id)).await.unwrap();
+        state
+            .gate_results
+            .save(&mk_result(&test_gate.id))
+            .await
+            .unwrap();
         state
             .gate_results
             .save(&mk_result(&review_gate.id))
