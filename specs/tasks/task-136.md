@@ -4,7 +4,7 @@ spec_ref: "agent-gates.md §Merge Processor Integration"
 depends_on:
   - task-134
   - task-135
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-gates.md §Merge Processor Integration"
 commits: ["38f35818f0e603543253bb54584f67185b02e64a", "bfae8b786ac08cf87f081f2c77f5d9dbeb2868eb", "a05c7286ac53a17c2bd6957e3285c191c10fae1b"]
