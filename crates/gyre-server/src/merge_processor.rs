@@ -5617,12 +5617,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-gate-fail"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR (gate failed)",
             "feat/gate-fail",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("agent-gate-fail"));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -5889,15 +5889,15 @@ mod tests {
             .await
             .unwrap();
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-no-spec"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR (no spec_ref)",
             "feat/no-spec",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr).await.unwrap();
 
         enqueue_mr(&state, "mr-no-spec", 100, 2000).await;
@@ -5955,15 +5955,15 @@ mod tests {
         let state = test_state();
         let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-cb"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "MR (circuit breaker)",
             "feat/cb",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         state.merge_requests.create(&mr).await.unwrap();
 
         enqueue_mr(&state, "mr-cb", 100, 2000).await;
@@ -6399,12 +6399,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-solo-merge"),
             repo.id.clone(),
+            Id::new("ws-1"),
             "Solo MR",
             "feat/solo-merge",
             "main",
             1000,
         );
-        mr.workspace_id = Id::new("ws-1");
         mr.author_agent_id = Some(Id::new("agent-solo"));
         state.merge_requests.create(&mr).await.unwrap();
 

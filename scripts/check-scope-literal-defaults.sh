@@ -31,7 +31,7 @@
 # flagged site by resolving the real scope (or refusing to create the
 # entity without it); delete the exemption line when fixed and lower
 # FROZEN_EXEMPTION_COUNT — never add entries, never raise it.
-FROZEN_EXEMPTION_COUNT=6
+FROZEN_EXEMPTION_COUNT=0
 #
 # Run by pre-commit and CI.
 
@@ -54,7 +54,7 @@ import re
 import sys
 from pathlib import Path
 
-FROZEN_EXEMPTION_COUNT = 6
+FROZEN_EXEMPTION_COUNT = 0
 
 TEST_START = re.compile(r'\s*(#\[[^\]]*\]\s*)?(mod tests|#\[cfg\(test\)\])')
 

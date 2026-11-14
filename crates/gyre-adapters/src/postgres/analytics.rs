@@ -155,6 +155,10 @@ impl AnalyticsRepository for PgStorage {
     async fn record(&self, event: &AnalyticsEvent) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let e = event.clone();
+        // File the row under the handle's resolved tenant scope (not a
+        // fabricated literal) — same form as the merge_request/repository
+        // create() rows (task-111 verification repair).
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let props = serde_json::to_string(&e.properties)?;
@@ -168,7 +172,7 @@ impl AnalyticsRepository for PgStorage {
                 repo_id: e.repo_id.as_deref(),
                 properties: props,
                 timestamp: e.timestamp as i64,
-                tenant_id: "default",
+                tenant_id: &tenant,
             };
             diesel::insert_into(analytics_events::table)
                 .values(&record)
@@ -430,6 +434,8 @@ impl CostRepository for PgStorage {
     async fn record(&self, entry: &CostEntry) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let e = entry.clone();
+        // Handle's resolved tenant scope — see AnalyticsRepository::record above.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let record = CostEntryRecord {
@@ -440,7 +446,7 @@ impl CostRepository for PgStorage {
                 amount: e.amount,
                 currency: &e.currency,
                 timestamp: e.timestamp as i64,
-                tenant_id: "default",
+                tenant_id: &tenant,
             };
             diesel::insert_into(cost_entries::table)
                 .values(&record)
