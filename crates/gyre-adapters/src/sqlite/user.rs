@@ -39,6 +39,7 @@ struct UserRow {
     last_login_at: Option<i64>,
     tenant_id: Option<String>,
     global_role: String,
+    deactivated_at: Option<i64>,
 }
 
 impl From<UserRow> for User {
@@ -70,6 +71,7 @@ impl From<UserRow> for User {
         u.last_login_at = r.last_login_at.map(|v| v as u64);
         u.tenant_id = r.tenant_id.map(Id::new);
         u.global_role = global_role;
+        u.deactivated_at = r.deactivated_at.map(|v| v as u64);
         u
     }
 }
@@ -104,6 +106,7 @@ struct UserRecord<'a> {
     last_login_at: Option<i64>,
     tenant_id: Option<&'a str>,
     global_role: String,
+    deactivated_at: Option<i64>,
 }
 
 #[derive(Insertable)]
@@ -162,6 +165,7 @@ impl UserRepository for SqliteStorage {
                 last_login_at: u.last_login_at.map(|v| v as i64),
                 tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
                 global_role: global_role_to_str(&u.global_role).to_string(),
+                deactivated_at: u.deactivated_at.map(|v| v as i64),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -273,6 +277,7 @@ impl UserRepository for SqliteStorage {
                     users::last_login_at.eq(u.last_login_at.map(|v| v as i64)),
                     users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
                     users::global_role.eq(global_role_to_str(&u.global_role)),
+                    users::deactivated_at.eq(u.deactivated_at.map(|v| v as i64)),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
@@ -382,6 +387,37 @@ mod tests {
             .unwrap();
         assert_eq!(found.display_name, "alice");
         assert_eq!(found.external_id, "ext-1");
+    }
+
+    /// TASK-124: deactivation round-trips through the persisted column —
+    /// a fresh find_by_* after update() must see the deactivated account
+    /// (the auth extractor's rejection depends on it).
+    #[tokio::test]
+    async fn deactivation_persists_and_round_trips() {
+        let (_tmp, s) = setup();
+        let mut u = make_user("u1", "ext-1", "dana");
+        UserRepository::create(&s, &u).await.unwrap();
+        assert!(!u.is_deactivated());
+
+        u.deactivate(1234);
+        UserRepository::update(&s, &u).await.unwrap();
+
+        for found in [
+            UserRepository::find_by_id(&s, &u.id)
+                .await
+                .unwrap()
+                .unwrap(),
+            s.find_by_external_id("ext-1").await.unwrap().unwrap(),
+            s.find_by_username("dana").await.unwrap().unwrap(),
+        ] {
+            assert_eq!(found.deactivated_at, Some(1234));
+            assert!(found.is_deactivated());
+        }
+
+        // list() sees the deactivation too (GET /api/v1/users surface).
+        let listed = UserRepository::list(&s).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].is_deactivated());
     }
 
     #[tokio::test]

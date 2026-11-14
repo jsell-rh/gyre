@@ -415,6 +415,12 @@ pub struct User {
     pub preferences: UserPreferences,
     pub roles: Vec<UserRole>,
     pub last_login_at: Option<u64>,
+    /// Unix seconds at which a TenantAdmin deactivated the account
+    /// (user-management.md §API > User Management: PUT /users/{id}/deactivate).
+    /// None while the account is active. A deactivated user fails
+    /// authentication (auth extractor + SSO login) and does not count as
+    /// an active workspace Owner.
+    pub deactivated_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -436,9 +442,26 @@ impl User {
             preferences: UserPreferences::default(),
             roles: vec![UserRole::ReadOnly],
             last_login_at: None,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Whether a TenantAdmin has deactivated this account
+    /// (user-management.md §API > User Management).
+    pub fn is_deactivated(&self) -> bool {
+        self.deactivated_at.is_some()
+    }
+
+    /// Deactivate the account: stamp `deactivated_at` and `updated_at`.
+    /// Idempotent — a second call keeps the original stamp (the first
+    /// deactivation time is the audit-relevant one).
+    pub fn deactivate(&mut self, now: u64) {
+        if self.deactivated_at.is_none() {
+            self.deactivated_at = Some(now);
+        }
+        self.updated_at = now;
     }
 
     /// Create a user with distinct username and display name (SSO provisioning).
@@ -551,6 +574,29 @@ mod tests {
         let u = User::new(Id::new("u1"), "ext-1", "alice", 1000);
         assert_eq!(u.roles, vec![UserRole::ReadOnly]);
         assert!(!u.is_admin());
+    }
+
+    /// TASK-124: deactivation stamps deactivated_at and is idempotent —
+    /// the FIRST deactivation time is the audit-relevant one, so a second
+    /// call must not move it.
+    #[test]
+    fn deactivate_stamps_once_and_reports_state() {
+        let mut u = User::new(Id::new("u1"), "ext-1", "alice", 1000);
+        assert!(!u.is_deactivated());
+        assert!(u.deactivated_at.is_none());
+
+        u.deactivate(2000);
+        assert_eq!(u.deactivated_at, Some(2000));
+        assert!(u.is_deactivated());
+        assert_eq!(u.updated_at, 2000);
+
+        u.deactivate(3000);
+        assert_eq!(
+            u.deactivated_at,
+            Some(2000),
+            "re-deactivation must keep the original stamp"
+        );
+        assert_eq!(u.updated_at, 3000);
     }
 
     #[test]
