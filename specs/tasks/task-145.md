@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §What This Prevents"
-commits: ["f4b7f15195215cd8695e682404343ea4f1db325a", "0de2f4e4cb9b591e951718aa7bba459e77479152", "0c0529449e16bbb3ae93b099f5b5907fc2aa791b", "6128a39c8fa30617634c5ac192529ee469506ffb"]
+commits: ["0d3c6a58147ae47ff616371d8db02b49c15883f2", "6128a39c8fa30617634c5ac192529ee469506ffb", "0c0529449e16bbb3ae93b099f5b5907fc2aa791b", "0de2f4e4cb9b591e951718aa7bba459e77479152", "f4b7f15195215cd8695e682404343ea4f1db325a"]
 ---
 
 ## Spec Excerpt
