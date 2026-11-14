@@ -26,8 +26,8 @@ struct QualityGateRow {
     required: i32,
     gate_phase: String,
     timeout_secs: Option<i64>,
-    created_at: i64,
     position: i32,
+    created_at: i64,
 }
 
 impl QualityGateRow {
@@ -53,8 +53,8 @@ impl QualityGateRow {
             required: self.required != 0,
             gate_phase: GatePhase::parse(&self.gate_phase).unwrap_or_default(),
             timeout_secs: self.timeout_secs.map(|v| v as u64),
+            position: self.position.max(0) as u32,
             created_at: self.created_at as u64,
-            position: self.position as u32,
         }
     }
 }
@@ -73,8 +73,8 @@ struct NewQualityGateRow<'a> {
     required: i32,
     gate_phase: &'a str,
     timeout_secs: Option<i64>,
-    created_at: i64,
     position: i32,
+    created_at: i64,
 }
 
 fn gate_type_str(gt: &GateType) -> &'static str {
@@ -107,8 +107,8 @@ impl QualityGateRepository for SqliteStorage {
                 required: if g.required { 1 } else { 0 },
                 gate_phase: g.gate_phase.as_str(),
                 timeout_secs: g.timeout_secs.map(|v| v as i64),
-                created_at: g.created_at as i64,
                 position: g.position as i32,
+                created_at: g.created_at as i64,
             };
             diesel::insert_into(quality_gates::table)
                 .values(&row)
@@ -155,10 +155,8 @@ impl QualityGateRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = quality_gates::table
                 .filter(quality_gates::repo_id.eq(&repo_id))
-                .order((
-                    quality_gates::position.asc(),
-                    quality_gates::created_at.asc(),
-                ))
+                .order(quality_gates::position.asc())
+                .then_order_by(quality_gates::created_at.asc())
                 .load::<QualityGateRow>(&mut *conn)
                 .context("list quality gates by repo")?;
             Ok(rows.into_iter().map(QualityGateRow::into_gate).collect())
@@ -353,7 +351,7 @@ mod tests {
             required: true,
             gate_phase: GatePhase::PreMerge,
             timeout_secs: Some(30),
-            position: 1,
+            position: 0,
             created_at: 1000,
         }
     }
@@ -394,7 +392,59 @@ mod tests {
         );
         assert_eq!(
             reloaded.position, 7,
-            "upsert must persist position changes (drag-to-reorder, repo-lifecycle §3)"
+            "upsert must persist chain position changes (gate-chain reordering)"
         );
+    }
+
+    /// task-135 (agent-gates.md §Gate Chains): the repo's gate list is the
+    /// ordered chain — `list_by_repo_id` must return rows ordered by
+    /// position with creation order as the tiebreak (pre-position rows all
+    /// sit at 0). A drift here silently scrambles every configured chain
+    /// while single-gate lookups stay green.
+    #[tokio::test]
+    async fn list_by_repo_orders_by_chain_position() {
+        let (_tmp, storage) = tmp_storage();
+        // Insert out of order: positions 2, 0, 1; created_at deliberately
+        // anti-correlated with position so only (position, created_at)
+        // ordering produces the expected sequence.
+        for (name, position, created_at) in [
+            ("third", 2u32, 100u64),
+            ("first", 0, 300),
+            ("second", 1, 200),
+        ] {
+            let mut g = sample_gate();
+            g.id = Id::new(format!("gate-order-{position}"));
+            g.name = name.to_string();
+            g.position = position;
+            g.created_at = created_at;
+            QualityGateRepository::save(&storage, &g).await.unwrap();
+        }
+
+        let listed = QualityGateRepository::list_by_repo_id(&storage, "repo-1")
+            .await
+            .unwrap();
+        let names: Vec<&str> = listed.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    /// Same-position rows (all written before the position column existed)
+    /// fall back to creation order.
+    #[tokio::test]
+    async fn list_by_repo_position_tie_falls_back_to_created_at() {
+        let (_tmp, storage) = tmp_storage();
+        for (name, created_at) in [("old-a", 100u64), ("old-b", 200u64), ("old-c", 300u64)] {
+            let mut g = sample_gate();
+            g.id = Id::new(format!("gate-tie-{name}"));
+            g.name = name.to_string();
+            g.position = 0;
+            g.created_at = created_at;
+            QualityGateRepository::save(&storage, &g).await.unwrap();
+        }
+
+        let listed = QualityGateRepository::list_by_repo_id(&storage, "repo-1")
+            .await
+            .unwrap();
+        let names: Vec<&str> = listed.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["old-a", "old-b", "old-c"]);
     }
 }
