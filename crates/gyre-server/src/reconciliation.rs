@@ -1841,7 +1841,14 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
 }
 
 /// Create priority-6 MetaSpecDrift notifications for Admin/Developer/Owner
-/// members of a drifted workspace.
+/// members of a drifted workspace, plus the drifted meta-specs' owners
+/// (user-management.md §Who Gets Notified: "Spec drift detected" → Spec
+/// owner — the drift is against the workspace's effective meta-spec set,
+/// so each pinned spec's ledger owner is a recipient; owner refs resolve
+/// via `resolve_owner_ref`, `user:{name}` / `team:{slug}` forms). The
+/// member set is the meta-spec-reconciliation.md §10 accountability
+/// superset — misses no specced recipient; owners are added on top,
+/// deduplicated.
 async fn notify_drift_members(
     state: &Arc<AppState>,
     ws: &gyre_domain::Workspace,
@@ -1857,6 +1864,9 @@ async fn notify_drift_members(
         }
     };
 
+    // Recipients: role-based members + the effective set's spec owners.
+    let mut recipients: Vec<Id> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for member in &members {
         if !matches!(
             member.role,
@@ -1866,10 +1876,39 @@ async fn notify_drift_members(
         ) {
             continue;
         }
+        if seen.insert(member.user_id.as_str().to_string()) {
+            recipients.push(member.user_id.clone());
+        }
+    }
+    // The effective set's pinned specs are the specs the code drifted
+    // from — their owners (ledger `owner` field) are routing recipients.
+    if let Ok(effective) = resolve_effective_meta_spec_set(state, ws).await {
+        let pinned_paths: Vec<&str> = effective
+            .personas
+            .values()
+            .map(|e| e.path.as_str())
+            .chain(effective.principles.iter().map(|e| e.path.as_str()))
+            .chain(effective.standards.iter().map(|e| e.path.as_str()))
+            .chain(effective.process.iter().map(|e| e.path.as_str()))
+            .collect();
+        for path in pinned_paths {
+            let owner = match state.spec_ledger.find_by_path(path).await {
+                Ok(Some(entry)) => entry.owner,
+                _ => continue,
+            };
+            for owner_id in crate::notifications::resolve_owner_ref(state, &ws.id, &owner).await {
+                if seen.insert(owner_id.as_str().to_string()) {
+                    recipients.push(owner_id);
+                }
+            }
+        }
+    }
+
+    for user_id in &recipients {
         let mut notif = Notification::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             ws.id.clone(),
-            member.user_id.clone(),
+            user_id.clone(),
             NotificationType::MetaSpecDrift,
             format!(
                 "Meta-spec drift detected in workspace '{}' — code was produced under a superseded meta-spec set",
@@ -1889,10 +1928,13 @@ async fn notify_drift_members(
         notif.source.entity_id = ws.id.to_string();
         if let Err(e) = state.create_notification(&notif).await {
             warn!(
-                user = %member.user_id,
+                user = %user_id,
                 error = %e,
                 "sweep: failed to create MetaSpecDrift notification"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 }
@@ -3608,6 +3650,181 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_drift_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: the sweep's MetaSpecDrift creation must go
+        // through the channel dispatcher — a configured email channel
+        // queues an outbox entry. Fails if the sweep bypasses
+        // dispatch_to_channels (review finding: fan-out wiring is easy to
+        // drop on new notification-creation paths).
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-sweep-chan").await;
+        let repo = make_repo(&state, "repo-chan", "ws-sweep-chan").await;
+
+        let set = make_set("ws-sweep-chan", vec![pin("backend-developer", "a1")]);
+        put_set(&state, "ws-sweep-chan", &set).await;
+
+        // Provenance under an OLD set SHA → drift.
+        let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-chan", "deadbeef", now());
+        state.chain_attestations.save(&old_att).await.unwrap();
+
+        // Admin member with an email channel configured (Immediate, all
+        // bands) — the dispatcher must fan the drift notification out to it.
+        let membership = WorkspaceMembership {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: Id::new("user-chan"),
+            workspace_id: ws.id.clone(),
+            role: WorkspaceRole::Admin,
+            invited_by: Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(now()),
+            created_at: now(),
+        };
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-chan"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        run_conformance_sweep(&state).await.unwrap();
+
+        // In-app record exists …
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-chan"),
+                Some(&ws.id),
+                None,
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MetaSpecDrift),
+            "expected in-app MetaSpecDrift notification"
+        );
+        // … and the configured email channel fired.
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-chan:")),
+            "sweep drift notification must reach the configured email channel"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_drift_notification_routes_to_meta_spec_owners() {
+        // user-management.md §Who Gets Notified: "Spec drift detected" →
+        // Spec owner. The conformance drift is against the workspace's
+        // effective meta-spec set, so the pinned specs' ledger owners are
+        // recipients — here a plain Viewer (no accountability role), who
+        // must receive MetaSpecDrift purely through owner routing.
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-sweep-own").await;
+        let repo = make_repo(&state, "repo-sown", "ws-sweep-own").await;
+
+        let set = make_set("ws-sweep-own", vec![pin("backend-developer", "a1")]);
+        put_set(&state, "ws-sweep-own", &set).await;
+
+        // Provenance under an OLD set SHA → drift.
+        let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-own", "deadbeef", now());
+        state.chain_attestations.save(&old_att).await.unwrap();
+
+        // The pinned spec's owner: a Viewer member (not
+        // Admin/Developer/Owner — only owner routing can reach them).
+        let mut owner = gyre_domain::User::new(
+            Id::new("owner-viewer"),
+            "ext-owner-viewer",
+            "owner-viewer",
+            1_000_000,
+        );
+        owner.username = "owner-viewer".to_string();
+        state.users.create(&owner).await.unwrap();
+        let membership = WorkspaceMembership {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: Id::new("owner-viewer"),
+            workspace_id: ws.id.clone(),
+            role: WorkspaceRole::Viewer,
+            invited_by: Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(now()),
+            created_at: now(),
+        };
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        // Ledger entry for the pinned spec naming that owner.
+        let entry = gyre_domain::SpecLedgerEntry {
+            path: "backend-developer".to_string(),
+            title: "Backend Developer persona".to_string(),
+            owner: "user:owner-viewer".to_string(),
+            kind: Some("meta:persona".to_string()),
+            current_sha: "a1".to_string(),
+            approval_mode: "human_only".to_string(),
+            approval_status: gyre_domain::ApprovalStatus::Approved,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+            repo_id: None,
+            workspace_id: Some("ws-sweep-own".to_string()),
+        };
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        run_conformance_sweep(&state).await.unwrap();
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("owner-viewer"),
+                Some(&ws.id),
+                None,
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            notifs.len(),
+            1,
+            "the drifted meta-spec's owner must receive the MetaSpecDrift notification"
+        );
+        assert_eq!(notifs[0].notification_type, NotificationType::MetaSpecDrift);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -2465,6 +2465,9 @@ async fn create_uncertainty_notifications(
                 "agent_complete: failed to create AgentNeedsClarification notification for user {}: {e}",
                 member.user_id
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 

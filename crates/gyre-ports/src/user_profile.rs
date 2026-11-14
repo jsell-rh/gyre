@@ -73,6 +73,23 @@ pub trait SessionRepository: Send + Sync {
     async fn delete_expired_before(&self, cutoff: u64) -> Result<u64>;
 }
 
+/// Per-user delivery-channel preferences (user-management.md §Delivery Channels).
+///
+/// One row per user: the serialized `NotificationChannels` config. The in_app
+/// flag is always true and enforced in the domain type, not by storage.
+#[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
+pub trait UserChannelPreferenceRepository: Send + Sync {
+    /// Returns the user's channel config, or None when the user has never
+    /// configured channels (callers apply `NotificationChannels::default()`).
+    async fn find(&self, user_id: &Id) -> Result<Option<gyre_domain::NotificationChannels>>;
+    async fn upsert(
+        &self,
+        user_id: &Id,
+        channels: &gyre_domain::NotificationChannels,
+    ) -> Result<()>;
+}
+
 /// Read-only aggregated view of a user's judgment history.
 #[async_trait]
 pub trait JudgmentLedgerRepository: Send + Sync {

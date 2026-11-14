@@ -212,6 +212,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    user_channel_preferences (user_id) {
+        user_id -> Text,
+        channels -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     user_tokens (id) {
         id -> Text,
         user_id -> Text,
@@ -789,6 +797,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     agent_worktrees,
     users,
     user_notification_preferences,
+    user_channel_preferences,
     user_tokens,
     user_sessions,
     api_keys,

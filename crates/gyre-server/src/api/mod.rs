@@ -936,7 +936,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/users/:user_id/sessions/:id",
             delete(revoke_user_session),
         )
-        // Notification Preferences (HSI §12) — per-handler auth, ABAC-exempt
+        // Notification Preferences (HSI §12 + user-management.md §Delivery
+        // Channels) — per-type preferences and delivery channel config,
+        // per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/notification-preferences",
             get(get_notification_preferences).put(update_notification_preferences),
@@ -957,6 +959,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/notifications/mark-all-read",
             post(mark_all_read_notifications),
         )
+        // Preferences (per-type + delivery channels, task-112 §Delivery
+        // Channels) — same combined handlers as /users/me/notification-preferences
         .route(
             "/api/v1/notifications/preferences",
             get(get_notification_preferences).put(update_notification_preferences),
