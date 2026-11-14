@@ -758,35 +758,43 @@ const GATE_FAILURE_ESCALATION_THRESHOLD: u64 = 3;
 /// fresh MR starts at zero — "Reset on gate pass or new MR push").
 const GATE_FAILURE_STREAK_NS: &str = "gate_failure_streak";
 
-/// KV namespace marking that a GateResult for (MR, gate) has already been
-/// delivered to an author agent's inbox. The executor delivers at failure
-/// time ("Speed matters"); the Ralph loop's `on_gates_failed` re-checks the
-/// inbox later and only emits for gates that were NOT covered (e.g. optional
-/// gates, or results seeded by paths that bypass the executor) — without
-/// the marker the author's next session would read the same failure twice.
+/// KV namespace marking that the GateResult for attempt N of (MR, gate)
+/// has already been delivered to an author agent's inbox. The executor
+/// delivers at failure time ("Speed matters"); the Ralph loop's
+/// `on_gates_failed` re-checks the inbox later and only emits for gates
+/// that were NOT covered (e.g. optional gates, or results seeded by paths
+/// that bypass the executor) — without the marker the author's next
+/// session would read the same failure twice. The key is scoped to the
+/// ATTEMPT: each re-enqueue is a new gate run whose failure must reach the
+/// author (the spec's own example is `"attempt": 2`), so the marker must
+/// not suppress later attempts — only re-delivery of the same attempt
+/// (executor vs. Ralph-loop fallback).
 const GATE_RESULT_DELIVERED_NS: &str = "gate_result_delivered";
 
-fn gate_result_delivered_key(mr_id: &Id, gate_id: &Id, author_id: &Id) -> String {
+fn gate_result_delivered_key(mr_id: &Id, gate_id: &Id, author_id: &Id, attempt: u64) -> String {
     format!(
-        "{}:{}:{}",
+        "{}:{}:{}:{}",
         mr_id.as_str(),
         gate_id.as_str(),
-        author_id.as_str()
+        author_id.as_str(),
+        attempt
     )
 }
 
-/// Has the author already received a GateResult for this (MR, gate)?
+/// Has the author already received a GateResult for attempt `attempt` of
+/// this (MR, gate)?
 pub(crate) async fn gate_result_already_delivered(
     state: &AppState,
     mr_id: &Id,
     gate_id: &Id,
     author_id: &Id,
+    attempt: u64,
 ) -> bool {
     state
         .kv_store
         .kv_get(
             GATE_RESULT_DELIVERED_NS,
-            &gate_result_delivered_key(mr_id, gate_id, author_id),
+            &gate_result_delivered_key(mr_id, gate_id, author_id, attempt),
         )
         .await
         .ok()
@@ -794,21 +802,23 @@ pub(crate) async fn gate_result_already_delivered(
         .is_some()
 }
 
-/// Record that the author received a GateResult for this (MR, gate).
-/// `pub(crate)` — the Ralph loop's fallback delivery path
+/// Record that the author received a GateResult for attempt `attempt` of
+/// this (MR, gate). `pub(crate)` — the Ralph loop's fallback delivery path
 /// (`on_gates_failed`) marks its own emissions with the same marker the
-/// executor uses, so the two paths stay mutually de-duplicated.
+/// executor uses, so the two paths stay mutually de-duplicated within an
+/// attempt.
 pub(crate) async fn mark_gate_result_delivered(
     state: &AppState,
     mr_id: &Id,
     gate_id: &Id,
     author_id: &Id,
+    attempt: u64,
 ) {
     if let Err(e) = state
         .kv_store
         .kv_set(
             GATE_RESULT_DELIVERED_NS,
-            &gate_result_delivered_key(mr_id, gate_id, author_id),
+            &gate_result_delivered_key(mr_id, gate_id, author_id, attempt),
             now_secs().to_string(),
         )
         .await
@@ -885,9 +895,14 @@ fn is_security_gate(gate: &gyre_domain::QualityGate) -> bool {
 /// §What You Produce) separates findings into severity sections, with the
 /// critical ones under a "Critical Findings" heading. A critical finding is
 /// present when that section exists and carries any content before the next
-/// section. An output with no structured sections falls back to a standalone
-/// "critical" marker (e.g. "ChangesRequested: critical SQL injection in
-/// handlers.rs:47").
+/// section. An output with no structured sections falls back to EXPLICIT
+/// severity labels only — `severity: critical` / `severity=critical`, or a
+/// line classified by a leading `critical:` label. A bare "critical" word
+/// anywhere in the output is NOT a severity signal: command gates echo
+/// arbitrary tool output (file paths, identifiers) into the gate result, and
+/// a coincidental word there must not escalate to a human Overseer
+/// (false-positive page). Err toward under-notification on unstructured
+/// output — the structured report is the persona's real channel.
 fn has_critical_finding(output: &str) -> bool {
     let mut saw_critical_section = false;
     let mut in_critical_section = false;
@@ -918,10 +933,37 @@ fn has_critical_finding(output: &str) -> bool {
         // Structured report present and its critical section is empty.
         return false;
     }
-    // Unstructured output: a standalone "critical" word flags criticality.
-    output
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("critical"))
+    // Unstructured output: an explicit severity label flags criticality.
+    let lower = output.to_lowercase();
+    // A `critical` severity value must be the whole word — `severity:
+    // critically reviewed` is not a critical classification.
+    let is_critical_word = |v: &str| match v.strip_prefix("critical") {
+        Some(rest) => rest.chars().next().is_none_or(|c| !c.is_alphanumeric()),
+        None => false,
+    };
+    // `severity: critical` / `severity=critical` — a `severity` label whose
+    // value is `critical` (not `high`/`medium`/`informational`).
+    let severity_is_critical = lower.split("severity").skip(1).any(|rest| {
+        let rest = rest.trim_start_matches([' ', '\t']);
+        rest.strip_prefix(':')
+            .or_else(|| rest.strip_prefix('='))
+            .is_some_and(|v| is_critical_word(v.trim_start_matches([' ', '\t'])))
+    });
+    if severity_is_critical {
+        return true;
+    }
+    // A line classified by a leading `critical:` label (after optional list
+    // bullets), e.g. "- critical: SQL injection in handlers.rs:47".
+    output.lines().any(|line| {
+        let stripped = line
+            .trim_start()
+            .trim_start_matches(['-', '*', '+'])
+            .trim_start_matches([' ', '\t'])
+            .to_lowercase();
+        stripped
+            .strip_prefix("critical")
+            .is_some_and(|rest| rest.starts_with(':'))
+    })
 }
 
 /// Gate failure feedback (agent-gates.md §Gate Failure Feedback):
@@ -979,9 +1021,13 @@ async fn gate_failure_feedback(
         "gate_agent_id": gate_agent_id,
     });
 
-    // 1. Author inbox delivery (§Agent Inbox Delivery).
+    // 1. Author inbox delivery (§Agent Inbox Delivery). One GateResult
+    //    per ATTEMPT: the marker is attempt-scoped, so a re-enqueued MR's
+    //    next failure delivers again (the spec's example is attempt 2),
+    //    while a re-run of the same attempt (Ralph-loop fallback) does
+    //    not double-deliver.
     if let Some(ref author_id) = mr.author_agent_id {
-        if !gate_result_already_delivered(state, mr_id, &gate.id, author_id).await {
+        if !gate_result_already_delivered(state, mr_id, &gate.id, author_id, attempt).await {
             state
                 .emit_event(
                     Some(mr.workspace_id.clone()),
@@ -990,7 +1036,7 @@ async fn gate_failure_feedback(
                     Some(payload.clone()),
                 )
                 .await;
-            mark_gate_result_delivered(state, mr_id, &gate.id, author_id).await;
+            mark_gate_result_delivered(state, mr_id, &gate.id, author_id, attempt).await;
         }
     }
 
@@ -1328,13 +1374,24 @@ Fix the issue and re-push to trigger gate re-evaluation.",
     );
 
     let now = now_secs();
-    // Deterministic id (per MR + gate): the executor runs one feedback task
-    // per gate concurrently, so a streak-3 feedback can race a concurrent
-    // attempt's existence check above — a deterministic id makes a second
-    // create idempotent (mem overwrites the same row, SQLite rejects the
-    // duplicate PK) instead of leaving two tasks.
+    // Deterministic id per (MR, gate, attempt): the executor runs one
+    // feedback task per gate concurrently, so a streak-3 feedback can race
+    // a concurrent attempt's existence check above — a deterministic id
+    // makes a re-create of the SAME attempt idempotent (mem overwrites the
+    // same row, SQLite rejects the duplicate PK) instead of leaving two
+    // tasks. The attempt is part of the id because the existence check
+    // only skips while the prior task is NON-terminal: once it is
+    // Done/Cancelled, a later 3+ streak on the same (MR, gate) must be able
+    // to create its own escalation task — with a (MR, gate)-only id that
+    // create would collide with the terminal task's PK on SQLite and the
+    // escalation would be silently lost forever.
     let mut task = gyre_domain::Task::new(
-        Id::new(format!("gate-failure-task:{}:{}", mr.id.as_str(), gate.id.as_str())),
+        Id::new(format!(
+            "gate-failure-task:{}:{}:{}",
+            mr.id.as_str(),
+            gate.id.as_str(),
+            attempt
+        )),
         &title,
         now,
     );
@@ -7794,16 +7851,17 @@ specs:
         state.users.create(&admin).await.unwrap();
 
         // A security gate that FAILS with a critical finding in its output:
-        // `ls` on a missing path exits non-zero and its stderr names the
-        // path — the word "critical" in the failure output flags the
-        // finding's severity (the unstructured form of the security
-        // persona's "Critical Findings" report section).
+        // `ls` on a missing operand exits non-zero and its stderr quotes
+        // the operand — the operand carries an explicit `severity:critical`
+        // label, the unstructured severity marker that escalates critical
+        // findings to the Overseer. (A coincidental "critical" word in a
+        // path is NOT a severity signal — see `critical_finding_detection`.)
         let gate = QualityGate {
             id: Id::new("gate-sec-critical"),
             repo_id: repo_id.clone(),
             name: "security-review".to_string(),
             gate_type: GateType::TestCommand,
-            command: Some("ls /nonexistent-gyre-critical-finding".to_string()),
+            command: Some("ls severity:critical".to_string()),
             required_approvals: None,
             persona: Some("personas/security.md".to_string()),
             validation_type: None,
@@ -8093,8 +8151,11 @@ specs:
 
     /// `has_critical_finding`: the security persona's report format puts
     /// critical findings under a "Critical Findings" section — the section
-    /// must exist AND carry content. Unstructured outputs fall back to a
-    /// standalone "critical" marker.
+    /// must exist AND carry content. Unstructured outputs escalate only on
+    /// an explicit severity label, never on a coincidental "critical"
+    /// word (a failing command gate echoes arbitrary tool output — file
+    /// paths, identifiers — into its result, and that must not page the
+    /// human Overseer).
     #[test]
     fn critical_finding_detection() {
         // Structured report with a populated critical section.
@@ -8105,19 +8166,38 @@ specs:
         assert!(!has_critical_finding(
             "## Security Report\n\n### Critical Findings\n\n### High Findings\nweak headers\n"
         ));
-        // No critical section at all, no marker → not critical.
+        // No critical section at all, no label → not critical.
         assert!(!has_critical_finding(
             "## Security Report\n\n### High Findings\nweak headers\n"
         ));
-        // Unstructured output with an inline critical marker.
+        // Unstructured output with an explicit severity label.
         assert!(has_critical_finding(
+            "ChangesRequested: severity: critical — SQL injection in handlers.rs:47"
+        ));
+        assert!(has_critical_finding("severity=critical"));
+        // Unstructured output with a line classified by a leading label.
+        assert!(has_critical_finding(
+            "- critical: SQL injection in handlers.rs:47\n- high: weak headers"
+        ));
+        // A non-critical severity label does not escalate.
+        assert!(!has_critical_finding("severity: high — weak headers"));
+        // A bare "critical" word mid-sentence is NOT a severity signal —
+        // only the persona's structured report or an explicit label is.
+        assert!(!has_critical_finding(
             "ChangesRequested: critical SQL injection in handlers.rs:47"
         ));
-        // Unstructured, non-critical.
+        // A coincidental "critical" inside a command's echoed path must
+        // not escalate (the false-positive class: a failing command gate
+        // whose stderr names a path containing the word).
         assert!(!has_critical_finding(
-            "ChangesRequested: high-severity header weakness"
+            "ls: cannot access '/nonexistent-gyre-critical-finding': No such file or directory"
         ));
         // The word must be whole — "uncritical" is not "critical".
         assert!(!has_critical_finding("reviewed, uncritical"));
+        // Word boundary on the severity value: "critically" is not a
+        // critical classification.
+        assert!(!has_critical_finding(
+            "severity: critically reviewed, no issues"
+        ));
     }
 }
