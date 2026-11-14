@@ -600,22 +600,31 @@ impl ResourceResolver {
                     "workspace_member",
                     Some("write"),
                 ),
-                // Invitee-facing accept/decline (task-110 repair): the
-                // invited user is not a workspace member yet, so the
-                // workspace_member resource mapping would never match a
-                // membership for them — per-handler authorization keys on
-                // the invitation's user_id instead (the caller must BE the
-                // invitee, same tenant).
-                RouteResourceMapping::api(
-                    "/api/v1/workspaces/:id/invite/accept",
-                    "workspace",
-                    None,
-                ),
-                RouteResourceMapping::api(
-                    "/api/v1/workspaces/:id/invite/decline",
-                    "workspace",
-                    None,
-                ),
+                // Invitee-facing accept/decline (task-110 review
+                // repair): the invited user is BY DEFINITION not a
+                // workspace member yet — an invitation exists only for
+                // non-members (invite_to_workspace 409s on existing
+                // membership; the membership row is created at
+                // acceptance). Mapping these routes to any
+                // workspace-scoped resource makes the middleware derive
+                // subject.member_of_resource_workspace from the real
+                // membership store, which is false for the invitee, so
+                // the seeded builtin `workspace-membership-required`
+                // (Deny, priority 940) wins evaluation and returns 403
+                // BEFORE the per-handler invitee check runs — the
+                // spec-named invitee endpoints and the accept_url/
+                // decline_url embedded in the invitee's
+                // InvitationReceived notification were unreachable in
+                // production. The routes are therefore ABAC-exempt;
+                // per-handler authorization in api/invitations.rs loads
+                // the workspace, enforces tenant containment (403), and
+                // requires the caller to BE the pending invitation's
+                // invitee (404 otherwise) — verified by
+                // scripts/check-abac-exempt-handlers.sh and the
+                // production-chain regression test
+                // invitee_accepts_and_declines_through_abac_middleware.
+                RouteResourceMapping::exempt("/api/v1/workspaces/:id/invite/accept"),
+                RouteResourceMapping::exempt("/api/v1/workspaces/:id/invite/decline"),
                 RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/invitations",
                     "workspace_member",

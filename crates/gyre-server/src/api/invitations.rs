@@ -1710,12 +1710,19 @@ pub async fn list_my_invitations(
 /// workspace (spec §API > Workspace Membership). The invitation is
 /// located by (workspace, caller) — no token needed, because the
 /// caller's authenticated identity IS the invitee proof.
+///
+/// ABAC-exempt (abac_middleware.rs): the invitee is a non-member BY
+/// DEFINITION, so the seeded `workspace-membership-required` builtin
+/// would deny them before this handler runs. Authorization is enforced
+/// per-handler via `authorize_my_pending_invitation` (tenant
+/// containment, then caller-must-be-the-invitee).
 pub async fn accept_my_workspace_invitation(
     auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let invitation = find_my_pending_invitation(&state, &auth, &workspace_id).await?;
+    let invitation =
+        authorize_my_pending_invitation(&state, &auth, &workspace_id).await?;
     let now = now_secs();
     if invitation.is_expired(now) {
         state
@@ -1765,12 +1772,19 @@ pub async fn accept_my_workspace_invitation(
 ///
 /// Authenticated invitee declines their pending invitation for the
 /// workspace (spec §Workspace Invitation Flow step 4).
+///
+/// ABAC-exempt (abac_middleware.rs): the invitee is a non-member BY
+/// DEFINITION, so the seeded `workspace-membership-required` builtin
+/// would deny them before this handler runs. Authorization is enforced
+/// per-handler via `authorize_my_pending_invitation` (tenant
+/// containment, then caller-must-be-the-invitee).
 pub async fn decline_my_workspace_invitation(
     auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
-    let invitation = find_my_pending_invitation(&state, &auth, &workspace_id).await?;
+    let invitation =
+        authorize_my_pending_invitation(&state, &auth, &workspace_id).await?;
     let now = now_secs();
     if invitation.is_expired(now) {
         state
@@ -1802,26 +1816,39 @@ pub async fn decline_my_workspace_invitation(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Shared lookup for the invitee-facing accept/decline routes: resolve the
-/// workspace, enforce tenant containment, and find the caller's pending
-/// invitation in it. 404 when the caller has no pending invitation there
-/// (an invitee must not learn whether OTHER users have pending
-/// invitations), 403 when the workspace belongs to another tenant.
-async fn find_my_pending_invitation(
+/// Outcome of the invitee-facing invitation lookup. The authorization
+/// decisions (403 foreign tenant, 404 no-such-invitation) are made by
+/// the HANDLERS, not this helper, so each ABAC-exempt route's
+/// containment check is visible in its own body
+/// (scripts/check-abac-exempt-handlers.sh Rule 1).
+enum MyInvitationLookup {
+    /// The workspace belongs to the caller's tenant and the caller has a
+    /// pending invitation in it.
+    Pending(WorkspaceInvitation),
+    /// The workspace exists but belongs to another tenant.
+    ForeignTenant,
+    /// The workspace does not exist, or the caller has no pending
+    /// invitation in it (indistinguishable by design: an invitee must
+    /// not learn whether OTHER users have pending invitations).
+    Missing,
+}
+
+/// Shared lookup for the invitee-facing accept/decline routes: resolve
+/// the workspace and the caller's pending invitation in it WITHOUT
+/// deciding — the handlers enforce tenant containment (403) and
+/// invitee identity (404) so the authorization branches live in the
+/// exempt routes' own bodies.
+async fn lookup_my_pending_invitation(
     state: &AppState,
     auth: &AuthenticatedAgent,
     workspace_id: &str,
-) -> Result<WorkspaceInvitation, ApiError> {
+) -> Result<MyInvitationLookup, ApiError> {
     let ws_id = Id::new(workspace_id.to_string());
-    let workspace = state
-        .workspaces
-        .find_by_id(&ws_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    let Some(workspace) = state.workspaces.find_by_id(&ws_id).await? else {
+        return Ok(MyInvitationLookup::Missing);
+    };
     if workspace.tenant_id.as_str() != auth.tenant_id {
-        return Err(ApiError::Forbidden(
-            "workspace belongs to a different tenant".to_string(),
-        ));
+        return Ok(MyInvitationLookup::ForeignTenant);
     }
     let caller_id = caller_user_id(auth);
     let invitation = state
@@ -1829,13 +1856,32 @@ async fn find_my_pending_invitation(
         .list_by_workspace(&ws_id)
         .await?
         .into_iter()
-        .find(|i| i.user_id == caller_id && i.status == InvitationStatus::Pending)
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "no pending invitation for you in workspace {workspace_id}"
-            ))
-        })?;
-    Ok(invitation)
+        .find(|i| i.user_id == caller_id && i.status == InvitationStatus::Pending);
+    Ok(match invitation {
+        Some(inv) => MyInvitationLookup::Pending(inv),
+        None => MyInvitationLookup::Missing,
+    })
+}
+
+/// Per-handler authorization for the ABAC-exempt invitee routes: the
+/// loaded workspace's tenant must match the caller's (403), and the
+/// caller must have their OWN pending invitation in the workspace
+/// (404 — must not reveal whether other users have pending
+/// invitations).
+async fn authorize_my_pending_invitation(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<WorkspaceInvitation, ApiError> {
+    match lookup_my_pending_invitation(state, auth, workspace_id).await? {
+        MyInvitationLookup::Pending(invitation) => Ok(invitation),
+        MyInvitationLookup::ForeignTenant => Err(ApiError::Forbidden(
+            "workspace belongs to a different tenant".to_string(),
+        )),
+        MyInvitationLookup::Missing => Err(ApiError::NotFound(format!(
+            "no pending invitation for you in workspace {workspace_id}"
+        ))),
+    }
 }
 
 // ─── Expiry job ──────────────────────────────────────────────────────────────
@@ -3436,6 +3482,173 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["invitations"][0]["status"], "Accepted");
+    }
+
+    /// Review F1 (task-110): the invitee-facing accept/decline routes must
+    /// be reachable through the PRODUCTION chain — the real api_router
+    /// layered with abac_middleware (exactly as build_router does, minus
+    /// the orthogonal last-seen/require-auth layers), the seeded builtin
+    /// policy set, and an API-key invitee. The seeded
+    /// `workspace-membership-required` builtin (Deny, priority 940) denies
+    /// every non-member on workspace-mapped routes, and an invitee is a
+    /// non-member BY DEFINITION (the membership row is created at
+    /// acceptance), so these two routes are ABAC-exempt with per-handler
+    /// authorization. Regression: with a workspace resource mapping
+    /// instead of the exemption, the middleware returns 403 before the
+    /// handler runs, and the accept_url embedded in the invitee's
+    /// InvitationReceived notification points at a dead endpoint.
+    #[tokio::test]
+    async fn invitee_accepts_and_declines_through_abac_middleware() {
+        use crate::abac_middleware::{abac_middleware, init_resolver};
+
+        fn production_router(state: Arc<AppState>) -> Router {
+            init_resolver();
+            crate::api::api_router()
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    abac_middleware,
+                ))
+                .with_state(state)
+        }
+
+        fn seed_pending_invitation(f: &InviteeFixture) -> WorkspaceInvitation {
+            WorkspaceInvitation {
+                id: new_id(),
+                tenant_id: Id::new("default"),
+                workspace_id: Id::new("ws-inv"),
+                user_id: f.invitee_id.clone(),
+                invited_by: Id::new("owner-inv"),
+                role: WorkspaceRole::Developer,
+                status: InvitationStatus::Pending,
+                token_hash: hash_token(&generate_invitation_token()),
+                expires_at: now_secs() + 86_400,
+                created_at: now_secs(),
+                accepted_at: None,
+            }
+        }
+
+        // ── Accept ──
+        let f = invitee_fixture().await;
+        // crate::mem::test_state() ships the full production builtin
+        // policy set (shared_workspace_policy_pair_seeded); refresh it
+        // explicitly so the test does not depend on that wiring detail.
+        crate::abac_middleware::seed_builtin_policies(&f.state)
+            .await
+            .expect("seed builtin policies");
+        let app = production_router(f.state.clone());
+        let invitation = seed_pending_invitation(&f);
+        f.state
+            .workspace_invitations
+            .create(&invitation)
+            .await
+            .unwrap();
+
+        // Control (proves the mechanism the exemption must overcome): the
+        // same invitee hitting a workspace-MAPPED route is denied 403 by
+        // the seeded builtin alone — member_of_resource_workspace is
+        // false for them. If this ever returns 2xx, the 204 below no
+        // longer proves anything about the exemption.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/workspaces/ws-inv/members")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "control: seeded workspace-membership-required must deny the \
+             non-member invitee on workspace-mapped routes"
+        );
+
+        // The spec-named invitee accept route through the production
+        // chain: ABAC-exempt passthrough, then per-handler authorization
+        // (tenant containment + caller IS the invitee) → 204.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite/accept")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "the invitee accept route must be reachable through \
+             abac_middleware (was 403 when the route was workspace-mapped)"
+        );
+
+        let m = f
+            .state
+            .workspace_memberships
+            .find_by_user_and_workspace(&f.invitee_id, &Id::new("ws-inv"))
+            .await
+            .unwrap()
+            .expect("membership exists after acceptance");
+        assert!(m.accepted);
+        assert_eq!(m.role, WorkspaceRole::Developer);
+
+        // ── Decline (fresh fixture: a second workspace invitation for a
+        // still-non-member invitee) ──
+        let f = invitee_fixture().await;
+        crate::abac_middleware::seed_builtin_policies(&f.state)
+            .await
+            .expect("seed builtin policies");
+        let app = production_router(f.state.clone());
+        let invitation = seed_pending_invitation(&f);
+        f.state
+            .workspace_invitations
+            .create(&invitation)
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite/decline")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "the invitee decline route must be reachable through \
+             abac_middleware (was 403 when the route was workspace-mapped)"
+        );
+
+        let all = f
+            .state
+            .workspace_invitations
+            .list_by_workspace(&Id::new("ws-inv"))
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].status, InvitationStatus::Declined);
+        assert!(
+            f.state
+                .workspace_memberships
+                .find_by_user_and_workspace(&f.invitee_id, &Id::new("ws-inv"))
+                .await
+                .unwrap()
+                .is_none(),
+            "declining must not create a membership"
+        );
     }
 
     /// A different authenticated user must not accept someone else's
