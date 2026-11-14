@@ -21,6 +21,7 @@ pub mod compose;
 pub mod compute_target;
 pub mod constraint_evaluator;
 pub mod container_audit;
+pub mod decisions;
 pub mod dependency;
 pub mod extractor;
 pub mod git_types;
@@ -80,6 +81,10 @@ pub use constraint_evaluator::{
     TargetContext,
 };
 pub use container_audit::ContainerAuditRecord;
+pub use decisions::{
+    evaluate_custom, BuiltinDecision, CustomDecisionSpec, CustomRule, DecisionRequest,
+    DecisionResult,
+};
 pub use dependency::{
     BreakingChange, BreakingChangeBehavior, DependencyEdge, DependencyPolicy, DependencyStatus,
     DependencyType, DetectionMethod,
@@ -102,7 +107,7 @@ pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
 pub use policy::{
     builtin_policies, trust_policies_for_level, Condition, ConditionOp, ConditionValue, Policy,
-    PolicyDecision, PolicyEffect, PolicyScope,
+    PolicyDecision, PolicyEffect, PolicyScope, SYSTEM_ABAC_IDENTITY,
 };
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use python_extractor::PythonExtractor;

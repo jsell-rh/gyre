@@ -177,6 +177,38 @@ pub(crate) async fn validate_repo_scope(
     Ok(())
 }
 
+/// Decision-scope validation for the analytics Decision API (analytics.md
+/// §Decision API for Agents): a decision context naming a
+/// `workspace_id`/`repo_id` scopes the events the decision is computed
+/// over, so a forged id would surface another scope's aggregated
+/// analytics through the decision outcome. Same lookup-and-compare rule
+/// as `validate_workspace_scope`/`validate_repo_scope` above; returns the
+/// validated ids for the event query filter. Absent fields scope to
+/// nothing (platform-wide), consistent with the analytics query API.
+pub(crate) async fn validate_decision_scope(
+    state: &AppState,
+    context: &serde_json::Value,
+    auth: &AuthenticatedAgent,
+) -> Result<(Option<gyre_common::Id>, Option<gyre_common::Id>), ApiError> {
+    let workspace_id = match context.get("workspace_id").and_then(|v| v.as_str()) {
+        Some(w) => {
+            let id = gyre_common::Id::new(w);
+            validate_workspace_scope(state, &id, auth).await?;
+            Some(id)
+        }
+        None => None,
+    };
+    let repo_id = match context.get("repo_id").and_then(|v| v.as_str()) {
+        Some(r) => {
+            let id = gyre_common::Id::new(r);
+            validate_repo_scope(state, &id, auth, workspace_id.as_ref()).await?;
+            Some(id)
+        }
+        None => None,
+    };
+    Ok((workspace_id, repo_id))
+}
+
 pub async fn record_audit_event(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
