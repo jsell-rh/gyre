@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
 commits:
-  - COMMIT_SHA_PLACEHOLDER
+  - 8cc35749
 ---
 
 ## Spec Excerpt
