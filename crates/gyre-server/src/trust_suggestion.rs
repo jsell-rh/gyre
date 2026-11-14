@@ -189,6 +189,8 @@ async fn evaluate_workspace(
                 user = %member.user_id,
                 "trust_suggestion: notification created"
             );
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 

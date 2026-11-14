@@ -1569,11 +1569,13 @@ async fn save_enforcement_marker(state: &AppState, key: &str, marker: &Enforceme
 /// or was filed by a different agent; the reporting agent's spawner is
 /// included explicitly (the reporter may have completed — Idle — by the
 /// time enforcement runs, but its spawner still triggered the crossing).
-/// Emitted at most once per user per budget period via
-/// `has_active_notification` so repeated usage reports within the same
-/// period do not spam the inbox. Returns the number of notifications
-/// newly created (0 when every recipient was already notified — the
-/// level-crossing signal the BudgetWarning bus event rides on).
+/// Emitted at most once per user per budget period (the dispatcher's
+/// budget helpers gate on `has_active_notification`) so repeated usage
+/// reports within the same period do not spam the inbox. Returns the
+/// number of notifications newly created (0 when every recipient was
+/// already notified — the level-crossing signal the BudgetWarning bus
+/// event rides on). Delivery fans out to the recipient's configured
+/// channels (email/webhook/Slack) via the notification dispatcher.
 async fn notify_budget_level(
     state: &AppState,
     workspace_id: &Id,
@@ -1595,76 +1597,33 @@ async fn notify_budget_level(
     };
     let tenant_id = ws.tenant_id.to_string();
 
-    let (ntype, title) = if exhausted {
-        (
-            gyre_common::NotificationType::AgentBudgetExhausted,
-            format!(
-                "Workspace budget exhausted — {:.0}% of the daily limit used",
-                (pct * 100.0).min(999.0)
-            ),
+    let title = if exhausted {
+        format!(
+            "Workspace budget exhausted — {:.0}% of the daily limit used",
+            (pct * 100.0).min(999.0)
         )
     } else {
-        (
-            gyre_common::NotificationType::AgentBudgetWarning,
-            format!("Workspace budget at {:.0}% of the daily limit", pct * 100.0),
-        )
+        format!("Workspace budget at {:.0}% of the daily limit", pct * 100.0)
     };
 
-    // Recipients: the spawning users of the affected agents (the active
-    // workspace agents the enforcement acts on, plus the reporting agent)
-    // and workspace Admins (warning) / Owner (exhausted).
-    let mut recipients: Vec<gyre_common::Id> = Vec::new();
+    // Routing + per-period de-duplication live in the dispatcher's budget
+    // helpers (user-management.md §Who Gets Notified budget rows) — the
+    // single implementation, so the routing contract cannot drift from
+    // the live emission path. The reporting agent's spawner is passed
+    // explicitly; the helpers resolve the full recipient set (the
+    // workspace's active agents' spawners plus the role members) and
+    // de-duplicate per budget period.
+    let mut spawned_by: Option<gyre_common::Id> = None;
     if let Some(agent_id) = agent_id {
         if let Ok(Some(agent)) = state.agents.find_by_id(agent_id).await {
-            if let Some(spawned_by) = agent.spawned_by {
-                recipients.push(gyre_common::Id::new(spawned_by));
+            if let Some(sb) = agent.spawned_by {
+                spawned_by = Some(gyre_common::Id::new(sb));
             }
         }
     }
-    if let Ok(agents) = state.agents.list_by_workspace(workspace_id).await {
-        recipients.extend(
-            agents
-                .into_iter()
-                .filter(|a| a.status == gyre_domain::AgentStatus::Active)
-                .filter_map(|a| a.spawned_by.map(gyre_common::Id::new)),
-        );
-    }
-    if let Ok(members) = state
-        .workspace_memberships
-        .list_by_workspace(workspace_id)
-        .await
-    {
-        recipients.extend(
-            members
-                .into_iter()
-                .filter(|m| {
-                    if exhausted {
-                        matches!(m.role, gyre_domain::WorkspaceRole::Owner)
-                    } else {
-                        matches!(m.role, gyre_domain::WorkspaceRole::Admin)
-                    }
-                })
-                .map(|m| m.user_id),
-        );
-    }
-    recipients.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    recipients.dedup_by(|a, b| a.as_str() == b.as_str());
-
-    // De-duplicate per period: the budget counters increment on every call,
-    // so without this guard each call past the threshold would re-notify.
-    let entity_ref = workspace_id.to_string();
-    let since = ws_usage.period_start as i64;
-    let mut created = 0usize;
-    for user_id in recipients {
-        let already_notified = state
-            .notifications
-            .has_active_notification(workspace_id, &user_id, ntype.as_str(), &entity_ref, since)
-            .await
-            .unwrap_or(false);
-        if already_notified {
-            continue;
-        }
-        let body = serde_json::json!({
+    let ctx = crate::notification_dispatcher::BudgetNotificationContext {
+        title,
+        body: serde_json::json!({
             "workspace_id": workspace_id.as_str(),
             "usage_pct": (pct * 100.0).round(),
             "tokens_used_today": ws_usage.tokens_used_today,
@@ -1673,24 +1632,30 @@ async fn notify_budget_level(
             "max_cost_per_day": config.max_cost_per_day,
             "agent_id": agent_id.map(|a| a.as_str()),
         })
-        .to_string();
-        crate::notifications::notify_rich(
+        .to_string(),
+        entity_ref: workspace_id.to_string(),
+        repo_id: repo_id.map(|r| r.to_string()),
+        period_start: ws_usage.period_start as i64,
+    };
+    if exhausted {
+        crate::notification_dispatcher::notify_agent_budget_exhausted(
             state,
-            workspace_id.clone(),
-            user_id,
-            ntype.clone(),
-            title.clone(),
+            workspace_id,
+            spawned_by.as_ref(),
             &tenant_id,
-            Some(body),
-            Some(entity_ref.clone()),
-            repo_id.map(|r| r.to_string()),
-            "budget",
-            None,
+            &ctx,
         )
-        .await;
-        created += 1;
+        .await
+    } else {
+        crate::notification_dispatcher::notify_agent_budget_warning(
+            state,
+            workspace_id,
+            spawned_by.as_ref(),
+            &tenant_id,
+            &ctx,
+        )
+        .await
     }
-    created
 }
 
 /// Apply the rolling 24-hour budget window (agent-runtime.md §4 Budget

@@ -397,7 +397,7 @@ mod tests {
         // 2026-11-13-000065_user_tenant_scope (task-110) is excluded too:
         // after the rebase onto c5deca801 it only creates the tenant-scope
         // index and depends on 000058's tenant_id column, so it cannot run
-        // in the pre-000058 set. It rides along with the target batch (in
+        // in the pre-000058 set. It runs right after the target batch (in
         // version order, after 000058) — index creation only, so the
         // backfill assertions below are unaffected. (Renumbered from
         // 20261009000057 to 20261108000060 when upstream landed
@@ -405,14 +405,27 @@ mod tests {
         // when the task-110 rebase onto main head f764bc00 collided with
         // upstream's 2026-11-08 numbering; see its up.sql.)
         let all = MIGRATIONS.migrations().unwrap();
-        let (pre, target): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
+        // 000060 (user_preferences_channel_shape, task-112) must also be
+        // excluded from `pre`: it rewrites 000058's flat backfill literal
+        // into the current nested notification_channels shape, so it is run
+        // explicitly after 000058 below (the same order a deployed database
+        // sees them).
+        let (pre, deferred): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
             let v = m.name().version().to_string();
-            v != "20261008000058" && v != "20261113000065"
+            v != "20261008000058" && v != "20261109000060" && v != "20261113000065"
         });
+        let (target, rest): (Vec<_>, Vec<_>) = deferred
+            .into_iter()
+            .partition(|m| m.name().version().to_string() == "20261008000058");
+        assert_eq!(target.len(), 1, "000058 not found in embedded migrations");
+        let (m60, m65): (Vec<_>, Vec<_>) = rest
+            .into_iter()
+            .partition(|m| m.name().version().to_string() == "20261109000060");
+        assert_eq!(m60.len(), 1, "000060 not found in embedded migrations");
         assert_eq!(
-            target.len(),
-            2,
-            "000058 and the tenant-scope index migration not found in embedded migrations"
+            m65.len(),
+            1,
+            "tenant-scope index migration not found in embedded migrations"
         );
         use diesel::migration::MigrationConnection;
         // run_migrations is the raw harness method — unlike
@@ -448,6 +461,11 @@ mod tests {
         // Run 000058 alone. Panics here on the original parser-overflow
         // version and on a dedup collision aborting at CREATE UNIQUE INDEX.
         conn.run_migrations(&target).unwrap();
+        // The tenant-scope index migration (2026-11-13-000065) runs in the
+        // same batch position a deployed database sees it: after 000058
+        // (whose tenant_id column it indexes). Index creation only — the
+        // backfill assertions below are unaffected.
+        conn.run_migrations(&m65).unwrap();
 
         // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
         // `Self { field: field, … }` with spans mapped onto the field
@@ -544,8 +562,184 @@ mod tests {
         assert_eq!(d.timezone, "UTC");
         assert_eq!(d.locale, "en-US");
         assert_eq!(d.global_role, "Member");
+        // 000058's backfill literal is the pre-task-112 flat
+        // notification_channels shape (the migration is shipped, so its
+        // literal is historical). It must still deserialize to the current
+        // defaults via the NotificationChannels compat path — a reset to
+        // defaults here would mean every upgraded deployment silently loses
+        // user-customized preferences.
+        let backfilled: gyre_domain::UserPreferences =
+            serde_json::from_str(d.preferences.as_deref().expect("preferences"))
+                .expect("000058 flat backfill literal must deserialize");
+        assert_eq!(backfilled, gyre_domain::UserPreferences::default());
+
+        // 000060 converges the flat backfill to the current nested shape:
+        // after it runs, the stored row must be byte-identical to the
+        // current UserPreferences::default() serialization.
+        conn.run_migrations(&m60).unwrap();
+        let d: Defaults = diesel::sql_query(
+            "SELECT timezone, locale, global_role, preferences FROM users WHERE id = 'u-alice-1'",
+        )
+        .load(&mut conn)
+        .unwrap()
+        .pop()
+        .expect("row u-alice-1");
         let want_prefs = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
         assert_eq!(d.preferences.as_deref(), Some(want_prefs.as_str()));
+    }
+
+    /// Task-112 review repair: migration 000060 converges stored
+    /// users.preferences from the pre-task-112 flat notification_channels
+    /// shape (`in_app`/`email_enabled`/`email_digest`) to the nested §Delivery
+    /// Channels shape. Drives the REAL embedded up.sql against seeded rows —
+    /// the exact transition an upgraded deployment makes — and asserts:
+    /// stored email config values survive (all combinations are covered by
+    /// the migration's REPLACE needles), sibling preference fields pass
+    /// through untouched, already-nested rows are left byte-identical, and
+    /// NULL preferences stay NULL. Without the rewrite, every pre-task-112
+    /// row fails UserPreferences deserialization in the adapters'
+    /// `.ok().unwrap_or_default()` read path and user customizations are
+    /// silently reset on upgrade.
+    #[test]
+    fn migration_000060_rewrites_legacy_notification_channels() {
+        use diesel::sql_types::{Nullable, Text};
+        use diesel::RunQueryDsl;
+
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }`, so clippy::redundant_field_names fires
+        // on derive-generated code; the lint is scoped off for this
+        // row-carrier module (same pattern as the tests above).
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::{Nullable, Text};
+            use diesel::QueryableByName;
+
+            #[derive(QueryableByName)]
+            pub(super) struct PrefsRow {
+                #[diesel(sql_type = Nullable<Text>)]
+                pub(super) preferences: Option<String>,
+            }
+            #[derive(QueryableByName)]
+            pub(super) struct VersionRow {
+                #[diesel(sql_type = Text)]
+                pub(super) version: String,
+            }
+        }
+        use rows::{PrefsRow, VersionRow};
+
+        let (_tmp, storage) = tmp_storage();
+        let mut conn = storage.pool.get().unwrap();
+
+        // Seed representative rows: the exact 000058 backfill literal, a
+        // customized flat row, a flat row with in_app=false (the needle must
+        // not touch it), an already-nested row, and a NULL row.
+        let flat_default = r#"{"default_workspace_id":null,"theme":"System","notification_channels":{"in_app":true,"email_enabled":false,"email_digest":"Off"},"ui_density":"Comfortable","code_font_size":14,"diff_view":"SideBySide","activity_feed_scope":"MyActivity"}"#;
+        let flat_custom = r#"{"default_workspace_id":null,"theme":"Dark","notification_channels":{"in_app":true,"email_enabled":true,"email_digest":"Daily"},"ui_density":"Compact","code_font_size":16,"diff_view":"Unified","activity_feed_scope":"All"}"#;
+        let flat_inapp_false = r#"{"default_workspace_id":null,"theme":"System","notification_channels":{"in_app":false,"email_enabled":true,"email_digest":"Hourly"},"ui_density":"Comfortable","code_font_size":14,"diff_view":"SideBySide","activity_feed_scope":"MyActivity"}"#;
+        let nested = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
+        let insert =
+            "INSERT INTO users (id, external_id, name, created_at, updated_at, preferences) \
+                      VALUES (?, ?, ?, 1, 1, ?)";
+        for (id, prefs) in [
+            ("u-flat-default", flat_default),
+            ("u-flat-custom", flat_custom),
+            ("u-flat-inapp-false", flat_inapp_false),
+            ("u-nested", nested.as_str()),
+        ] {
+            diesel::sql_query(insert)
+                .bind::<Text, _>(id)
+                .bind::<Text, _>(format!("ext-{id}"))
+                .bind::<Text, _>("name")
+                .bind::<Nullable<Text>, _>(prefs)
+                .execute(&mut conn)
+                .unwrap();
+        }
+        diesel::sql_query(insert)
+            .bind::<Text, _>("u-null")
+            .bind::<Text, _>("ext-u-null")
+            .bind::<Text, _>("name")
+            .bind::<Nullable<Text>, _>(Option::<String>::None)
+            .execute(&mut conn)
+            .unwrap();
+
+        // Un-mark 000060 so the runner re-applies the real up.sql to the
+        // seeded rows (the same transition a deployed database makes).
+        // Pinned to the exact version: the base also ships a distinct
+        // 20261009000060 (commit_signatures) whose version string must not
+        // match.
+        let versions: Vec<VersionRow> = diesel::sql_query(
+            "SELECT version FROM __diesel_schema_migrations WHERE version = '20261109000060'",
+        )
+        .load(&mut conn)
+        .unwrap();
+        assert_eq!(versions.len(), 1, "expected exactly one 000060 version row");
+        let deleted = diesel::sql_query("DELETE FROM __diesel_schema_migrations WHERE version = ?")
+            .bind::<Text, _>(&versions[0].version)
+            .execute(&mut conn)
+            .unwrap();
+        assert_eq!(deleted, 1, "failed to un-mark migration 000060");
+        conn.run_pending_migrations(MIGRATIONS)
+            .expect("portable 000060 up.sql must run");
+
+        let mut get = |id: &str| -> Option<String> {
+            let row: PrefsRow = diesel::sql_query("SELECT preferences FROM users WHERE id = ?")
+                .bind::<Text, _>(id)
+                .load(&mut conn)
+                .unwrap()
+                .pop()
+                .unwrap_or_else(|| panic!("user {id} missing"));
+            row.preferences
+        };
+
+        // The 000058 backfill literal converges to the current default
+        // serialization byte-for-byte.
+        let want = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
+        assert_eq!(get("u-flat-default").as_deref(), Some(want.as_str()));
+
+        // Customized flat row: values survive, shape is canonical.
+        let got = get("u-flat-custom").expect("custom prefs");
+        let parsed: gyre_domain::UserPreferences =
+            serde_json::from_str(&got).expect("rewritten prefs must deserialize");
+        assert_eq!(parsed.theme, gyre_domain::Theme::Dark);
+        assert_eq!(parsed.ui_density, gyre_domain::UiDensity::Compact);
+        assert_eq!(parsed.code_font_size, 16);
+        assert_eq!(parsed.diff_view, gyre_domain::DiffView::Unified);
+        assert_eq!(parsed.activity_feed_scope, gyre_domain::FeedScope::All);
+        assert!(parsed.notification_channels.in_app);
+        assert!(parsed.notification_channels.email.enabled);
+        assert_eq!(
+            parsed.notification_channels.email.digest,
+            gyre_domain::DigestFrequency::Daily
+        );
+        assert_eq!(
+            parsed.notification_channels.email.min_priority,
+            gyre_domain::NotificationPriority::Medium
+        );
+        assert_eq!(parsed.notification_channels.webhook, None);
+        assert_eq!(parsed.notification_channels.slack, None);
+        assert!(
+            !got.contains("email_enabled"),
+            "flat fields must be gone: {got}"
+        );
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            got,
+            "rewritten row must be in canonical (re-serializable) form"
+        );
+
+        // in_app is outside the REPLACE needle and passes through untouched.
+        let got = get("u-flat-inapp-false").expect("inapp-false prefs");
+        let parsed: gyre_domain::UserPreferences = serde_json::from_str(&got).unwrap();
+        assert!(!parsed.notification_channels.in_app);
+        assert!(parsed.notification_channels.email.enabled);
+        assert_eq!(
+            parsed.notification_channels.email.digest,
+            gyre_domain::DigestFrequency::Hourly
+        );
+
+        // Already-nested rows are left byte-identical; NULL stays NULL.
+        assert_eq!(get("u-nested").as_deref(), Some(nested.as_str()));
+        assert_eq!(get("u-null"), None);
     }
 
     /// Regression guard for migration 000062 (task-122): teams gain a

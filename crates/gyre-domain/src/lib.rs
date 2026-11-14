@@ -128,8 +128,9 @@ pub use team::{Team, TeamMembership};
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
 pub use user::{
-    DiffView, FeedScope, GlobalRole, NotificationChannels, Theme, UiDensity, User, UserPreferences,
-    UserPreferencesPatch, UserRole,
+    DiffView, DigestFrequency, EmailConfig, FeedScope, GlobalRole, NotificationChannels,
+    NotificationPriority, SlackConfig, Theme, UiDensity, User, UserPreferences,
+    UserPreferencesPatch, UserRole, WebhookConfig,
 };
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
 pub use workspace::{
