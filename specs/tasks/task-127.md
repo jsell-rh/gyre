@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f", "ef28d2086cc83c35d0c5617a601aa57216f1b8ff"]
 ---
 
 ## Spec Excerpt
@@ -200,20 +200,22 @@ No new route, no ABAC registry change.
 
 ### Test evidence
 
-- `cd web && npm test`: **2339 passed, 41 skipped, 0 failed** (116
-  files), including new suites `PublicUserProfile.test.js` (4 tests),
-  `NotificationDrawer.test.js` (8), `InvitationAccept.test.js` (5), and
-  new cases in `UserProfile.test.js` (invitations accept/decline,
-  preferences PUT shape, channels payload contract),
-  `WorkspaceSettings.test.js` (Members tab role-change/invite/invitations,
-  Teams tab real CRUD), `TenantSettings.test.js` (user list/search/
-  deactivate/not-admin), `AppShell.test.js` (`/@username` and
-  `/invite/:id` parse/urlFor), `Inbox.test.js` (dismiss now uses the
-  dismiss endpoint — `markNotificationRead` previously called
-  `/dismiss`, conflating read and dismissed state).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server`: clean.
+Post-merge verification (merge head `ef28d208`, after resolving the
+rebase conflict with the task-132 ABAC UI head — sole conflict was the
+WorkspaceSettings.svelte import block; both sides' imports kept, both
+features verified present):
+
+- `cd web && npm ci && npm test`: **2382 passed, 41 skipped, 0 failed**
+  (118 files) — task-127's suites (PublicUserProfile ×4,
+  NotificationDrawer ×8, InvitationAccept ×5, plus new cases in
+  UserProfile/WorkspaceSettings/TenantSettings/AppShell/Inbox) pass
+  alongside task-132's ABAC suites on the merged tree.
+- `cargo check -p gyre-server` (via the enforced build wrapper): clean
+  on the merged tree.
 - `cargo fmt -p gyre-server -- --check`: clean.
-- SPA production build (temp outDir, web/dist untouched): builds clean.
+- `scripts/check-task-commit-attribution.sh`: clean.
+- Full web build and `cargo test --all` remain with the independent
+  verifier (4 GiB budget blocks server test compilation in-sandbox).
 
 ### Server tests the verifier must execute
 
