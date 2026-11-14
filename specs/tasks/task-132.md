@@ -4,7 +4,7 @@ spec_ref: "abac-policy-engine.md §UI"
 depends_on:
   - task-128
   - task-129
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "abac-policy-engine.md §UI"
 commits: ["5ba1bdf35f564d19b0e8c1a12a72c46d23781d3d", "11b0a02f6cb47e3197c2455edf384a08568c3adf"]
