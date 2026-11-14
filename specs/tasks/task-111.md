@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round (repair `2d09a4ab`) and the prior round were contract-restore repairs over an unchanged tree; no product behavior changed.
+Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round (repair `5c7b2879`) and the two prior rounds were contract-restore repairs over an unchanged tree; no product behavior changed.
 
 ### Implementation
 
@@ -97,10 +97,10 @@ Session management per `user-management.md` §Session Management is implemented 
 - **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants (`/users/:user_id/sessions...`) with per-handler role checks and tenant containment. Session routes are ABAC-exempt by design with per-handler authorization (validated by `check-abac-exempt-handlers.sh`).
 - **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days (revoked rows kept as the durable sign-out record).
 
-### This round: contract restore (repair `2d09a4ab`)
+### This round: contract restore (repair `5c7b2879`)
 
-- The executor's checkout again restored the pristine assigned task document (progress reset to `not-started`, `commits:` emptied, checkboxes unchecked, `## Shipped` dropped) — the same contract-reset shape as the prior round's repair `34e4e281`. The contract body is byte-identical to the checkpoint version, so the checkpoint metadata (progress `ready-for-review`, the 23-commit attribution list, checked criteria, these notes) was restored over it unchanged. This also keeps `check-task-commit-attribution.sh` passing — the gate fails while the restored `commits: []` hides the branch's task-labeled commits from review scoping.
-- **No source change:** `git diff 3ba9bba5..8ca5dfd` touches only this task document (the prior round's identical restore). All session surfaces were re-verified present by direct inspection this round at head `8ca5dfd`: `UserSession` entity, `SessionRepository` port + SQLite/PostgreSQL/mem impls, migration `2026-10-08-000064_user_sessions`, auth-path session tracking, all six session routes with their ABAC-exempt mappings and per-handler authorization, and `spawn_session_cleanup`. Probe evidence: `/tmp/stage/review-evidence/task-111-round-contract-restore-2d09a4ab.md`.
+- The executor's checkout again restored the pristine assigned task document (progress reset to `not-started`, `commits:` emptied, checkboxes unchecked, `## Shipped` dropped) — the same contract-reset shape as the prior rounds' repairs `2d09a4ab` and `34e4e281`. The contract body is byte-identical to the checkpoint version, so the checkpoint metadata (progress `ready-for-review`, the 23-commit attribution list, checked criteria, these notes) was restored over it unchanged. This also keeps `check-task-commit-attribution.sh` passing — the gate fails while the restored `commits: []` hides the branch's task-labeled commits from review scoping.
+- **No source change:** `git diff 3ba9bba5..HEAD -- . ':!specs/tasks/task-111.md'` is empty — every commit after base merge `3ba9bba5` touches only this task document. All session surfaces were re-verified present by direct inspection this round at head `0f6cb439`: `UserSession` entity, `SessionRepository` port + SQLite/PostgreSQL/mem impls, migration `2026-10-08-000064_user_sessions`, auth-path session tracking, all six session routes with their ABAC-exempt mappings and per-handler authorization, and `spawn_session_cleanup`. Probe evidence: `/tmp/stage/review-evidence/task-111-repair-contract-restore.md`.
 
 Prior-round context, preserved: the executor merged base `3f7871b6` (task-148's `gyre_analytics_decide` MCP tool) into this branch as `3ba9bba5` — `git diff c0988beb..3ba9bba5` touched only `api/analytics.rs`, `mcp.rs`, docs, and task-148's spec files, with no conflict markers. Earlier repair history (base-merge conflict resolution `44049f85` against the task-124 base, fixture repairs, migration renumbering) is preserved in the branch history and the commits list below; it is not re-diagnosed here.
 
@@ -108,9 +108,9 @@ Prior-round context, preserved: the executor merged base `3f7871b6` (task-148's 
 
 This round (no source change; direct inspection only — full gates are not repeated inside a repair round):
 
-- `git diff --stat 3ba9bba5..HEAD` — only `specs/tasks/task-111.md`; no session surface differs from the previously verified tree.
-- Source-surface presence probes at head `8ca5dfd` (entity, port + both adapter impls, migration, routes, ABAC-exempt mappings, cleanup spawn) — all present; log: `/tmp/stage/review-evidence/task-111-round-contract-restore-2d09a4ab.md`.
-- Differential probe of the gate this repair fixes: `bash scripts/check-task-commit-attribution.sh` — exit 0 with the restored `commits:` frontmatter; exit 1 when the frontmatter is reset to `commits: []` (the executor's restored state), proving the restore is load-bearing, not cosmetic.
+- `git diff --stat 3ba9bba5..HEAD -- . ':!specs/tasks/task-111.md'` — empty; no session surface differs from the previously verified tree.
+- Source-surface presence probes at head `0f6cb439` (entity, port + SQLite/PostgreSQL/mem impls, migration, routes, ABAC-exempt mappings, cleanup spawn) — all present; log: `/tmp/stage/review-evidence/task-111-repair-contract-restore.md`.
+- Differential probe of the gate this repair fixes: `bash scripts/check-task-commit-attribution.sh` — exit 0 with the restored `commits:` frontmatter; exit 1 when the frontmatter is reset to `commits: []` (the executor's restored state, 23 unlisted commits), proving the restore is load-bearing, not cosmetic. Logs: `/tmp/stage/review-evidence/task-111-attribution-checkpoint.log` (pristine, exit 1) and `/tmp/stage/review-evidence/task-111-attribution-pristine-vs-checkpoint.log` (checkpoint, exit 0).
 
 Prior-round evidence on the identical source tree (head `3ba9bba5`, the only later commits are task-doc restores):
 
