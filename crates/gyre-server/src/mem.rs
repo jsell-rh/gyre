@@ -1450,7 +1450,7 @@ impl AnalyticsRepository for MemAnalyticsRepository {
 
     async fn aggregate_by_day(
         &self,
-        event_name: &str,
+        event_name: Option<&str>,
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>> {
@@ -1458,7 +1458,14 @@ impl AnalyticsRepository for MemAnalyticsRepository {
         let store = self.store.lock().await;
         let mut by_day: BTreeMap<String, u64> = BTreeMap::new();
         for e in store.iter() {
-            if e.event_name == event_name && e.timestamp >= since && e.timestamp <= until {
+            let name_match = match event_name {
+                Some(name) => e.event_name == name,
+                // None = total volume across ALL event names (the
+                // dashboard bar-chart form, analytics.md §Analytics
+                // Dashboard).
+                None => true,
+            };
+            if name_match && e.timestamp >= since && e.timestamp <= until {
                 // Simple day bucketing: seconds / 86400 -> day number, format as YYYY-MM-DD
                 let secs = e.timestamp as i64;
                 let days_since_epoch = secs / 86400;
