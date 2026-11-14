@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["eaca83fb8c0bf871c51a7ff7dc9adaea4b9f83ad", "062f925e2d5abdf4196291df05fac6cf9e9fbd06", "b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,104 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-HSI §12 profile gaps (notification filtering, judgment ledger, auth
-provider info) are implemented in production code across the commits
-listed in the frontmatter; coverage row 53 is `implemented`.
-
-What shipped, per acceptance criterion:
-
-- **Spec amendment (Part 1)** — HSI §12 Judgment Ledger names the four
-  concrete sources (`spec_approvals`; `audit_events` rows
-  `event_type IN (gate_override, trust_change, meta_spec_publish)`;
-  `meta_spec_versions` joined to `meta_specs`), and the `?type=` values
-  are `approval|rejection|gate|trust|meta-spec`, matching
-  `JudgmentType::as_str()`.
-- **JudgmentType::GateOverride** — `as_str() = "gate"`,
-  `from_db_str("gate")` parses (`gyre-domain/src/user_profile.rs`).
-- **Aggregation (Part 2)** — `JudgmentLedgerRepository::list_for_user`
-  (sqlite/postgres/mem parity) unions all four categories from real
-  tables, filters `?workspace_id=` in the queries (no stamping), sorts
-  reverse-chronologically with a deterministic tie-break, and applies
-  limit/offset after the union+sort.
-- **Trust-change write path** — PUT /api/v1/workspaces/:id writes a
-  `trust_change` audit event (from/to/workspace_id) on real transitions.
-- **Gate-override write path** — a human (user-principal) approval
-  review on an MR with failed gate results writes one `gate_override`
-  event per failed gate (mr_id/gate_id/gate_type/failed→overridden);
-  agent-token approvals are excluded.
-- **Meta-spec publish attribution** — meta-spec registry create/update
-  write `meta_spec_publish` events (kind/name/version/content_hash).
-- **Inbox filtering** — `user_notification_preferences` rows with
-  `enabled = 0` are excluded in-query (before pagination) from both the
-  inbox list and the unread-count badge, and from the MCP inbox tool.
-- **Auth provider info** — `users.oidc_issuer` + `last_login_at`
-  recorded by JWT validation via debounced
-  `UserRepository::record_login`; `GET /api/v1/users/me` returns both
-  read-only.
-- **Profile ledger UI** — type filter
-  (all/approval/rejection/gate/trust/meta-spec), workspace filter, and
-  Load More pagination; `GET /users/me/judgments?type=<unknown>`
-  returns 400 listing accepted values.
-
-### This round: verification repair (eaca83fb)
-
-Verification round 9c3a7d54 ran `bash /tmp/stage/checks.sh` at candidate
-1aba5d5e and exited 1 on exactly one gate: rustfmt changed-lines —
-`crates/gyre-server/src/api/specs.rs:3611,3612,3628` (the F1/F2
-spec-approval review tests added in add632b1). Every other gate in that
-run passed (diff-scoped clippy clean, architecture/hierarchy lints, all
-invariant scripts OK, web build succeeded). Fix eaca83fb applies
-rustfmt's preferred formatting to those lines (collapse the
-serde_json::to_vec chain to one line; reflow the revoked_by assertion
-to multi-line). Behavior-neutral whitespace only; the file is now
-fully rustfmt-clean, not just the changed lines.
-
-### Test evidence (this round, head eaca83fb)
-
-- `python3 scripts/check-rustfmt-diff.py cdd1dd02` — 50 Rust files
-  checked, changed lines clean, exit 0 (the failing gate from round
-  9c3a7d54).
-- `python3 scripts/check-rustfmt-diff.py HEAD^1` and `HEAD^2` — clean
-  for both merge parents.
-- Whole-file rustfmt: no diff (specs.rs fully formatted).
-- Prior-round evidence (head 062f925e, unchanged code paths): workspace
-  check exit 0; `gyre-adapters` sqlite::user_profile 13 passed;
-  `gyre-domain` 511 passed; mem adapter 14 passed. Evidence directory:
-  /tmp/stage/review-evidence/.
-- rustfmt parsed and reformatted the file successfully — the change is
-  a pure whitespace reflow inside existing test expressions; server
-  test compilation is deferred to the independent verifier per the
-  4 GiB budget.
-
-### Server tests the independent verifier must execute
-
-The hard 4 GiB budget defers server test compilation/execution to the
-verifier. Required at this round's head (eaca83fb):
-
-- `agent_can_revoke_its_own_approval_with_agent_jwt` (api/specs.rs)
-- `reject_approved_spec_records_declining_human` (api/specs.rs)
-- `reject_via_jwt_surfaces_rejection_in_judgment_ledger` and
-  `approve_via_jwt_surfaces_in_judgment_ledger` (api/specs.rs)
-- `reject_transition_pending_to_rejected_and_audit` (api/gates.rs)
-- `judgments_unknown_type_returns_400` (api/users.rs)
-- `disabled_preference_excludes_type_from_inbox_and_count`
-  (api/users.rs)
-- `get_me_returns_recorded_auth_provider_info` (api/users.rs)
-- `trust_transition_writes_trust_change_audit_event`
-  (api/workspaces.rs)
-- `human_approval_on_failed_gate_writes_gate_override_event`
-  (api/merge_requests.rs)
-- `publish_writes_meta_spec_publish_audit_event` (api/meta_specs.rs)
-- `push_check_notifications_broadcast_to_stream_subscribers`
-  (graph_extraction.rs)
-- task-112/146 notification/dispatch suites at the merged call sites
-  (notification_dispatcher, signal_chain, spec_patrol,
-  reconciliation, secret_rotation, impersonation, prompt_assembly,
-  spec_link_staleness, merge_processor tests — the `&[]` arity repair
-  touched only test call sites)
-
-plus the standard full gates (`cargo test --all`, diff-scoped clippy,
-`cd web && npm ci && npm test`, exact-head GitHub checks).
