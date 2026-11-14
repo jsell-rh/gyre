@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "analytics.md §Analytics Dashboard (UI)"
   - "analytics.md §Data Retention"
-commits: ["f2d6db71f21c89feb052220e030f5faa754be5e7"]
+commits: ["f2d6db71f21c89feb052220e030f5faa754be5e7", "af587a17fcee2909f749dbe050f409d710d8b6db"]
 ---
 
 ## Spec Excerpt
@@ -119,7 +119,13 @@ the analytics-scoped retention configuration surface (§Data Retention).
   - **Event counts bar chart** — `GET /analytics/daily?days=30` rendered as
     an SVG bar chart, one bar per day, zero-filled across all 30 calendar
     days (the chart shows volume over time, not just active days), peak
-    count in the axis meta.
+    count in the axis meta. The endpoint returns TOTAL daily event volume
+    across all event names (review repair af587a17): `event_name` is an
+    optional filter on `GET /analytics/daily` — absent or empty (the
+    spec's `?event_name=&days=30` form) aggregates across every event
+    name via `AnalyticsRepository::aggregate_by_day(Option<&str>)`, so
+    the bare `?days=30` request the chart sends is valid and returns the
+    aggregate series, not a 400 and not a single-name series.
   - **Recent events** — paginated table (event, agent, timestamp, properties
     preview) from `GET /analytics/events?limit=50`; filterable by event
     name, agent, and workspace (dropdown options derived from the live
@@ -175,6 +181,24 @@ the analytics-scoped retention configuration surface (§Data Retention).
 
 ### Test evidence
 
+- Review repair (af587a17) probes, run in this sandbox against the real
+  adapters (not mocks):
+  - `cargo check -p gyre-server -p gyre-adapters` — clean (exit 0).
+  - `cargo test -p gyre-adapters --lib sqlite::analytics::tests::analytics_aggregate_by_day`
+    — 2 tests pass, including the new
+    `analytics_aggregate_by_day_no_event_name_totals_across_names`
+    (seeds two distinct event names on one day; `None` must count both).
+  - New gyre-server test
+    `daily_events_bare_days_form_returns_total_volume` pins the exact
+    dashboard request: bare `?days=30` → 200 with totals across distinct
+    event names (would fail with 400 under the old required-param
+    contract and fail if the response were per-name), empty-value
+    `?event_name=&days=30` → same totals, explicit name still filters.
+    **gyre-server test compilation exceeds the in-sandbox 4 GiB budget —
+    the independent verifier must run:**
+    `cargo test -p gyre-server --lib analytics::tests` (covers the new
+    daily-form test plus all analytics handler, decide, top-agents, and
+    retention suites).
 - `web/src/__tests__/AnalyticsView.test.js` — 13 component tests, all
   passing: five-section render from real API mocks, 30 zero-filled bars,
   properties-JSON expansion, event-name filter reaching the API, cursor
