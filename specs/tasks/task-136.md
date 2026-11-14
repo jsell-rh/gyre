@@ -4,10 +4,10 @@ spec_ref: "agent-gates.md §Merge Processor Integration"
 depends_on:
   - task-134
   - task-135
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "agent-gates.md §Merge Processor Integration"
-commits: ["a05c7286ac53a17c2bd6957e3285c191c10fae1b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -72,61 +72,3 @@ MR enters merge queue
 ## Agent Instructions
 
 Read `specs/system/agent-gates.md` §Merge Processor Integration. Merge processor: grep for `merge_processor\|process_merge` in `gyre-server/src/`. Merge queue: `gyre-server/src/api/merge_queue.rs`. Gate status: depends on task-135's status tracking. Agent spawn (for AgentReview): `gyre-server/src/api/spawn.rs`. Review API (for checking gate agent verdicts): `gyre-server/src/api/merge_requests.rs`. Notification system: `gyre-server/src/api/messages.rs`. The merge processor likely has a background loop — find it and extend the gate-check phase to handle all gate types.
-
-## Shipped
-
-Most of the section's flow shipped with tasks 134/135 (verified against the
-code before scoping this task): enqueue triggers `trigger_gates_for_mr`
-(which spawns every gate concurrently), the merge processor polls
-`check_gates_for_mr` every cycle (RequiredApprovals re-evaluated live each
-cycle; AgentReview gates poll the reviewer agent's submitted verdicts),
-all-passed proceeds to merge, pending/running requeues, required failure
-fails the queue entry, and the merge attestation bundle snapshots all gate
-results with types at merge time. This task closes the two parts that were
-still hollow:
-
-### Attempt-scoped gate re-arming (the retry path)
-
-- Each enqueue/trigger of an MR is one gate ATTEMPT. `arm_gate_result`
-  replaces the gate's prior GateResult rows for the MR with a fresh Pending
-  row (new `GateResultRepository::delete_by_mr_id_and_gate_id` port,
-  implemented in SQLite, PostgreSQL, and mem adapters), and a per-(MR,
-  gate) attempt counter is kept in the port-backed KV store
-  (`gate_attempts` namespace).
-- Why: `check_gates_for_mr` polls `list_by_mr_id`, which is not
-  attempt-scoped — before this change a stale `Failed` row survived every
-  re-enqueue and vetoed the MR forever, so the spec's Ralph-loop retry
-  path ("addresses the feedback, re-pushes, and gates re-run") could
-  never merge. Regression test `reenqueue_replaces_failed_gate_result_and_waits`
-  fails on the pre-change code.
-
-### GateResult author feedback
-
-- On a required-gate failure the author agent's spawning user now receives
-  a notification carrying the full §Gate Failure Feedback payload: gate
-  name, type, failure output, spec_ref, attempt count, gate_agent_id —
-  previously only gate name/mr_id/agent_id. The GateFailure workspace event
-  also carries the attempt number and the real forge-spawned gate-agent id
-  (was always the `gate-agent:{id}` display form).
-- The notification's tenant scope is resolved from the MR's workspace and
-  skipped (logged) when unresolvable — the call site previously passed a
-  hardcoded fabricated `"default"` tenant.
-
-### Test evidence
-
-- This sandbox: `cargo check -p gyre-server --lib --tests` exit 0,
-  `cargo test -p gyre-adapters sqlite::quality_gate` exit 0 (4 passed,
-  including the new pair-scoped delete test), `rustfmt --check` clean,
-  clippy clean vs. baseline, and all mechanical guards (arch,
-  mem-port-contracts, fabricated-scope-defaults, scope-literal-defaults,
-  task-commit-attribution, …) OK. Evidence:
-  `/tmp/stage/review-evidence/task-136.md`.
-- The build wrapper refuses gyre-server test compilation here (4 GiB
-  budget — infrastructure restriction, not a code defect). The verifier
-  must run `cargo test --all`, in particular the new tests
-  `gate_executor::tests::reenqueue_replaces_failed_gate_result_and_waits`,
-  `gate_executor::tests::failing_gate_notifies_author_with_gate_result_payload`,
-  `notifications::tests::gate_failure_notification_carries_deep_link`,
-  `notifications::tests::gate_failure_notification_skipped_when_workspace_unresolvable`,
-  plus the full `gate_executor`, `merge_queue`, `merge_processor`, and
-  `ralph_loop` modules that exercise the changed trigger/decision paths.
