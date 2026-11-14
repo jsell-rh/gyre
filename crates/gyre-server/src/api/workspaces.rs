@@ -153,6 +153,10 @@ pub async fn create_workspace(
         .apply_trust_transition(&ws, false, &seed_policies)
         .await
         .map_err(ApiError::Internal)?;
+    // apply_trust_transition persists policies outside the PolicyRepository
+    // port (atomicity) — invalidate the policy-set cache so the ABAC engine
+    // sees the seeded trust policies immediately (policy_cache.rs contract).
+    state.policy_cache.invalidate();
 
     // Seed the creator's Owner membership (user-management.md §Workspace
     // Membership): a workspace created by a user principal is owned by its
@@ -342,6 +346,13 @@ pub async fn update_workspace(
                     "Trust level transition failed — policies could not be created".to_string(),
                 )
             })?;
+        // apply_trust_transition persists policies outside the
+        // PolicyRepository port (atomicity) — invalidate the policy-set
+        // cache so the ABAC engine sees the transitioned trust policies
+        // immediately (policy_cache.rs contract). Without this, a
+        // Supervised workspace's merge-hold Deny could stay invisible to
+        // merge-time evaluation until an unrelated policy write.
+        state.policy_cache.invalidate();
     } else {
         // No trust change — only the non-trust workspace fields need updating.
         state.workspaces.update(&ws).await?;
