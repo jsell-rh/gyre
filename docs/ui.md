@@ -92,6 +92,10 @@ The workspace home is a **dashboard** — the landing page after selecting a wor
 
 Gear icon (⚙) in the workspace header opens a full-page settings view with tabs: General, Trust & Policies, Teams, Budget, Compute, Audit.
 
+### Analytics
+
+Chart icon in the workspace top bar (next to the settings gear) or `/workspaces/:slug/analytics` opens the full-page product analytics dashboard (`AnalyticsView.svelte`, analytics.md §Analytics Dashboard): event-volume bar chart (last 30 days), paginated/filterable recent-events list with expandable properties, interactive decision evaluator for the six built-in decisions, funnel view with drop-off rates and custom funnel definitions, and top agents ranked by events, completion rate, and average duration.
+
 ---
 
 ## Mode 2: Repo Mode
@@ -154,6 +158,7 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 |---|---|
 | `App.svelte` | Application shell — top bar, two-mode routing, mobile drawer, keyboard shortcuts (no persistent sidebar) |
 | `WorkspaceHome.svelte` | Workspace home dashboard — 5 section cards |
+| `AnalyticsView.svelte` | Product analytics dashboard — daily event volume chart, recent events, decision evaluator, funnel, top agents |
 | `RepoMode.svelte` | Repo mode shell — horizontal tab routing |
 | `ExplorerCanvas.svelte` | Unified architecture canvas — semantic zoom treemap, lens toggle (structural/evaluative/observable), filter presets, view query rendering, minimap (replaces the former Graph/Flow tabs) |
 | `explorer/SpecRealizationView.svelte` | Explorer default view — spec ↔ realization two-panel (GovernedBy linkage) |

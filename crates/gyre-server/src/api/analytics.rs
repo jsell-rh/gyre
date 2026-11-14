@@ -187,8 +187,17 @@ pub(crate) async fn record_search_query(
 #[derive(Deserialize)]
 pub struct CountEventsParams {
     pub event_name: String,
-    pub since: u64,
-    pub until: u64,
+    /// Start of the window (unix secs). Defaults to 0 (all time).
+    pub since: Option<u64>,
+    /// End of the window (unix secs). Defaults to now.
+    pub until: Option<u64>,
+    /// Optional property-equality filter `key:value` — counts only
+    /// events whose `properties[key]` equals `value` (string equality).
+    /// Used by the Analytics Dashboard funnel view (analytics.md
+    /// §Analytics Dashboard): a funnel step like
+    /// `task.status_changed(InProgress)` counts status-change events
+    /// whose `new_status` property is `InProgress`.
+    pub property: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -548,10 +557,41 @@ pub async fn count_events(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CountEventsParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let count = state
-        .analytics
-        .count(&params.event_name, params.since, params.until)
-        .await?;
+    let until = params.until.unwrap_or_else(now_secs);
+    let since = params.since.unwrap_or(0);
+    if since > until {
+        return Err(ApiError::InvalidInput(
+            "since must not be after until".to_string(),
+        ));
+    }
+    let count = match params.property.as_deref() {
+        None => state.analytics.count(&params.event_name, since, until).await?,
+        Some(filter) => {
+            // Property filters are evaluated in Rust over the filtered
+            // event set (the storage layer has no properties index) —
+            // same fetch cap as the /top ranking.
+            let (key, value) = filter.split_once(':').ok_or_else(|| {
+                ApiError::InvalidInput(
+                    "property filter must be 'key:value' (e.g. new_status:InProgress)"
+                        .to_string(),
+                )
+            })?;
+            let filter = AnalyticsQueryFilter {
+                event_name: Some(params.event_name.clone()),
+                since: Some(since),
+                until: Some(until),
+                limit: 100_000,
+                ..Default::default()
+            };
+            let events = state.analytics.query_filtered(&filter).await?;
+            events
+                .iter()
+                .filter(|e| {
+                    e.properties.get(key).and_then(|v| v.as_str()) == Some(value)
+                })
+                .count() as u64
+        }
+    };
     Ok(Json(
         serde_json::json!({ "event_name": params.event_name, "count": count }),
     ))
@@ -736,13 +776,26 @@ pub async fn compare(
     }))
 }
 
-/// `GET /api/v1/analytics/top` — top N event names by count since a timestamp.
+/// `GET /api/v1/analytics/top` — top N event names by count since a
+/// timestamp (default), or — with `?dimension=agent` — the top-agents
+/// ranking the Analytics Dashboard renders (analytics.md §Analytics
+/// Dashboard "Top agents"): agents ranked by events generated, with task
+/// completion rate and average completion duration.
 #[derive(Deserialize)]
 pub struct TopParams {
     /// Max number of results. Defaults to 10, max 100.
     pub limit: Option<usize>,
-    /// Start of the window (unix secs). Defaults to 24h ago.
+    /// Start of the window (unix secs). Defaults to 24h ago (event
+    /// dimension) or 30d ago (agent dimension, matching the dashboard's
+    /// "Top agents — since 30d-ago" fetch).
     pub since: Option<u64>,
+    /// Ranking dimension: `event_name` (default) or `agent`.
+    pub dimension: Option<String>,
+    /// Agent dimension only: restrict the ranking to one workspace.
+    /// Validated against the caller's tenant — the same anti-forgery
+    /// rule as `decide` (a forged id would leak another tenant's
+    /// aggregated agent stats).
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -751,33 +804,142 @@ pub struct TopEntry {
     pub count: u64,
 }
 
+/// One ranked agent (`?dimension=agent`). Completion rate is
+/// `agent.completed / (agent.completed + agent.failed)` — `None` when
+/// the agent neither completed nor failed a task in the window (nothing
+/// to divide). Average duration is the mean `duration_secs` property
+/// over the agent's `agent.completed` events.
+#[derive(Serialize)]
+pub struct TopAgentEntry {
+    pub agent_id: String,
+    pub event_count: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub completion_rate: Option<f64>,
+    pub avg_duration_secs: Option<f64>,
+}
+
+#[derive(Default)]
+struct AgentAgg {
+    event_count: u64,
+    completed: u64,
+    failed: u64,
+    duration_secs_sum: f64,
+    duration_samples: u64,
+}
+
 pub async fn top_events(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Query(params): Query<TopParams>,
-) -> Result<Json<Vec<TopEntry>>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = params.limit.unwrap_or(10).min(100);
-    let since = params
-        .since
-        .unwrap_or_else(|| now_secs().saturating_sub(86400));
 
-    // Query all events in the window (capped to avoid memory issues).
-    let events = state.analytics.query(None, Some(since), 100_000).await?;
+    match params.dimension.as_deref() {
+        None | Some("event_name") => {
+            let since = params
+                .since
+                .unwrap_or_else(|| now_secs().saturating_sub(86400));
 
-    // Group by event_name.
-    let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for e in events {
-        *counts.entry(e.event_name).or_default() += 1;
+            // Query all events in the window (capped to avoid memory issues).
+            let events = state.analytics.query(None, Some(since), 100_000).await?;
+
+            // Group by event_name.
+            let mut counts: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for e in events {
+                *counts.entry(e.event_name).or_default() += 1;
+            }
+
+            // Sort by count descending, take limit.
+            let mut entries: Vec<TopEntry> = counts
+                .into_iter()
+                .map(|(event_name, count)| TopEntry { event_name, count })
+                .collect();
+            entries.sort_by(|a, b| b.count.cmp(&a.count));
+            entries.truncate(limit);
+
+            Ok(Json(serde_json::to_value(entries).unwrap_or_default()))
+        }
+        Some("agent") => {
+            let since = params
+                .since
+                .unwrap_or_else(|| now_secs().saturating_sub(30 * 86_400));
+
+            // Optional workspace scoping, validated against the caller
+            // (same rule as `decide` / `record_event`).
+            let workspace_id = match params.workspace_id.as_deref() {
+                Some(w) => {
+                    let id = Id::new(w);
+                    super::audit::validate_workspace_scope(&state, &id, &auth).await?;
+                    Some(id.to_string())
+                }
+                None => None,
+            };
+
+            let filter = AnalyticsQueryFilter {
+                workspace_id,
+                since: Some(since),
+                until: Some(now_secs()),
+                limit: 100_000,
+                ..Default::default()
+            };
+            let events = state.analytics.query_filtered(&filter).await?;
+
+            let mut agents: std::collections::HashMap<String, AgentAgg> =
+                std::collections::HashMap::new();
+            for e in events {
+                // Unattributed events cannot rank an agent.
+                let Some(agent_id) = e.agent_id else { continue };
+                let agg = agents.entry(agent_id).or_default();
+                agg.event_count += 1;
+                match e.event_name.as_str() {
+                    "agent.completed" => {
+                        agg.completed += 1;
+                        if let Some(d) = e.properties.get("duration_secs").and_then(|v| {
+                            v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+                        }) {
+                            agg.duration_secs_sum += d;
+                            agg.duration_samples += 1;
+                        }
+                    }
+                    "agent.failed" => agg.failed += 1,
+                    _ => {}
+                }
+            }
+
+            let mut entries: Vec<TopAgentEntry> = agents
+                .into_iter()
+                .map(|(agent_id, agg)| TopAgentEntry {
+                    agent_id,
+                    event_count: agg.event_count,
+                    completed: agg.completed,
+                    failed: agg.failed,
+                    completion_rate: if agg.completed + agg.failed > 0 {
+                        Some(agg.completed as f64 / (agg.completed + agg.failed) as f64)
+                    } else {
+                        None
+                    },
+                    avg_duration_secs: if agg.duration_samples > 0 {
+                        Some(agg.duration_secs_sum / agg.duration_samples as f64)
+                    } else {
+                        None
+                    },
+                })
+                .collect();
+            entries.sort_by(|a, b| {
+                b.event_count
+                    .cmp(&a.event_count)
+                    .then_with(|| a.agent_id.cmp(&b.agent_id))
+            });
+            entries.truncate(limit);
+
+            Ok(Json(serde_json::to_value(entries).unwrap_or_default()))
+        }
+        Some(other) => Err(ApiError::InvalidInput(format!(
+            "unsupported dimension {other:?} (expected event_name or agent)"
+        ))),
     }
-
-    // Sort by count descending, take limit.
-    let mut entries: Vec<TopEntry> = counts
-        .into_iter()
-        .map(|(event_name, count)| TopEntry { event_name, count })
-        .collect();
-    entries.sort_by(|a, b| b.count.cmp(&a.count));
-    entries.truncate(limit);
-
-    Ok(Json(entries))
 }
 
 // ─── Analytics Decision API (analytics.md §Decision API for Agents) ──────────
@@ -1054,6 +1216,7 @@ mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
+    use serde_json::json;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -2911,5 +3074,240 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ─── Analytics Dashboard support (task-149, analytics.md §Analytics
+    // Dashboard: top agents, funnel counts) ────────────────────────────────
+
+    /// Seed an event directly through the analytics port. The HTTP ingest
+    /// binds agent identity to the caller, which would attribute every
+    /// seeded event to the test caller — the ranking tests need distinct
+    /// agents, so they bypass the endpoint and write through the port the
+    /// endpoint itself persists to.
+    async fn seed_agent_event(
+        state: &crate::AppState,
+        event_name: &str,
+        agent_id: Option<&str>,
+        properties: serde_json::Value,
+        workspace_id: Option<&str>,
+    ) {
+        let mut ev = AnalyticsEvent::new(
+            new_id(),
+            event_name,
+            agent_id.map(|a| a.to_string()),
+            properties,
+            now_secs(),
+        );
+        if let Some(ws) = workspace_id {
+            ev = ev.with_scope(None, None, Some(&Id::new(ws)), None);
+        }
+        state.analytics.record(&ev).await.unwrap();
+    }
+
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    #[tokio::test]
+    async fn top_agents_dimension_ranks_and_computes_rates() {
+        let state = test_state();
+        // agent-a: 4 events — spawned, 2 completions (durations 100s/200s),
+        // 1 failure → completion rate 2/3, avg duration 150s.
+        seed_agent_event(&state, "agent.spawned", Some("agent-a"), json!({}), None).await;
+        seed_agent_event(
+            &state,
+            "agent.completed",
+            Some("agent-a"),
+            json!({"duration_secs": 100}),
+            None,
+        )
+        .await;
+        seed_agent_event(
+            &state,
+            "agent.completed",
+            Some("agent-a"),
+            json!({"duration_secs": 200}),
+            None,
+        )
+        .await;
+        seed_agent_event(&state, "agent.failed", Some("agent-a"), json!({}), None).await;
+        // agent-b: 1 event, no completions or failures → null rates.
+        seed_agent_event(&state, "agent.spawned", Some("agent-b"), json!({}), None).await;
+        // Unattributed event cannot rank an agent.
+        seed_agent_event(&state, "agent.spawned", None, json!({}), None).await;
+
+        let app = crate::build_router(state);
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/top?dimension=agent&since=0&limit=10",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "unattributed event must not rank: {arr:?}");
+        assert_eq!(arr[0]["agent_id"], "agent-a");
+        assert_eq!(arr[0]["event_count"], 4);
+        assert_eq!(arr[0]["completed"], 2);
+        assert_eq!(arr[0]["failed"], 1);
+        let rate = arr[0]["completion_rate"].as_f64().unwrap();
+        assert!((rate - 2.0 / 3.0).abs() < 1e-9, "rate was {rate}");
+        assert_eq!(arr[0]["avg_duration_secs"].as_f64().unwrap(), 150.0);
+        assert_eq!(arr[1]["agent_id"], "agent-b");
+        assert_eq!(arr[1]["event_count"], 1);
+        assert!(arr[1]["completion_rate"].is_null());
+        assert!(arr[1]["avg_duration_secs"].is_null());
+    }
+
+    #[tokio::test]
+    async fn top_agents_workspace_scope_validated_against_caller_tenant() {
+        // Same anti-forgery rule as record_event/decide: the workspace
+        // filter must resolve within the caller's tenant, and the ranking
+        // must only cover events actually attributed to that workspace.
+        let state = test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-own"),
+                Id::new("default"),
+                "Own",
+                "own",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-victim"),
+                Id::new("tenant-other"),
+                "Victim",
+                "victim",
+                1000,
+            ))
+            .await
+            .unwrap();
+        seed_agent_event(&state, "agent.spawned", Some("agent-own"), json!({}), Some("ws-own"))
+            .await;
+        seed_agent_event(
+            &state,
+            "agent.spawned",
+            Some("agent-victim"),
+            json!({}),
+            Some("ws-victim"),
+        )
+        .await;
+
+        let app = crate::build_router(state);
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/top?dimension=agent&since=0&workspace_id=ws-own",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "only the own-workspace agent ranks: {arr:?}");
+        assert_eq!(arr[0]["agent_id"], "agent-own");
+
+        // Cross-tenant workspace: Forbidden — no leaked ranking.
+        let (status, _) = get_json(
+            &app,
+            "/api/v1/analytics/top?dimension=agent&since=0&workspace_id=ws-victim",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Unknown workspace: NotFound, not a silent empty ranking.
+        let (status, _) = get_json(
+            &app,
+            "/api/v1/analytics/top?dimension=agent&since=0&workspace_id=ws-nope",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn top_dimension_rejects_unknown() {
+        let app = app();
+        let (status, body) = get_json(&app, "/api/v1/analytics/top?dimension=bogus").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn count_property_filter_matches_property_equality() {
+        // Funnel support: a `task.status_changed(InProgress)` step counts
+        // only the events whose `new_status` property is `InProgress`.
+        let state = test_state();
+        seed_agent_event(
+            &state,
+            "task.status_changed",
+            Some("agent-a"),
+            json!({"new_status": "InProgress"}),
+            None,
+        )
+        .await;
+        seed_agent_event(
+            &state,
+            "task.status_changed",
+            Some("agent-a"),
+            json!({"new_status": "InProgress"}),
+            None,
+        )
+        .await;
+        seed_agent_event(
+            &state,
+            "task.status_changed",
+            Some("agent-a"),
+            json!({"new_status": "Blocked"}),
+            None,
+        )
+        .await;
+
+        let app = crate::build_router(state);
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/count?event_name=task.status_changed&since=0&property=new_status:InProgress",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 2, "body: {json}");
+
+        // Without the property filter the count is the raw total.
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/count?event_name=task.status_changed&since=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 3);
+
+        // since/until are now optional (default 0..now) — the dashboard
+        // funnel fetches rely on the default window.
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/count?event_name=task.status_changed",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 3);
+
+        // Malformed property filter: 400, not a silent zero count.
+        let (status, _) = get_json(
+            &app,
+            "/api/v1/analytics/count?event_name=task.status_changed&property=new_status",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
