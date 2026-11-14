@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["8cc357498e02489c2ce63b90785fe813e39daaab", "25f0bb2d29e70cd30c959a73fb2abd7027513c67"]
+commits: ["25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
 ---
 
 ## Spec Excerpt
