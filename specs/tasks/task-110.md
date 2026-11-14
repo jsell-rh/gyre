@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb", "07cf13dded96fc9f0fc32d47456281fbc7cc4244"]
 ---
 
 ## Spec Excerpt
@@ -100,57 +100,53 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**This round: re-verify the independently approved invitation flow on
-assignment base 9afd66c7 (which carries task-133's ABAC MCP permission
-resources) and resolve the durable CI finding** — no invitation behavior
-changed; the implementation is the one approved across the prior repair
+**This round: repair rebase onto assignment base 8d07a41a (main's merge
+carrying task-126's user-management CLI commands)** — no invitation
+behavior changed. The implementation approved across the prior repair
 rounds (domain entities, ports, SQLite/Postgres/mem adapters, migrations
-2026-11-13-000063/64/65, the five tenant endpoints plus policy endpoints,
-workspace invitation lifecycle, CSPRNG + SHA-256 tokens, per-tenant
-`InvitationPolicy`, bulk invite, background expiry job, ABAC mappings,
-docs).
-
-### CI finding 7ec83a8d (candidate_failed) — resolved as a transient flake
-
-PR #825 head a8996690, CI run 43610196702: the "Development controller"
-check failed on attempt 1 at the `test_pipeline*.py` step, then the SAME
-tree passed every job on attempt 2 — the run's final conclusion is
-`success` (GitHub API evidence saved under
-`/tmp/stage/review-evidence/`). Attempt-1 job logs were never retrievable
-(blob host denied from this sandbox); with an identical tree passing on
-re-run there is no deterministic defect to repair. The two
-`test_pipeline*.py` failures that DO reproduce in this sandbox are
-environment restrictions, not code defects: this sandbox denies
-`os.killpg(2)` (EPERM; plain child kill works — probe saved), which is
-exactly what both tests exercise, and they fail identically on the
-assignment base. The `test_dev*.py` failures here are the 4 GiB cargo
-build wrapper, also unrelated to this branch (it changes no scripts or
-manifests).
+2026-11-13-000063/64/65, the five tenant endpoints plus policy
+endpoints, workspace invitation lifecycle, CSPRNG + SHA-256 tokens,
+per-tenant `InvitationPolicy`, bulk invite, background expiry job, ABAC
+mappings, docs) carries over unchanged: the server-side crates are
+byte-identical to the prior head aa92dbe9
+(`git diff aa92dbe9..HEAD -- crates/gyre-server crates/gyre-domain
+crates/gyre-ports crates/gyre-adapters crates/gyre-common` is empty).
 
 ### Repairs this round
 
+- Resolved the rebase conflict in `specs/coverage/system/user-management.md`:
+  the merged audit header keeps both lines' running narrative with the
+  mechanically recounted table counts (15 implemented / 10 task-assigned /
+  11 n/a / 0 not-started of 36 — verified by per-row recount), and row 30
+  (§CLI, task-126) was de-staled for the merged tree: the CLI
+  tenant-invitation group (`gyre tenant invite`, `gyre tenant invitations
+  list/revoke`) now has live task-110 backends (rows 5/25), so only
+  `gyre sessions` (task-111, §Session Management) keeps that row open.
 - Restored this task's `commits:` frontmatter, which the assignment reset
-  had emptied: `check-task-commit-attribution.sh` was FAILING on the tree
-  because the seven task-110-labeled product-surface commits in branch
-  history were orphaned from review scoping. All nine previously recorded
-  SHAs verified in-branch (`git merge-base --is-ancestor`).
+  had emptied — `check-task-commit-attribution.sh` was FAILING on the
+  tree. All nine previously recorded SHAs re-verified in-branch
+  (`git merge-base --is-ancestor`), plus this round's merge commit
+  07cf13dd.
+- Verified task-126's merged CLI against task-110's server surface: every
+  invitation path the CLI calls (`POST /api/v1/tenant/invite[/bulk]`,
+  `GET/DELETE /api/v1/tenant/invitations[/:id]`,
+  `POST/GET/DELETE /api/v1/workspaces/:id/invite[/invitations...]`) is
+  registered in `api/mod.rs` with matching request-body shapes
+  (`InviteRequest`, `WorkspaceInviteRequest`).
 
-### Verification on the merged tree (head f56a47df)
+### Verification on the merged tree (head 07cf13dd)
 
-- `cargo check -p gyre-server` — clean (adapters/domain/ports included).
-- `cargo test -p gyre-domain` — 8 passed. `cargo test -p gyre-adapters` —
-  533 passed, 0 failed (6 ignored are Docker/SSH/credential-gated
-  compute/llm tests, untouched by this branch).
-- `check-clippy-diff.py HEAD^1` and `check-rustfmt-diff.py HEAD^1` —
-  changed lines clean.
-- All non-advisory mechanical gates pass: arch, hierarchy, ABAC route
-  registry, ABAC exempt handlers, migration versions + SQL portability,
-  mem port contracts, in-memory state stores, forged scope fields, inert
-  enforcement, dead message kinds, byte-slice truncation, unwired port
-  methods, sandbox sweep artifacts, scope/lossy/fabricated-defaults
-  lints. Advisory failures (dead-parameters, ignored-tool-tests,
-  tenant-filter/crypto-verify awk) are byte-identical on the assignment
-  base in files this branch never touched.
+- `cargo check -p gyre-cli` — clean.
+- `cargo test -p gyre-cli` — 189 passed + 1 ws integration, 0 failed
+  (includes task-126's invitation CLI mock-server request/body flows).
+- `bash scripts/check-task-commit-attribution.sh` — PASS after the
+  frontmatter restore (FAILed with `commits: []`).
+- `bash scripts/check-cli-spec-parity.sh` — exit 0 (one advisory note,
+  pre-existing in task-126's code, untouched by this branch).
+- Server/domain/adapters untouched by this merge (empty diff vs
+  aa92dbe9), so the prior round's head evidence stands: `cargo check -p
+  gyre-server` clean; `cargo test -p gyre-domain` 8 passed;
+  `cargo test -p gyre-adapters` 533 passed, 0 failed.
 
 ### Verifier must run (blocked in-sandbox by the 4 GiB build wrapper)
 
