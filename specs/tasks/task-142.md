@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Merge Attestation Bundle"
   - "agent-gates.md §What Gets Signed and By Whom"
-commits: ["e2c10e6957dbf4e11c5c28d3887abbe9fe9a9337", "331a6eafa838d290df79139e4e2697e3a83d19df"]
+commits: ["331a6eafa838d290df79139e4e2697e3a83d19df", "e2c10e6957dbf4e11c5c28d3887abbe9fe9a9337", "88a1da2c90cedb70613554724294781d84647a68"]
 ---
 
 ## Spec Excerpt
@@ -104,21 +104,26 @@ Each signer uses their own OIDC identity. The result is a multi-party attestatio
 - **Domain types** (`crates/gyre-domain/src/merge_attestation.rs`): `MergeAttestationBundle` with `SpecRefAttestation`, `AuthorAttestation`, `GateAttestation`, serializing to the spec's exact JSON schema (`merge_attestation_version` "1.0", `mr_id`, `merge_commit_sha`, `merged_at`, `spec_ref`, `spec_approval`, `author`, `gates[]` with per-gate result/timing/`output_hash`/`signed_by`/`signature`, `bundle_signature`). `unsigned_canonical_json()`/`unsigned_gate_json()` define the exact bytes each signature covers; timestamps are Unix epoch seconds (u64).
 - **Port** (`crates/gyre-ports/src/attestation_signer.rs`): `AttestationSigner` trait (`sign`, `signer_identity`) — the seam where Sigstore/OIDC identities plug in later without changing the bundle format.
 - **Signers** (`crates/gyre-server/src/merge_attestation.rs`): `ForgeSigner` signs with the server's real Ed25519 key; `GateAgentSigner` gives each gate agent a distinct Ed25519 key pair (the placeholder key scheme the task explicitly permits, derived from forge key material bound to the agent id so a Gyre instance can re-derive it for verification; distinct from the forge key, so the forge alone cannot forge a complete bundle).
-- **Generation** (`generate_merge_attestation_bundle`): collects every gate result for the MR; signs TestCommand/LintCommand (and other forge-run) results with the forge identity; for AgentReview/AgentValidation gates, resolves the review bound to the gate (`Review.gate_id`), records reviewer identity/decision/body-hash, and signs with that gate agent's identity. Spec approval comes from the approval ledger's newest active entry for the exact (path, sha) — never fabricated; MRs without an author agent omit the author block. Bundle-level forge signature covers the canonical unsigned document.
-- **Author attestation level (review repair F1)**: derived with the canonical workload-record rule — `constraint_check::derive_attestation_level` — the same derivation spec-approval validation and the gate executor apply to the same `workload_attestations` record (0 = no record, 1 = raw push, 2 = CLI-attested stack, 3 = Gyre-managed container with stack+container+image). No bundle-local rule exists anymore, so the bundle can never attest a level that contradicts the provenance evaluation of the same record.
-- **Reviewer stack attestation (review repair F2)**: each AgentReview/AgentValidation gate entry records the reviewing gate agent's stack fingerprint (`reviewer_stack_attestation`) from the same `workload_attestations` namespace the author's comes from, keyed by `review.reviewer_agent_id` (identity-security.md §Layer 2: record which stack produced each gate result).
+- **Generation** (`generate_merge_attestation_bundle`): collects every gate result for the MR; signs TestCommand/LintCommand (and other forge-run) results with the forge identity; for AgentReview/AgentValidation gates, resolves the review bound to the gate (`Review.gate_id`), records reviewer identity/decision/body-hash/stack attestation, and signs with that gate agent's identity. Spec approval comes from the approval ledger's newest active entry for the exact (path, sha) — never fabricated; MRs without an author agent omit the author block. Bundle-level forge signature covers the canonical unsigned document.
+- **Author attestation level**: derived with the canonical workload-record rule — `constraint_check::derive_attestation_level` — the same derivation spec-approval validation and the gate executor apply to the same `workload_attestations` record; no bundle-local rule exists, so the bundle can never attest a level that contradicts the provenance evaluation of the same record.
 - **Integration**: both merge-processor success paths (single-MR `process_next` and each atomic-group member in `merge_atomic_group`) generate and store the bundle. Stored as a `merge_attestation_bundle` audit event (full signed JSON, queryable) and as a git note under `refs/notes/merge-attestations`. Generation failure logs a warning and never rolls back the landed merge. No existing merge logic was modified — only the added post-merge call.
 - **Verification** (`verify_merge_attestation_bundle`): checks the bundle signature and every per-gate signature against the named party's key; returns false on tampering, missing signatures, or a `signed_by` that doesn't match the signing key.
 
+### Verification-repair (this round)
+
+- Fixed the rustfmt changed-line failures the verifier reported (attempt 3099b0f6) in `gyre-domain/src/lib.rs`, `gyre-ports/src/lib.rs`, `gyre-server/src/merge_attestation.rs`, `gyre-server/src/merge_processor.rs` — pure reflow/module ordering, no semantic change.
+- Repaired the compile break introduced by the base merge: task-111 made `MergeRequest::new` take a mandatory `workspace_id: Id`; the task-142 test helper now constructs the MR with its real workspace scope instead of assigning the field post-hoc.
+
 ### Test evidence
 
-Probes run in this sandbox (the build wrapper permits check-based and small-package probes):
+Probes run in this sandbox (build wrapper permits check-based and small-package probes):
 
-- `cargo test -p gyre-domain` — 8 passed, 0 failed.
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — clean; type-checks the lib and all server tests including the new F1 regression test.
-- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --tests` — finished; zero warnings in either touched `merge_attestation.rs`.
+- `cargo test -p gyre-domain` — pass (539 + 8 tests across targets, 0 failed).
+- `cargo test -p gyre-ports` — pass (trait-only crate, 0 tests).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — 0 errors after the constructor repair.
+- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --tests` — no warnings on changed lines; only pre-existing warnings elsewhere (part of the 796 the verifier already classifies as outside changes).
 
 Server test execution is blocked by the sandbox build wrapper (gyre-server code generation exceeds the 4 GiB budget — recorded in `/tmp/stage/review-evidence/task-142-repair-evidence.md`); the independent verifier must run:
 
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` — covers multi-party signing and spec-schema serialization (now also asserting `reviewer_stack_attestation` and the canonical author level `Some(2)` for a stack-attested local workload), the new `author_attestation_level_matches_canonical_derivation` F1 regression (bundle level equals `constraint_check::derive_attestation_level` for all four workload shapes), tamper/missing-signature verification failures, distinct gate-agent keys, and author omission for agent-less MRs.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` — multi-party signing, spec-schema serialization (incl. `reviewer_stack_attestation` and canonical author level), the `author_attestation_level_matches_canonical_derivation` F1 regression, tamper/missing-signature verification failures, distinct gate-agent keys, and author omission for agent-less MRs.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_processor_generates_multi_party_attestation_bundle` — integration test that the merge processor generates and stores the bundle after a successful merge.
