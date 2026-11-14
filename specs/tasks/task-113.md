@@ -3,7 +3,7 @@ title: "Implement in-app notification UI & email templates"
 spec_ref: "user-management.md §In-App Notification UI"
 depends_on:
   - task-112
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
@@ -135,38 +135,48 @@ and the email template/digest layer). Coverage rows 19 and 20 are
   aggregate into one digest email; failed sends keep entries for retry.
 - **Priority filter**: enforced at queue time (task-112) and re-checked at
   drain time against the user's current preferences.
-- **Security hardening** (commits 5d008fb8, 5ff46667, 5eed7b03, 5b8d0974,
-  c945df27, 25f0bb2d from prior review rounds): SMTP header/command
-  injection blocked at the RFC 5322 builder and envelope gate
-  (`strip_header_controls`, `valid_address`) with regression tests
-  (`crlf_in_title_cannot_forge_header_lines`,
-  `addresses_with_controls_are_rejected_at_the_gate`); dot-stuffing and
-  reply-code parsing repairs.
+- **Transport**: minimal real RFC 5321 SMTP client (dot-stuffing, CRLF,
+  base64 multipart/alternative, RFC 2047 subject encoding, 10 s per-op
+  timeouts) against `GYRE_SMTP_*`; unconfigured relay = queue-and-hold,
+  failed sends retry next cycle. SMTP header/command injection blocked at
+  the RFC 5322 builder and envelope gate with regression tests (prior
+  review-round hardening).
 
-### Verification repair (this round, commit b85772c5)
+### Merge resolution (this round, commit 5b53fef1)
 
-Independent verification of the merged tree (base 2824d9b1 via merge
-7a742af6, which brought task-136 gate evaluation in) failed on exactly
-one gate: rustfmt reported changed lines needing formatting in
-`email.rs` (1095–1099, 1145–1151) and `notifications.rs` (1272) — test
-code added by earlier rounds of this task. Clippy, architecture, ABAC,
-and the web build were all green on the same tree. Fixed by running
-rustfmt over both files; `git diff --word-diff` confirms the change is
-line-wrapping only (identical tokens, no semantic change). Evidence
-under `/tmp/stage/review-evidence/task-113-verification-repair/`.
+The published PR conflicted with current main (task-111 session
+management, head 9fb371ac). Resolved by merging main into this branch.
+Both sides changed seven code files since the common base 9527d6ae
+(`gyre-server` notifications/lib/main/users/git_http/reconciliation,
+`gyre-adapters` sqlite/user_profile), but in disjoint hunk regions — git
+auto-merged all of them; the only textual conflict was the
+`user-management.md` coverage audit header, resolved as a union narrative
+with a mechanical recount (15 implemented, 10 task-assigned, 11 n/a —
+rows 12/26 arrive implemented from main's task-111 work, rows 19/20 this
+task, unchanged). `specs/coverage/SUMMARY.md` regenerated via
+`scripts/update-coverage-summary.sh` (also picked up main's
+abac-policy-engine/agent-gates count drift). No web/dist rebuild was
+performed in this round: the merged dist is the mechanical union of both
+sides' committed assets; the executor restores/regenerates them from the
+assignment base.
 
 ### Test evidence
 
-- `rustfmt --edition 2021 --check`: exit 0 on both repaired files and
-  on every Rust file changed vs base 2824d9b1 (16 files).
-- The failing verification already compiled and linted this exact tree
-  (clippy changed-lines clean) and built the web bundle; the repair is
-  formatting-only, so no recompilation was needed inside the 4 GiB
-  assignment budget.
-- Server tests the verifier must execute:
+- This round (merged tree): `SKIP_WEB_BUILD=1 cargo check -p gyre-server`
+  exit 0 (evidence: review-evidence/cargo-check-gyre-server.log, rerun
+  fresh in 0.38 s); `cargo test -p gyre-adapters --lib` on the merged
+  adapters crate — the one crate with a both-sides-changed file
+  (`sqlite/user_profile.rs`) — 537 passed, 0 failed, including both the
+  notification-preferences tests and task-111's session tests in the
+  merged file (evidence:
+  review-evidence/cargo-test-adapters-full.log).
+- Prior verified rounds (unchanged code): full `cargo test --all`, web
+  `npm test` (2328 passed), rustfmt/clippy/arch gates green on the
+  pre-merge head; per-round repair details are recorded in this task's
+  commit history (attribution commits above).
+- Server tests the verifier must execute on the merged tree:
   `cargo test -p gyre-server --lib email::`,
   `cargo test -p gyre-server notifications`,
-  `cargo test -p gyre-server impersonation`,
   `cargo test -p gyre-server --test spec_enforcement`,
   `cargo test --all`, and web e2e (`npx playwright test` against a release
   server build, GYRE_AUTH_TOKEN=e2e-test-token).
