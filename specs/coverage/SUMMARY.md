@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-11-13
+**Last updated:** 2026-11-14
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -25,7 +25,7 @@
 | message-bus.md | 17 | 3 | 0 | 2 | 1 | 11 | 85% |
 | meta-spec-reconciliation.md | 18 | 7 | 0 | 4 | 7 | 0 | 63% |
 | observability.md | 9 | 0 | 0 | 1 | 5 | 3 | 88% |
-| platform-model.md | 56 | 5 | 0 | 21 | 22 | 8 | 58% |
+| platform-model.md | 56 | 5 | 0 | 20 | 23 | 8 | 60% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
 | realized-model.md | 12 | 4 | 0 | 0 | 5 | 3 | 100% |
 | repo-lifecycle.md | 20 | 2 | 0 | 3 | 11 | 4 | 83% |
@@ -34,14 +34,14 @@
 | source-control.md | 13 | 2 | 0 | 1 | 0 | 10 | 90% |
 | spec-lifecycle.md | 13 | 3 | 0 | 0 | 5 | 5 | 100% |
 | spec-links.md | 17 | 3 | 0 | 0 | 4 | 10 | 100% |
-| spec-registry.md | 19 | 1 | 0 | 3 | 6 | 9 | 83% |
+| spec-registry.md | 19 | 1 | 0 | 2 | 7 | 9 | 88% |
 | supply-chain.md | 18 | 4 | 0 | 7 | 6 | 1 | 50% |
 | system-explorer.md | 19 | 10 | 0 | 9 | 0 | 0 | 0% |
 | trusted-foundry-integration.md | 26 | 26 | 0 | 0 | 0 | 0 | 0% |
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
 | ui-layout.md | 42 | 4 | 0 | 31 | 7 | 0 | 18% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
-| user-management.md | 36 | 11 | 0 | 17 | 8 | 0 | 32% |
+| user-management.md | 36 | 11 | 0 | 14 | 11 | 0 | 44% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **220** | **0** | **225** | **194** | **163** | **61%** |
+| **TOTAL** | **802** | **220** | **0** | **220** | **199** | **163** | **62%** |

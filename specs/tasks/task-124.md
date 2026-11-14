@@ -133,35 +133,53 @@ global role can be an invitee). Pending invitations are unaccepted
 membership rows — the lifecycle is real storage state, not a parallel
 table.
 
-### This round (contract restoration, checkpoint cebe3a499)
+### This round (merge of task-112's branch `1ee52c43`, checkpoint 4fd846f2)
 
-The executor again restored the assigned task document (contract
-repair d8383a00); this round preserves the existing production fix
-unchanged (no source changes were needed) and re-verifies it on the
-current checkout. The assigned contract body is kept byte-identical;
-progress status, the `commits:` frontmatter list, and these notes are
-the only task-document changes.
+The executor staged the assigned repair: merge the task-112 pipeline
+branch (base `1ee52c43` — notification delivery channels, who-gets-
+notified routing, escalation routing) into this task-124 head. The
+merge auto-resolved all code files; the only textual conflict was
+`specs/coverage/system/user-management.md`, where the two branches had
+implemented disjoint rows of the same coverage matrix from a common
+ancestor:
 
-- Review finding 3cd87005 (stale 7-argument
-  `NotificationRepository::list_for_user` call in the test
-  `deactivate_user_cascades_to_auth_and_ownership` after the rebase
-  brought in task-125's 8-argument signature) remains fixed by commit
-  33508170: the call at `crates/gyre-server/src/api/users.rs:4102`
-  passes `None` for the new `repo_id: Option<&Id>` parameter. `None` is
-  semantically correct, not just type-correct — the assertion checks
-  for a `WorkspaceOwnerless` notification, which has no repo scope, so
-  an unfiltered (all-repos) listing is what it needs. A tree-wide grep
-  over `crates/gyre-server/src` confirms no other stale
-  `list_for_user` call sites (the `spec_patrol.rs` callers already pass
-  the 8-argument form).
-- Fresh probes on the tree of HEAD `7fd39fb7` (identical source to
-  this round's commit; only this task document differs):
-  - `/tmp/stage/bin/cargo check -p gyre-server --tests` exits 0
-    (~8m54s; log retained at
-    `review-evidence/cargo-check-gyre-server-tests-round3.log`).
-  - `scripts/check-migration-versions.sh`,
-    `scripts/check-abac-route-registry.sh`, and `scripts/check-arch.sh`
-    all exit 0 (logs retained under `review-evidence/`).
+- Resolved as the union: rows 16/17/18 (task-112 implemented) come
+  from the base side, rows 26 (partial, session endpoints owned by
+  task-111) / 27 (task-124 implemented) from this branch. The
+  `Coverage:` header line was recomputed mechanically from the merged
+  table (`grep -c` per status, the same semantics as
+  `scripts/update-coverage-summary.sh`): 36 rows, 11 n/a, 0
+  not-started, 14 task-assigned, 11 implemented, 0 verified —
+  11/36. `specs/coverage/SUMMARY.md` regenerated via the script
+  (also picks up base-side platform-model.md row 7 / task-130 that
+  the stale SUMMARY had missed).
+- Migration-version invariant holds under the merge: the base's
+  `2026-11-09-000060/000061` and this branch's
+  `2026-11-12/13-000060/000061/000063` map to distinct full Diesel
+  versions (date+sequence, dashes removed), so every migration runs;
+  `scripts/check-migration-versions.sh` exits 0.
+
+No task-124 source semantics changed: every code file auto-merged,
+`cargo check -p gyre-server` and `cargo check -p gyre-server --tests`
+both pass on the merged tree, and all mechanical invariant scripts
+exit 0 (arch, ABAC route registry, ABAC exempt handlers, MCP write
+gates, migration versions/portability, byte-slice truncation, dead
+message kinds, mem port contracts, inert enforcement, relative path
+defaults, fail-open ref resolution, fabricated scope defaults, lossy
+secret conversion, scope literal defaults, task commit attribution,
+forwarded-header trust, in-memory state stores, unbounded external
+HTTP, forged scope fields). No duplicate axum route paths were
+introduced by the merged `api/mod.rs`.
+
+Fresh probes on the merged tree (logs under `review-evidence/`):
+
+- `cargo test -p gyre-common` — 125 passed.
+- `cargo test -p gyre-domain` — 510 + 8 passed.
+- `cargo test -p gyre-adapters` — 517 passed (includes both the
+  task-112 `user_channel_preferences` adapter tests and the task-124
+  migration backfill/deactivation storage paths on real SQLite).
+- `cargo check -p gyre-server --tests` — exit 0 (3m23s;
+  `review-evidence/cargo-check-gyre-server-tests-merge-112.log`).
 - Running the server test binary itself is deferred to the verifier
   per the sandbox memory budget (commands below).
 
@@ -173,6 +191,13 @@ the only task-document changes.
   `use users::{...}` import list in `api/mod.rs` (task-124 handlers vs
   task-125 notification handlers), resolved as the union; coverage
   narratives merged and mechanically recounted.
+- Merge of `1ee52c43` (this round's base, recorded above): only
+  conflict was the coverage matrix header; union + mechanical
+  recount. Earlier contract-restoration rounds (cebe3a499 and prior)
+  preserved the shipped production fixes unchanged and re-verified
+  them; review finding 3cd87005 (stale 7-argument
+  `list_for_user` call in `deactivate_user_cascades_to_auth_and_
+  ownership`) remains fixed by commit 33508170.
 - 38b3134f: fixed a test-fixture bug — `seed_workspace_with_owner`
   built the Owner membership as pending instead of the production
   `create_workspace` semantics (accepted immediately), which had broken
