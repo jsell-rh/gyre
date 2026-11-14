@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: ["8cc357498e02489c2ce63b90785fe813e39daaab", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "5ff4666790c4efa5873493db62566ee6f6b5c669"]
 ---
 
 ## Spec Excerpt
@@ -76,17 +76,17 @@ From §Email Notifications:
 
 ## Acceptance Criteria
 
-- [x] Notification bell with unread count badge in top nav
-- [x] Notification drawer slides out with grouped notifications
-- [x] Deep links navigate to relevant entity
-- [x] Mark read/unread (individual and bulk)
-- [x] Filtering by type, priority, workspace, repo
-- [x] Unread count API endpoint
-- [x] SSE endpoint for real-time notification push
-- [x] Notification preferences page with channel configuration
-- [x] Email templates for at least 5 notification types (all `NotificationType` variants)
-- [x] Digest mode aggregates notifications
-- [ ] `cargo test --all` and `npm test` pass — deferred to the independent verifier per the 4 GiB build wrapper; the previously failing `email::tests::subject_encoding_and_dot_stuffing` is repaired this round (real production fix, evidence below)
+- [ ] Notification bell with unread count badge in top nav
+- [ ] Notification drawer slides out with grouped notifications
+- [ ] Deep links navigate to relevant entity
+- [ ] Mark read/unread (individual and bulk)
+- [ ] Filtering by type, priority, workspace, repo
+- [ ] Unread count API endpoint
+- [ ] SSE endpoint for real-time notification push
+- [ ] Notification preferences page with channel configuration
+- [ ] Email templates for at least 5 notification types
+- [ ] Digest mode aggregates notifications
+- [ ] `cargo test --all` and `npm test` pass
 
 ## Agent Instructions
 
@@ -171,8 +171,8 @@ surface and the email template/digest layer). Coverage rows 19 and 20
   fixture defects against correct production behavior — digest fixture
   lacked a Medium-band type; the RFC 2047 fixture was pure ASCII.
   Production code unchanged.
-- `5ff46667` (this round, durable verification finding from attempt
-  `72fbcc80`: `cargo test --all` failed
+- `5ff46667` (durable verification finding from attempt `72fbcc80`:
+  `cargo test --all` failed
   `email::tests::subject_encoding_and_dot_stuffing`): **real production
   bug** — `dot_stuff` appended `\r\n` after every `split("\r\n")` segment,
   doubling the final CRLF of the DATA payload (and adding one when the
@@ -188,6 +188,22 @@ surface and the email template/digest layer). Coverage rows 19 and 20
   reconciled three rows (abac-policy-engine, agent-gates, analytics) that
   were stale on the incoming base relative to its own coverage files.
 
+### Contract-restoration round (no code change)
+
+The executor restored the assigned task document (contract repair
+`8bbc6329`); this round re-records the frontmatter attribution and these
+Shipped notes on the restored contract without touching the protected
+text (acceptance-criteria boxes left as assigned). The production fix
+from `5ff46667` is preserved verbatim in
+`crates/gyre-server/src/email.rs` (`dot_stuff`, lines 577–589) and
+re-verified this round with a standalone probe
+(`/tmp/stage/review-evidence/dot_stuff_probe.rs`, exit 0): the fixed
+join-based implementation passes both the failing assertion from attempt
+`72fbcc80` (`"line one\r\n.hidden\r\n"` → `"line one\r\n..hidden\r\n"`)
+and the pinned no-trailing-CRLF contract, while the pre-fix
+implementation reproduces the exact production failure — the test kills
+the bug.
+
 ### Test evidence
 
 - Web (in-sandbox, vitest — focused run on the task's four suites:
@@ -201,15 +217,10 @@ surface and the email template/digest layer). Coverage rows 19 and 20
   `notifications-store.test.js` (SSE frame parsing incl. split frames,
   unread-only counting, Authorization header, failed-stream fallback).
 - Rust (in-sandbox): `cargo test -p gyre-domain` — **510 passed** (incl.
-  `EmailConfig::type_overrides` serde compatibility). This round
-  (`5ff46667`, evidence: `/tmp/stage/review-evidence/task-113-email-test-repair.md`):
-  `cargo check -p gyre-server --lib` exit 0; standalone probe replicating
-  the fixed `dot_stuff` plus the test's assertions passes (exit 0) while
-  the old implementation reproduces the exact production failure (exit
-  101) — the test kills the bug. `digest_drain_sends_aggregate_and_
-  clears_outbox` (fake SMTP relay) uses only containment assertions and
-  is unaffected by the trailing-CRLF change (the wire format is now
-  RFC 5321-correct: single CRLF before the terminating `.`).
+  `EmailConfig::type_overrides` serde compatibility);
+  `cargo check -p gyre-server --lib` exit 0; the standalone
+  `dot_stuff` probe above (exit 0) distinguishes the fixed behavior
+  from the reproduced defect.
 - Rust (deferred to the independent verifier per the 4 GiB build
   wrapper — the server test binary must be compiled there):
   - `cargo test -p gyre-server --lib email::` — templates per type,
