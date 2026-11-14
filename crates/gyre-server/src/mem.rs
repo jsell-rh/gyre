@@ -3590,6 +3590,13 @@ impl gyre_ports::GateResultRepository for MemGateResultRepository {
             .cloned()
             .collect())
     }
+    async fn delete_by_mr_id_and_gate_id(&self, mr_id: &str, gate_id: &str) -> Result<()> {
+        self.results
+            .lock()
+            .await
+            .retain(|_, r| !(r.mr_id.to_string() == mr_id && r.gate_id.to_string() == gate_id));
+        Ok(())
+    }
 }
 
 #[derive(Default)]
