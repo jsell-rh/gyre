@@ -121,27 +121,25 @@ When working on this task:
 The spec save git write-through is fully implemented in production code on
 this branch (inherited from mainline; review history in
 `specs/reviews/task-011.md`, R2 verdict `complete`). The current round is a
-fourth contract repair (id `4a17771f34554fa3a9a0086b511876f2`): the executor
+fifth contract repair (id `ecc55cd157d34fa896f3ddffd1cdfe39`): the executor
 again restored the assigned task document, and the completion record is
 re-applied here on top of the restored document. No write-through product
 code changed this round — the assignment base is still `6ffd6799`, already
-merged as `90eda370` in the prior round.
+merged as `90eda370` in a prior round.
 
-### This round (repair `4a17771f`)
+### This round (repair `ecc55cd1`)
 
 - No merge was required: the assignment base `6ffd6799` is identical to the
-  prior round's base and was already merged (`90eda370`). `git diff --stat
-  90eda370..HEAD` shows only `specs/tasks/task-011.md` changed since the last
-  verified head — the product surface (`specs_assist.rs`, `git_ops.rs`,
-  `git2_ops.rs`) is byte-identical to the head where the prior round's probes
-  passed (`cargo check -p gyre-server --tests` exit 0; `cargo test -p
-  gyre-adapters --lib git2_ops` 35 passed).
+  prior round's base and was already merged (`90eda370`). The product surface
+  (`specs_assist.rs`, `git_ops.rs`, `git2_ops.rs`) is byte-identical to the
+  prior verified head (`git diff 1607a409 -- crates/ web/ src/` is empty) —
+  the code where the prior round's probes recorded evidence.
 - The executor restored the assigned task document (unchecked acceptance
   criteria, empty commit list) in the working tree; the restored normative
   text is identical to the recorded contract. The completion record —
   progress, acceptance checkboxes, commit attribution, and these Shipped
   notes — is re-applied (doc-only). Evidence retained under
-  `/tmp/stage/review-evidence/round-4a17771f-git-verification.txt`.
+  `/tmp/stage/review-evidence/round-ecc55cd1-git-verification.txt`.
 
 ### Actual behavior
 
@@ -188,18 +186,18 @@ merged as `90eda370` in the prior round.
   nested paths, overwrite, `create_branch` from existing ref, and
   `branch_exists`.
 
-### Probes this round (head `db9980a2`)
+### Probes this round (head `1607a409`)
 
 - Git-level verification only (no cargo compile re-run): the sandbox has no
   warm target dir and the code is byte-identical to the previously verified
-  head `90eda370`, so a cold build would prove nothing new. Recorded under
-  `/tmp/stage/review-evidence/round-4a17771f-git-verification.txt`:
-  `git log --oneline 90eda370..HEAD` (two doc-only commits), `git diff --stat
-  90eda370..HEAD` (only `specs/tasks/task-011.md`), `git status --short` at
-  round start (only the executor's task-doc restore), and grep spot checks of
-  the write-through call sites at HEAD.
+  head, so a cold build would prove nothing new. Recorded under
+  `/tmp/stage/review-evidence/round-ecc55cd1-git-verification.txt`:
+  `git merge-base --is-ancestor 6ffd6799 HEAD` (exit 0 — base already
+  merged), `git status --short` at round start (only the executor's task-doc
+  restore), `git diff 1607a409 -- crates/ web/ src/` (empty), and grep spot
+  checks of the write-through call sites at HEAD.
 - The verifier should execute at the published head: `cargo test -p
   gyre-adapters --lib git2_ops` and `cargo test -p gyre-server --lib
   api::specs_assist` (gyre-server test compilation is deferred to the
   verifier per the 4 GiB build budget; the identical code passed `cargo
-  check -p gyre-server --tests` at `90eda370` in the prior round).
+  check -p gyre-server --tests` at `90eda370` in a prior round).
