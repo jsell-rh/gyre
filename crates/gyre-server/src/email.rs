@@ -939,17 +939,20 @@ mod tests {
     }
 
     /// The digest aggregates: one subject, items grouped by priority band
-    /// with per-item unsubscribe links.
+    /// (each band rendered only when non-empty) with per-item unsubscribe
+    /// links. Fixture covers High, Medium, and Low band types — the bands
+    /// must appear in Urgent→Low order.
     #[test]
     fn digest_aggregates_and_groups_by_priority() {
         let notifs = vec![
             make_notif(NotificationType::MergeQueuePaused, "queue paused", 100),
             make_notif(NotificationType::AgentFailed, "agent down", 200),
-            make_notif(NotificationType::SuggestedSpecLink, "maybe link", 300),
+            make_notif(NotificationType::MetaSpecDrift, "meta drifted", 300),
+            make_notif(NotificationType::SuggestedSpecLink, "maybe link", 400),
         ];
         let email = render_digest_email(&notifs, Locale::En, "https://gyre.example");
-        assert!(email.subject.contains("3"));
-        // Urgent/High section precedes Medium in the HTML.
+        assert!(email.subject.contains("4"));
+        // High section precedes Medium, which precedes Low, in the HTML.
         let high = email
             .html
             .find("HIGH")
@@ -960,16 +963,37 @@ mod tests {
             .find("MEDIUM")
             .or_else(|| email.html.find("Medium"))
             .expect("medium band");
+        let low = email
+            .html
+            .find("LOW")
+            .or_else(|| email.html.find("Low"))
+            .expect("low band");
         assert!(high < medium);
-        assert!(email.html.matches("unsubscribe=").count() >= 3);
+        assert!(medium < low);
+        assert!(email.html.matches("unsubscribe=").count() >= 4);
         assert!(email.text.contains("agent down"));
+        assert!(email.text.contains("meta drifted"));
     }
 
     #[test]
     fn subject_encoding_and_dot_stuffing() {
+        // ASCII subjects pass through unencoded — RFC 2047 encoded-words
+        // are only required for non-ASCII text.
         assert_eq!(encode_subject("plain"), "plain");
-        let enc = encode_subject("Ihr Gyre-Digest (3)");
+        assert_eq!(encode_subject("Ihr Gyre-Digest (3)"), "Ihr Gyre-Digest (3)");
+        // Non-ASCII subjects become an RFC 2047 encoded-word that decodes
+        // back to the original.
+        let enc = encode_subject("Warteschlange pausiert – Übersicht");
         assert!(enc.starts_with("=?UTF-8?B?"));
+        assert!(enc.ends_with("?="));
+        let payload = enc
+            .strip_prefix("=?UTF-8?B?")
+            .and_then(|p| p.strip_suffix("?="))
+            .expect("encoded-word delimiters");
+        assert_eq!(
+            String::from_utf8(B64.decode(payload).unwrap()).unwrap(),
+            "Warteschlange pausiert – Übersicht"
+        );
         let stuffed = dot_stuff("line one\r\n.hidden\r\n");
         assert_eq!(stuffed, "line one\r\n..hidden\r\n");
     }
