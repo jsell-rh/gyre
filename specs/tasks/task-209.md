@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,100 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-HSI §12 profile gaps (notification filtering, judgment ledger, auth
-provider info) are implemented in production code across the commits
-listed in the frontmatter; coverage row 53 is `implemented`.
-
-What shipped, per acceptance criterion (all landed in the earlier
-rounds' commits, unchanged by this round's merge — see below):
-
-- **Spec amendment (Part 1)** — HSI §12 Judgment Ledger names the four
-  concrete sources (`spec_approvals`; `audit_events` rows
-  `event_type IN (gate_override, trust_change, meta_spec_publish)`;
-  `meta_spec_versions` joined to `meta_specs`), and the `?type=` values
-  are `approval|rejection|gate|trust|meta-spec`, matching
-  `JudgmentType::as_str()`.
-- **JudgmentType::GateOverride** — `as_str() = "gate"`,
-  `from_db_str("gate")` parses (`gyre-domain/src/user_profile.rs`).
-- **Aggregation (Part 2)** — `JudgmentLedgerRepository::list_for_user`
-  (sqlite/postgres/mem parity) unions all four categories from real
-  tables, filters `?workspace_id=` in the queries (no stamping), sorts
-  reverse-chronologically with a deterministic tie-break, and applies
-  limit/offset after the union+sort.
-- **Trust-change write path** — PUT /api/v1/workspaces/:id writes a
-  `trust_change` audit event (from/to/workspace_id) on real transitions.
-- **Gate-override write path** — a human (user-principal) approval
-  review on an MR with failed gate results writes one `gate_override`
-  event per failed gate (mr_id/gate_id/gate_type/failed→overridden);
-  agent-token approvals are excluded.
-- **Meta-spec publish attribution** — meta-spec registry create/update
-  write `meta_spec_publish` events (kind/name/version/content_hash).
-- **Inbox filtering** — `user_notification_preferences` rows with
-  `enabled = 0` are excluded in-query (before pagination) from both the
-  inbox list and the unread-count badge, and from the MCP inbox tool.
-- **Auth provider info** — `users.oidc_issuer` + `last_login_at`
-  recorded by JWT validation via debounced
-  `UserRepository::record_login`; `GET /api/v1/users/me` returns both
-  read-only.
-
-### This round: rebase repair onto assignment base 6ffd679 (merge 7c258bee)
-
-Durable finding 246a0aa6: merging the branch (6fea6da3) onto base
-6ffd679 (task-130 token scoping lineage) conflicted in
-`crates/gyre-server/src/auth.rs`. Resolved keeping both sides: the
-base's `AuthenticatedAgent` hierarchy-claims construction (§1 token
-scoping) and task-209's debounced `record_login` auth-provider
-provenance write. The base's deletion of the unrouted legacy inbox
-handlers (`api/agent_messages.rs`, the `AgentMessage` type in
-`src/messages.rs`) is taken as-is — dead code since message bus Phase
-3, untouched by task-209. Post-merge, every task-209 surface was
-grep-verified intact: the gate-override write in the review flow now
-sits after base's new reviewer-identity binding and still fires only
-for human principals; `users.rs`, `workspaces.rs`, `meta_specs.rs`,
-the user_profile adapters, and the HSI §12 spec text are byte-identical
-to the pre-merge candidate.
-
-### Test evidence (this round, sandbox probes, code state 7c258bee)
-
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` — exit 0
-  (log: /tmp/stage/review-evidence/t209-r3-srv-lib-check.log).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-adapters --lib --tests` —
-  exit 0 (log: t209-r3-adt-check.log).
-- `cargo test -p gyre-adapters --lib` — 522 passed, 0 failed; the
-  `user_profile` suite (12 tests: judgment-ledger merge/filter/
-  pagination/rejection-attribution/compressed-details, notification
-  exclusion for list+count, prefs roundtrip, record_login debounce,
-  token CRUD) all green (log: t209-r3-adt-userprofile-tests.log).
-- `cd web && npx vitest run` — 113 files, 2312 passed, 41 skipped,
-  exit 0 (log: t209-r3-web-tests.log).
-- Mechanical invariant scripts: every `scripts/check-*.sh` that fails
-  on the merged tree also fails on BOTH parents (6ffd679 and 6fea6da3)
-  or is mawk-vs-gawk environmental breakage (e.g.
-  check-tenant-filter.sh uses gawk 3-arg `match()`; the script is
-  byte-identical in both parents — GitHub CI runs gawk). No new
-  violations introduced by the merge (logs:
-  t209-r3-check-scripts-{merged-tree,base-parent,candidate-parent}.txt).
-- Round summary with source SHAs and exit codes:
-  /tmp/stage/review-evidence/t209-r3-round-summary.txt.
-
-### Server tests the independent verifier must execute
-
-The hard 4 GiB budget defers server test compilation/execution to the
-verifier. Required at head 7c258bee:
-
-- `trust_transition_writes_trust_change_audit_event`
-  (api/workspaces.rs)
-- `human_approval_on_failed_gate_writes_gate_override_event`
-  (api/merge_requests.rs)
-- `publish_writes_meta_spec_publish_audit_event` (api/meta_specs.rs)
-- `disabled_preference_excludes_type_from_inbox_and_count`
-  (api/users.rs)
-- `get_me_returns_recorded_auth_provider_info` (api/users.rs)
-- `push_check_notifications_broadcast_to_stream_subscribers`
-  (graph_extraction.rs — the call site repaired in 8e295c2e)
-
-plus the standard full gates (`cargo test --all`, clippy/rustfmt,
-`cd web && npm ci && npm test`, exact-head GitHub checks).
