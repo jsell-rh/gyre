@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["bdf1855d12d8837e6142b7ab060b09ac3cb63e55", "fd4351b9988673828b61a2b1379057db07548018", "97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["c947d22f1aa9b66f30b26b913aeda2e6c506fb94", "bdf1855d12d8837e6142b7ab060b09ac3cb63e55", "fd4351b9988673828b61a2b1379057db07548018", "97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
 ---
 
 ## Spec Excerpt
@@ -87,7 +87,7 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history. This round merges the new assignment base `32c4faef` (task-135 gate chain configuration and gate agent lifecycle, task-011 spec save git write-through) and repairs the four test failures that verification finding `4fb29ee2` (`cargo test --all`, exit 101) attributed to that merge.
+Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history. This round merges the new assignment base `c844ea52` (task-129 ABAC evaluation engine, API, and audit integration) and repairs the compile fallout that merge introduced in three base test fixtures. No session-management behavior changed this round.
 
 ### Implementation (unchanged this round)
 
@@ -97,18 +97,20 @@ Session management per `user-management.md` §Session Management is implemented 
 - **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with tenant-containment checks.
 - **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days.
 
-### This round's repair (`bdf1855d`, on merge `a52bc417` of base `32c4faef`)
+### This round's repair (`c947d22f`, on merge `0c135ca9` of base `c844ea52`)
 
-The base `32c4faef` and this branch both descend from `bfc36c9c`; git auto-merged them without textual conflicts, but four tests the base brought in build the MR router from `test_state()` without seeding the `repo-1` fixture (`closing_mr_emits_analytics_event`, `merging_mr_emits_analytics_event_with_gate_count`, `scoped_gate_review_records_persona_attribution`, `unscoped_review_has_no_gate_attribution`). `create_mr` has refused unknown repositories since the M34 scope-fabrication repair (`74749334`), so `create_test_mr` got a 404 and panicked unwrapping `json["id"]` — the exact failure class repaired before in `db116ab7`. All four now use the same `seed_repo(&state).await` fixture every other test in the module already uses; no product code changed. The attribution test's mint-site comment was also refreshed to describe the seeded-repo workspace binding instead of the base's pre-merge bootstrap-workspace one.
+The base `c844ea52` and this branch both descend from `32c4faef`; git auto-merged them without textual conflicts, but the base's three merge-processor decision-recording tests (`trust-audit`, `att-audit`, `fail-closed`) construct `MergeRequest` with the pre-M34 6-arg signature and patch `workspace_id` after the fact, while this branch's `MergeRequest::new` takes the workspace `Id` as its third argument — the same failure class repaired in `6a8d4a7c`/`ed6a9adc`/`f811501f`. All three fixtures now inline their workspace `Id` at the construction site (identical final state to the removed post-construction assignment); the trust-audit fixture's now-unneeded `mut` was dropped. No product code changed. The merged `test_state()` keeps both sides' wiring: the base's seeded builtin ABAC policies (`shared_workspace_policy_pair_seeded`) and this branch's `MemSessionRepository` session store; session routes remain ABAC-exempt with per-handler enforcement, and `check-abac-route-registry`/`check-abac-exempt-handlers` pass on the merged tree.
 
 ### Test evidence
 
-In-sandbox this round (log: `/tmp/stage/review-evidence/task-111-repair-round.log`):
+In-sandbox this round (log: `/tmp/stage/review-evidence/task-111-c844ea52-merge-round.log`):
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — clean (the merge plus the four fixture repairs type-check, including the base's new `mint_scoped` call sites and `Review` attribution fields).
-- All mechanical invariant gates pass on the merged tree: architecture/hierarchy lint, ABAC route registry + exempt-handler parity + context parity, MCP write-tool gating, migration versions and SQL portability, dead message kinds, byte-slice truncation, relative path defaults, fail-open ref resolution, mem port contracts, fabricated scope defaults (lookup and construction), lossy secret conversion, inert enforcement, forged scope fields, forwarded-header trust, in-memory state stores, unbounded external HTTP.
-- `cargo fmt --check` on the changed file — clean.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — clean (the merge plus the three fixture repairs type-check, including the base's new `policy_cache`, `evaluate_push_attestation_abac`, and reserved-system-identity call sites).
+- `cargo fmt --check` — clean.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain -p gyre-common -p gyre-ports` — 643 passed, 0 failed.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters` — 534 passed, 0 failed (includes the SQLite `SessionRepository` suite).
+- All mechanical invariant gates pass on the merged tree: architecture/hierarchy lint, ABAC route registry + exempt-handler parity, MCP write-tool gating, migration versions and SQL portability, dead message kinds, byte-slice truncation, relative path defaults, fail-open ref resolution, mem port contracts, fabricated scope defaults (lookup and construction), lossy secret conversion, inert enforcement, forged scope fields, forwarded-header trust, in-memory state stores, unbounded external HTTP (logs in `/tmp/stage/review-evidence/check-*.log`).
 
-Deferred to the independent verifier (gyre-server codegen exceeds the in-sandbox 4 GiB budget; the wrapper blocks it by design):
+Deferred to the independent verifier (gyre-server test codegen exceeds the in-sandbox 4 GiB budget; the wrapper blocks it by design):
 
-- `cargo test --all` — the authoritative rerun of finding `4fb29ee2`. Expected: the four repaired `api::merge_requests::tests` now pass; the remaining suite passed verbatim on this exact merged tree in that finding's run (2181 passed, only those 4 failed).
+- `cargo test --all` — expected: the three repaired `merge_processor` tests compile and pass; the full suite last ran green on this branch's tree at base `32c4faef` (finding `4fb29ee2`: 2181 passed, only the 4 `merge_requests` failures since repaired in `bdf1855d`), and the only compile-level interaction with the new base was the constructor drift fixed in `c947d22f`.
