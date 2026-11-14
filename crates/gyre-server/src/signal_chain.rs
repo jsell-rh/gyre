@@ -254,11 +254,23 @@ async fn ensure_workspace_orchestrator(
     if let Some(existing) = find_live_workspace_orchestrator(state, workspace_id).await? {
         return Ok(existing);
     }
+    // The signal chain is a server-originated (system) spawn — there is no
+    // authenticated caller whose tenant scope could be compared. Mirror the
+    // HTTP handler's system-principal bypass: resolve the REAL tenant of the
+    // workspace being spawned into (fail-closed when the row is missing —
+    // the same lookup the core repeats for containment) and pass it as the
+    // caller tenant, never a fabricated identity.
+    let ws = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} not found"))?;
     let (agent, _token, _launch) = crate::api::orchestrator::spawn_workspace_orchestrator_core(
         state,
         &workspace_id.to_string(),
         crate::api::orchestrator::SpawnOrchestratorRequest::default(),
         "system",
+        ws.tenant_id.as_str(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("workspace orchestrator spawn: {e:?}"))?;
@@ -1145,6 +1157,9 @@ fn scheduler_system_auth() -> crate::auth::AuthenticatedAgent {
         user_id: None,
         roles: vec![gyre_domain::UserRole::Admin],
         tenant_id: crate::auth::system_principal_tenant(),
+        workspace_id: None,
+        repo_id: None,
+        scope: Vec::new(),
         jwt_claims: None,
         bearer_token: None,
         deprecated_token_auth: false,
@@ -1469,11 +1484,35 @@ pub async fn ensure_repo_orchestrator_for_failure(
     if let Ok(Some(existing)) = find_live_repo_orchestrator(state, repo).await {
         return Some(existing);
     }
+    // §1/task-093 F3 containment: the spawn core compares the repo's
+    // workspace tenant against the caller's — resolve it here, fail closed
+    // (no orchestrator → caller falls back to workspace routing) when the
+    // workspace cannot be loaded; never fabricate a tenant identity.
+    let ws_tenant = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id,
+        Ok(None) => {
+            tracing::warn!(
+                repo_id = %repo.id,
+                "signal-chain: repo references missing workspace {}; tenant scope \
+                 for failure orchestrator cannot be determined",
+                repo.workspace_id
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                repo_id = %repo.id,
+                "signal-chain: workspace lookup failed: {e}"
+            );
+            return None;
+        }
+    };
     match crate::api::orchestrator::spawn_repo_orchestrator_core(
         state,
         &repo.id.to_string(),
         crate::api::orchestrator::SpawnOrchestratorRequest::default(),
         "system",
+        ws_tenant.as_str(),
     )
     .await
     {
@@ -1501,6 +1540,23 @@ async fn run_repo_orchestrator(
     // durable one-live check and the per-repo registry lock (held by the
     // caller) serializes concurrent signals.
     if find_live_repo_orchestrator(state, repo).await?.is_none() {
+        // Server-originated (system) spawn — no authenticated caller to
+        // compare against. Pass the REAL tenant of the repo's workspace
+        // (fail-closed on a dangling reference, mirroring the core's own
+        // containment lookup) so the comparison never sees a fabricated
+        // identity.
+        let ws_tenant = match state.workspaces.find_by_id(&repo.workspace_id).await {
+            Ok(Some(ws)) => ws.tenant_id,
+            Ok(None) => {
+                anyhow::bail!(
+                    "repo {} references workspace {} which does not exist — the tenant \
+                     scope for the orchestrator token cannot be determined",
+                    repo.id,
+                    repo.workspace_id
+                )
+            }
+            Err(e) => return Err(e),
+        };
         let (agent, _token, _launch) = crate::api::orchestrator::spawn_repo_orchestrator_core(
             state,
             &repo.id.to_string(),
@@ -1509,6 +1565,7 @@ async fn run_repo_orchestrator(
                 parent_id: task.assigned_to.as_ref().map(|a| a.to_string()),
             },
             "system",
+            ws_tenant.as_str(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("repo orchestrator spawn: {e:?}"))?;
