@@ -44,6 +44,15 @@ vi.mock('../lib/api.js', () => ({
     secretCreate: vi.fn().mockResolvedValue({}),
     secretDelete: vi.fn().mockResolvedValue(null),
     secretRotate: vi.fn().mockResolvedValue({}),
+    // ABAC policy management surface (task-132) — the Policies tab's
+    // PolicyManager calls the global /policies endpoints.
+    policies: vi.fn().mockResolvedValue([]),
+    createPolicy: vi.fn().mockResolvedValue({}),
+    updatePolicy: vi.fn().mockResolvedValue({}),
+    deletePolicy: vi.fn().mockResolvedValue(null),
+    policyDecisions: vi.fn().mockResolvedValue([]),
+    evaluatePolicy: vi.fn().mockResolvedValue({}),
+    effectivePermissions: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -540,6 +549,26 @@ describe('TenantSettings', () => {
         expect(api.createWorkspace).toHaveBeenCalledWith(
           expect.objectContaining({ name: 'Risk Engine', slug: 'risk-engine' })
         );
+      }, { timeout: 3000 });
+    });
+  });
+
+  // ── ABAC policy management (abac-policy-engine.md §UI, task-132) ─────
+  describe('Policies tab', () => {
+    it('embeds the PolicyManager at tenant level on the global /policies endpoints', async () => {
+      api.me.mockResolvedValue({ username: 'admin', email: 'admin@example.com', role: 'Admin', tenant_id: 'tenant-acme' });
+      const { container } = render(TenantSettings);
+      await fireEvent.click(container.querySelector('[data-testid="tenant-settings-tab-policies"]'));
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="policy-manager"]')).toBeTruthy();
+      }, { timeout: 3000 });
+      await waitFor(() => {
+        expect(api.policies).toHaveBeenCalledWith({ scope: 'Tenant' });
+      }, { timeout: 3000 });
+      // The tab resolves the admin's own tenant to prefill the scope filter
+      // once me() returns.
+      await waitFor(() => {
+        expect(api.policies).toHaveBeenCalledWith({ scope: 'Tenant', scope_id: 'tenant-acme' });
       }, { timeout: 3000 });
     });
   });

@@ -619,10 +619,18 @@ export const api = {
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  // Tenant-level ABAC policies
-  policies: () => request('/policies'),
+  // Tenant-level ABAC policies. `params` carries the §UI scope filter
+  // (`?scope=Workspace&scope_id=<id>` — the GLOBAL policy endpoints;
+  // workspace scoping is a query filter, never a workspace-prefixed URL).
+  policies: (params = {}) => {
+    if (params == null) return request('/policies');
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies${qs ? '?' + qs : ''}`);
+  },
   createPolicy: (data) =>
     request('/policies', { method: 'POST', body: JSON.stringify(data) }),
+  updatePolicy: (id, data) =>
+    request(`/policies/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePolicy: (id) =>
     request(`/policies/${id}`, { method: 'DELETE' }),
   policyDecisions: (params = {}) => {
@@ -636,6 +644,19 @@ export const api = {
     request(`/policies/${policyId}`, { method: 'DELETE' }),
   simulateAbacPolicy: (id, data) =>
     request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
+  // Dry-run simulator — POST /api/v1/policies/evaluate (global endpoint,
+  // never workspace-prefixed; the id parameter of simulateAbacPolicy is
+  // ignored server-side and kept only for call-site compatibility).
+  evaluatePolicy: (data) =>
+    request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
+  // Effective permissions — GET /api/v1/policies/effective?subject={id}
+  // (the documented `subject` spelling; the server accepts `subject_id`
+  // as an alias). Optional resource_type/workspace_id/repo_id/tenant_id
+  // scope the answer.
+  effectivePermissions: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies/effective${qs ? '?' + qs : ''}`);
+  },
   // Explorer saved views — repo-scoped (canonical, via WS or REST)
   savedViews: (repoId) => request(`/repos/${repoId}/views`),
   createSavedView: (repoId, data) =>
@@ -763,8 +784,8 @@ export const api = {
     }).toString();
     return request(`/analytics/decide?${qs}`);
   },
-  // Retention policies (analytics.md §Data Retention)
-  adminRetention: () => request('/admin/retention'),
+  // Retention policies (analytics.md §Data Retention) — adminRetention is
+  // defined alongside the other admin endpoints above.
   setAnalyticsRetention: (retentionDays) =>
     request('/admin/retention', {
       method: 'PUT',

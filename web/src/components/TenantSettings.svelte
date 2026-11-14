@@ -24,6 +24,7 @@
   }
   import { toast as showToast } from '../lib/toast.svelte.js';
   import SecretsPanel from './SecretsPanel.svelte';
+  import PolicyManager from './abac/PolicyManager.svelte';
 
   let {
     onBack = undefined,
@@ -98,48 +99,20 @@
   let computeDeleting = $state(null);
 
   // ── Policies (ABAC) ──────────────────────────────────────────────────
-  let policies = $state([]);
-  let policiesLoading = $state(false);
-  let policiesError = $state(null);
-  let policyDecisions = $state([]);
-  let policyDecisionsLoading = $state(false);
-  let showPolicyForm = $state(false);
-  let policyFormSaving = $state(false);
-  let policyForm = $state({ name: '', scope: 'tenant', effect: 'allow', actions: 'push', resource_types: 'repo', priority: 100, condition_attr: 'subject.type', condition_op: 'equals', condition_val: 'agent' });
-  let deletingPolicyId = $state(null);
-
-  async function createPolicy() {
-    if (!policyForm.name.trim()) return;
-    policyFormSaving = true;
+  // Full policy management surface (abac-policy-engine.md §UI) lives in
+  // the PolicyManager component; this tab only anchors it at tenant level
+  // and resolves the admin's tenant id so the scope filter defaults to
+  // the caller's own tenant.
+  async function ensureCurrentUser() {
+    if (currentUser || usersLoading) return;
+    usersLoading = true;
     try {
-      await api.createPolicy({
-        name: policyForm.name.trim(),
-        scope: policyForm.scope,
-        effect: policyForm.effect,
-        conditions: [{ attribute: policyForm.condition_attr, operator: policyForm.condition_op, value: policyForm.condition_val }],
-        actions: policyForm.actions.split(',').map(s => s.trim()).filter(Boolean),
-        resource_types: policyForm.resource_types.split(',').map(s => s.trim()).filter(Boolean),
-        priority: parseInt(policyForm.priority) || 100,
-      });
-      showPolicyForm = false;
-      policyForm = { name: '', scope: 'tenant', effect: 'allow', actions: 'push', resource_types: 'repo', priority: 100, condition_attr: 'subject.type', condition_op: 'equals', condition_val: 'agent' };
-      loadPolicies();
-    } catch (e) {
-      policiesError = 'Create failed: ' + (e?.message ?? e);
+      currentUser = await api.me();
+    } catch {
+      // Non-fatal: the policy manager's scope-id field stays blank and
+      // lists tenant-unscoped policies until an id is typed.
     } finally {
-      policyFormSaving = false;
-    }
-  }
-
-  async function deletePolicy(id) {
-    deletingPolicyId = id;
-    try {
-      await api.deletePolicy(id);
-      policies = policies.filter(p => p.id !== id);
-    } catch (e) {
-      policiesError = 'Delete failed: ' + (e?.message ?? e);
-    } finally {
-      deletingPolicyId = null;
+      usersLoading = false;
     }
   }
 
@@ -239,7 +212,7 @@
       if (untrack(() => jobs.length === 0 && !jobsLoading)) loadJobs();
     }
     if (tab === 'policies') {
-      if (untrack(() => policies.length === 0 && !policiesLoading)) loadPolicies();
+      if (untrack(() => !currentUser && !usersLoading)) ensureCurrentUser();
     }
     if (tab === 'llm') {
       if (untrack(() => Object.keys(adminLlmConfigs).length === 0 && !adminLlmLoading)) loadAdminLlm();
@@ -422,23 +395,9 @@
     }
   }
 
-  // ── Policies ──────────────────────────────────────────────────────────
-  async function loadPolicies() {
-    policiesLoading = true;
-    policiesError = null;
-    try {
-      const [pols, decs] = await Promise.all([
-        api.policies().catch(() => []),
-        api.policyDecisions({ limit: 20 }).catch(() => []),
-      ]);
-      policies = Array.isArray(pols) ? pols : (pols?.items ?? []);
-      policyDecisions = Array.isArray(decs) ? decs : (decs?.items ?? []);
-    } catch (e) {
-      policiesError = e?.message ?? 'Failed to load policies';
-    } finally {
-      policiesLoading = false;
-    }
-  }
+  // ── Policies (ABAC) ──────────────────────────────────────────────────
+  // PolicyManager loads its own data from the global
+  // GET /api/v1/policies?scope=…&scope_id=… endpoints.
 
   // ── LLM Defaults ─────────────────────────────────────────────────────
   async function loadAdminLlm() {
@@ -1206,141 +1165,15 @@
           <h2 class="panel-title">Access Policies (ABAC)</h2>
           <p class="panel-desc">Attribute-based access control policies governing agent actions, git push, and resource access across the tenant.</p>
         </div>
-
-        <!-- Create Policy button -->
-        <div class="panel-actions" style="margin-bottom: var(--space-4)">
-          <button class="action-btn" onclick={() => (showPolicyForm = !showPolicyForm)}>
-            {showPolicyForm ? 'Cancel' : '+ Create Policy'}
-          </button>
-        </div>
-
-        {#if showPolicyForm}
-          <div class="create-form" style="margin-bottom: var(--space-6)">
-            <div class="form-row">
-              <label class="form-label">Name <input class="form-input" bind:value={policyForm.name} placeholder="e.g. allow-agent-push" /></label>
-              <label class="form-label">Effect
-                <select class="form-input" bind:value={policyForm.effect}>
-                  <option value="allow">Allow</option>
-                  <option value="deny">Deny</option>
-                </select>
-              </label>
-              <label class="form-label">Priority <input class="form-input" type="number" bind:value={policyForm.priority} /></label>
-            </div>
-            <div class="form-row">
-              <label class="form-label">Actions <input class="form-input" bind:value={policyForm.actions} placeholder="push, read, spawn" /></label>
-              <label class="form-label">Resource Types <input class="form-input" bind:value={policyForm.resource_types} placeholder="repo, agent" /></label>
-              <label class="form-label">Scope
-                <select class="form-input" bind:value={policyForm.scope}>
-                  <option value="tenant">Tenant</option>
-                  <option value="workspace">Workspace</option>
-                </select>
-              </label>
-            </div>
-            <div class="form-row">
-              <label class="form-label">Condition Attribute <input class="form-input" bind:value={policyForm.condition_attr} placeholder="subject.type" /></label>
-              <label class="form-label">Operator
-                <select class="form-input" bind:value={policyForm.condition_op}>
-                  <option value="equals">equals</option>
-                  <option value="not_equals">not_equals</option>
-                  <option value="contains">contains</option>
-                  <option value="in">in</option>
-                </select>
-              </label>
-              <label class="form-label">Value <input class="form-input" bind:value={policyForm.condition_val} placeholder="agent" /></label>
-            </div>
-            <button class="action-btn action-btn-primary" onclick={createPolicy} disabled={policyFormSaving || !policyForm.name.trim()}>
-              {policyFormSaving ? 'Creating...' : 'Create Policy'}
-            </button>
-          </div>
-        {/if}
-
-        {#if policiesLoading}
-          <div class="panel-loading" aria-live="polite">Loading policies…</div>
-        {:else if policiesError}
-          <div class="panel-error" role="alert">{policiesError}</div>
-        {:else}
-          {#if policies.length > 0}
-            <h3 class="sub-heading">Active Policies ({policies.length})</h3>
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th scope="col"><button class="sort-btn">Name</button></th>
-                  <th scope="col"><button class="sort-btn">Scope</button></th>
-                  <th scope="col"><button class="sort-btn">Effect</button></th>
-                  <th scope="col"><button class="sort-btn">Actions</button></th>
-                  <th scope="col"><button class="sort-btn">Resources</button></th>
-                  <th scope="col"><button class="sort-btn">Priority</button></th>
-                  <th scope="col"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each policies as policy (policy.id ?? policy.name)}
-                  <tr>
-                    <td class="td-name">{policy.name ?? '—'}</td>
-                    <td>{policy.scope ?? '—'}</td>
-                    <td>
-                      <span class="status-pill" class:status-ok={policy.effect === 'allow'} class:status-err={policy.effect === 'deny'}>
-                        {policy.effect ?? '—'}
-                      </span>
-                    </td>
-                    <td class="mono">{(policy.actions ?? []).join(', ') || '—'}</td>
-                    <td class="mono">{(policy.resource_types ?? []).join(', ') || '—'}</td>
-                    <td>{policy.priority ?? '—'}</td>
-                    <td>
-                      {#if policy.id}
-                        <button class="delete-btn" onclick={() => deletePolicy(policy.id)} disabled={deletingPolicyId === policy.id} title="Delete policy">
-                          {deletingPolicyId === policy.id ? '...' : '✕'}
-                        </button>
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {:else}
-            <div class="panel-empty">No ABAC policies configured. Create one above to control agent access.</div>
-          {/if}
-
-          {#if policyDecisions.length > 0}
-            <h3 class="sub-heading" style="margin-top: var(--space-6)">Recent Decisions ({policyDecisions.length})</h3>
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th scope="col"><button class="sort-btn">Time</button></th>
-                  <th scope="col"><button class="sort-btn">Decision</button></th>
-                  <th scope="col"><button class="sort-btn">Subject</button></th>
-                  <th scope="col"><button class="sort-btn">Action</button></th>
-                  <th scope="col"><button class="sort-btn">Resource</button></th>
-                  <th scope="col"><button class="sort-btn">Policy</button></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each policyDecisions as dec (dec.id ?? dec.timestamp)}
-                  <tr>
-                    <td class="td-mono">{fmtTimestamp(dec.timestamp ?? dec.evaluated_at)}</td>
-                    <td>
-                      <span class="status-pill" class:status-ok={dec.decision === 'allow'} class:status-err={dec.decision === 'deny'}>
-                        {dec.decision ?? '—'}
-                      </span>
-                    </td>
-                    <td class="mono" title={dec.subject?.id ?? dec.subject_id ?? ''}>
-                      {#if dec.subject?.type && dec.subject?.id}
-                        {dec.subject.type}: <button class="audit-entity-btn" onclick={() => nav(dec.subject.type, dec.subject.id, {})}>{resolveEntityName(dec.subject.type, dec.subject.id)}</button>
-                      {:else if dec.subject_id}
-                        <button class="audit-entity-btn" onclick={() => nav('agent', dec.subject_id, {})}>{resolveEntityName('agent', dec.subject_id)}</button>
-                      {:else}
-                        —
-                      {/if}
-                    </td>
-                    <td>{dec.action ?? '—'}</td>
-                    <td>{dec.resource?.type ?? dec.resource_type ?? '—'}</td>
-                    <td class="mono">{dec.matched_policy ?? dec.policy_name ?? '—'}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-        {/if}
+        <!-- Full §UI surface: CRUD + condition-builder editor, dry-run
+             simulator, decision audit log, effective permissions, conflict
+             detector — all on the global /api/v1/policies endpoints with
+             ?scope= query filters. -->
+        <PolicyManager
+          heading="Tenant Policies"
+          initialScope="tenant"
+          initialScopeId={currentUser?.tenant_id ?? null}
+        />
       </div>
 
     <!-- ── LLM Defaults ─────────────────────────────────────────────── -->
