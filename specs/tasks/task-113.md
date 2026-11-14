@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["f25b5d1856a7e39f29cbf63f4927ca7045b3bd15", "08c58f63cfd82da292a778bb208e0f4c801c8c4e", "ed9a85cb1424069b8aecc5ce00dc60a75b0ffbc4", "d5340ae6128a6333bf2f3415ee4afd0c8d62d18e", "5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: ["f25b5d1856a7e39f29cbf63f4927ca7045b3bd15", "08c58f63cfd82da292a778bb208e0f4c801c8c4e", "ed9a85cb1424069b8aecc5ce00dc60a75b0ffbc4", "d5340ae6128a6333bf2f3415ee4afd0c8d62d18e", "5ff4666790c4efa5873493db62566ee6f6b5c669", "5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab", "5d008fb8b7b87b637a09f5ce9f341acbefaf159c"]
 ---
 
 ## Spec Excerpt
@@ -151,46 +151,64 @@ and 20 (`user-management.md`) are `implemented`.
   drain time against the user's CURRENT config (raised thresholds /
   unsubscribes take effect on already-queued entries).
 
-### CI repair (this round, commit 08c58f63)
+### Security repair (this round, commit 5d008fb8)
 
-The published candidate failed CI with all 64 e2e tests timing out at
-`waitForLoadState('networkidle')` (run 43612463147). Root cause: the
-client held a per-tab fetch-streamed SSE connection to
-`/api/v1/notifications/stream`; a never-ending HTTP response — fetch-
-streamed OR EventSource — permanently blocks networkidle. Verified
-empirically with headless Chromium against a minimal SSE server (evidence
-in `/tmp/stage/review-evidence/task-113/`): pages holding either a
-streaming fetch or an EventSource never reach networkidle; a plain page
-reaches it in ~580 ms.
+Review finding (round 2): SMTP header injection in the RFC 5322 message
+builder — `encode_subject` passed ASCII subjects through with no CR/LF
+stripping, and `render_notification_email` embeds `notif.title` raw;
+titles carry user-controlled free text (display names via `PUT /users/me`,
+workspace names at creation), so a CRLF-laden ImpersonationRequest title
+forged a `Bcc:` header at the relay, copying the victim's approval-code
+email to the attacker.
 
-Fix: the bell's realtime channel rides the app's existing single
-authenticated `/ws` WebSocket (already open per tab for presence/liveness;
-WebSockets do not block networkidle). `BroadcastingNotificationRepo::create`
-now pushes `WsMessage::NotificationPush` to the owner's live connections in
-addition to the SSE broadcast; the redundant explicit impersonation push
-was removed (the centralized fan-out covers it, and no longer pushes on
-the persist-failure path). The SSE endpoint and its per-event
-user+tenant filtering are unchanged.
+- `strip_header_controls` (CR/LF/NUL) applied inside `encode_subject`
+  before the ASCII/encoded-word branch.
+- `valid_address` gates `from`/`to` in `send_email` before any socket —
+  these values are interpolated into RFC 5322 headers AND raw SMTP
+  envelope commands (`MAIL FROM`/`RCPT TO`), so both header and command
+  injection are blocked; `build_message` control-strips them again as
+  defense in depth; `run_digest_once` drops queued entries for a user
+  whose stored address can never pass the gate (warn log) instead of
+  retrying forever.
+- Regression tests: `crlf_in_title_cannot_forge_header_lines` (renders
+  the exact attack title, asserts the header block stays exactly 5 lines
+  with no forged header and CRLF stripped from the subject) and
+  `addresses_with_controls_are_rejected_at_the_gate` (unit assertions +
+  `send_email` failing with the gate error before any connection).
 
-Validation this round (evidence + commands under
-`/tmp/stage/review-evidence/task-113/`):
+Validation this round (evidence under `/tmp/stage/review-evidence/`):
 
-- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests`:
-  exit 0.
-- `npm test` (full vitest suite): 119 files, 2371 passed / 41 skipped
-  (pre-existing skips). Notification suites rewritten for the WS
-  subscription: unread-only counting, status mapping, detach/re-attach
-  idempotence; plus a server test proving owner-only WS push (one push to
-  the owner's connection, none to another user's, no duplicate).
-- End-to-end probe with the built SPA + stub API in headless Chromium:
-  networkidle fires in ~1.5 s, the bell renders, the badge shows the
-  fetched unread count, and zero requests are made to the SSE stream —
-  the exact CI failure mode is gone without touching any e2e test.
+- Standalone probe `header-injection-repair-probe.rs` (functions copied
+  verbatim from the repaired source; same methodology as the reviewer's
+  repro): exit 0, all checks pass — including the NEGATIVE CONTROL where
+  the pre-fix chain still exhibits the injected `Bcc:` header, proving
+  the new assertions kill the real bug.
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --lib
+  --tests`: exit 0 (gyre-server test builds are deferred to the verifier
+  per the 4 GiB build budget).
+- Mechanical checks: `check-arch.sh`, `check-byte-slice-truncation.sh`,
+  `check-inert-enforcement.sh` all exit 0.
+
+### Realtime/CI repair (commit 08c58f63)
+
+The first published candidate failed CI with all 64 e2e tests timing out
+at `waitForLoadState('networkidle')`: the client held a per-tab
+fetch-streamed SSE connection to `/api/v1/notifications/stream`, and a
+never-ending HTTP response permanently blocks networkidle. Fix: the
+bell's realtime channel rides the app's existing single authenticated
+`/ws` WebSocket (`BroadcastingNotificationRepo::create` pushes
+`WsMessage::NotificationPush` to the owner's live connections); the
+specced SSE endpoint is unchanged. Verified empirically with headless
+Chromium (networkidle fires in ~1.5 s, zero SSE requests); `npm test`
+119 files, 2371 passed / 41 pre-existing skips.
 
 Server tests the independent verifier should run (deferred per the 4 GiB
 build budget):
 
-- `cargo test -p gyre-server notifications` (includes the new
+- `cargo test -p gyre-server --lib email::` (includes this round's two
+  header-injection regression tests plus the in-process relay digest
+  drain test)
+- `cargo test -p gyre-server notifications` (includes
   `create_notification_pushes_to_owners_live_ws_connections_only`)
 - `cargo test -p gyre-server impersonation`
 - `cargo test -p gyre-server --test spec_enforcement`
