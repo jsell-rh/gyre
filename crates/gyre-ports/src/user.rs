@@ -21,6 +21,29 @@ pub trait UserRepository: Send + Sync {
     /// immutable after creation; implementations MUST reject an update that
     /// changes either (user-management.md §Username vs Display Name).
     async fn update(&self, user: &User) -> Result<()>;
+    /// Records the OIDC provider that just authenticated this user: the verified `iss` claim and
+    /// the authentication time (HSI §12 "Auth provider info"). Server-written — no handler ever
+    /// routes a client value here.
+    ///
+    /// The `last_login_at` write is skipped unless `min_interval_secs` has elapsed since the
+    /// stored `last_login_at` (or it is unset). OIDC tokens are validated on *every* request, so an
+    /// unconditional write would make `users` the hottest table in the server to record a
+    /// timestamp that is read a few times a day. Implementations MUST evaluate the interval and
+    /// apply the write in one statement — a read-modify-write would let concurrent requests for
+    /// the same user race.
+    ///
+    /// The debounce NEVER suppresses an issuer change: the write also fires when the stored
+    /// `oidc_issuer` is unset or differs from the verified one. The user-provisioning path
+    /// stamps `last_login_at` on every authentication (user-management.md §User Entity), which
+    /// keeps that column fresh — without this carve-out the issuer would never be recorded for
+    /// an already-provisioned user, and a migration to a different IdP would never be reflected.
+    async fn record_login(
+        &self,
+        user_id: &Id,
+        oidc_issuer: &str,
+        at: u64,
+        min_interval_secs: u64,
+    ) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
 }
 

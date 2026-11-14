@@ -80,9 +80,13 @@ pub struct UserProfileResponse {
     pub global_role: String,
     pub roles: Vec<String>,
     pub preferences: serde_json::Value,
-    pub last_login_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
+    /// OIDC issuer that authenticated this user (HSI §12 auth-provider info).
+    /// Null for API-key/legacy provisioned users.
+    pub oidc_issuer: Option<String>,
+    /// Last authenticated-at (Unix secs) of the user (HSI §12).
+    pub last_login_at: Option<u64>,
     /// Unix seconds of the account's deactivation, if a TenantAdmin
     /// deactivated it (user-management.md §API > User Management).
     pub deactivated_at: Option<u64>,
@@ -106,9 +110,10 @@ impl From<User> for UserProfileResponse {
             global_role: format!("{:?}", u.global_role),
             roles: u.roles.iter().map(|r| r.as_str().to_string()).collect(),
             preferences: prefs,
-            last_login_at: u.last_login_at,
             created_at: u.created_at,
             updated_at: u.updated_at,
+            oidc_issuer: u.oidc_issuer.clone(),
+            last_login_at: u.last_login_at,
             deactivated_at: u.deactivated_at,
             tenant_id: u.tenant_id.map(|t| t.to_string()),
         }
@@ -142,9 +147,10 @@ pub async fn get_me(
         roles: auth.roles.iter().map(|r| r.as_str().to_string()).collect(),
         preferences: serde_json::to_value(gyre_domain::UserPreferences::default())
             .unwrap_or_default(),
-        last_login_at: None,
         created_at: 0,
         updated_at: 0,
+        oidc_issuer: None,
+        last_login_at: None,
         deactivated_at: None,
         tenant_id: None,
     };
@@ -639,6 +645,10 @@ async fn list_my_notifications_impl(
     let max_priority = params.max_priority.or(band_max);
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
+    // HSI §12: types the user disabled via notification preferences are
+    // excluded from the inbox (before limit/offset).
+    let disabled = disabled_notification_types(&state, &user_id).await?;
+    let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
     let notifications = state
         .notifications
         .list_for_user(
@@ -648,6 +658,7 @@ async fn list_my_notifications_impl(
             max_priority,
             params.notification_type.as_deref(),
             repo_id.as_ref(),
+            &disabled,
             limit,
             offset,
         )
@@ -671,9 +682,12 @@ pub async fn get_notification_count(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    // Same preference exclusion as the inbox list, so the badge matches it.
+    let disabled = disabled_notification_types(&state, &user_id).await?;
+    let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
     let count = state
         .notifications
-        .count_unresolved(&user_id, workspace_id.as_ref())
+        .count_unresolved(&user_id, workspace_id.as_ref(), &disabled)
         .await?;
     Ok(Json(serde_json::json!({ "count": count })))
 }
@@ -2156,6 +2170,20 @@ pub struct UpdateNotifPrefsRequest {
     pub channels: Option<gyre_domain::NotificationChannels>,
 }
 
+/// Canonical type names the user has explicitly disabled (HSI §12).
+/// Used as the inbox/count exclusion set; an empty result filters nothing.
+async fn disabled_notification_types(
+    state: &AppState,
+    user_id: &Id,
+) -> Result<Vec<String>, ApiError> {
+    let prefs = state.user_notification_prefs.list_for_user(user_id).await?;
+    Ok(prefs
+        .into_iter()
+        .filter(|p| !p.enabled)
+        .map(|p| p.notification_type)
+        .collect())
+}
+
 /// Shared validation for a `NotificationChannels` update, whichever endpoint
 /// carries it (PUT /notifications/preferences or the `notification_channels`
 /// field of PUT /users/me): `in_app` is forced true ("Always true (can't
@@ -2207,20 +2235,33 @@ pub async fn update_notification_preferences(
         ));
     }
 
+    // Normalize to the canonical `NotificationType::as_str()` name before
+    // storing: `parse` accepts legacy aliases (`SpecPendingApproval`,
+    // `BudgetWarning`), but notification rows are persisted with canonical
+    // names and the inbox filter is a raw string comparison — storing an
+    // alias would silently create a preference that never matches any
+    // notification (a dead toggle).
     let mut items: Vec<NotifPrefResponse> = Vec::new();
     if let Some(prefs) = req.preferences {
-        let prefs: Vec<UserNotificationPreference> = prefs
-            .into_iter()
-            .map(|item| {
-                UserNotificationPreference::new(
-                    user_id.clone(),
-                    item.notification_type,
-                    item.enabled,
-                )
-            })
-            .collect();
-        state.user_notification_prefs.upsert_batch(&prefs).await?;
-        items = prefs.into_iter().map(Into::into).collect();
+        let mut normalized: Vec<UserNotificationPreference> = Vec::with_capacity(prefs.len());
+        for item in prefs {
+            let nt = NotificationType::parse(&item.notification_type).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "unknown notification type '{}' (expected canonical name, e.g. \"GateFailure\")",
+                    item.notification_type
+                ))
+            })?;
+            normalized.push(UserNotificationPreference::new(
+                user_id.clone(),
+                nt.as_str().to_string(),
+                item.enabled,
+            ));
+        }
+        state
+            .user_notification_prefs
+            .upsert_batch(&normalized)
+            .await?;
+        items = normalized.into_iter().map(Into::into).collect();
     }
 
     let mut channels: Option<gyre_domain::NotificationChannels> = None;
@@ -2272,10 +2313,18 @@ pub async fn get_judgments(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
-    let judgment_type = params
-        .judgment_type
-        .as_deref()
-        .and_then(JudgmentType::from_db_str);
+    // An unparseable ?type= must 400 (same contract as the sibling
+    // notification-preferences PUT / notifications priority param):
+    // silently treating it as "no filter" returns unfiltered results the
+    // caller did not ask for.
+    let judgment_type = match params.judgment_type.as_deref() {
+        Some(t) => Some(JudgmentType::from_db_str(t).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "unknown judgment type '{t}' (expected one of approval|rejection|gate|trust|meta-spec)"
+            ))
+        })?),
+        None => None,
+    };
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
 
@@ -3044,6 +3093,234 @@ mod tests {
             "should return only ConflictingInterpretations: got {notifs:?}"
         );
         assert_eq!(notifs[0]["notification_type"], "ConflictingInterpretations");
+    }
+
+    /// HSI §12: disabling a notification type via
+    /// PUT /users/me/notification-preferences must exclude it from the inbox
+    /// list AND the badge count — the handler wiring, not just the query.
+    #[tokio::test]
+    async fn disabled_preference_excludes_type_from_inbox_and_count() {
+        let state = test_state();
+        seed_notification(&state, NotificationType::GateFailure, "Gate failed").await;
+        seed_notification(
+            &state,
+            NotificationType::SpecApprovalRequested,
+            "Approve spec",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state);
+        // Baseline: both visible.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            2,
+            "baseline: both types visible: {json:?}"
+        );
+
+        // Disable GateFailure.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me/notification-preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"preferences":[{"notification_type":"GateFailure","enabled":false}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Inbox excludes the disabled type.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "disabled type must be excluded: {json:?}");
+        assert_eq!(notifs[0]["notification_type"], "SpecApprovalRequested");
+
+        // Badge count matches the inbox.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications/count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 1, "badge must not count the disabled type");
+    }
+
+    /// Legacy parse aliases must normalize to the canonical
+    /// `NotificationType::as_str()` name before storing: notification rows
+    /// are persisted with canonical names and the inbox exclusion is a raw
+    /// string comparison, so storing 'SpecPendingApproval' (alias for
+    /// 'SpecApprovalRequested') would be a silently inert toggle.
+    #[tokio::test]
+    async fn preference_alias_normalizes_to_canonical_before_storing() {
+        let state = test_state();
+        seed_notification(
+            &state,
+            NotificationType::SpecApprovalRequested,
+            "Approve spec",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+        // Disable via the legacy alias spelling.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me/notification-preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"preferences":[{"notification_type":"SpecPendingApproval","enabled":false}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // The stored (and echoed) preference carries the canonical name.
+        assert_eq!(
+            json["preferences"][0]["notification_type"], "SpecApprovalRequested",
+            "alias must be normalized before storing: {json:?}"
+        );
+
+        // The canonical-typed notification is excluded from the inbox...
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            0,
+            "alias-named disable must filter the canonical-typed notification: {json:?}"
+        );
+
+        // ...and from the badge count.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications/count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 0);
+    }
+
+    /// HSI §12 auth provider info: a successful OIDC/JWT authentication must
+    /// record the verified issuer + login time, and GET /users/me must return
+    /// both read-only. PUT /users/me has no field for either, so they cannot
+    /// be client-set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_me_returns_recorded_auth_provider_info() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Authenticate via a real OIDC JWT — this drives validate_jwt's
+        // record_login path against the user store.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "me-issuer-sub",
+                "preferred_username": "issuer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let me = body_json(resp).await;
+        // The issuer is the test JwtConfig's verified issuer.
+        assert_eq!(me["oidc_issuer"], "http://localhost:8080/realms/gyre");
+        let login = me["last_login_at"]
+            .as_u64()
+            .expect("last_login_at recorded");
+        assert!(login > 0);
+
+        // Editable profile fields round-trip without touching auth-provider info.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"display_name":"Renamed","timezone":"Europe/Berlin"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let me2 = body_json(resp).await;
+        assert_eq!(me2["display_name"], "Renamed");
+        assert_eq!(me2["timezone"], "Europe/Berlin");
+        assert_eq!(me2["oidc_issuer"], "http://localhost:8080/realms/gyre");
+        assert_eq!(me2["last_login_at"].as_u64(), Some(login));
     }
 
     /// Seed a tenant so create_user's tenant validation can resolve it
@@ -4607,7 +4884,17 @@ mod tests {
         // Cascade 3 — the tenant's TenantAdmins were notified.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new(&admin_id), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new(&admin_id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -5433,5 +5720,46 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    /// GET /users/me/judgments?type=<unknown> must 400 — the same contract
+    /// as the sibling notification-preferences PUT and the notifications
+    /// priority param. Silently mapping an unparseable type to "no filter"
+    /// returns unfiltered results the caller did not ask for (review F5).
+    #[tokio::test]
+    async fn judgments_unknown_type_returns_400() {
+        let app = app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=bogus")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an unparseable ?type= must be rejected, not ignored"
+        );
+
+        // Every canonical JudgmentType string is accepted (no filter drop).
+        for t in ["approval", "rejection", "gate", "trust", "meta-spec"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/users/me/judgments?type={t}"))
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "type={t} must be valid");
+        }
     }
 }

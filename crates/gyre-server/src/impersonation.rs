@@ -1064,7 +1064,7 @@ mod tests {
         // In-app records exist for both events …
         let notifs = state
             .notifications
-            .list_for_user(&target.id, None, None, None, None, None, 10, 0)
+            .list_for_user(&target.id, None, None, None, None, None, &[], 10, 0)
             .await
             .unwrap();
         assert_eq!(notifs.len(), 2, "approval code + start alert");
