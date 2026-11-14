@@ -3,7 +3,7 @@ title: "Implement ABAC evaluation engine, API, and audit integration"
 spec_ref: "abac-policy-engine.md §Evaluation Engine"
 depends_on:
   - task-128
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "abac-policy-engine.md §Evaluation Engine"
   - "abac-policy-engine.md §Evaluation Flow"
@@ -145,7 +145,7 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ## Shipped
 
-### ABAC evaluation engine, API, and audit integration (rounds 1–9)
+### ABAC evaluation engine, API, and audit integration
 
 Production code, in the listed commits:
 
@@ -185,68 +185,56 @@ Production code, in the listed commits:
   route through the engine (no system-token bypass — the global token
   is allowed BY `system-full-access`), with reserved-identity and
   scoped-gate-token containment ahead of evaluation.
+- **Merge-time attestation gate** (`merge_processor.rs`):
+  `evaluate_attestation_abac` returns `Result` and FAILS CLOSED — a
+  workspace/policy-store read error requeues the entry (never degrades
+  to a tenant-scope-less evaluation); a Deny fails the queue entry and
+  emits an `AbacDenied` audit event plus a warn-level decision log
+  (allowances at debug).
 
-### Round-9 verification repair (commit 6e712b45)
+### Round-11 rebase repair (merge commit 56f8bbc3)
 
-Round-8 `cargo test --all` failed 68 gyre-server lib tests. Repaired:
+Main (task-146, bfc36c9c) refactored every merge-queue failure path
+through the new `fail_queue_entry` helper so the spec-required
+`merge_queue.processed` (outcome "failed") analytics event cannot
+diverge from the status change. The rebase conflicted in the
+attestation ABAC gate of `merge_processor.rs` (three regions).
+Resolution preserves both sides' invariants:
 
-- `mem::test_state` now pre-seeds the startup builtin set into the
-  shared policy store (production parity — main.rs seeds the same set
-  before serving; an empty store made every registered route
-  default-deny the global token after the round-2 bypass removal).
-  Fixture-drift tests updated to the production shape (policies list,
-  effective-permissions subject binding, repo-access dangling-workspace
-  now asserts both the middleware containment 403 and the handler's
-  fail-closed 404, push-attestation audit subject tenant).
-- The three `policy_engine` spec-example tests now carry the addressed
-  `resource.workspace_id`/`resource.repo_id` so the Workspace/Repo-scoped
-  spec-example Denies pass the round-4 scope filter (assertion strength
-  unchanged — the Deny must still outrank the Allow).
-- Two live middleware tests updated to the merged 12-arg
-  `mint_worker_scoped` signature.
-- Resolved the merge onto assignment base 6ffd679 keeping the task-129
-  audit shape in the scoped-token deny block and the worker-scoped
-  re-spawn JWT mint.
+- The task-129 fail-closed semantics are retained verbatim:
+  `evaluate_attestation_abac` still returns `anyhow::Result`; on `Err`
+  the entry is requeued with the "failing closed" reason (both the
+  branch-head and agent-task lookup paths).
+- Deny enforcement now flows through main's shared `denial` block,
+  which calls `fail_queue_entry(state, &entry, Some(&mr),
+  "attestation_abac", &reason)` — the failure still fails the queue
+  entry before the merge commit is created (task-077 F5), and now also
+  records the `merge_queue.processed` failed analytics event required
+  by analytics.md §Auto-Emitted Events (previously the direct
+  `update_status(Failed)` call on this path skipped it).
+- The §Audit Integration log-level contract inside
+  `evaluate_attestation_abac` keeps the task-129 shape: warn +
+  `record_abac_denied_service` AbacDenied audit event on Deny, debug on
+  Allow (main's interim single info! log dropped).
 
-### Round-10 verification repair (commit c459a69b)
-
-Round-9 verification (`cargo test --all --quiet`) failed 7 gyre-server
-lib tests — all fixture drift against the round-9 builtin seeding, no
-production defect. Root causes and repairs:
-
-- `api::policies::evaluate_respects_policy_scope`: the out-of-scope
-  ws-B dry-run leg asserted an ANONYMOUS default deny
-  (`matched_policy` null). With the builtin set seeded, the deny is
-  attributed to the tenant-level `default-deny` catchall (priority 1,
-  no conditions — §Policy Composition rule 4, §Built-In Policies
-  table). The assertion now pins `matched_policy` to exactly
-  `builtin-default-deny`: strictly stronger in the production shape,
-  since it proves both that the out-of-scope ws-A Allow stays excluded
-  by the scope filter and that no other policy decides the leg.
-- Six `merge_processor::attestation_abac_tests`: custom fixtures sat at
-  priorities 10–100, below the `builtin-attested-authorization` Allow
-  (150) that `evaluate_attestation_abac` matches first for
-  chain-present work (it sets `subject.attestation_chain_present` —
-  production parity; the passing dry-run equivalents don't set it,
-  which is why only the merge-time tests drifted). Fixtures moved into
-  the user band the builtin's definition documents (200–299): denies to
-  250, allows to 200. Assertions unchanged — same attribute-propagation
-  coverage (chain_depth, root_signer, constraint_count, tenant_id) and
-  same matched-policy attribution.
+All other task-146 changes (analytics port wiring, migration
+000063, `emit_queue_processed_terminal`, scope columns) merged clean.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --lib --tests` — clean (this sandbox,
-  build wrapper, 8m19s).
-- `cargo fmt --check -p gyre-server` — clean.
-- `scripts/check-task-commit-attribution.sh` — clean with the restored
+- `cargo check -p gyre-server` — clean (this sandbox, build wrapper).
+- `cargo check -p gyre-server --tests` — clean, including the
+  merge_processor attestation-ABAC tests (Result signature, fail-closed
+  workspace-read test) and the api_integration suite.
+- `cargo test -p gyre-domain --lib` — 510 passed, 0 failed.
+- `rustfmt --check` on the resolved file — clean.
+- `scripts/check-arch.sh` — passed.
+- `scripts/check-task-commit-attribution.sh` — passes with the restored
   frontmatter commit list.
 - gyre-server test compilation exceeds this sandbox's 4 GiB cgroup
   budget (established round 9), so the independent verifier must run:
   - `cargo test --all --quiet`
   - focused: `cargo test -p gyre-server --lib attestation_abac`
   - focused: `cargo test -p gyre-server --lib evaluate_respects_policy_scope`
-  - round-9 focused probes: see the round-9 Shipped notes (controller
-    artifact `round9-test-state-seeding.md`, not a sandbox path)
-  Analysis backing the round-10 fixture repairs (this sandbox):
-  `/tmp/stage/review-evidence/round10-fixture-drift-analysis.md`
+  - focused: `cargo test -p gyre-server --lib merge_queue` (analytics
+    event on the attestation-deny failure path)
