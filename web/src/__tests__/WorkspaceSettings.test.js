@@ -53,6 +53,15 @@ vi.mock('../lib/api.js', () => ({
     secretCreate: vi.fn().mockResolvedValue({}),
     secretDelete: vi.fn().mockResolvedValue(null),
     secretRotate: vi.fn().mockResolvedValue({}),
+    // ABAC policy management surface (task-132) — PolicyManager on the
+    // Policies tab calls the global /policies endpoints on mount.
+    policies: vi.fn().mockResolvedValue([]),
+    createPolicy: vi.fn().mockResolvedValue({}),
+    updatePolicy: vi.fn().mockResolvedValue({}),
+    deletePolicy: vi.fn().mockResolvedValue(null),
+    policyDecisions: vi.fn().mockResolvedValue([]),
+    evaluatePolicy: vi.fn().mockResolvedValue({}),
+    effectivePermissions: vi.fn().mockResolvedValue([]),
   },
   setAuthToken: vi.fn(),
 }));
@@ -529,6 +538,20 @@ describe('WorkspaceSettings', () => {
       expect(trustRow.textContent).toContain('trust:require-human-mr-review');
       expect(trustRow.textContent).toContain('deny');
       expect(trustRow.textContent).toContain('merge on mr');
+    });
+
+    // ── ABAC policy management integration (abac-policy-engine.md §UI, task-132) ──
+    it('embeds the PolicyManager scoped to the workspace via global ?scope= query params', async () => {
+      api.workspaceAbacPolicies.mockResolvedValue([]);
+      api.policies.mockResolvedValue([]);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openPoliciesTab(container);
+      expect(container.querySelector('[data-testid="policy-manager"]')).toBeTruthy();
+      // The §UI URL pattern: GLOBAL /api/v1/policies with
+      // ?scope=Workspace&scope_id=<id> — never a workspace-prefixed URL.
+      await waitFor(() => {
+        expect(api.policies).toHaveBeenCalledWith({ scope: 'Workspace', scope_id: 'ws-1' });
+      });
     });
   });
 

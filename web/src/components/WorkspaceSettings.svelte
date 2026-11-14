@@ -15,6 +15,7 @@
   import SecretsPanel from './SecretsPanel.svelte';
   import Modal from '../lib/Modal.svelte';
   import Badge from '../lib/Badge.svelte';
+  import PolicyManager from './abac/PolicyManager.svelte';
 
   let {
     workspace = null,
@@ -1263,6 +1264,19 @@
             </div>
           {/if}
         {/if}
+
+        <!-- Full §UI policy management surface (task-132): CRUD with the
+             condition-builder editor, dry-run simulator, decision audit
+             log, effective permissions, and conflict detection — on the
+             GLOBAL /api/v1/policies endpoints, workspace-scoped via
+             ?scope=Workspace&scope_id=<id> query parameters (never
+             workspace-prefixed policy URLs). -->
+        <PolicyManager
+          heading="Workspace Policies"
+          initialScope="workspace"
+          initialScopeId={workspace?.id ?? null}
+          lockScope={true}
+        />
       </div>
 
     <!-- Members tab (user-management.md §UI Pages > Workspace Members:
