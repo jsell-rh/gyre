@@ -9,18 +9,30 @@
 # and the SQLite/PG adapters persist under the handle's configured tenant
 # scope — lowering 12→9; the two repository.rs create() sites were then
 # fixed for real the same way — the row is filed under the handle's
-# `self.tenant_id`, matching every query method — and the Task::new
-# constructor site was re-anchored to the check's documented inline
-# `// scope-literal:ok` marker at its true location (task-099 F1 legacy
-# debt the base itself carries exempted; real fix = require the workspace
-# at Task::new construction), lowering 9→6). Fix a site by resolving the
-# real scope (or refusing to create the entity without it), then DELETE
-# its line and lower FROZEN_EXEMPTION_COUNT in
+# `self.tenant_id`, matching every query method — lowering 9→7; the
+# Task::new constructor site binds the documented bootstrap workspace
+# (the task-130 mainline form, replacing the exempted inline literal),
+# lowering 7→6). Fix a site by resolving the real scope (or refusing to
+# create the entity without it), then DELETE its line and lower
+# FROZEN_EXEMPTION_COUNT in
 # scripts/check-scope-literal-defaults.sh.
 # NEVER add entries; NEVER raise the frozen count.
 
+# The task-099 F1 auth.rs/lib.rs sites were fixed for real (construction
+# goes through `system_principal_tenant()` / the user's stored binding;
+# emit paths resolve the workspace tenant or skip) — entries deleted.
 # Unowned legacy (record-conversion `From` impls fabricating tenant on the
-# wire; domain constructor defaults) — opportunistic fixes welcome:
+# wire; domain constructor defaults) — opportunistic fixes welcome.
+# Fixed in the task-130 verification repair round and the task-111
+# verification repair (entries deleted):
+#   sqlite/postgres merge_request.rs and repository.rs create() rows now
+#   carry the storage handle's resolved tenant scope; the domain
+#   MergeRequest constructor requires the workspace as a parameter and
+#   the Task constructor binds the documented bootstrap workspace.
+# The two activity.rs entries reference adapter files removed upstream
+# (task-207 dropped the ActivityRepository port and its adapters); they are
+# dead lines kept only because the frozen file may not gain or re-point
+# entries — delete them when the analytics sites are fixed.
 crates/gyre-adapters/src/sqlite/activity.rs:56
 crates/gyre-adapters/src/sqlite/analytics.rs:115
 crates/gyre-adapters/src/sqlite/analytics.rs:225

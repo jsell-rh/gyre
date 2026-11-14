@@ -1073,14 +1073,17 @@ pub async fn submit_review(
     // a user named after a gate agent forge that agent's review. The
     // server's system token keeps the request-body reviewer (server-
     // internal flows).
+    //
+    // §1 Token Scoping: the scope claim is a list; read it through the
+    // extractor-derived `auth.scope` (mirrored from signature-verified
+    // claims), never the raw JSON string form — an array claim read as a
+    // string silently fails open.
     let agent_token_principal = auth.user_id.is_none() && !auth.is_system_principal();
     let reviewer_agent_id = if agent_token_principal
         || auth
-            .jwt_claims
-            .as_ref()
-            .and_then(|c| c.get("scope"))
-            .and_then(|s| s.as_str())
-            == Some(crate::auth::REVIEW_SUBMIT_SCOPE)
+            .scope
+            .iter()
+            .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE)
     {
         auth.agent_id.clone()
     } else if auth.user_id.is_some() {
@@ -1840,7 +1843,17 @@ mod tests {
         state.agents.create(&forger).await.unwrap();
         let token = state
             .agent_signing_key
-            .mint("agt-forger", "task-1", "tester", &state.base_url, 600)
+            .mint(
+                "agt-forger",
+                "task-1",
+                "tester",
+                &state.base_url,
+                600,
+                "default",
+                "ws-1",
+                "repo-1",
+                "repo-1",
+            )
             .unwrap();
         state
             .kv_store
