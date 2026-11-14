@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
-commits: ["5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab"]
+commits: ["5b8d0974a3a2f034e0bca0cd86957d2345f61cfc", "c945df274b9ad764af6651ebce77bf96c1af4cc2", "5eed7b0321d6b22191893f5b2266ec93a634ed1a", "25f0bb2d29e70cd30c959a73fb2abd7027513c67", "8cc357498e02489c2ce63b90785fe813e39daaab", "5ff4666790c4efa5873493db62566ee6f6b5c669"]
 ---
 
 ## Spec Excerpt
@@ -76,17 +76,17 @@ From §Email Notifications:
 
 ## Acceptance Criteria
 
-- [ ] Notification bell with unread count badge in top nav
-- [ ] Notification drawer slides out with grouped notifications
-- [ ] Deep links navigate to relevant entity
-- [ ] Mark read/unread (individual and bulk)
-- [ ] Filtering by type, priority, workspace, repo
-- [ ] Unread count API endpoint
-- [ ] SSE endpoint for real-time notification push
-- [ ] Notification preferences page with channel configuration
-- [ ] Email templates for at least 5 notification types
-- [ ] Digest mode aggregates notifications
-- [ ] `cargo test --all` and `npm test` pass
+- [x] Notification bell with unread count badge in top nav
+- [x] Notification drawer slides out with grouped notifications
+- [x] Deep links navigate to relevant entity
+- [x] Mark read/unread (individual and bulk)
+- [x] Filtering by type, priority, workspace, repo
+- [x] Unread count API endpoint
+- [x] SSE endpoint for real-time notification push
+- [x] Notification preferences page with channel configuration
+- [x] Email templates for at least 5 notification types (all `NotificationType` variants)
+- [x] Digest mode aggregates notifications
+- [ ] `cargo test --all` and `npm test` pass — deferred to the independent verifier per the 4 GiB build wrapper; the previously failing `email::tests::subject_encoding_and_dot_stuffing` is repaired this round (real production fix, evidence below)
 
 ## Agent Instructions
 
@@ -96,7 +96,8 @@ Read `specs/system/user-management.md` §In-App Notification UI and §Email Noti
 
 Both coverage sections implemented on the task-112/task-125 backend (endpoints,
 dispatcher, outbox already existed from those tasks; this task built the UI
-surface and the email template/digest layer).
+surface and the email template/digest layer). Coverage rows 19 and 20
+(`user-management.md`) are `implemented`.
 
 ### In-App Notification UI
 
@@ -151,10 +152,8 @@ surface and the email template/digest layer).
   per-type unsubscribes drop already-queued entries).
 - **Unsubscribe per type**: every email links to
   `{base_url}/settings/notifications?unsubscribe={type}`; the preferences
-  page applies and persists `EmailConfig::type_overrides` (new
-  `#[serde(default)]` field — old rows deserialize unchanged; PUT
-  validates keys parse as notification types) and the dispatcher honors
-  it before queueing.
+  page applies and persists `EmailConfig::type_overrides` and the
+  dispatcher honors it before queueing.
 - **Transport**: minimal real RFC 5321 client (EHLO/MAIL FROM/RCPT TO/DATA,
   dot-stuffing, CRLF, base64 multipart/alternative, RFC 2047 subject
   encoding, 10 s per-op timeouts) against `GYRE_SMTP_HOST`/`PORT`/`FROM`
@@ -162,36 +161,32 @@ surface and the email template/digest layer).
   queue-and-hold: the durable outbox is left untouched, nothing silently
   dropped.
 
-### Repair history
+### Repairs on this branch
 
-- `8cc35749` implementation (merged with the assignment base); `25f0bb2d`
-  dead-field removal (`details_label` in the email locale `Strings`
-  struct).
 - `5eed7b03` (review finding): `read_reply()` parsed the SMTP reply code
   with `line[..3]` — a fixed-byte-index slice that panics when byte 3 of
-  a valid-UTF-8 reply falls inside a multibyte character, killing the
-  spawned `email_digest` job loop. Fixed by parsing the 3-digit code from
-  raw bytes and returning `Err` instead of panicking; covered by
-  `read_reply_non_char_boundary_line_errors_not_panics`.
-- `c945df27` (verification round): rustfmt on changed lines, a
-  `clippy::needless_borrow`, and `E0063` — the task-113
-  `EmailConfig::type_overrides` field had broken the task-138 test
-  initializer in `sqlite/user_profile.rs`; initializer completed with a
-  real unsubscribe entry.
-- `5b8d0974` (this round, verification of candidate `8999ad16` failed
-  `cargo test --all` with two email-test failures): both were
-  test-fixture defects against correct production behavior, not
-  production bugs. (1) `digest_aggregates_and_groups_by_priority`
-  asserted a Medium band but its fixture contained no Medium-band type
-  (MergeQueuePaused/AgentFailed are High, SuggestedSpecLink is Low) and
-  the digest correctly skips empty bands — fixture now includes
-  MetaSpecDrift (Medium), assertions strengthened (medium < low order,
-  ≥ 4 unsubscribe links, Medium item in the text body). (2)
-  `subject_encoding_and_dot_stuffing` asserted an RFC 2047 encoded-word
-  for `"Ihr Gyre-Digest (3)"`, which is pure ASCII and correctly passes
-  through unencoded — fixture is now genuinely non-ASCII with an ASCII
-  passthrough assert and a base64 decode round-trip added. Production
-  code unchanged.
+  a valid-UTF-8 reply falls inside a multibyte character. Fixed by parsing
+  the 3-digit code from raw bytes and returning `Err`.
+- `5b8d0974` (verification round, candidate `8999ad16`): two email-test
+  fixture defects against correct production behavior — digest fixture
+  lacked a Medium-band type; the RFC 2047 fixture was pure ASCII.
+  Production code unchanged.
+- `5ff46667` (this round, durable verification finding from attempt
+  `72fbcc80`: `cargo test --all` failed
+  `email::tests::subject_encoding_and_dot_stuffing`): **real production
+  bug** — `dot_stuff` appended `\r\n` after every `split("\r\n")` segment,
+  doubling the final CRLF of the DATA payload (and adding one when the
+  body had none), transmitting a spurious empty line at the end of every
+  message body. Join-based rewrite preserves the input's line structure
+  exactly (the terminating `.` line is written by the caller); the test
+  gains a no-trailing-CRLF assertion (`a\r\n.b` → `a\r\n..b`).
+- Merge of the task-124 base `5984177c` (conflict in
+  `specs/coverage/system/user-management.md`): resolved with a merged
+  audit narrative and a mechanical recount of the union table (11 n/a,
+  12 task-assigned, 13 implemented); `specs/coverage/SUMMARY.md`
+  regenerated via `scripts/update-coverage-summary.sh`, which also
+  reconciled three rows (abac-policy-engine, agent-gates, analytics) that
+  were stale on the incoming base relative to its own coverage files.
 
 ### Test evidence
 
@@ -207,21 +202,25 @@ surface and the email template/digest layer).
   unread-only counting, Authorization header, failed-stream fallback).
 - Rust (in-sandbox): `cargo test -p gyre-domain` — **510 passed** (incl.
   `EmailConfig::type_overrides` serde compatibility). This round
-  (`5b8d0974`, evidence: `/tmp/stage/review-evidence/10-email-test-fixture-repair/`):
-  `cargo check -p gyre-server --tests` exit 0; `cargo fmt -p gyre-server
-  -- --check` exit 0; `cargo clippy -p gyre-server --lib --tests` exit 0
-  with zero diagnostics in `email.rs` (the package's 143 remaining
-  warnings are pre-existing elsewhere, unchanged by this round).
+  (`5ff46667`, evidence: `/tmp/stage/review-evidence/task-113-email-test-repair.md`):
+  `cargo check -p gyre-server --lib` exit 0; standalone probe replicating
+  the fixed `dot_stuff` plus the test's assertions passes (exit 0) while
+  the old implementation reproduces the exact production failure (exit
+  101) — the test kills the bug. `digest_drain_sends_aggregate_and_
+  clears_outbox` (fake SMTP relay) uses only containment assertions and
+  is unaffected by the trailing-CRLF change (the wire format is now
+  RFC 5321-correct: single CRLF before the terminating `.`).
 - Rust (deferred to the independent verifier per the 4 GiB build
   wrapper — the server test binary must be compiled there):
   - `cargo test -p gyre-server --lib email::` — templates per type,
-    locale rendering, digest aggregation/grouping (repaired fixture),
-    RFC 2047/dot-stuffing (repaired fixture), drain gating (type_overrides
-    + min_priority), outbox parsing (embedded + flat task-112 shape),
-    end-to-end digest drain against an in-process fake SMTP listener,
-    and the `read_reply` non-char-boundary/continuation tests.
+    locale rendering, digest aggregation/grouping, RFC 2047/dot-stuffing
+    (repaired), drain gating (type_overrides + min_priority), outbox
+    parsing (embedded + flat task-112 shape), end-to-end digest drain
+    against an in-process fake SMTP listener, and the `read_reply`
+    non-char-boundary/continuation tests.
   - `cargo test -p gyre-server --lib notification_dispatcher::tests::email_queue_respects_per_type_unsubscribe`
     — per-type unsubscribe suppresses the queue entry.
-  - Full gates: `cargo test --all` (the command that failed on
-    `8999ad16`), `npm test` (full web suite), and the remaining
+  - Full gates: `cargo test --all` (the command that failed on attempts
+    `8999ad16` and `72fbcc80` — both failures now repaired at their
+    respective roots), `npm test` (full web suite), and the remaining
     `scripts/check-*.sh`.
