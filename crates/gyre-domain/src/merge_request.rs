@@ -96,12 +96,12 @@ pub struct MergeRequest {
     pub revert_commit_sha: Option<String>,
 }
 
-/// `MergeRequest::new` requires the workspace as an explicit constructor
-/// parameter (task-111 scope-fabrication fix): a merge request cannot be
-/// constructed without its mandatory scope, so no bootstrap binding is
-/// needed here — unlike `Agent::new` / `Task::new`, which keep the
-/// documented bootstrap-workspace default for callers without a real
-/// workspace at hand.
+// `MergeRequest::new` requires the workspace as an explicit constructor
+// parameter (task-111 scope-fabrication fix): a merge request cannot be
+// constructed without its mandatory scope, so no bootstrap binding is
+// needed here — unlike `Agent::new` / `Task::new`, which keep the
+// documented bootstrap-workspace default for callers without a real
+// workspace at hand.
 
 impl MergeRequest {
     pub fn new(
