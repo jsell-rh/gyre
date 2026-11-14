@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "abac-policy-engine.md §UI"
-commits: ["11b0a02f6cb47e3197c2455edf384a08568c3adf", "5ba1bdf3"]
+commits: ["5ba1bdf35f564d19b0e8c1a12a72c46d23781d3d", "11b0a02f6cb47e3197c2455edf384a08568c3adf"]
 ---
 
 ## Spec Excerpt
