@@ -595,28 +595,26 @@ pub async fn git_receive_pack(
     // push code (agent-gates.md §Gate Agent Lifecycle: "read-only access").
     // Caller-scoped capability, exact-match (review F3): checked before
     // workspace/repo resolution so the denial does not depend on (or leak
-    // the existence of) the target.
-    if let Some(scope) = auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
+    // the existence of) the target. §1 Token Scoping: the scope claim is a
+    // list; read it through the extractor-derived `auth.scope` (mirrored
+    // from signature-verified claims), never the raw JSON string form —
+    // an array claim read as a string silently fails open.
+    if auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE || s == crate::auth::VALIDATION_REPORT_SCOPE)
     {
-        if scope == crate::auth::REVIEW_SUBMIT_SCOPE
-            || scope == crate::auth::VALIDATION_REPORT_SCOPE
-        {
-            warn!(
-                agent_id = %auth.agent_id,
-                workspace_slug = %workspace_slug,
-                repo_name = %repo_name,
-                "git-receive-pack 403: scoped gate-agent token cannot push"
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                "push rejected: gate-agent scoped tokens are read-only".to_string(),
-            )
-                .into_response();
-        }
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: scoped gate-agent token cannot push"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: gate-agent scoped tokens are read-only".to_string(),
+        )
+            .into_response();
     }
 
     let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {

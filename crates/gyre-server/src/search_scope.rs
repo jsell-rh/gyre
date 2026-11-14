@@ -38,14 +38,20 @@ pub struct SearchScope {
     pub accessible_repo_ids: Option<Vec<String>>,
 }
 
-/// True when the caller authenticated via a Gyre-minted agent JWT
-/// (`scope == "agent"` in the claims). Mirrors the MCP-side `is_agent_jwt`.
+/// True when the caller authenticated via a Gyre-minted agent JWT — the
+/// claims carry a non-empty fine-grained `scope` list (platform-model.md §1
+/// Token Scoping). Global tokens, API keys, and Keycloak JWTs carry no such
+/// list. Mirrors the MCP-side `is_agent_jwt` (array form); the legacy
+/// `scope: "agent"` string form is accepted for tokens minted before §1.
 fn is_agent_jwt(auth: &AuthenticatedAgent) -> bool {
-    auth.jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
-        == Some("agent")
+    let Some(scope) = auth.jwt_claims.as_ref().and_then(|c| c.get("scope")) else {
+        return false;
+    };
+    match scope {
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::String(s) => s == "agent",
+        _ => false,
+    }
 }
 
 /// Claim helper: string value of `key` in the caller's JWT claims.
@@ -109,9 +115,34 @@ pub async fn derive_search_scope(state: &AppState, auth: &AuthenticatedAgent) ->
                 }
                 _ => {}
             }
+            // Worker agent (§1 Token Scoping): workers carry `workspace_id` +
+            // `repo_id` claims on their JWT — the signed claims are the
+            // scope. The agent record must still exist: an unknown caller
+            // fails closed even with a signed token (a deleted agent whose
+            // token is still live is an inconsistent state, never widened
+            // access). Pre-§1 worker tokens (no hierarchy claims) fall
+            // through to the agent record below.
+            if let Some(ws) = claim_str(claims, "workspace_id") {
+                let repo = claim_str(claims, "repo_id");
+                let known = matches!(
+                    state.agents.find_by_id(&Id::new(&auth.agent_id)).await,
+                    Ok(Some(_))
+                );
+                return if known {
+                    SearchScope {
+                        tenant_id,
+                        accessible_workspace_ids: Some(vec![ws]),
+                        accessible_repo_ids: repo.map(|r| vec![r]),
+                    }
+                } else {
+                    SearchScope {
+                        tenant_id,
+                        accessible_workspace_ids: Some(vec![]),
+                        accessible_repo_ids: Some(vec![]),
+                    }
+                };
+            }
         }
-        // Worker agent (no orchestrator claims): fall through to the agent
-        // record — workers carry no workspace/repo claims on their JWT.
     }
 
     // Human users: workspace membership (accepted invitations only).

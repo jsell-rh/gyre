@@ -15,6 +15,30 @@ async fn test_state() -> std::sync::Arc<gyre_server::AppState> {
     gyre_server::build_state("gyre-test-token", "http://localhost:0", None)
 }
 
+/// Ensure a Workspace row backs the probe MR's default workspace scope and
+/// return its tenant id, so §1 mint_scoped callers resolve the tenant the
+/// way production does (MR → workspace → tenant), never a fabricated
+/// literal. Idempotent.
+async fn ensure_probe_workspace(
+    state: &std::sync::Arc<gyre_server::AppState>,
+    ws_id: &str,
+    tenant_id: &str,
+) -> String {
+    let ws_id = gyre_common::Id::new(ws_id);
+    if let Ok(Some(ws)) = state.workspaces.find_by_id(&ws_id).await {
+        return ws.tenant_id.to_string();
+    }
+    let ws = gyre_domain::Workspace::new(
+        ws_id.clone(),
+        gyre_common::Id::new(tenant_id),
+        "probe workspace",
+        ws_id.as_str().to_string(),
+        1,
+    );
+    state.workspaces.create(&ws).await.unwrap();
+    tenant_id.to_string()
+}
+
 /// Scoped `review:submit` JWT must be bound to its own subject when
 /// submitting a review (forged reviewer_agent_id ignored).
 #[tokio::test]
@@ -37,7 +61,10 @@ async fn scoped_review_token_reviewer_identity_is_bound() {
     );
     state.merge_requests.create(&mr).await.unwrap();
 
-    // Mint a scoped token for a gate agent.
+    // Mint a scoped token for a gate agent. Tenant comes from the MR's
+    // workspace ("default", the documented single-tenant scope — a real
+    // Workspace row is seeded so the §1 mint resolves it like production).
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-review-probe".to_string();
     let token = state
         .agent_signing_key
@@ -48,6 +75,8 @@ async fn scoped_review_token_reviewer_identity_is_bound() {
             "http://localhost:0",
             60,
             "review:submit",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -103,6 +132,7 @@ async fn scoped_review_token_denied_outside_allowlist() {
         .unwrap();
     let app: Router = gyre_server::build_router(state.clone());
 
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-review-probe-2".to_string();
     let token = state
         .agent_signing_key
@@ -113,6 +143,8 @@ async fn scoped_review_token_denied_outside_allowlist() {
             "http://localhost:0",
             60,
             "review:submit",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -139,6 +171,83 @@ async fn scoped_review_token_denied_outside_allowlist() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "scoped review token must be denied outside the review-route allow-list"
+    );
+}
+
+/// Task-195 review repair: a `review:submit`-scoped gate-agent token must
+/// NOT reach the REST agent-inbox route (`GET /api/v1/agents/{id}/messages`).
+/// The route is kept off the reviewer allow-list as least privilege /
+/// defense in depth: a single-purpose review token's ReviewRequest is
+/// delivered via its launch env and the /mcp surface
+/// (`gyre_message_poll` derives the inbox from the verified token
+/// subject — inherently own-inbox), so it has no need for the REST
+/// inbox route. (The handler actually routed at that path,
+/// `messages::poll_messages`, does enforce own-inbox for non-admin
+/// callers; the "no caller-identity check, drain-and-clear" handler
+/// from earlier review rounds was the unrouted legacy `agent_messages`
+/// module, since deleted.) Discriminator: builtin policies are seeded
+/// so the agent role WOULD permit the read; the 403 is attributable
+/// solely to the scoped-token allow-list, and re-adding the route there
+/// flips this test to a 200.
+#[tokio::test]
+async fn scoped_review_token_cannot_read_agent_inbox_route() {
+    let state = test_state().await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
+    let app: Router = gyre_server::build_router(state.clone());
+
+    // A distinct victim agent whose inbox the scoped token must not touch.
+    let victim = gyre_domain::Agent::new(
+        gyre_common::Id::new("agent-inbox-victim-1"),
+        "inbox-victim",
+        0,
+    );
+    state.agents.create(&victim).await.unwrap();
+
+    let gate_agent_id = "gate-review-probe-inbox".to_string();
+    // §1 Token Scoping: the mint needs the tenant of a real workspace row
+    // and the gate persona slug, like every production gate path.
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
+    let token = state
+        .agent_signing_key
+        .mint_scoped(
+            &gate_agent_id,
+            "gate-1",
+            "forge",
+            "http://localhost:0",
+            60,
+            "review:submit",
+            &tenant_id,
+            Some("test-reviewer"),
+        )
+        .unwrap();
+    state
+        .kv_store
+        .kv_set("agent_tokens", &gate_agent_id, token.clone())
+        .await
+        .unwrap();
+
+    // GET /api/v1/agents/{victim}/messages with the scoped token: outside
+    // the review allow-list (and deliberately kept off it), so denied even
+    // though the builtin agent-role policy would permit the read.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/agents/agent-inbox-victim-1/messages")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "review-scoped gate-agent token must not read another agent's inbox \
+         (route is off the reviewer allow-list: least privilege)"
     );
 }
 
@@ -178,6 +287,8 @@ async fn scoped_review_token_cannot_push() {
             "http://localhost:0",
             60,
             "review:submit",
+            ws.tenant_id.as_str(),
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -222,6 +333,7 @@ async fn revoked_scoped_token_is_rejected() {
     let state = test_state().await;
     let app: Router = gyre_server::build_router(state.clone());
 
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-review-probe-4".to_string();
     let token = state
         .agent_signing_key
@@ -232,6 +344,8 @@ async fn revoked_scoped_token_is_rejected() {
             "http://localhost:0",
             60,
             "review:submit",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -292,6 +406,7 @@ async fn validation_scoped_token_cannot_submit_review() {
     );
     state.merge_requests.create(&mr).await.unwrap();
 
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-validate-probe".to_string();
     let token = state
         .agent_signing_key
@@ -302,6 +417,8 @@ async fn validation_scoped_token_cannot_submit_review() {
             "http://localhost:0",
             60,
             "validation:report",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -365,6 +482,7 @@ async fn validation_scoped_token_can_read_mr_context() {
     );
     state.merge_requests.create(&mr).await.unwrap();
 
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
     let gate_agent_id = "gate-validate-probe-read".to_string();
     let token = state
         .agent_signing_key
@@ -375,6 +493,8 @@ async fn validation_scoped_token_can_read_mr_context() {
             "http://localhost:0",
             60,
             "validation:report",
+            &tenant_id,
+            Some("test-reviewer"),
         )
         .unwrap();
     state
@@ -409,11 +529,17 @@ async fn validation_scoped_token_can_read_mr_context() {
 
 /// Review F3: capability comparison must be exact-match. A lookalike scope
 /// (`review:submit:admin`, `xreview:submit`) is not a known gate-agent
-/// capability, so it must not inherit the reviewer identity binding in
-/// `submit_review`. Discriminator: the lookalike token authenticates as a
-/// normal agent (the builtin agent-role policy allows the review POST), and
-/// the review is stored under the request body's reviewer id — proving the
-/// scope check compared exactly rather than substring-matched.
+/// capability, so it must not inherit the scoped-token route allow-list.
+/// Discriminators:
+/// 1. Route allow-list: the lookalike token authenticates as a normal
+///    agent, so GET /api/v1/repos (outside the review allow-list) is
+///    evaluated under the builtin agent-role policy and permitted — a
+///    substring scope match would lock the token to the review routes and
+///    deny it (403) there.
+/// 2. Reviewer identity binding: since the manifest-gate review repair,
+///    binding applies to EVERY agent-token principal regardless of scope,
+///    so the lookalike token's review is stored under its own verified
+///    token subject, never the request-body reviewer id.
 #[tokio::test]
 async fn lookalike_scope_does_not_inherit_review_capability() {
     let state = test_state().await;
@@ -432,6 +558,7 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
         1,
     );
     state.merge_requests.create(&mr).await.unwrap();
+    let tenant_id = ensure_probe_workspace(&state, "default", "tenant-probe").await;
 
     for lookalike in ["review:submit:admin", "xreview:submit"] {
         let agent_id = format!("gate-lookalike-{}", lookalike.replace(':', "-"));
@@ -444,6 +571,8 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
                 "http://localhost:0",
                 60,
                 lookalike,
+                &tenant_id,
+                None,
             )
             .unwrap();
         state
@@ -452,10 +581,34 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
             .await
             .unwrap();
 
-        // Route allow-list: lookalike scope is not a known gate-agent
-        // capability, so the allow-list does not apply — the request is
-        // evaluated under the agent-role builtin policy (read+write on
-        // merge_request), which permits the POST.
+        // Discriminator 1 — route allow-list: the lookalike scope is not a
+        // known gate-agent capability, so the scoped-token allow-list does
+        // not apply and GET /api/v1/repos is evaluated under the agent-role
+        // builtin policy (which permits the read). A substring scope
+        // comparison would treat the lookalike as `review:submit` and deny
+        // the request here.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/repos")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "lookalike scope '{lookalike}' must not inherit the scoped-token route allow-list"
+        );
+
+        // Discriminator 2 — reviewer identity binding: the review POST is
+        // permitted by the agent-role policy, but the review is stored
+        // under the token's own subject (agent-token principals are bound
+        // to their verified identity regardless of scope).
         let body = serde_json::json!({
             "reviewer_agent_id": "some-other-reviewer",
             "decision": "approved",
@@ -477,20 +630,18 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
         let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(status, StatusCode::CREATED, "body: {text}");
 
-        // Reviewer identity binding must NOT have engaged: the review is
-        // stored under the body's reviewer id (proof the scope comparison
-        // is exact, not substring).
         let reviews = state.reviews.list_reviews(&mr_id).await.unwrap();
         let stored = reviews
             .iter()
             .find(|r| r.body.as_deref() == Some(&format!("lookalike probe {lookalike}")))
             .unwrap_or_else(|| panic!("lookalike scope request failed: {status} {text}"));
         assert_eq!(
-            stored.reviewer_agent_id, "some-other-reviewer",
-            "lookalike scope '{lookalike}' must not inherit reviewer identity binding"
+            stored.reviewer_agent_id, agent_id,
+            "an agent-token caller's review must be recorded under its own verified \
+             identity, never the request-body reviewer id (scope '{lookalike}')"
         );
-        assert_eq!(status, StatusCode::CREATED);
     }
 }
 
@@ -595,7 +746,18 @@ async fn scoped_gate_tokens_can_fetch_pinned_mr_spec() {
     ] {
         let token = state
             .agent_signing_key
-            .mint_scoped(agent, "gate-1", "forge", "http://localhost:0", 60, scope)
+            .mint_scoped(
+                agent,
+                "gate-1",
+                "forge",
+                "http://localhost:0",
+                60,
+                scope,
+                // §1: tenant resolved from the MR's seeded workspace row, the
+                // same fail-closed chain the gate executor uses in production.
+                ws.tenant_id.as_str(),
+                Some("gate-spec-probe"),
+            )
             .unwrap();
         state
             .kv_store
