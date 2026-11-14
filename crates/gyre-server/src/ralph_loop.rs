@@ -315,7 +315,12 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
         .filter(|r| r.status == GateStatus::Failed)
         .collect::<Vec<_>>();
     for r in &failed {
-        let gate = state.quality_gates.find_by_id(r.gate_id.as_str()).await.ok().flatten();
+        let gate = state
+            .quality_gates
+            .find_by_id(r.gate_id.as_str())
+            .await
+            .ok()
+            .flatten();
         let gate_name = gate
             .as_ref()
             .map(|g| g.name.clone())
@@ -324,14 +329,9 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
             .as_ref()
             .map(|g| format!("{:?}", g.gate_type))
             .unwrap_or_else(|| "Unknown".to_string());
-        let attempt =
-            crate::gate_executor::gate_attempt_count(state, &mr.id, &r.gate_id).await;
+        let attempt = crate::gate_executor::gate_attempt_count(state, &mr.id, &r.gate_id).await;
         if crate::gate_executor::gate_result_already_delivered(
-            state,
-            &mr.id,
-            &r.gate_id,
-            &agent.id,
-            attempt,
+            state, &mr.id, &r.gate_id, &agent.id, attempt,
         )
         .await
         {
@@ -355,11 +355,7 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
             )
             .await;
         crate::gate_executor::mark_gate_result_delivered(
-            state,
-            &mr.id,
-            &r.gate_id,
-            &agent.id,
-            attempt,
+            state, &mr.id, &r.gate_id, &agent.id, attempt,
         )
         .await;
     }
@@ -1153,10 +1149,7 @@ mod tests {
             Some("TestCommand")
         );
         assert_eq!(
-            failure
-                .payload
-                .as_ref()
-                .and_then(|p| p["status"].as_str()),
+            failure.payload.as_ref().and_then(|p| p["status"].as_str()),
             Some("Failed")
         );
         let attempt = failure

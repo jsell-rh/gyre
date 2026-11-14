@@ -785,10 +785,7 @@ mod tests {
         if let tungstenite::Message::Text(text) = msg {
             let v: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(v["kind"], "gate_result");
-            assert_eq!(
-                v["to"],
-                serde_json::json!({"agent": "agent-ws-live"})
-            );
+            assert_eq!(v["to"], serde_json::json!({"agent": "agent-ws-live"}));
             assert_eq!(v["payload"]["mr_id"], "mr-42");
             assert_eq!(v["payload"]["attempt"], 2);
             assert_eq!(v["payload"]["gate_name"], "security-review");
@@ -800,8 +797,11 @@ mod tests {
         // not subscription, gates agent-directed delivery.
         let got =
             tokio::time::timeout(std::time::Duration::from_millis(300), ws_other.next()).await;
+        // Pass on timeout (Err) or clean stream close (Ok(None)); any
+        // delivered message means agent-directed delivery leaked.
+        let leaked = got.ok().flatten().is_some();
         assert!(
-            matches!(got, Err(_)) || matches!(got, Ok(None)),
+            !leaked,
             "agent-directed message must not reach another agent's session"
         );
     }

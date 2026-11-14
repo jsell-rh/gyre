@@ -1369,8 +1369,7 @@ Attempts: {attempt}
 Author agent: {author_id} (session ended)
 
 Fix the issue and re-push to trigger gate re-evaluation.",
-        gate.name,
-        mr.id
+        gate.name, mr.id
     );
 
     let now = now_secs();
@@ -1528,15 +1527,15 @@ async fn handle_all_gates_failed(state: &Arc<AppState>, mr: &gyre_domain::MergeR
         }
     }
     let description = format!(
-        "All gates failed on MR #{} ('{}'). The approach itself may be wrong — 
-reassess before retrying.
+        "All gates failed on MR #{} ('{}'). The approach itself may be wrong — reassess before
+retrying.
 
 Failed gates:
 {gates_summary}
 Author agent: {}
 
-agent-gates.md §Gate Failure Feedback — all gates failed: the MR was removed 
-from the merge queue and this task was created to reassess the approach.",
+agent-gates.md §Gate Failure Feedback — all gates failed: the MR was removed from
+the merge queue and this task was created to reassess the approach.",
         mr.id,
         mr.title,
         mr.author_agent_id
@@ -7493,10 +7492,7 @@ specs:
         agent
     }
 
-    async fn gate_results_for(
-        state: &Arc<AppState>,
-        mr_id: &Id,
-    ) -> Vec<GateResult> {
+    async fn gate_results_for(state: &Arc<AppState>, mr_id: &Id) -> Vec<GateResult> {
         state
             .gate_results
             .list_by_mr_id(mr_id.as_str())
@@ -7574,10 +7570,7 @@ specs:
             .iter()
             .find(|m| m.kind == MessageKind::GateResult)
             .expect("GateResult in author inbox");
-        assert_eq!(
-            msg.to,
-            Destination::Agent(Id::new("agent-gf-author"))
-        );
+        assert_eq!(msg.to, Destination::Agent(Id::new("agent-gf-author")));
         let p = msg.payload.as_ref().unwrap();
         assert_eq!(p["mr_id"], mr_id.to_string());
         assert_eq!(p["gate_name"], "unit tests");
@@ -7699,15 +7692,9 @@ specs:
             tasks.iter().all(|t| !t.title.starts_with("Gate failure: ")),
             "no deferred gate-failure task before 3 failures: {tasks:?}"
         );
-        let orch_inbox = state
-            .messages
-            .list_unacked(&orch.id, 100)
-            .await
-            .unwrap();
+        let orch_inbox = state.messages.list_unacked(&orch.id, 100).await.unwrap();
         assert!(
-            orch_inbox
-                .iter()
-                .all(|m| m.kind != MessageKind::Escalation),
+            orch_inbox.iter().all(|m| m.kind != MessageKind::Escalation),
             "no orchestrator escalation before 3 consecutive failures"
         );
 
@@ -7753,8 +7740,10 @@ specs:
         )
         .await;
         let task = task.expect("deferred gate-failure task must be created");
-        let expected_title =
-            format!("Gate failure: unit tests on MR #{} (attempt 3)", mr_id.as_str());
+        let expected_title = format!(
+            "Gate failure: unit tests on MR #{} (attempt 3)",
+            mr_id.as_str()
+        );
         assert_eq!(task.title, expected_title);
         assert_eq!(task.status, gyre_domain::TaskStatus::Backlog);
         assert_eq!(task.priority, gyre_domain::TaskPriority::High);
@@ -7848,7 +7837,11 @@ specs:
             owner_id.clone(),
             now_secs(),
         );
-        state.workspace_memberships.create(&membership).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
         let admin_id = Id::new("user-sec-tenant-admin");
         let mut admin =
             gyre_domain::User::new(admin_id.clone(), "ext-sec-admin", "sec-admin", now_secs());
@@ -7959,8 +7952,9 @@ specs:
                         .await
                         .unwrap()
                         .iter()
-                        .any(|n| n.notification_type
-                            == gyre_common::NotificationType::SecurityFinding)
+                        .any(|n| {
+                            n.notification_type == gyre_common::NotificationType::SecurityFinding
+                        })
                 })
                 .await,
                 "critical security finding must notify the Overseer recipient {uid}"
@@ -8017,8 +8011,7 @@ specs:
         assert!(
             eventually(|| async {
                 let results = gate_results_for(&state, &mr_id).await;
-                results.len() == 2
-                    && results.iter().all(|r| r.status == GateStatus::Failed)
+                results.len() == 2 && results.iter().all(|r| r.status == GateStatus::Failed)
             })
             .await,
             "both gates must fail"
@@ -8045,7 +8038,10 @@ specs:
             eventually_task_with_label(
                 &state,
                 &repo_id,
-                &format!("Reassess approach: all gates failed on MR #{}", mr_id.as_str()),
+                &format!(
+                    "Reassess approach: all gates failed on MR #{}",
+                    mr_id.as_str()
+                ),
             ),
         )
         .await
@@ -8054,7 +8050,10 @@ specs:
         assert_eq!(task.priority, gyre_domain::TaskPriority::High);
         assert_eq!(task.labels, vec!["gate-failure", "auto-created"]);
         let desc = task.description.as_deref().unwrap();
-        assert!(desc.contains("lint"), "description lists failed gates: {desc}");
+        assert!(
+            desc.contains("lint"),
+            "description lists failed gates: {desc}"
+        );
         assert!(desc.contains("unit tests"), "description: {desc}");
     }
 
