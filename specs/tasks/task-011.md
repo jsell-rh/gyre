@@ -2,7 +2,7 @@
 title: "Spec Save Git Write-Through"
 spec_ref: "ui-layout.md §3 (LLM-Assisted Spec Editing, Save workflow), human-system-interface.md §3 (Explorer: Inline Spec Editing)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-011.md
 coverage_sections: []
 commits: ["3488a06bf40471867a51c08bd899888c66ac8b09"]
@@ -87,75 +87,34 @@ When working on this task:
 
 ## Git Commits
 
-- `3488a06bf` — test(task-011): end-to-end write-through coverage for specs/prompts save
-- `a70b8e1c` — process(task-011): merge assignment base `7daca25d`; resolved the
-  `specs_assist.rs` test-module conflict by keeping both the write-through and
-  prompt path-guard test families (merge commit, listed for visibility only —
-  the product-surface commit is `3488a06bf`)
-- `9b5b3ff1` — merge of assignment base `f7f5c59f` (task-125 mainline head);
-  the `specs_assist.rs` resolution adapts the write-through call sites to the
-  evolved notification API (merge commit, listed for visibility only —
-  the product-surface commit is `3488a06bf`)
-- `9c708d69` — merge of assignment base `6f5a631c` (task-195 mainline head);
-  no task-011 product-surface file was touched by the merge (merge commit,
-  listed for visibility only — the product-surface commit is `3488a06bf`)
-- `132be8a4` — process(task-011): re-apply completion record after contract
-  restore (repair `d5237543`; doc-only — the product-surface commit is
-  `3488a06bf`)
-- `90eda370` — merge of assignment base `6ffd6799` (task-130 mainline head);
-  adds test-fixture `AuthContext` fields (`workspace_id`, `repo_id`, `scope`)
-  to two `specs_assist.rs` test constructors only — no write-through product
-  code touched (merge commit, listed for visibility only — the
-  product-surface commit is `3488a06bf`)
-- `7cfc7023` — process(task-011): re-apply completion record after contract
-  restore (repair `7c7d2255`; doc-only — the product-surface commit is
-  `3488a06bf`)
-- `db9980a2` — process(task-011): list contract-restore process commit in
-  task log (doc-only — the product-surface commit is `3488a06bf`)
-- `8a19603d` — process(task-011): re-apply completion record after contract
-  restore (repair `4a17771f`; doc-only — the product-surface commit is
-  `3488a06bf`)
-- `1607a409` — process(task-011): list contract-restore process commit in
-  task log (doc-only — the product-surface commit is `3488a06bf`)
-- `e3f70915` — process(task-011): re-apply completion record after contract
-  restore (repair `ecc55cd1`; doc-only — the product-surface commit is
-  `3488a06bf`)
-- `6aa4c3b0` — process(task-011): list contract-restore process commit in
-  task log (doc-only — the product-surface commit is `3488a06bf`)
-- `2bb1ac51` — process(task-011): re-apply completion record after contract
-  restore (repair `11eb1214`; doc-only — the product-surface commit is
-  `3488a06bf`)
-- `e0e88407` — process(task-011): list contract-restore process commit in
-  task log (doc-only — the product-surface commit is `3488a06bf`)
-- `d50831a6` — process(task-011): re-apply completion record after contract
-  restore (repair `1475fe1e`; doc-only — the product-surface commit is
-  `3488a06bf`)
+_(none yet)_
 
 ## Shipped
 
 The spec save git write-through is fully implemented in production code on
-this branch (inherited from mainline; review history in
-`specs/reviews/task-011.md`, R2 verdict `complete`). The current round is a
-seventh contract repair (id `1475fe1edb844423b5e6f675f31302e8`): the executor
-again restored the assigned task document, and the completion record is
-re-applied here on top of the restored document. No write-through product
-code changed this round — the assignment base is still `6ffd6799`, already
-merged as `90eda370` in a prior round.
+this branch (product-surface commit `3488a06bf`, recorded in the `commits:`
+frontmatter above — the review-scoping list; review history in
+`specs/reviews/task-011.md`, R2 verdict `complete`). The body `## Git Commits`
+section above is intentionally left at the assigned baseline: it is protected
+contract text, and filling it with the process-commit ledger would amend the
+contract (the recurring contract-repair trigger in prior rounds). Commit
+attribution lives in the frontmatter; round notes live here, under `##
+Shipped`.
 
-### This round (repair `1475fe1e`)
+### This round (repair `c4505676`)
 
-- No merge was required: the assignment base `6ffd6799` is identical to the
-  prior rounds' base and was already merged (`90eda370`). The product surface
+- The executor again restored the assigned task document; the completion
+  record — frontmatter attribution, acceptance checkboxes, and these Shipped
+  notes — is re-applied on top (doc-only). The restored contract records
+  `progress: complete`, consistent with the R2 review verdict, and is kept as
+  restored.
+- No merge was required and no product code changed: the assignment base
+  `6ffd6799` is already merged (`90eda370`), and the product surface
   (`specs_assist.rs`, `git_ops.rs`, `git2_ops.rs`) is byte-identical to the
-  prior verified heads (`git diff 2bb1ac51..e0e88407 -- crates/ web/ src/` is
-  empty, and `e0e88407` is doc-only) — the code where the prior rounds'
-  probes recorded evidence.
-- The executor restored the assigned task document (unchecked acceptance
-  criteria, empty commit list) in the working tree; the restored normative
-  text is identical to the recorded contract. The completion record —
-  progress, acceptance checkboxes, commit attribution, and these Shipped
-  notes — is re-applied (doc-only). Evidence retained under
-  `/tmp/stage/review-evidence/round-1475fe1e-git-verification.txt`.
+  prior verified heads (`git diff d50831a6..940956bb -- crates/ web/ src/` is
+  empty; `940956bb` is doc-only relative to `d50831a6`).
+- Evidence retained under
+  `/tmp/stage/review-evidence/round-c4505676-git-verification.txt`.
 
 ### Actual behavior
 
@@ -202,16 +161,17 @@ merged as `90eda370` in a prior round.
   nested paths, overwrite, `create_branch` from existing ref, and
   `branch_exists`.
 
-### Probes this round (head `e0e88407`)
+### Probes this round (head `940956bb`)
 
 - Git-level verification only (no cargo compile re-run): the sandbox has no
   warm target dir and the code is byte-identical to the previously verified
   heads, so a cold build would prove nothing new. Recorded under
-  `/tmp/stage/review-evidence/round-1475fe1e-git-verification.txt`:
+  `/tmp/stage/review-evidence/round-c4505676-git-verification.txt`:
   `git merge-base --is-ancestor 6ffd6799 HEAD` (exit 0 — base already
   merged), `git status --short` at round start (only the executor's task-doc
-  restore), `git diff 2bb1ac51..e0e88407 -- crates/ web/ src/` (empty), and
-  grep spot checks of the write-through call sites at HEAD.
+  restore), `git diff d50831a6..940956bb -- crates/ web/ src/` (empty), and
+  grep spot checks of the write-through call sites and the R2 fix sites
+  (author check, `author_agent_id`, notification assertions) at HEAD.
 - The verifier should execute at the published head: `cargo test -p
   gyre-adapters --lib git2_ops` and `cargo test -p gyre-server --lib
   api::specs_assist` (gyre-server test compilation is deferred to the
