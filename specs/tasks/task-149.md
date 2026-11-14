@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "analytics.md §Analytics Dashboard (UI)"
   - "analytics.md §Data Retention"
-commits: ["f2d6db71f21c89feb052220e030f5faa754be5e7", "af587a17fcee2909f749dbe050f409d710d8b6db"]
+commits: ["af587a17fcee2909f749dbe050f409d710d8b6db", "f2d6db71f21c89feb052220e030f5faa754be5e7"]
 ---
 
 ## Spec Excerpt
