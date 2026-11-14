@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f", "ef28d2086cc83c35d0c5617a601aa57216f1b8ff"]
+commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f"]
 ---
 
 ## Spec Excerpt
