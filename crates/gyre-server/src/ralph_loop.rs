@@ -1009,6 +1009,7 @@ mod tests {
         let mut mr = MergeRequest::new(
             Id::new("mr-1"),
             Id::new("r-1"),
+            Id::new("ws-1"),
             "Agent 'worker-1': Implement auth retry",
             "task/abc",
             "main",

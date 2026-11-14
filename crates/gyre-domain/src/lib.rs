@@ -135,7 +135,9 @@ pub use user::{
     NotificationPriority, SlackConfig, Theme, UiDensity, User, UserPreferences,
     UserPreferencesPatch, UserRole, WebhookConfig,
 };
-pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
+pub use user_profile::{
+    JudgmentEntry, JudgmentType, UserNotificationPreference, UserSession, UserToken,
+};
 pub use workspace::{
     builtin_personas, BuiltinPersonaDef, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel,
     Workspace, BUILTIN_PERSONA_DEFS,

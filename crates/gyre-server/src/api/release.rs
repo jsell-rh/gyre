@@ -204,6 +204,7 @@ pub async fn release_prepare(
         let mr = gyre_domain::MergeRequest::new(
             new_id(),
             Id::new(&req.repo_id),
+            repo.workspace_id.clone(),
             title,
             branch.clone(),
             repo.default_branch.clone(),

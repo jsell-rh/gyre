@@ -3972,6 +3972,7 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             mr_id.clone(),
             repo_id.clone(),
+            Id::new("ws-test"),
             "Add feature",
             "feature-branch",
             "main",
@@ -4109,6 +4110,7 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             mr_id.clone(),
             repo_id.clone(),
+            Id::new("ws-test"),
             "Add feature",
             "feature-branch",
             "main",
@@ -4228,6 +4230,7 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             mr_id.clone(),
             repo_id.clone(),
+            Id::new("ws-test"),
             "Add feature",
             "feature-branch",
             "main",
@@ -5784,6 +5787,7 @@ mod tests {
         let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-sha-test"),
             repo.id,
+            Id::new("default"),
             "feat",
             "feat/x",
             "main",
@@ -5866,6 +5870,7 @@ mod tests {
         let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-tpl-test"),
             repo.id,
+            Id::new("default"),
             "feat",
             "feat/y",
             "main",
@@ -6442,13 +6447,13 @@ specs:
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(mr_id),
             repo.id.clone(),
+            ws.id.clone(),
             "feat",
             "feat/x",
             "main",
             now_secs(),
         );
         mr.spec_ref = spec_ref.map(|s| s.to_string());
-        mr.workspace_id = repo.workspace_id.clone();
         state.merge_requests.create(&mr).await.unwrap();
         dir
     }
@@ -7089,6 +7094,7 @@ specs:
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-mg-4"),
             repo.id.clone(),
+            repo.workspace_id.clone(),
             "feat",
             "feat/y",
             "main",
