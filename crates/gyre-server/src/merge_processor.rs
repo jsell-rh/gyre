@@ -1497,6 +1497,35 @@ async fn merge_atomic_group(
                     .update_status(&ge.id, MergeQueueEntryStatus::Merged, None)
                     .await?;
 
+                // agent-gates.md §Part 3 — merge attestation bundle for
+                // every group member merge (same multi-party signing as the
+                // single-MR path; see the call site there for rationale).
+                match crate::merge_attestation::generate_merge_attestation_bundle(
+                    state,
+                    &updated_mr,
+                    &merge_commit_sha,
+                    now,
+                )
+                .await
+                {
+                    Ok(signed) => {
+                        crate::merge_attestation::store_merge_attestation_bundle(
+                            state,
+                            &updated_mr,
+                            &repo,
+                            &signed,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        warn!(
+                            mr_id = %updated_mr.id,
+                            error = %e,
+                            "failed to generate merge attestation bundle for atomic group member"
+                        );
+                    }
+                }
+
                 merged_entries.push((ge.clone(), updated_mr));
                 // Track the merge commit for post-merge validation (TASK-095).
                 group_merge_shas.push(merge_commit_sha.clone());
@@ -2697,6 +2726,38 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .save(&updated_mr.id.to_string(), &bundle)
                 .await;
             info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
+
+            // agent-gates.md §Part 3 — merge attestation bundle with
+            // multi-party signing (forge signs command gates and the
+            // document; each gate agent signs its AgentReview result).
+            // Stored as an audit event + git note on the merge commit.
+            // Generated after every successful merge; a generation failure
+            // is logged but never rolls back the already-landed merge.
+            match crate::merge_attestation::generate_merge_attestation_bundle(
+                state,
+                &updated_mr,
+                &merge_commit_sha,
+                now,
+            )
+            .await
+            {
+                Ok(signed) => {
+                    crate::merge_attestation::store_merge_attestation_bundle(
+                        state,
+                        &updated_mr,
+                        &repo,
+                        &signed,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    warn!(
+                        mr_id = %updated_mr.id,
+                        error = %e,
+                        "failed to generate merge attestation bundle"
+                    );
+                }
+            }
 
             // §5.3 location 2 — Git note on refs/notes/attestations.
             // During the dual-write period, we write EITHER the chain attestation
@@ -9563,6 +9624,140 @@ mod tests {
         assert!(
             crate::attestation::verify_bundle(&bundle, &state.agent_signing_key.public_key_bytes),
             "attestation signature must verify over the full payload incl. meta_specs_used"
+        );
+    }
+
+    /// agent-gates.md §Part 3: the merge processor generates a signed
+    /// merge attestation bundle after every successful merge. The bundle
+    /// is recorded as a `merge_attestation_bundle` audit event, carries
+    /// every gate result of the MR, signs TestCommand results with the
+    /// forge identity and the AgentReview result with the gate agent's
+    /// identity, and every signature verifies with the real keys.
+    /// Reverting the `generate_merge_attestation_bundle` call in
+    /// `process_next` fails this test — no audit event is recorded.
+    #[tokio::test]
+    async fn merge_processor_generates_multi_party_attestation_bundle() {
+        use gyre_domain::{GateResult, QualityGate, Review, ReviewDecision};
+        use gyre_ports::AuditQueryFilter;
+
+        let state = test_state();
+        for policy in crate::abac_middleware::m34_builtin_policies() {
+            state.policies.create(&policy).await.unwrap();
+        }
+        let (repo, mr) = setup_mr_with_attestation_chain(&state).await;
+
+        // Gates for the MR's repo: a forge-run test gate and an
+        // AgentReview gate whose gate agent submitted an approval.
+        let mk_gate = |gate_type: gyre_domain::GateType,
+                       name: &str|
+         -> QualityGate {
+            QualityGate {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: repo.id.clone(),
+                name: name.to_string(),
+                gate_type,
+                command: Some("true".to_string()),
+                required_approvals: None,
+                persona: None,
+                validation_type: None,
+                required: true,
+                gate_phase: Default::default(),
+                timeout_secs: None,
+                position: 0,
+                created_at: 1_700_000_000,
+            }
+        };
+        let test_gate = mk_gate(gyre_domain::GateType::TestCommand, "tests");
+        let review_gate = mk_gate(gyre_domain::GateType::AgentReview, "security-review");
+        state.quality_gates.save(&test_gate).await.unwrap();
+        state.quality_gates.save(&review_gate).await.unwrap();
+
+        let mk_result = |gate_id: &Id| -> GateResult {
+            GateResult {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                gate_id: gate_id.clone(),
+                mr_id: mr.id.clone(),
+                status: gyre_domain::GateStatus::Passed,
+                output: Some("ok".to_string()),
+                started_at: Some(1_700_000_000),
+                finished_at: Some(1_700_000_060),
+            }
+        };
+        state.gate_results.save(&mk_result(&test_gate.id)).await.unwrap();
+        state
+            .gate_results
+            .save(&mk_result(&review_gate.id))
+            .await
+            .unwrap();
+
+        let mut review = Review::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            mr.id.clone(),
+            "security-gate-7",
+            ReviewDecision::Approved,
+            1_700_000_100,
+        );
+        review.gate_id = Some(review_gate.id.clone());
+        review.body = Some("approved after review".to_string());
+        state.reviews.submit_review(&review).await.unwrap();
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Merged, "MR must merge");
+
+        // The bundle was recorded as an audit event for this MR.
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                agent_id: None,
+                event_type: Some(
+                    crate::merge_attestation::MERGE_ATTESTATION_AUDIT_TYPE.to_string(),
+                ),
+                workspace_id: None,
+                user_id: None,
+                resource_type: None,
+                outcome: None,
+                since: None,
+                until: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        let event = events
+            .iter()
+            .find(|e| e.resource_id.as_deref() == Some(mr.id.as_str()))
+            .expect("merge attestation bundle audit event must be recorded for the merged MR");
+
+        // The event's detail is the full signed bundle; parse it back.
+        let bundle: gyre_domain::merge_attestation::MergeAttestationBundle =
+            serde_json::from_value(event.detail.clone())
+                .expect("audit detail must deserialize as a MergeAttestationBundle");
+        assert_eq!(bundle.mr_id, mr.id.to_string());
+        assert_eq!(bundle.merge_commit_sha, updated.merge_commit_sha.unwrap());
+        assert_eq!(bundle.merge_attestation_version, "1.0");
+        assert_eq!(bundle.gates.len(), 2, "both gate results must be attested");
+
+        let by_name = |n: &str| bundle.gates.iter().find(|g| g.name == n).unwrap();
+        assert_eq!(by_name("tests").signed_by, "forge");
+        let sec = by_name("security-review");
+        assert_eq!(sec.signed_by, "agent:security-gate-7");
+        assert_eq!(sec.reviewer_agent_id.as_deref(), Some("security-gate-7"));
+        assert_eq!(sec.review_decision.as_deref(), Some("Approved"));
+
+        // Every signature in the bundle verifies against the signing
+        // party's real key material.
+        assert!(
+            crate::merge_attestation::verify_merge_attestation_bundle(
+                &bundle,
+                &state.agent_signing_key
+            ),
+            "all bundle signatures must verify"
         );
     }
 
