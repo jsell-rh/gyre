@@ -2,10 +2,10 @@
 title: "Implement session management"
 spec_ref: "user-management.md §Session Management"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["c947d22f1aa9b66f30b26b913aeda2e6c506fb94", "bdf1855d12d8837e6142b7ab060b09ac3cb63e55", "fd4351b9988673828b61a2b1379057db07548018", "97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -84,31 +84,3 @@ Users can:
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Session Management for full requirements. Auth middleware is in `gyre-server/src/auth.rs`. User model is in `gyre-domain/src/user.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC mappings in `gyre-server/src/abac_middleware.rs`. Check migration numbering.
-
-## Shipped
-
-Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round changed no code: the executor restored the assigned task contract (finding `f68118b6`, category contract), so this commit re-records the frontmatter (`progress`, `commits`) and these shipped notes on the unchanged tree at `06fcc511` (merge of base `c844ea52`).
-
-### Implementation
-
-- **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields; only the SHA-256 of the session token is stored, never plaintext.
-- **Port + adapters:** `SessionRepository` (create, list, find, touch, revoke, revoke_all, delete_expired) implemented by SQLite, PostgreSQL, and mem adapters on migration `2026-10-08-000064_user_sessions`.
-- **Auth integration:** sessions minted on API-key auth keyed by (credential, IP, User-Agent); `last_active_at` + sliding expiry refreshed at most once per 60s; revoked sessions reject auth on both HTTP and WS/TTY paths; `credential_revoked` rejects the key when every session for it is revoked; IP from socket peer only (CWE-348).
-- **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants (`/users/:user_id/sessions...`) with per-handler role checks and tenant containment. Session routes are ABAC-exempt by design with per-handler authorization (validated by `check-abac-exempt-handlers.sh`).
-- **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days (revoked rows kept as the durable sign-out record).
-- **Prior base-merge repairs on this branch:** `bdf1855d`/`c947d22f` re-seeded repo fixtures and adapted base audit-trail fixtures to the 7-arg `MergeRequest::new`, repairing the four `merge_requests` failures from verification finding `4fb29ee2`.
-
-### Acceptance-criteria status
-
-All body checkboxes above are satisfied by the shipped code except `cargo test --all`, which is deferred to the independent verifier (gyre-server test codegen exceeds the in-sandbox 4 GiB budget; the build wrapper blocks it by design). The full suite must run `cargo test --all` on this exact head; the four `merge_requests` tests from finding `4fb29ee2` were repaired by `bdf1855d` and the merge with base `c844ea52` type-checks clean including all test targets.
-
-### Test evidence (this round, tree unchanged at `06fcc511`)
-
-Logs under `/tmp/stage/review-evidence/`:
-
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — clean (7m18s).
-- `cargo fmt --check` — clean.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain -p gyre-common -p gyre-ports` — 643 passed, 0 failed.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters` — 534 passed, 0 failed (includes the SQLite `SessionRepository` suite).
-- All 19 mechanical invariant gates pass: architecture, ABAC route registry + exempt-handler parity, MCP write-tool gating, migration versions + SQL portability, dead message kinds, byte-slice truncation, relative path defaults, fail-open ref resolution, mem port contracts, fabricated scope defaults (lookup + construction), lossy secret conversion, scope-literal defaults, inert enforcement, forged scope fields, forwarded-header trust, in-memory state stores, unbounded external HTTP.
-- `scripts/check-task-commit-attribution.sh` — passes with the frontmatter commit list restored by this commit (17 labeled product-surface commits + 5 unlabeled product commits from this branch recorded for review scoping).
