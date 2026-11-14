@@ -491,10 +491,12 @@ pub async fn create_notifications_for_error_findings(
                 &tenant_id,
                 now_i64,
             );
-            // Error-severity findings keep the High band (rank 3) the patrol
-            // task plan specified, overriding the type's Medium default.
+            // Error-severity findings keep the rank-3 Inbox position the
+            // patrol task plan specified. The four-level band stays the
+            // type's band (Medium): per the amended §Notification Entity
+            // membership table the band derives from the notification type,
+            // never from the numeric rank.
             notif.priority_rank = 3;
-            notif.priority = gyre_common::NotificationPriority::from_rank(3);
             notif.body = Some(
                 serde_json::json!({
                     "finding_type": finding.finding_type,
@@ -1496,10 +1498,18 @@ mod tests {
             ]
         );
 
-        // All should be error-severity drift findings at rank 3 (High band).
+        // All should be error-severity drift findings at rank 3 (High
+        // Inbox position) whose four-level band is the type's Medium —
+        // per the amended §Notification Entity membership table the band
+        // derives from the type, never from the numeric rank.
         for notif in &admin_notifs {
             assert_eq!(notif.notification_type, NotificationType::SpecDriftDetected);
             assert_eq!(notif.priority_rank, 3);
+            assert_eq!(
+                notif.priority,
+                gyre_common::NotificationPriority::Medium,
+                "SpecDriftDetected band is Medium per the amended table"
+            );
         }
     }
 

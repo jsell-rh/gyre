@@ -52,8 +52,12 @@ impl NotificationRow {
             id: Id::new(self.id),
             workspace_id: source.workspace_id.clone(),
             user_id: Id::new(self.user_id),
-            notification_type: ntype,
-            priority: gyre_common::NotificationPriority::from_rank(priority_rank),
+            notification_type: ntype.clone(),
+            // Band derives from the persisted notification TYPE per the
+            // amended §Notification Entity membership table — never from
+            // the numeric rank (only the rank is persisted, and no numeric
+            // threshold reproduces the specced membership).
+            priority: gyre_common::NotificationPriority::for_notification_type(&ntype),
             priority_rank,
             title: self.title,
             body: self.body,
@@ -513,6 +517,66 @@ mod tests {
             n.resolved_at = Some(created_at + 10);
         }
         n
+    }
+
+    /// Read-path band derivation (task-123 repair): only the numeric rank is
+    /// persisted; the four-level band must be reconstructed from the
+    /// persisted notification TYPE per the amended §Notification Entity
+    /// membership table — never threshold-mapped from the rank. Pins the
+    /// types whose rank and band deliberately disagree: rank 2 → High (not
+    /// Urgent), rank 4 → Low (not High), rank 7 → High (not Medium).
+    #[tokio::test]
+    async fn read_path_reconstructs_band_from_type_not_rank() {
+        let (_tmp, s) = setup();
+        let cases = [
+            (
+                "n-band-1",
+                NotificationType::SpecApprovalRequested,
+                2u8,
+                gyre_common::NotificationPriority::High,
+            ),
+            (
+                "n-band-2",
+                NotificationType::CascadeTestTriggered,
+                4,
+                gyre_common::NotificationPriority::Low,
+            ),
+            (
+                "n-band-3",
+                NotificationType::SecretExpiring,
+                7,
+                gyre_common::NotificationPriority::High,
+            ),
+            (
+                "n-band-4",
+                NotificationType::SpecAssertionFailure,
+                9,
+                gyre_common::NotificationPriority::Medium,
+            ),
+        ];
+        for (id, ntype, rank, band) in cases {
+            let n = Notification::new(
+                Id::new(id),
+                Id::new("ws-1"),
+                Id::new("user-1"),
+                ntype.clone(),
+                format!("band probe {id}"),
+                "tenant-1",
+                1000,
+            );
+            assert_eq!(n.priority_rank, rank, "{ntype:?} rank");
+            assert_eq!(n.priority, band, "{ntype:?} band at creation");
+            NotificationRepository::create(&s, &n).await.unwrap();
+            let loaded = NotificationRepository::get(&s, &Id::new(id), &Id::new("user-1"))
+                .await
+                .unwrap()
+                .expect("notification must load");
+            assert_eq!(loaded.priority_rank, rank, "{ntype:?} rank round-trips");
+            assert_eq!(
+                loaded.priority, band,
+                "{ntype:?} band must reconstruct from the type, not from_rank({rank})"
+            );
+        }
     }
 
     #[tokio::test]

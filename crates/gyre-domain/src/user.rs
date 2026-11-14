@@ -289,90 +289,15 @@ impl NotificationPriority {
     /// §Notification Routing for Agent Escalations "Urgent → always notify
     /// workspace Owners" step and per-channel min_priority semantics.
     pub fn for_notification_type(t: &NotificationType) -> Self {
-        use NotificationType as T;
-        match t {
-            // Urgent - needs attention now (work blocked / immediate action):
-            // security finding, agent escalation, MR reverted (spec examples),
-            // agent stuck awaiting clarification (HSI §8 #1), merge queue
-            // blocked, budget exhausted (work stopped).
-            T::AgentEscalation
-            | T::SecurityFinding
-            | T::MrReverted
-            | T::AgentNeedsClarification
-            | T::MergeQueueEscalation
-            | T::AgentBudgetExhausted
-            // Active impersonation of this user (identity-security.md
-            // §Impersonation, merged from main's task-109): security alert
-            // on the user's own account, priority 1.
-            | T::ImpersonationAlert
-            // Worker spawn failed on the compute target after all retries
-            // (agent-runtime.md §1 Phase 7, merged from main's task-125
-            // base): the task is Blocked — work blocked, immediate action.
-            | T::ComputeTargetUnavailable => Self::Urgent,
-            // High - needs attention soon: gate failure, budget warning
-            // (spec examples), plus decisions/blocks that stall work soon:
-            // approvals, rejections, conflicts, paused queue, failed groups.
-            T::GateFailure
-            | T::AgentBudgetWarning
-            | T::SpecApprovalRequested
-            | T::SpecRejected
-            | T::ConstraintViolation
-            | T::SpecConflict
-            | T::PersonaApprovalRequested
-            // Persona change awaiting spec-lifecycle approval (merged from
-            // main's task-116): same pending-approval decision class as
-            // SpecApprovalRequested / PersonaApprovalRequested.
-            | T::PersonaChangePendingApproval
-            | T::MergeQueuePaused
-            | T::CascadeTestFailed
-            | T::AtomicGroupFailure
-            // Impersonation consent request (identity-security.md
-            // §Impersonation, merged from main's task-109): same
-            // pending-approval decision class as SpecApprovalRequested.
-            | T::ImpersonationRequest
-            // Secret approaching expiry (platform-model.md §7, merged from
-            // main): same approaching-deadline class as AgentBudgetWarning.
-            | T::SecretExpiring
-            // Agent failed and needs attention (user-management.md
-            // §Notification Entity, merged from main's unified taxonomy):
-            // High per the spec's level examples.
-            | T::AgentFailed
-            // Breaking change in a repo others depend on (merged from
-            // main): stalls dependent work soon.
-            | T::BreakingChangeDetected
-            // Platform-level system alert (merged from main): default High
-            // per the taxonomy's numeric rank 3.
-            | T::SystemAlert
-            // Workspace has no active Owner; tenant admins must reassign
-            // ownership (user-management.md §Ownership Transfer & Reclamation,
-            // merged from main's task-125 base): needs attention soon.
-            | T::WorkspaceOwnerless => Self::High,
-            // Medium - needs attention eventually: spec drift (spec example),
-            // stale-dependency-adjacent and review-arbitration items.
-            T::MetaSpecDrift
-            | T::CrossWorkspaceSpecChange
-            | T::ConflictingInterpretations
-            | T::DependencyChainTooDeep
-            | T::SpecAssertionFailure
-            // Spec drift detected by the spec patrol (merged from main's
-            // unified taxonomy): same drift class as MetaSpecDrift.
-            | T::SpecDriftDetected
-            // A dependency edge went stale (merged from main): needs
-            // attention eventually.
-            | T::DependencyStale => Self::Medium,
-            // Low - informational (MR merged, gate passed - spec examples):
-            // completions, suggestions, notices.
-            T::AgentCompleted
-            | T::TrustSuggestion
-            | T::AbandonedBranch
-            | T::SuggestedSpecLink
-            | T::CascadeTestTriggered
-            // Informational notices from main's unified taxonomy: MR merged,
-            // gates passed, workspace invitations and membership changes.
-            | T::MrMerged
-            | T::GatePassed
-            | T::InvitationReceived
-            | T::MembershipChanged => Self::Low,
+        // Delegates to the canonical membership table in gyre-common — the
+        // same derivation backs the Notification entity's `priority` field
+        // at creation and read time, so the routing band and the entity band
+        // can never disagree (one notification, one band, on every surface).
+        match gyre_common::NotificationPriority::for_notification_type(t) {
+            gyre_common::NotificationPriority::Urgent => Self::Urgent,
+            gyre_common::NotificationPriority::High => Self::High,
+            gyre_common::NotificationPriority::Medium => Self::Medium,
+            gyre_common::NotificationPriority::Low => Self::Low,
         }
     }
 }

@@ -850,6 +850,48 @@ mod tests {
         );
     }
 
+    /// The entity band serialized into webhook/email payloads
+    /// (`notif.priority`, reconstructed by the adapters from the persisted
+    /// type) must equal the band that gates channel delivery
+    /// (`for_notification_type`) — one notification, one band on every
+    /// surface. Covers the 12 types whose entity band used to be
+    /// threshold-mapped from the HSI rank (task-123 repair: rank 2 → Urgent
+    /// etc., contradicting the amended membership table).
+    #[test]
+    fn entity_band_equals_channel_routing_band() {
+        let types = [
+            NotificationType::SpecApprovalRequested,
+            NotificationType::PersonaApprovalRequested,
+            NotificationType::SpecRejected,
+            NotificationType::ConstraintViolation,
+            NotificationType::SpecConflict,
+            NotificationType::PersonaChangePendingApproval,
+            NotificationType::ImpersonationRequest,
+            NotificationType::WorkspaceOwnerless,
+            NotificationType::SecretExpiring,
+            NotificationType::CrossWorkspaceSpecChange,
+            NotificationType::SpecAssertionFailure,
+            NotificationType::CascadeTestTriggered,
+        ];
+        for t in types {
+            let n = gyre_common::Notification::new(
+                gyre_common::Id::new("n-band"),
+                gyre_common::Id::new("ws-band"),
+                gyre_common::Id::new("u-band"),
+                t.clone(),
+                "band probe",
+                "tenant",
+                0,
+            );
+            let entity_band = n.priority.as_str().to_ascii_lowercase();
+            let routing_band = NotificationPriority::for_notification_type(&t).as_str();
+            assert_eq!(
+                entity_band, routing_band,
+                "{t:?}: entity band must equal channel-routing band"
+            );
+        }
+    }
+
     /// One captured outbound HTTP delivery: (url, body, headers).
     type CapturedCall = (String, String, Vec<(String, String)>);
 

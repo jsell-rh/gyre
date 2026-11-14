@@ -534,10 +534,13 @@ mod tests {
                 .is_empty(),
             "TenantAdmins of other tenants must not be notified"
         );
-        // The notification is priority rank 2 (needs human action).
+        // The notification is priority rank 2 (needs human action); its
+        // four-level band is High per the amended §Notification Entity
+        // membership table (rank 2 would threshold-map to Urgent — the
+        // amendment forbids deriving the band from the number).
         let n = &ownerless_notifications(&state, "admin1", "ws1").await[0];
         assert_eq!(n.priority_rank, 2);
-        assert_eq!(n.priority, NotificationPriority::Urgent);
+        assert_eq!(n.priority, NotificationPriority::High);
     }
 
     /// Emitter-path guard (review F1): the ownerless flow's in-app record

@@ -346,8 +346,11 @@ async fn list_my_notifications_impl(
     let repo_id = params.repo_id.as_deref().map(Id::new);
     // `?priority=` takes the four-level name (Low/Medium/High/Urgent,
     // case-insensitive) and widens to the HSI §8 rank band it covers so the
-    // stored rank column can serve the filter (user-management.md
-    // §Notification Entity: the level is the band of the rank).
+    // stored rank column can serve the filter. The rank bands are an
+    // Inbox-ordering approximation on the numeric scale — the entity's
+    // four-level band is type-derived and independent of it (amended
+    // §Notification Entity membership table; see
+    // NotificationPriority::for_notification_type).
     let (band_min, band_max) = match params.priority.as_deref() {
         Some(level) => {
             let normalized = level.trim().to_ascii_lowercase();
@@ -2045,7 +2048,11 @@ mod tests {
         // list response: four-level priority, structured source, deep link,
         // and read state.
         assert_eq!(notifs[0]["priority"], 2);
-        assert_eq!(notifs[0]["priority_level"], "Urgent");
+        // Four-level band is High per the amended §Notification Entity
+        // membership table — SpecApprovalRequested is a pending-approval
+        // decision (rank 2 would threshold-map to Urgent; the amendment
+        // forbids deriving the band from the number).
+        assert_eq!(notifs[0]["priority_level"], "High");
         assert_eq!(notifs[0]["entity_type"], "workspace");
         assert_eq!(notifs[0]["read"], false);
         assert!(notifs[0]["read_at"].is_null());

@@ -52,8 +52,12 @@ impl NotificationRow {
             id: Id::new(self.id),
             workspace_id: source.workspace_id.clone(),
             user_id: Id::new(self.user_id),
-            notification_type: ntype,
-            priority: gyre_common::NotificationPriority::from_rank(priority_rank),
+            notification_type: ntype.clone(),
+            // Band derives from the persisted notification TYPE per the
+            // amended §Notification Entity membership table — never from
+            // the numeric rank (only the rank is persisted, and no numeric
+            // threshold reproduces the specced membership).
+            priority: gyre_common::NotificationPriority::for_notification_type(&ntype),
             priority_rank,
             title: self.title,
             body: self.body,

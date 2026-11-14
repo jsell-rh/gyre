@@ -12,9 +12,14 @@
 //! - `priority_rank` (HSI §8) is the 1–10 numeric rank used for Inbox sorting
 //!   and the `min_priority`/`max_priority` list filters.
 //!
-//! The two are kept consistent: the four-level priority is the band of the
-//! numeric rank (1–2 Urgent, 3–4 High, 5–7 Medium, 8–10 Low), so every type's
-//! default rank places it in the band its user-management priority calls for.
+//! The two are deliberately **not** mapped onto each other (amended
+//! §Notification Entity membership table, task-112 review): the band derives
+//! from the notification TYPE via `NotificationPriority::for_notification_type`,
+//! because no numeric threshold can reproduce the specced membership
+//! (SecurityFinding and GateFailure share numeric priority 3 yet sit in
+//! different bands; AgentEscalation is numeric 5 yet Urgent; BudgetWarning is
+//! numeric 7 yet High). Deriving the band from the rank — at creation or at
+//! read time — is a spec violation, not a simplification.
 
 use crate::Id;
 use serde::{Deserialize, Serialize};
@@ -247,16 +252,22 @@ impl NotificationType {
     }
 
     /// The default four-level priority for this notification type
-    /// (user-management.md §Notification Entity).
+    /// (user-management.md §Notification Entity amended membership table).
+    ///
+    /// Derived from the TYPE, never from the numeric rank — see
+    /// [`NotificationPriority::for_notification_type`].
     pub fn default_priority(&self) -> NotificationPriority {
-        NotificationPriority::from_rank(self.default_priority_rank())
+        NotificationPriority::for_notification_type(self)
     }
 
     /// The default HSI §8 numeric rank (1 highest – 10 lowest) for this
     /// notification type.
     ///
-    /// Ranks for the user-management taxonomy are chosen so their band equals
-    /// the level the spec assigns: Urgent 1–2, High 3–4, Medium 5–7, Low 8–10.
+    /// Ranks are the Inbox-ordering values of the HSI §8 scale — independent
+    /// of the four-level band (see the module doc: the amended §Notification
+    /// Entity membership table is deliberately not threshold-mappable onto
+    /// the numeric scale, so a type's rank and its band may disagree, e.g.
+    /// `SpecApprovalRequested` is rank 2 yet High).
     /// `AgentEscalation` (2) and `AgentBudgetWarning` (4) follow
     /// user-management.md's explicit level examples, superseding the looser
     /// HSI draft ranks (5 and 7).
@@ -372,12 +383,95 @@ impl NotificationPriority {
     ///
     /// Bands: 1–2 Urgent, 3–4 High, 5–7 Medium, 8–10 Low. Ranks outside 1–10
     /// clamp to the nearest band.
+    ///
+    /// This describes the bands of the NUMERIC scale (used to widen a
+    /// four-level `?priority=` list filter onto the stored rank column). It
+    /// is NOT the derivation of the entity's `priority` field — that derives
+    /// from the notification type via [`Self::for_notification_type`], per
+    /// the amended §Notification Entity membership table.
     pub fn from_rank(rank: u8) -> Self {
         match rank.clamp(1, 10) {
             1..=2 => Self::Urgent,
             3..=4 => Self::High,
             5..=7 => Self::Medium,
             _ => Self::Low,
+        }
+    }
+
+    /// The four-level band for a notification type, per the amended
+    /// type→band membership table of user-management.md §Notification Entity
+    /// (band comments + the task-112 review amendment recording the full
+    /// table).
+    ///
+    /// This is the authoritative derivation of the `Notification` entity's
+    /// `priority` field — used at creation time (`Notification::new`) and at
+    /// read time (the SQL adapters reconstruct it from the persisted
+    /// `notification_type`), and delegated to by the domain's channel-routing
+    /// `for_notification_type` so the entity band and the routing band can
+    /// never disagree. The band derives from the notification TYPE, never
+    /// from the HSI §8 1–10 numeric priority: that scale is an
+    /// Inbox-ordering concern and no numeric threshold can reproduce the
+    /// specced membership (SecurityFinding and GateFailure share numeric
+    /// priority 3 yet sit in different bands; AgentEscalation is numeric 5
+    /// yet Urgent; BudgetWarning is numeric 7 yet High).
+    pub fn for_notification_type(t: &NotificationType) -> Self {
+        use NotificationType as T;
+        match t {
+            // Urgent — needs attention now (work blocked / immediate action):
+            // security finding, agent escalation, MR reverted (spec examples),
+            // agent stuck awaiting clarification (HSI §8 #1), merge queue
+            // blocked, budget exhausted (work stopped), active impersonation
+            // of the user, worker spawn failed after all retries.
+            T::AgentEscalation
+            | T::SecurityFinding
+            | T::MrReverted
+            | T::AgentNeedsClarification
+            | T::MergeQueueEscalation
+            | T::AgentBudgetExhausted
+            | T::ImpersonationAlert
+            | T::ComputeTargetUnavailable => Self::Urgent,
+            // High — needs attention soon: gate failure, budget warning
+            // (spec examples), plus decisions/blocks that stall work soon:
+            // approvals, rejections, conflicts, paused queue, failed groups,
+            // approaching deadlines (secret expiry), agent failure, breaking
+            // changes, system alerts, ownerless workspaces.
+            T::GateFailure
+            | T::AgentBudgetWarning
+            | T::SpecApprovalRequested
+            | T::SpecRejected
+            | T::ConstraintViolation
+            | T::SpecConflict
+            | T::PersonaApprovalRequested
+            | T::PersonaChangePendingApproval
+            | T::MergeQueuePaused
+            | T::CascadeTestFailed
+            | T::AtomicGroupFailure
+            | T::ImpersonationRequest
+            | T::SecretExpiring
+            | T::AgentFailed
+            | T::BreakingChangeDetected
+            | T::SystemAlert
+            | T::WorkspaceOwnerless => Self::High,
+            // Medium — needs attention eventually: spec drift (spec example),
+            // stale-dependency-adjacent and review-arbitration items.
+            T::MetaSpecDrift
+            | T::CrossWorkspaceSpecChange
+            | T::ConflictingInterpretations
+            | T::DependencyChainTooDeep
+            | T::SpecAssertionFailure
+            | T::SpecDriftDetected
+            | T::DependencyStale => Self::Medium,
+            // Low — informational (MR merged, gate passed — spec examples):
+            // completions, suggestions, notices.
+            T::AgentCompleted
+            | T::TrustSuggestion
+            | T::AbandonedBranch
+            | T::SuggestedSpecLink
+            | T::CascadeTestTriggered
+            | T::MrMerged
+            | T::GatePassed
+            | T::InvitationReceived
+            | T::MembershipChanged => Self::Low,
         }
     }
 }
@@ -422,8 +516,10 @@ pub struct Notification {
     pub workspace_id: Id,
     pub user_id: Id,
     pub notification_type: NotificationType,
-    /// Four-level priority (user-management.md §Notification Entity). Always
-    /// the band of `priority_rank`, so the two models cannot disagree.
+    /// Four-level priority (user-management.md §Notification Entity).
+    /// Derived from the notification type via the amended membership table
+    /// (`NotificationPriority::for_notification_type`) — independent of
+    /// `priority_rank`, which is the HSI §8 Inbox-ordering scale.
     pub priority: NotificationPriority,
     /// HSI §8 numeric rank (1 highest – 10 lowest) used for Inbox sorting and
     /// the min/max priority filters.
@@ -532,10 +628,11 @@ mod tests {
         );
     }
 
-    /// Every variant's rank must place it in the band its user-management
-    /// level calls for (spec comments: Low = merged/passed, Medium = stale
-    /// deps/spec drift, High = budget warning/gate failure, Urgent =
-    /// security finding/agent escalation/MR reverted).
+    /// The spec's band comments are authoritative level examples (Low =
+    /// merged/passed, Medium = stale deps/spec drift, High = budget
+    /// warning/gate failure, Urgent = security finding/agent escalation/MR
+    /// reverted) — the default priority must match them. (The full table is
+    /// pinned per variant by `entity_priority_matches_amended_membership_table`.)
     #[test]
     fn default_priority_bands_match_user_management_spec() {
         let cases = [
@@ -566,6 +663,108 @@ mod tests {
         ];
         for (t, level) in cases {
             assert_eq!(t.default_priority(), level, "{t:?}");
+        }
+    }
+
+    /// The entity band must equal the amended type→band membership table
+    /// (user-management.md §Notification Entity, task-112 review amendment)
+    /// for EVERY variant — the table is spelled out here independently of
+    /// `for_notification_type` so a drift in either direction fails this
+    /// probe. The band must NOT be derivable from the numeric rank: several
+    /// memberships are only expressible by type (e.g. SpecApprovalRequested
+    /// is rank 2 yet High, CascadeTestTriggered is rank 4 yet Low,
+    /// SecretExpiring is rank 7 yet High).
+    #[test]
+    fn entity_priority_matches_amended_membership_table() {
+        use NotificationPriority as P;
+        use NotificationType as T;
+        let urgent = [
+            T::SecurityFinding,
+            T::AgentEscalation,
+            T::MrReverted,
+            T::AgentNeedsClarification,
+            T::MergeQueueEscalation,
+            T::AgentBudgetExhausted,
+            T::ImpersonationAlert,
+            T::ComputeTargetUnavailable,
+        ];
+        let high = [
+            T::GateFailure,
+            T::AgentBudgetWarning,
+            T::SpecApprovalRequested,
+            T::SpecRejected,
+            T::ConstraintViolation,
+            T::SpecConflict,
+            T::PersonaApprovalRequested,
+            T::PersonaChangePendingApproval,
+            T::MergeQueuePaused,
+            T::CascadeTestFailed,
+            T::AtomicGroupFailure,
+            T::SecretExpiring,
+            T::ImpersonationRequest,
+            T::AgentFailed,
+            T::BreakingChangeDetected,
+            T::SystemAlert,
+            T::WorkspaceOwnerless,
+        ];
+        let medium = [
+            T::MetaSpecDrift,
+            T::CrossWorkspaceSpecChange,
+            T::ConflictingInterpretations,
+            T::DependencyChainTooDeep,
+            T::SpecAssertionFailure,
+            T::SpecDriftDetected,
+            T::DependencyStale,
+        ];
+        let low = [
+            T::AgentCompleted,
+            T::TrustSuggestion,
+            T::AbandonedBranch,
+            T::SuggestedSpecLink,
+            T::CascadeTestTriggered,
+            T::MrMerged,
+            T::GatePassed,
+            T::InvitationReceived,
+            T::MembershipChanged,
+        ];
+
+        // The four lists partition the taxonomy: every listed type appears
+        // in exactly one band.
+        let mut names: Vec<&str> = urgent
+            .iter()
+            .chain(&high)
+            .chain(&medium)
+            .chain(&low)
+            .map(|t| t.as_str())
+            .collect();
+        let listed = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), listed, "a type is listed in two bands");
+
+        for t in urgent {
+            assert_eq!(t.default_priority(), P::Urgent, "{t:?} must be Urgent");
+            assert_eq!(
+                P::for_notification_type(&t),
+                P::Urgent,
+                "{t:?} must be Urgent"
+            );
+        }
+        for t in high {
+            assert_eq!(t.default_priority(), P::High, "{t:?} must be High");
+            assert_eq!(P::for_notification_type(&t), P::High, "{t:?} must be High");
+        }
+        for t in medium {
+            assert_eq!(t.default_priority(), P::Medium, "{t:?} must be Medium");
+            assert_eq!(
+                P::for_notification_type(&t),
+                P::Medium,
+                "{t:?} must be Medium"
+            );
+        }
+        for t in low {
+            assert_eq!(t.default_priority(), P::Low, "{t:?} must be Low");
+            assert_eq!(P::for_notification_type(&t), P::Low, "{t:?} must be Low");
         }
     }
 
