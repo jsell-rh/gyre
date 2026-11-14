@@ -815,9 +815,8 @@ pub async fn decide(
     // Context is a JSON object passed as a (URL-encoded) query string.
     let context: serde_json::Value = match params.context.as_deref() {
         None | Some("") => serde_json::json!({}),
-        Some(raw) => serde_json::from_str(raw).map_err(|e| {
-            ApiError::InvalidInput(format!("invalid context JSON: {e}"))
-        })?,
+        Some(raw) => serde_json::from_str(raw)
+            .map_err(|e| ApiError::InvalidInput(format!("invalid context JSON: {e}")))?,
     };
     if !context.is_object() {
         return Err(ApiError::InvalidInput(
@@ -2322,7 +2321,10 @@ mod tests {
     }
 
     /// POST /analytics/decide/custom, returning (status, parsed body).
-    async fn decide_custom(app: &Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    async fn decide_custom(
+        app: &Router,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let resp = app
             .clone()
             .oneshot(
@@ -2353,7 +2355,11 @@ mod tests {
         state.analytics.record(&ev).await.unwrap();
     }
 
-    fn make_event(name: &str, props: serde_json::Value, timestamp: u64) -> gyre_domain::AnalyticsEvent {
+    fn make_event(
+        name: &str,
+        props: serde_json::Value,
+        timestamp: u64,
+    ) -> gyre_domain::AnalyticsEvent {
         gyre_domain::AnalyticsEvent::new(super::new_id(), name, None, props, timestamp)
     }
 
@@ -2363,7 +2369,10 @@ mod tests {
         let (status, body) = decide(&app, "feature.explode", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
-            body["error"].as_str().unwrap_or_default().contains("feature.promote"),
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("feature.promote"),
             "error should list the built-in decisions: {body}"
         );
     }
@@ -2386,13 +2395,15 @@ mod tests {
             .unwrap();
         let app = crate::build_router(state);
 
-        let (status, body) = decide(&app, "feature.promote", serde_json::json!({"flag": "f"})).await;
+        let (status, body) =
+            decide(&app, "feature.promote", serde_json::json!({"flag": "f"})).await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body["promote"], serde_json::json!(false));
         assert_eq!(body["confidence"], serde_json::json!(0.0));
         assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
 
-        let (status, body) = decide(&app, "feature.rollback", serde_json::json!({"flag": "f"})).await;
+        let (status, body) =
+            decide(&app, "feature.rollback", serde_json::json!({"flag": "f"})).await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body["rollback"], serde_json::json!(false));
         assert_eq!(body["trigger"], serde_json::json!("none"));
@@ -2417,7 +2428,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body["tokens_remaining_pct"], serde_json::json!(100.0));
         assert_eq!(body["cost_remaining_pct"], serde_json::json!(100.0));
-        assert_eq!(body["projected_exhaustion_at"], serde_json::json!("unknown"));
+        assert_eq!(
+            body["projected_exhaustion_at"],
+            serde_json::json!("unknown")
+        );
 
         let (status, body) = decide(&app, "merge_queue.health", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -2484,7 +2498,11 @@ mod tests {
         for _ in 0..20 {
             seed_event(
                 &state,
-                make_event("feature.error", serde_json::json!({"flag": "bad-flag"}), now - day),
+                make_event(
+                    "feature.error",
+                    serde_json::json!({"flag": "bad-flag"}),
+                    now - day,
+                ),
             )
             .await;
         }
@@ -2510,27 +2528,43 @@ mod tests {
         for i in 0..50 {
             seed_event(
                 &state,
-                make_event("gate.passed", serde_json::json!({"mr_id": format!("b{i}")}), now - 2 * w),
+                make_event(
+                    "gate.passed",
+                    serde_json::json!({"mr_id": format!("b{i}")}),
+                    now - 2 * w,
+                ),
             )
             .await;
         }
         seed_event(
             &state,
-            make_event("gate.failed", serde_json::json!({"mr_id": "bf"}), now - 2 * w),
+            make_event(
+                "gate.failed",
+                serde_json::json!({"mr_id": "bf"}),
+                now - 2 * w,
+            ),
         )
         .await;
         // Current window: 25 failed / 48 passed (~34%).
         for i in 0..48 {
             seed_event(
                 &state,
-                make_event("gate.passed", serde_json::json!({"mr_id": format!("c{i}")}), now - w / 2),
+                make_event(
+                    "gate.passed",
+                    serde_json::json!({"mr_id": format!("c{i}")}),
+                    now - w / 2,
+                ),
             )
             .await;
         }
         for i in 0..25 {
             seed_event(
                 &state,
-                make_event("gate.failed", serde_json::json!({"mr_id": format!("cf{i}")}), now - w / 2),
+                make_event(
+                    "gate.failed",
+                    serde_json::json!({"mr_id": format!("cf{i}")}),
+                    now - w / 2,
+                ),
             )
             .await;
         }
@@ -2544,7 +2578,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body["rollback"], serde_json::json!(true));
-        assert_eq!(body["trigger"], serde_json::json!("gate.failure_rate_spike"));
+        assert_eq!(
+            body["trigger"],
+            serde_json::json!("gate.failure_rate_spike")
+        );
         assert!(body["metrics"]["before_rate"].as_f64().unwrap() < 0.05);
         assert!(body["metrics"]["after_rate"].as_f64().unwrap() > 0.3);
         assert_eq!(body["metrics"]["affected_mrs"], serde_json::json!(25));
@@ -2559,7 +2596,11 @@ mod tests {
         for i in 0..90 {
             seed_event(
                 &state,
-                make_event("gate.passed", serde_json::json!({"gate_type": "lint", "mr_id": i}), now - 100),
+                make_event(
+                    "gate.passed",
+                    serde_json::json!({"gate_type": "lint", "mr_id": i}),
+                    now - 100,
+                ),
             )
             .await;
         }
@@ -2578,12 +2619,20 @@ mod tests {
         for i in 0..90 {
             seed_event(
                 &state,
-                make_event("agent.completed", serde_json::json!({"duration_secs": 80 + i % 40}), now - 100),
+                make_event(
+                    "agent.completed",
+                    serde_json::json!({"duration_secs": 80 + i % 40}),
+                    now - 100,
+                ),
             )
             .await;
         }
         for _ in 0..10 {
-            seed_event(&state, make_event("agent.failed", serde_json::json!({}), now - 100)).await;
+            seed_event(
+                &state,
+                make_event("agent.failed", serde_json::json!({}), now - 100),
+            )
+            .await;
         }
         let app = crate::build_router(state);
 
@@ -2729,7 +2778,15 @@ mod tests {
         // 2 spec approvals in the last week (threshold 3 → no match);
         // 1 failed + 3 merged queue entries (threshold 5 → no match).
         for i in 0..2 {
-            seed_event(&state, make_event("spec.approved", serde_json::json!({"spec_path": i}), now - 100)).await;
+            seed_event(
+                &state,
+                make_event(
+                    "spec.approved",
+                    serde_json::json!({"spec_path": i}),
+                    now - 100,
+                ),
+            )
+            .await;
         }
         for i in 0..3 {
             seed_event(
@@ -2810,7 +2867,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-        assert!(body["error"].as_str().unwrap_or_default().contains("comparison"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("comparison"));
     }
 
     #[tokio::test]

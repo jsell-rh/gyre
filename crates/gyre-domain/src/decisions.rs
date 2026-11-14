@@ -185,12 +185,9 @@ impl BuiltinDecision {
                     "reason": "no budget configuration available",
                 }),
             },
-            Self::MergeQueueHealth => evaluate_merge_queue_health(
-                context,
-                events,
-                blocked_count,
-                now,
-            ),
+            Self::MergeQueueHealth => {
+                evaluate_merge_queue_health(context, events, blocked_count, now)
+            }
         }
     }
 }
@@ -228,7 +225,7 @@ fn significance_confidence(sample_size: u64) -> f64 {
 
 /// Nearest-rank percentile over an UNSORTED slice of observations.
 /// Returns 0.0 for an empty slice.
-fn percentile(observations: &mut Vec<f64>, p: f64) -> f64 {
+fn percentile(observations: &mut [f64], p: f64) -> f64 {
     if observations.is_empty() {
         return 0.0;
     }
@@ -386,10 +383,9 @@ fn evaluate_feature_promote(context: &Value, events: &[AnalyticsEvent], now: u64
         .filter(is_flag)
         .filter_map(|e| event_actor(e))
         .collect();
-    let all_actors: HashSet<&str> =
-        events_named(events, "feature.used", cur_since, now)
-            .filter_map(|e| event_actor(e))
-            .collect();
+    let all_actors: HashSet<&str> = events_named(events, "feature.used", cur_since, now)
+        .filter_map(|e| event_actor(e))
+        .collect();
     let adoption_rate = if all_actors.is_empty() {
         0.0
     } else {
@@ -497,7 +493,10 @@ fn evaluate_feature_rollback(context: &Value, events: &[AnalyticsEvent], now: u6
     let prev: Vec<&AnalyticsEvent> = gate_events(prev_since, cur_since).collect();
 
     let failed_cur = cur.iter().filter(|e| e.event_name == "gate.failed").count();
-    let failed_prev = prev.iter().filter(|e| e.event_name == "gate.failed").count();
+    let failed_prev = prev
+        .iter()
+        .filter(|e| e.event_name == "gate.failed")
+        .count();
     let after_rate = failed_cur as f64 / cur.len().max(1) as f64;
     let before_rate = failed_prev as f64 / prev.len().max(1) as f64;
 
@@ -507,8 +506,8 @@ fn evaluate_feature_rollback(context: &Value, events: &[AnalyticsEvent], now: u6
         .filter_map(|e| prop_str(e, "mr_id"))
         .collect();
 
-    let rollback = cur.len() as u64 >= min_sample_size
-        && (after_rate - before_rate) >= min_rate_increase;
+    let rollback =
+        cur.len() as u64 >= min_sample_size && (after_rate - before_rate) >= min_rate_increase;
     let trigger = if rollback {
         "gate.failure_rate_spike"
     } else {
@@ -563,13 +562,12 @@ fn evaluate_gate_effectiveness(context: &Value, events: &[AnalyticsEvent], now: 
     let window_days = context_u64(context, "window_days").unwrap_or(7).max(1);
     let gate_type = context_str(context, "gate_type");
     let min_catch_rate = context_f64(context, "min_catch_rate").unwrap_or(0.05);
-    let max_false_positive_rate =
-        context_f64(context, "max_false_positive_rate").unwrap_or(0.3);
+    let max_false_positive_rate = context_f64(context, "max_false_positive_rate").unwrap_or(0.3);
     let min_sample_size = context_u64(context, "min_sample_size").unwrap_or(5);
 
     let since = now.saturating_sub(window_days * 86_400);
     let matches_type =
-        |e: &&AnalyticsEvent| gate_type.map_or(true, |t| prop_str(e, "gate_type") == Some(t));
+        |e: &&AnalyticsEvent| gate_type.is_none_or(|t| prop_str(e, "gate_type") == Some(t));
     let gate_events = |name: &str| {
         events_named(events, name, since, now)
             .filter(matches_type)
@@ -650,8 +648,8 @@ fn evaluate_agent_performance(context: &Value, events: &[AnalyticsEvent], now: u
 
     let since = now.saturating_sub(window_days * 86_400);
     let matches_agent = |e: &&AnalyticsEvent| {
-        agent_filter.map_or(true, |a| e.agent_id.as_deref() == Some(a))
-            && persona.map_or(true, |p| prop_str(e, "persona") == Some(p))
+        agent_filter.is_none_or(|a| e.agent_id.as_deref() == Some(a))
+            && persona.is_none_or(|p| prop_str(e, "persona") == Some(p))
     };
     let completed = events_named(events, "agent.completed", since, now)
         .filter(matches_agent)
@@ -720,7 +718,10 @@ fn evaluate_budget_headroom(
         None => (0, 0.0, now),
     };
 
-    let tokens_remaining_pct = remaining_pct(tokens_used as f64, config.max_tokens_per_day.map(|v| v as f64));
+    let tokens_remaining_pct = remaining_pct(
+        tokens_used as f64,
+        config.max_tokens_per_day.map(|v| v as f64),
+    );
     let cost_remaining_pct = remaining_pct(cost_used, config.max_cost_per_day);
 
     // Projected exhaustion: earliest of the token and cost limits, from
@@ -738,7 +739,10 @@ fn evaluate_budget_headroom(
         None => "unknown".to_string(),
         Some(_) => {
             let etas = [
-                eta_for(tokens_used as f64, config.max_tokens_per_day.map(|v| v as f64)),
+                eta_for(
+                    tokens_used as f64,
+                    config.max_tokens_per_day.map(|v| v as f64),
+                ),
                 eta_for(cost_used, config.max_cost_per_day),
             ];
             match etas.into_iter().flatten().min() {
@@ -932,8 +936,8 @@ impl CustomDecisionSpec {
     /// Returns a human-readable error for every invalid field so agents
     /// can fix their rule without a round trip.
     pub fn parse(body: &Value) -> Result<Self, String> {
-        let spec: CustomDecisionSpec =
-            serde_json::from_value(body.clone()).map_err(|e| format!("invalid decision body: {e}"))?;
+        let spec: CustomDecisionSpec = serde_json::from_value(body.clone())
+            .map_err(|e| format!("invalid decision body: {e}"))?;
         if spec.name.trim().is_empty() {
             return Err("name must be a non-empty string".into());
         }
@@ -1019,8 +1023,7 @@ pub fn evaluate_custom(
         let events = events_by_metric.get(&rule.metric);
         let count = events
             .map(|evts| {
-                evts
-                    .iter()
+                evts.iter()
                     .filter(|e| e.timestamp >= since && e.timestamp <= now)
                     .filter(|e| matches_filter(e, rule.filter.as_ref()))
                     .count()
@@ -1163,7 +1166,10 @@ mod tests {
         assert_eq!(out["promote"], json!(true), "outcome: {out}");
         assert_eq!(out["metrics"]["sample_size"], json!(100));
         let adoption = out["metrics"]["adoption_rate"].as_f64().unwrap();
-        assert!((adoption - 100.0 / 120.0).abs() < 1e-3, "adoption {adoption}");
+        assert!(
+            (adoption - 100.0 / 120.0).abs() < 1e-3,
+            "adoption {adoption}"
+        );
         assert!(out["confidence"].as_f64().unwrap() >= 0.9);
         assert!(out["reason"].as_str().unwrap().contains("Adoption"));
     }
@@ -1197,7 +1203,10 @@ mod tests {
         assert_eq!(out["promote"], json!(false));
         assert_eq!(out["confidence"], json!(0.0));
         assert_eq!(out["metrics"]["sample_size"], json!(0));
-        assert!(out["reason"].as_str().unwrap().contains("Insufficient sample"));
+        assert!(out["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Insufficient sample"));
     }
 
     // ─── feature.rollback ────────────────────────────────────────────────────
@@ -1208,15 +1217,27 @@ mod tests {
         let mut events = Vec::new();
         // Before window: 2% failure (1 failed / 50 passed).
         for i in 0..50 {
-            events.push(ev("gate.passed", json!({"mr_id": format!("b{i}")}), NOW - 2 * w));
+            events.push(ev(
+                "gate.passed",
+                json!({"mr_id": format!("b{i}")}),
+                NOW - 2 * w,
+            ));
         }
         events.push(ev("gate.failed", json!({"mr_id": "bf"}), NOW - 2 * w));
         // Current window: 34% failure (25 failed / 48 passed → ~0.34).
         for i in 0..48 {
-            events.push(ev("gate.passed", json!({"mr_id": format!("c{i}")}), NOW - w / 2));
+            events.push(ev(
+                "gate.passed",
+                json!({"mr_id": format!("c{i}")}),
+                NOW - w / 2,
+            ));
         }
         for i in 0..25 {
-            events.push(ev("gate.failed", json!({"mr_id": format!("cf{i}")}), NOW - w / 2));
+            events.push(ev(
+                "gate.failed",
+                json!({"mr_id": format!("cf{i}")}),
+                NOW - w / 2,
+            ));
         }
 
         let ctx = json!({"flag": "optimistic-merge", "window_mins": 30});
@@ -1245,7 +1266,11 @@ mod tests {
     fn gate_effectiveness_catches_real_bugs() {
         let mut events = Vec::new();
         for i in 0..90 {
-            events.push(ev("gate.passed", json!({"gate_type": "lint", "mr_id": i}), NOW - 100));
+            events.push(ev(
+                "gate.passed",
+                json!({"gate_type": "lint", "mr_id": i}),
+                NOW - 100,
+            ));
         }
         for i in 0..10 {
             events.push(ev(
@@ -1264,7 +1289,11 @@ mod tests {
     fn gate_effectiveness_flags_false_positives() {
         let mut events = Vec::new();
         for i in 0..95 {
-            events.push(ev("gate.passed", json!({"gate_type": "lint", "mr_id": i}), NOW - 100));
+            events.push(ev(
+                "gate.passed",
+                json!({"gate_type": "lint", "mr_id": i}),
+                NOW - 100,
+            ));
         }
         for i in 0..5 {
             events.push(ev(
@@ -1292,7 +1321,11 @@ mod tests {
             ));
         }
         for _ in 0..10 {
-            events.push(ev("agent.failed", json!({"persona": "implementer"}), NOW - 100));
+            events.push(ev(
+                "agent.failed",
+                json!({"persona": "implementer"}),
+                NOW - 100,
+            ));
         }
         let out = evaluate_agent_performance(&json!({"persona": "implementer"}), &events, NOW);
         assert_eq!(out["healthy"], json!(true), "outcome: {out}");
@@ -1306,7 +1339,11 @@ mod tests {
     fn agent_performance_degraded_on_failures() {
         let mut events = Vec::new();
         for _ in 0..50 {
-            events.push(ev("agent.completed", json!({"duration_secs": 100}), NOW - 100));
+            events.push(ev(
+                "agent.completed",
+                json!({"duration_secs": 100}),
+                NOW - 100,
+            ));
         }
         for _ in 0..50 {
             events.push(ev("agent.failed", json!({}), NOW - 100));
@@ -1354,12 +1391,7 @@ mod tests {
 
     #[test]
     fn budget_headroom_no_limit_never_exhausts() {
-        let out = evaluate_budget_headroom(
-            &json!({}),
-            &BudgetConfig::default(),
-            None,
-            NOW,
-        );
+        let out = evaluate_budget_headroom(&json!({}), &BudgetConfig::default(), None, NOW);
         assert_eq!(out["tokens_remaining_pct"], json!(100.0));
         assert_eq!(out["cost_remaining_pct"], json!(100.0));
         assert_eq!(out["projected_exhaustion_at"], json!("unknown"));
@@ -1438,7 +1470,10 @@ mod tests {
         assert_eq!(s.rules.len(), 2);
         assert_eq!(s.metrics(), vec!["spec.approved", "merge_queue.processed"]);
         assert_eq!(s.fetch_window_for("spec.approved"), Some(7 * 86_400));
-        assert_eq!(s.fetch_window_for("merge_queue.processed"), Some(24 * 3_600));
+        assert_eq!(
+            s.fetch_window_for("merge_queue.processed"),
+            Some(24 * 3_600)
+        );
 
         // Invalid comparison / window / name rejected with a field error.
         assert!(CustomDecisionSpec::parse(&json!({
