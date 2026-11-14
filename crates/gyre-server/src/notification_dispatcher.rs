@@ -1130,8 +1130,7 @@ mod tests {
         assert_eq!(outbox.len(), 1);
         let parsed: serde_json::Value = serde_json::from_str(&outbox[0].1).unwrap();
         assert_eq!(
-            parsed["notification"]["notification_type"],
-            "MergeQueuePaused",
+            parsed["notification"]["notification_type"], "MergeQueuePaused",
             "queued entry embeds the full notification"
         );
     }

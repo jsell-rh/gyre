@@ -205,7 +205,9 @@ fn type_heading(nt: &NotificationType, locale: Locale) -> &'static str {
             NotificationType::MembershipChanged => "Mitgliedschaft geändert",
             NotificationType::SystemAlert => "Systemhinweis",
             NotificationType::AgentNeedsClarification => "Agent benötigt Klärung",
-            NotificationType::CrossWorkspaceSpecChange => "Spezifikation über Workspaces hinweg geändert",
+            NotificationType::CrossWorkspaceSpecChange => {
+                "Spezifikation über Workspaces hinweg geändert"
+            }
             NotificationType::ConflictingInterpretations => "Widersprüchliche Interpretationen",
             NotificationType::MetaSpecDrift => "Meta-Spec-Abweichung",
             NotificationType::TrustSuggestion => "Vertrauensvorschlag",
@@ -225,7 +227,9 @@ fn type_heading(nt: &NotificationType, locale: Locale) -> &'static str {
             NotificationType::ImpersonationRequest => "Identitätswechsel angefragt",
             NotificationType::ImpersonationAlert => "Identitätswechsel aktiv",
             NotificationType::SecretExpiring => "Secret läuft ab",
-            NotificationType::PersonaChangePendingApproval => "Persona-Änderung wartet auf Freigabe",
+            NotificationType::PersonaChangePendingApproval => {
+                "Persona-Änderung wartet auf Freigabe"
+            }
             NotificationType::WorkspaceOwnerless => "Workspace ohne Owner",
         },
     }
@@ -264,7 +268,11 @@ fn format_ts(ts: i64) -> String {
     // H:M:S. No external time dependency needed for a fixed format.
     let days = ts.div_euclid(86_400);
     let secs_of_day = ts.rem_euclid(86_400);
-    let (h, m, s) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    let (h, m, s) = (
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    );
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -403,7 +411,9 @@ pub fn render_digest_email(
     let s = strings(locale);
     let subject = format!(
         "{} {} ({})",
-        s.subject_prefix, s.digest_heading, notifs.len()
+        s.subject_prefix,
+        s.digest_heading,
+        notifs.len()
     );
 
     // Group by priority band, Urgent → Low.
@@ -426,9 +436,7 @@ pub fn render_digest_email(
     for band in order {
         let items: Vec<&Notification> = notifs
             .iter()
-            .filter(|n| {
-                NotificationPriority::for_notification_type(&n.notification_type) == band
-            })
+            .filter(|n| NotificationPriority::for_notification_type(&n.notification_type) == band)
             .collect();
         if items.is_empty() {
             continue;
@@ -481,7 +489,7 @@ pub fn render_digest_email(
         note = html_escape(s.unsubscribe_note),
     ));
     html.push_str(HTML_SHELL_END);
-    text.push_str(&s.unsubscribe_note);
+    text.push_str(s.unsubscribe_note);
     text.push('\n');
 
     RenderedEmail {
@@ -613,10 +621,7 @@ async fn read_reply<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-async fn write_cmd(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
-    cmd: &str,
-) -> anyhow::Result<()> {
+async fn write_cmd(writer: &mut tokio::net::tcp::OwnedWriteHalf, cmd: &str) -> anyhow::Result<()> {
     tokio::time::timeout(
         std::time::Duration::from_secs(SMTP_TIMEOUT_SECS),
         writer.write_all(format!("{cmd}\r\n").as_bytes()),
@@ -691,18 +696,17 @@ fn parse_outbox_entry(key: String, raw: &str) -> Option<OutboxEntry> {
         return Some(OutboxEntry { key, notif });
     }
     // Flat task-112 shape.
-    let get_str = |field: &str| {
-        v.get(field)
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string())
-    };
+    let get_str = |field: &str| v.get(field).and_then(|x| x.as_str()).map(|s| s.to_string());
     let id = get_str("notification_id")?;
     let user_id = get_str("user_id")?;
     let workspace_id = get_str("workspace_id")?;
     let type_str = get_str("notification_type")?;
     let notification_type = NotificationType::parse(&type_str)?;
     let subject = get_str("subject").unwrap_or_default();
-    let title = subject.strip_prefix("[Gyre] ").unwrap_or(&subject).to_string();
+    let title = subject
+        .strip_prefix("[Gyre] ")
+        .unwrap_or(&subject)
+        .to_string();
     let created_at = v.get("queued_at").and_then(|x| x.as_i64()).unwrap_or(0);
     let tenant_id = get_str("tenant_id").unwrap_or_default();
     let mut notif = Notification::new(
@@ -722,10 +726,7 @@ fn parse_outbox_entry(key: String, raw: &str) -> Option<OutboxEntry> {
 
 /// True when the entry still passes the user's CURRENT email gating
 /// (enabled, digest on, priority band ≥ min_priority, type not unsubscribed).
-fn email_gated_in(
-    notif: &Notification,
-    channels: &gyre_domain::NotificationChannels,
-) -> bool {
+fn email_gated_in(notif: &Notification, channels: &gyre_domain::NotificationChannels) -> bool {
     if !channels.email.enabled || channels.email.digest == DigestFrequency::Off {
         return false;
     }
@@ -767,9 +768,7 @@ fn digest_window_secs(freq: DigestFrequency) -> u64 {
 /// held untouched — queue-and-hold, nothing silently dropped.
 pub async fn run_digest_once(state: &AppState) -> anyhow::Result<()> {
     let Some(smtp) = smtp_config_from_env() else {
-        tracing::debug!(
-            "email digest: GYRE_SMTP_HOST not configured — holding outbox entries"
-        );
+        tracing::debug!("email digest: GYRE_SMTP_HOST not configured — holding outbox entries");
         return Ok(());
     };
     let rows = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await?;
@@ -799,10 +798,7 @@ pub async fn run_digest_once(state: &AppState) -> anyhow::Result<()> {
             None => {
                 tracing::warn!(user_id = %user_id, "email digest: outbox user no longer exists");
                 for e in &entries {
-                    let _ = state
-                        .kv_store
-                        .kv_remove(EMAIL_OUTBOX_NS, &e.key)
-                        .await;
+                    let _ = state.kv_store.kv_remove(EMAIL_OUTBOX_NS, &e.key).await;
                 }
                 continue;
             }
@@ -813,10 +809,7 @@ pub async fn run_digest_once(state: &AppState) -> anyhow::Result<()> {
                 "email digest: user has email channel enabled but no address — dropping queued entries"
             );
             for e in &entries {
-                let _ = state
-                    .kv_store
-                    .kv_remove(EMAIL_OUTBOX_NS, &e.key)
-                    .await;
+                let _ = state.kv_store.kv_remove(EMAIL_OUTBOX_NS, &e.key).await;
             }
             continue;
         };
@@ -831,10 +824,7 @@ pub async fn run_digest_once(state: &AppState) -> anyhow::Result<()> {
                 sendable_keys.push(entry.key);
                 sendable.push(entry.notif);
             } else {
-                let _ = state
-                    .kv_store
-                    .kv_remove(EMAIL_OUTBOX_NS, &entry.key)
-                    .await;
+                let _ = state.kv_store.kv_remove(EMAIL_OUTBOX_NS, &entry.key).await;
             }
         }
         if sendable.is_empty() {
@@ -844,7 +834,11 @@ pub async fn run_digest_once(state: &AppState) -> anyhow::Result<()> {
         match channels.email.digest {
             DigestFrequency::Immediate => {
                 for (notif, key) in sendable.iter().zip(&sendable_keys) {
-                    let email = render_notification_email(notif, resolve_locale(&user.locale), &state.base_url);
+                    let email = render_notification_email(
+                        notif,
+                        resolve_locale(&user.locale),
+                        &state.base_url,
+                    );
                     if let Err(e) = send_email(&smtp, &to, &email).await {
                         tracing::warn!(user_id = %user_id, error = %e, "email digest: immediate send failed — entry kept for retry");
                         continue;
@@ -863,7 +857,8 @@ pub async fn run_digest_once(state: &AppState) -> anyhow::Result<()> {
                 if now.saturating_sub(last_sent) < window {
                     continue; // Window not elapsed — hold entries for the next due digest.
                 }
-                let email = render_digest_email(&sendable, resolve_locale(&user.locale), &state.base_url);
+                let email =
+                    render_digest_email(&sendable, resolve_locale(&user.locale), &state.base_url);
                 match send_email(&smtp, &to, &email).await {
                     Ok(()) => {
                         for key in &sendable_keys {
@@ -919,11 +914,11 @@ mod tests {
         assert!(email.subject.contains("[Gyre] Gate failure: lint failed"));
         assert!(email.html.contains("Gate failure"));
         assert!(email.html.contains("https://gyre.example/workspaces/acme"));
-        assert!(email
-            .html
-            .contains("unsubscribe=GateFailure"));
+        assert!(email.html.contains("unsubscribe=GateFailure"));
         assert!(email.text.contains("lint failed"));
-        assert!(email.text.contains("https://gyre.example/settings/notifications?unsubscribe=GateFailure"));
+        assert!(email
+            .text
+            .contains("https://gyre.example/settings/notifications?unsubscribe=GateFailure"));
     }
 
     /// The user's configured locale drives the rendering (§Email
@@ -955,8 +950,16 @@ mod tests {
         let email = render_digest_email(&notifs, Locale::En, "https://gyre.example");
         assert!(email.subject.contains("3"));
         // Urgent/High section precedes Medium in the HTML.
-        let high = email.html.find("HIGH").or_else(|| email.html.find("High")).expect("high band");
-        let medium = email.html.find("MEDIUM").or_else(|| email.html.find("Medium")).expect("medium band");
+        let high = email
+            .html
+            .find("HIGH")
+            .or_else(|| email.html.find("High"))
+            .expect("high band");
+        let medium = email
+            .html
+            .find("MEDIUM")
+            .or_else(|| email.html.find("Medium"))
+            .expect("medium band");
         assert!(high < medium);
         assert!(email.html.matches("unsubscribe=").count() >= 3);
         assert!(email.text.contains("agent down"));
@@ -1046,7 +1049,10 @@ mod tests {
         rt.block_on(async {
             let (client, mut server) = tokio::io::duplex(64);
             let writer = tokio::spawn(async move {
-                server.write_all("\u{fc}\u{fc}\r\n".as_bytes()).await.unwrap();
+                server
+                    .write_all("\u{fc}\u{fc}\r\n".as_bytes())
+                    .await
+                    .unwrap();
             });
             let mut reader = BufReader::new(client);
             let result = read_reply(&mut reader).await;
@@ -1166,12 +1172,8 @@ mod tests {
             let state = crate::mem::test_state();
             // Seed a user with email enabled (Daily digest, long-elapsed
             // window) and two queued notifications.
-            let mut user = gyre_domain::User::new(
-                Id::new("user-digest"),
-                "ext-1",
-                "digest-user",
-                1,
-            );
+            let mut user =
+                gyre_domain::User::new(Id::new("user-digest"), "ext-1", "digest-user", 1);
             user.email = Some("digest@example.com".to_string());
             user.locale = "en-US".to_string();
             let mut channels = gyre_domain::NotificationChannels::default();
@@ -1180,7 +1182,11 @@ mod tests {
             channels.email.min_priority = NotificationPriority::Medium;
             user.preferences.notification_channels = channels.clone();
             state.users.create(&user).await.unwrap();
-            state.user_channel_prefs.upsert(&user.id, &channels).await.unwrap();
+            state
+                .user_channel_prefs
+                .upsert(&user.id, &channels)
+                .await
+                .unwrap();
 
             for (i, nt) in [
                 NotificationType::AgentFailed,
@@ -1216,12 +1222,19 @@ mod tests {
             let payload = relay.await.unwrap();
             assert!(payload.contains("To: digest@example.com"));
             // One aggregate email carrying both entries.
-            assert!(payload.contains("Your Gyre digest (2)"), "subject: {}", payload);
+            assert!(
+                payload.contains("Your Gyre digest (2)"),
+                "subject: {}",
+                payload
+            );
             // Base64 bodies — decode and check aggregation content.
             assert!(payload.contains("Content-Type: multipart/alternative"));
 
             let remaining = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
-            assert!(remaining.is_empty(), "outbox must be drained, got {remaining:?}");
+            assert!(
+                remaining.is_empty(),
+                "outbox must be drained, got {remaining:?}"
+            );
             let stamp = state
                 .kv_store
                 .kv_get(DIGEST_STATE_NS, user.id.as_str())
