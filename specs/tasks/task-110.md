@@ -2,7 +2,7 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
@@ -100,82 +100,56 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**This round: rebase repair onto assignment base 5984177** (durable finding
-6f6a6b73 — merge conflicts in `abac_middleware.rs`, `api/mod.rs`, and
-`specs/coverage/system/user-management.md`). The base advanced past the
-previously reconciled 4b9220bc with task-124 (user management + workspace
-membership API endpoints). The invitation flow itself is the independently
-approved implementation from prior rounds (domain entities, ports,
-SQLite/Postgres/mem adapters, migrations 2026-11-13-000063/64/65, the five
-tenant endpoints, workspace invitation lifecycle, CSPRNG + SHA-256 tokens,
-per-tenant `InvitationPolicy`, bulk invite, background expiry job, ABAC
-mappings) — no invitation behavior changed this round.
+**This round: CI repair only — no code changed.** The durable finding
+(7ec83a8d, category `ci`) recorded run 43610196702 at PR head a8996690
+failing the `Development controller` job with "logs not yet available".
+Diagnosis: the job's only failed step was `python3 -m unittest discover -s
+scripts -p 'test_pipeline*.py'`; the candidate tree's `scripts/` is
+byte-identical to the assignment base 44cf25bf (which passed the same job
+in run 43602842046) except for one comment line in
+`warn-continue-creation-exemptions.txt`, and the suite is hermetic
+(temp-dir stores/fixtures). The two failures reproducible in this sandbox
+(`test_real_timeout_kills_check...`, `test_crash_cleanup_stops_durable_agent...`)
+are this sandbox's signal-policy restriction (`os.killpg` → EPERM) and
+reproduce identically at the assignment base — environment evidence, not
+defects. A re-run of the failed job at the **exact same head**
+(`gh run rerun 43610196702 --failed`, attempt 2) passed every job including
+`Development controller` and `Test` — the original failure was a runner
+flake. Evidence retained in `/tmp/stage/review-evidence/`.
 
-### Conflicts resolved
+### Shipped behavior (carried, independently approved in prior rounds)
 
-- `api/mod.rs` + `abac_middleware.rs` `/users/me` blocks (textual): both
-  sides kept — task-110's `GET /users/me/invitations` route/mapping plus
-  task-124's `GET /users/:username` and `PUT /users/:id/deactivate`.
-- **Duplicate workspace-invitation routes (semantic, both sides added at
-  different spots so git auto-merged them into a tree axum rejects):**
-  task-124 and task-110 had each implemented the SAME four spec paths
-  (`POST /workspaces/{id}/invite`, `GET .../invitations`,
-  `POST .../invite/accept`, `DELETE .../invitations/{id}`) — task-124 as
-  unaccepted membership rows (api/users.rs), task-110 as the
-  `WorkspaceInvitation` entity (api/invitations.rs). Resolution: task-110's
-  model keeps the paths (this task's contract; strict superset covering
-  §Workspace Invitation Flow's decline, configurable expiry, per-tenant
-  policy, `max_pending_invitations` cap, and the background expiry job).
-  task-124's three now-orphaned handlers (`list_invitations`,
-  `accept_invitation`, `revoke_invitation`), their route registrations,
-  ABAC resolver entries, api-reference rows, and their
-  `workspace_invitation_lifecycle` test were removed; task-124's member
-  list/role-change/removal endpoints, deactivation cascade, and user
-  listing are untouched. `POST /workspaces/{id}/members` (M22.8
-  `invite_member`) is unchanged from the merge base.
-- **Diesel version collision:** task-124's
-  `2026-11-13-000063_user_deactivated_at` and task-110's
-  `2026-11-13-000063_invitations` both map to version 20261113000063 (only
-  one runs per version — the alphabetically first — so
-  `users.deactivated_at` would silently never be created on fresh
-  databases). Renumbered to `2026-11-13-000066_user_deactivated_at` (next
-  unused sequence), with a renumber note in its up.sql;
-  `check-migration-versions.sh` passes.
-- `specs/coverage/system/user-management.md`: merged audit header and rows
-  25/26/27 recomputed against the merged tree (15/36 implemented, 10
-  task-assigned, 11 n/a); row 27's seven-endpoint table remains satisfied
-  (invitation paths now served by task-110's model). `SUMMARY.md`
-  regenerated with the canonical script.
+- Domain entities (`gyre-domain/src/invitation.rs`): `TenantInvitation`,
+  `WorkspaceInvitation`, `InvitationStatus`, per-tenant `InvitationPolicy`.
+- Ports (`gyre-ports/src/invitation.rs`): `TenantInvitationRepository`,
+  `WorkspaceInvitationRepository`; SQLite/Postgres/mem adapters with
+  migrations 2026-11-13-000063/64/65 (shared dir, both dialects).
+- All five tenant endpoints (`POST /tenant/invite`, `/tenant/invite/bulk`,
+  `GET /tenant/invitations`, `DELETE /tenant/invitations/{id}`,
+  `POST /invite/{token}/accept`) plus the workspace invitation lifecycle
+  (`POST /workspaces/{id}/invite`, list, accept, decline, revoke), CSPRNG
+  tokens stored as SHA-256 hashes, local-mode accept minting a first API
+  key, SSO account linking, background expiry job
+  (`spawn_invitation_expiry`), ABAC route mappings.
 
-### Merge-integrity and gate evidence (this head)
+### Verification evidence (this head)
 
-- `cargo check -p gyre-server` passes (8m00s, 4 GiB sandbox).
-- `cargo fmt --all --check` clean.
-- Mechanical checks pass: architecture, migration versions (post-renumber),
-  migration SQL portability, ABAC route registry, ABAC exempt handlers,
-  MCP write tools, mem port contracts, dead message kinds, byte-slice
-  truncation, relative path defaults, fail-open ref resolution, fabricated
-  scope defaults, lossy secret conversion, scope literal defaults, inert
-  enforcement, forwarded header trust, in-memory state stores, unbounded
-  external HTTP (sweep logs in `/tmp/stage/review-evidence/gate-*.log`).
-- Focused tests: `cargo test -p gyre-adapters` 533 passed / 0 failed —
-  includes the merged migration suite (renumbered 000066 runs; the 000058
-  backfill exclusion-set test), the SQLite invitation repositories, and
-  the mem-port contract tests; `-p gyre-domain -p gyre-common -p gyre-ports`
-  672 passed / 0 failed.
-- gyre-server test compilation is deferred to the independent verifier
-  (4 GiB cgroup build budget — environment restriction, not a defect). The
-  verifier must run the full workspace suite — in particular the 26
-  `api::invitations` tests (tenant lifecycle, revocation blocks accept,
-  expiry job marks expired, bulk invite, non-admin 403, local-mode accept
-  mints an authenticating API key, re-invite fresh key, SSO link, workspace
-  lifecycle incl. accept/decline/revoke, cross-tenant containment,
-  `max_pending` cap, `allow_re_invite`), `auth::` invitation/SSO-link and
-  task-129 reserved-identity tests (the previously conflicted region), and
-  task-124's user-management tests in `api::users` (deactivate cascade,
-  username profile, users listing — the handlers this merge kept).
-
-Coverage rows 5, 6, 7, 25 (task-110) plus 27 (merged) in
-`specs/coverage/system/user-management.md` are `implemented` and describe
-the merged tree; the audit header records this repair merge and the model
-choice.
+- Exact-head GitHub CI: run 43610196702 attempt 2 — all jobs success
+  (Development controller, Test, Clippy, Format, Architecture lint, Web
+  build, agent runner tests).
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --all-targets`
+  pass in this sandbox (4 GiB budget).
+- `cargo test -p gyre-adapters` 533 passed / 0 failed; `-p gyre-domain
+  -p gyre-ports` 547+8 passed / 0 failed (includes invitation repositories,
+  migrations, mem-port contracts).
+- Mechanical checks pass: architecture, migration versions, migration SQL
+  portability, ABAC route registry, ABAC exempt handlers, MCP write tools,
+  mem port contracts, dead message kinds, byte-slice truncation, relative
+  path defaults, fail-open ref resolution, fabricated scope defaults, lossy
+  secret conversion, scope literal defaults, inert enforcement, forwarded
+  header trust, in-memory state stores, unbounded external HTTP.
+- Node suites (`scripts/dashboard/test`, `scripts/test`) pass locally.
+- gyre-server test binaries exceed the sandbox build budget; the
+  independent verifier owns the full workspace suite — notably the 26
+  `api::invitations` tests and task-124's `api::users` tests in the merged
+  region.
