@@ -4,10 +4,10 @@ spec_ref: "abac-policy-engine.md §CLI"
 depends_on:
   - task-128
   - task-129
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "abac-policy-engine.md §CLI"
-commits: ["05549afd91dfda702b701cd828359c6c93cae8be"]
+commits: ["05549afd91dfda702b701cd828359c6c93cae8be", "eae3a9349b4ee7c77a86e687a97eee0da895ae33"]
 ---
 
 ## Spec Excerpt
@@ -73,7 +73,7 @@ Read `specs/system/abac-policy-engine.md` §CLI for the full spec. CLI implement
 
 ## Shipped
 
-All six `abac-policy-engine.md` §CLI commands ship as the `gyre policy` command group in `gyre-cli` (commit `05549afd`), calling the real policy API shipped by task-129 — no server changes were needed.
+All six `abac-policy-engine.md` §CLI commands ship as the `gyre policy` command group in `gyre-cli` (commit `05549afd`), calling the real policy API shipped by task-129. This round resolved the rebase conflict against current main (merge commit `eae3a934`): the conflict in `specs/coverage/system/abac-policy-engine.md` was resolved by combining both sides' audit outcomes — row 16 (CLI, this task) and row 17 (UI, task-132) are both `implemented`, coverage 16/19 (2 n/a). The `gyre-cli` implementation is untouched by the merge; the server-side `policies.rs` change taken from main (case-insensitive `parse_scope`, task-132) is fully compatible with the CLI's lowercase `--scope` values.
 
 ### Behavior
 
@@ -82,14 +82,14 @@ All six `abac-policy-engine.md` §CLI commands ship as the `gyre policy` command
 - **`gyre policy evaluate`** — `POST /api/v1/policies/evaluate` with the `{type}:{id}` flags mapped onto the documented request body (`subject.type`/`subject.id`, `resource.type`/`resource.id`); prints decision, matched policy (or "(none — default deny)"), evaluated-policy count, and evaluation time.
 - **`gyre policy decisions`** — `GET /api/v1/policies/decisions` with the subject-id filter (the `agent:` prefix is CLI syntax; the audit log keys on the id) and `--limit` (default 100, matching the server); `--decision {allow,deny}` and `--since <duration>` (s/m/h/d/w) are applied to the fetched newest-first page by the `filter_decisions` helper; prints timestamp, subject, action, resource, decision, matched policy.
 - **`gyre policy effective`** — `GET /api/v1/policies/effective?subject={id}&resource_type={type}`; prints the action/decision/matched-policy matrix answered from the subject's real stored attributes (server side).
-- **Error handling** — every API failure propagates as an error naming the HTTP status and the server's message (auth 403, validation 400, not-found 404); malformed `--subject`/`--resource`/`--since`/YAML input is rejected before any request is sent. Help text exists for the group and every subcommand/flag (verified against the built binary).
+- **Error handling** — every API failure propagates as an error naming the HTTP status and the server's message (auth 403, validation 400, not-found 404); malformed `--subject`/`--resource`/`--since`/YAML input is rejected before any request is sent. Help text exists for the group and every subcommand/flag.
 
-`serde_yaml` moved from gyre-cli dev-dependencies to regular dependencies (`workspace = true`); no other crates touched.
+`serde_yaml` moved from gyre-cli dev-dependencies to regular dependencies (`workspace = true`); no other crates touched by the CLI work.
 
 ### Test evidence
 
-23 focused tests in `gyre-cli` (all passing): arg-parsing tests including the clap `requires` rejection and unknown-scope-value rejection; `parse_subject_ref`/`parse_since_duration` unit tests (valid and malformed forms, overflow); `load_policy_yaml` tests (full definition with string/list/number condition values, optional-field defaults, missing-required-field, invalid scope/effect, missing file); a `filter_decisions` outcome/age matrix test; and mock-server command-flow tests asserting the exact request lines and bodies (`GET /api/v1/policies?scope=workspace&scope_id=ws-1`, `POST /api/v1/policies` with the YAML-derived JSON body, the evaluate request JSON shape, `GET /api/v1/policies/decisions?limit=250&subject_id=worker-42`, `GET /api/v1/policies/effective?subject=jsell&resource_type=spec`) plus error propagation for 403/400 and pre-request rejection of malformed input.
+28 focused policy tests in `gyre-cli` (all passing): arg-parsing tests including the clap `requires` rejection and unknown-scope-value rejection; `parse_subject_ref`/`parse_since_duration` unit tests (valid and malformed forms); `load_policy_yaml` tests (full definition with string/list/number condition values, optional-field defaults, missing-required-field, invalid scope/effect, missing file); a `filter_decisions` outcome/age matrix test; and mock-server command-flow tests asserting the exact request lines and bodies (`GET /api/v1/policies?scope=workspace&scope_id=ws-1`, `POST /api/v1/policies` with the YAML-derived JSON body, the evaluate request JSON shape, `GET /api/v1/policies/decisions?...&subject_id=worker-42`, `GET /api/v1/policies/effective?subject=jsell&resource_type=spec`) plus error propagation for 403/400 and pre-request rejection of malformed input.
 
-Probes run in this sandbox (per the 4 GiB budget rule, no gyre-server build here): `cargo test -p gyre-cli` — 178 passed, 0 failed; `cargo fmt -p gyre-cli --check` clean; `cargo clippy -p gyre-cli --all-targets` — no gyre-cli warnings; `scripts/check-byte-slice-truncation.sh`, `check-arch.sh`, `check-inert-enforcement.sh`, `check-relative-path-defaults.sh`, `check-lossy-secret-conversion.sh` all pass.
+Probes run in this sandbox after the rebase resolution (per the 4 GiB budget rule, no gyre-server build here — the merged tree's server code is byte-identical to main's, already independently verified): `cargo test -p gyre-cli` — 178 passed + 1 ws-integration, 0 failed; `cargo fmt -p gyre-cli --check` clean; `scripts/check-arch.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh`, `check-relative-path-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-task-commit-attribution.sh` all pass.
 
-The independent verifier must run `cargo test --all` (the final acceptance criterion) — in particular `cargo test -p gyre-cli` (the 23 policy tests) and the existing server-side `api::policies` tests that own the endpoint contracts the CLI calls.
+The independent verifier must run `cargo test --all` (the final acceptance criterion) — in particular `cargo test -p gyre-cli` (the policy tests) and the existing server-side `api::policies` tests that own the endpoint contracts the CLI calls (including task-132's `list_policies_scope_query_is_case_insensitive` taken from main in this merge).
