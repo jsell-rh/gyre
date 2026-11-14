@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: complete
+progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["d07a957fcf768d4d116f3e527788da7a2acb6076", "bc1d0c0cc30b775dc20f68cf5c2789e01a1ad5ce", "17bfb44719748cdaeb4e36a168acc996b778cb27", "22c4f6b5c604bbb55c7530fd2bed7733b743f492", "4d1d81b3e5d7ffdb22b7c6cb83fb4199457824e9", "eaca83fb8c0bf871c51a7ff7dc9adaea4b9f83ad", "062f925e2d5abdf4196291df05fac6cf9e9fbd06", "b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "a69b9ed8d8f1071a2198346da7e4392df921bb93"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -118,94 +118,3 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
-
-## Shipped
-
-HSI §12 profile gaps (notification filtering, judgment ledger, auth
-provider info) are implemented in production code across the commits
-listed in the frontmatter.
-
-What shipped, per acceptance criterion:
-
-- **Spec amendment (Part 1)** — HSI §12 Judgment Ledger names the four
-  concrete sources (`spec_approvals`; `audit_events` rows with
-  `event_type IN (gate_override, trust_change, meta_spec_publish)`;
-  `meta_spec_versions` joined to `meta_specs`), and the `?type=` values
-  are `approval|rejection|gate|trust|meta-spec`, matching
-  `JudgmentType::as_str()`.
-- **JudgmentType::GateOverride** — `as_str() = "gate"`,
-  `from_db_str("gate")` parses (`gyre-domain/src/user_profile.rs`).
-- **Aggregation (Part 2)** — `JudgmentLedgerRepository::list_for_user`
-  (sqlite/postgres/mem parity) unions all four categories from real
-  tables, filters `?workspace_id=` in the queries (no stamping), sorts
-  reverse-chronologically with a deterministic tie-break, and applies
-  limit/offset after the union+sort.
-- **Trust-change write path** — PUT /api/v1/workspaces/:id writes a
-  `trust_change` audit event (from/to/workspace_id) on real transitions.
-- **Gate-override write path** — a human (user-principal) approval
-  review on an MR with failed gate results writes one `gate_override`
-  event per failed gate (mr_id/gate_id/gate_type/failed→overridden);
-  agent-token approvals are excluded.
-- **Meta-spec publish attribution** — meta-spec registry create/update
-  write `meta_spec_publish` events (kind/name/version/content_hash).
-- **Inbox filtering** — `user_notification_preferences` rows with
-  `enabled = 0` are excluded in-query (before pagination) from the
-  inbox list, the unread-count badge, and the MCP inbox tool.
-- **Auth provider info** — `users.oidc_issuer` + `last_login_at`
-  recorded by JWT validation via debounced
-  `UserRepository::record_login`; `GET /api/v1/users/me` returns both
-  read-only.
-- **Profile ledger UI** — type filter
-  (all/approval/rejection/gate/trust/meta-spec), workspace filter, and
-  Load More pagination; `GET /users/me/judgments?type=<unknown>`
-  returns 400 listing accepted values.
-
-### This round: merge resolution against main 5984177c (task-124)
-
-The published PR head (bd3d8c3) conflicted with current main
-(5984177c, task-124 user management + workspace membership). Merge
-9b5f79cc resolves the single content conflict — `UserProfileResponse`
-in `crates/gyre-server/src/api/users.rs` — by keeping BOTH sides:
-task-209's HSI §12 auth-provider fields (`oidc_issuer`,
-`last_login_at`) and main's task-124 `deactivated_at` field, in the
-struct, the `From<User>` conversion, and the no-stored-user fallback.
-Every other path merged cleanly and additively: main's deactivation
-cascade (auth extractor guards, adapters, migration 000063, impersonation,
-workspace ownership) does not remove any task-209 surface, and the new
-task-124 routes carry their own ABAC registry entries.
-
-One arity break surfaced in main's task-124 test code:
-`NotificationRepository::list_for_user` grew task-209's `exclude_types`
-parameter, so the deactivation-cascade test's 8-arg call was updated
-to pass `&[]` (bc1d0c0c) — the test must see every notification type.
-Generated `web/dist` stays restored to the assignment base (executor
-staged restore preserved); final integration rebuilds and publishes it
-remotely.
-
-### Test evidence (this round, head bc1d0c0c)
-
-- `cargo check -p gyre-server` and `cargo check -p gyre-server
-  --all-targets` — exit 0 on the merged tree (lib + test code).
-- `cargo test -p gyre-adapters --lib` — 539 passed, 0 failed
-  (includes the judgment-ledger aggregation tests and main's task-124
-  user-management adapter tests).
-- Invariant scripts run clean after the merge: check-arch,
-  check-abac-route-registry, check-migration-versions,
-  check-abac-exempt-handlers, check-dead-message-kinds,
-  check-forged-scope-fields, check-task-commit-attribution.
-  `scripts/check-tenant-filter.sh` exits 2 with an awk syntax error in
-  this sandbox — main's own committed copy fails identically under
-  mawk 1.3.4 (environment, not a merge defect); CI's awk runs it.
-
-### Verifier must run (blocked here by the 4 GiB build budget)
-
-- `cargo test -p gyre-server --lib api::users` — judgments endpoint,
-  oidc_issuer/last_login, inbox filtering, task-124 deactivation
-  cascade (the bc1d0c0c call site).
-- `cargo test -p gyre-server --lib api::workspaces` — trust_change
-  audit write path.
-- `cargo test -p gyre-server --lib api::gates` — gate_override write
-  path on failed-gate MRs.
-- `cargo test -p gyre-server --lib api::meta_specs` — meta_spec_publish
-  attribution.
-- Full gates: `cargo test --all`, `cd web && npm ci && npm test`.
