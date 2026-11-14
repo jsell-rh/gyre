@@ -8,7 +8,7 @@ coverage_sections:
   - "analytics.md §Decision API for Agents"
   - "analytics.md §GET /api/v1/analytics/decide"
   - "analytics.md §POST /api/v1/analytics/decide/custom"
-commits: ["41b239140ee2ae658d64cde4cc266fe786cf6767"]
+commits: ["41b239140ee2ae658d64cde4cc266fe786cf6767", "4201065ebb72677a584a90a566a56e6d99db36dd"]
 ---
 
 ## Spec Excerpt
@@ -101,7 +101,9 @@ Agents can define and evaluate custom decisions using a simple rule DSL with `me
 
 The analytics Decision API (analytics.md §Decision API for Agents): all
 six built-in decisions plus the custom rule DSL, evaluated over real
-platform data.
+platform data. Repair round 4201065e fixes the review findings against
+the original candidate (rustfmt + clippy gate failures); no behavior
+changed.
 
 ### Behavior
 
@@ -155,25 +157,34 @@ platform data.
 - Routes registered in `api/mod.rs`; both mapped in the ABAC route
   registry (`analytics` resource).
 
+### Repair round (4201065e)
+
+- rustfmt: formatted the changed lines the review flagged in
+  `decisions.rs`, `lib.rs`, `abac_middleware.rs`, `api/analytics.rs`.
+  `python3 scripts/check-rustfmt-diff.py cdd1dd02` now exits 0
+  ("changed lines clean, 6 Rust files checked"). Reproduced the failure
+  (exit 1) on the pre-repair head first.
+- clippy: `decisions.rs` — `percentile()` takes `&mut [f64]` (ptr_arg)
+  and the three `map_or(true, …)` filters use `is_none_or`
+  (unnecessary_map_or). `cargo clippy -p gyre-domain --lib` now emits
+  zero warnings referencing `decisions.rs` (was 4).
+
 ### Test evidence
 
-- `cargo test -p gyre-domain --lib decisions` — 24 unit tests pass in
-  this sandbox: one per built-in evaluator (healthy + degraded +
+- `cargo test -p gyre-domain decisions` — 24 unit tests pass on the
+  repair head: one per built-in evaluator (healthy + degraded +
   empty-data cases), ISO8601 formatting, window parsing, nearest-rank
   percentiles, significance confidence, DSL parse/validation, custom
   evaluation (first-match, default, window + filter narrowing), and the
   `DecisionResult` response shape.
-- `cargo check -p gyre-server --tests` — the server integration tests
-  (14 new tests in `api/analytics.rs`: end-to-end decide for all six
-  builtins against seeded mem-store events with controlled timestamps,
-  budget headroom from real config/usage stores, merge-queue health with
-  live blocked entries, custom DSL match/default/invalid, unknown
-  decision 400, cross-tenant scope 403) type-check; the sandbox build
-  wrapper defers server test execution to the independent verifier
-  (evidence in `/tmp/stage/review-evidence`).
-- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-inert-enforcement.sh`, `check-forged-scope-fields.sh`,
-  `check-scope-literal-defaults.sh`, `check-mem-port-contracts.sh`,
-  `check-byte-slice-truncation.sh`, `check-unbounded-external-http.sh`,
-  `check-lossy-secret-conversion.sh`, `check-rustfmt-diff.py` — all
-  pass on the assignment head.
+- The server integration tests (14 new tests in `api/analytics.rs`:
+  end-to-end decide for all six builtins against seeded mem-store
+  events with controlled timestamps, budget headroom from real
+  config/usage stores, merge-queue health with live blocked entries,
+  custom DSL match/default/invalid, unknown decision 400, cross-tenant
+  scope 403) are unchanged by the repair (formatting-only edits in that
+  file); the sandbox build wrapper defers server test execution to the
+  independent verifier. Verifier should run:
+  `cargo test -p gyre-server api::analytics` plus the CI rustfmt/clippy
+  jobs (`python3 scripts/check-rustfmt-diff.py <HEAD^1>` and
+  `python3 scripts/check-clippy-diff.py <HEAD^1>` on the PR head).
