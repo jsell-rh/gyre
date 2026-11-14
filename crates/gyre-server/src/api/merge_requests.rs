@@ -1117,12 +1117,15 @@ pub async fn submit_review(
     // supplied attribution would be forgeable exactly like a forged
     // reviewer_agent_id. A token whose gate no longer exists records no
     // attribution (the identity is still bound to the token subject above).
+    // §1 Token Scoping: the scope claim is a list; read it through the
+    // extractor-derived `auth.scope` (mirrored from signature-verified
+    // claims), never the raw JSON string form — an array claim read as a
+    // string silently fails open (this gate would never fire, stripping
+    // every gate review of its persona attribution).
     if auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
-        == Some(crate::auth::REVIEW_SUBMIT_SCOPE)
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE)
     {
         let token_gate_id = auth
             .jwt_claims
@@ -1810,7 +1813,40 @@ mod tests {
         state.quality_gates.save(&gate).await.unwrap();
 
         // Scoped reviewer token, minted exactly as the gate executor mints
-        // them: task_id carries the gate id.
+        // them: task_id carries the gate id, tenant resolved fail-closed
+        // from the MR's workspace (task-130 hierarchy claims), persona slug
+        // from the gate persona reference. The API-created MR binds to the
+        // bootstrap workspace because the mem repo store has no repo-1
+        // row, so seed that workspace row for the tenant resolution —
+        // never a fabricated literal at the mint site.
+        let mr = state
+            .merge_requests
+            .find_by_id(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap()
+            .expect("test MR");
+        if state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            let ws = gyre_domain::Workspace::new(
+                mr.workspace_id.clone(),
+                gyre_common::Id::new("default"),
+                format!("Test workspace {}", mr.workspace_id.as_str()),
+                mr.workspace_id.as_str().to_string(),
+                1_700_000_000,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
+        let workspace = state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .expect("test MR workspace");
         let gate_agent_id = "gate-review-attrib".to_string();
         let token = state
             .agent_signing_key
@@ -1821,6 +1857,8 @@ mod tests {
                 &state.base_url,
                 60,
                 crate::auth::REVIEW_SUBMIT_SCOPE,
+                workspace.tenant_id.as_str(),
+                Some("security"),
             )
             .unwrap();
         state
