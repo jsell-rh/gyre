@@ -761,7 +761,12 @@ pub struct AuthenticatedAgent {
     /// claims (they are gated by ABAC/RBAC instead of token scope).
     pub scope: Vec<String>,
     /// Raw JWT claims for ABAC evaluation (G6).
-    /// - Global token or API key: `None` — ABAC checks are bypassed for these.
+    /// - Global token or API key: `None` — these auth methods carry no JWT
+    ///   claims object. They are NOT exempt from ABAC: both flow through
+    ///   the normal policy evaluation (API-key principals evaluate with
+    ///   `subject.id` = the user's display_name; the global token is
+    ///   allowed by the seeded `system-full-access` policy, not by a
+    ///   middleware bypass).
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     pub jwt_claims: Option<serde_json::Value>,
     /// The raw bearer token presented by the caller, when auth came from the
@@ -1813,11 +1818,43 @@ async fn find_or_create_user(
         .as_secs();
 
     if let Some(mut existing) = state.users.find_by_external_id(external_id).await? {
+        // Task-129 review round 3 (privilege escalation): a user whose
+        // stored display_name is the reserved system ABAC identity (a row
+        // no supported write path can produce anymore — pre-existing or
+        // DB-tampered) would authenticate as that identity and match
+        // `system-full-access` (priority 1000). The ABAC middleware denies
+        // such a principal at evaluation time; fail the login here too so
+        // the reserved identity is never handed out as an auth result.
+        // Rename the user (direct DB fix) to re-enable login.
+        if existing.display_name == gyre_domain::SYSTEM_ABAC_IDENTITY {
+            tracing::warn!(
+                user_id = %existing.id,
+                "SSO login for user whose display_name is the reserved system ABAC identity; \
+                 rejecting (rename the user to re-enable login)"
+            );
+            anyhow::bail!("user display_name is the reserved system ABAC identity");
+        }
         // Spec §User Entity: last_login_at is set on each authentication.
         // username/external_id stay untouched (immutable after creation).
         existing.record_login(now);
         state.users.update(&existing).await?;
         return Ok(existing);
+    }
+
+    // Task-129 review round 3 (privilege escalation): the SSO
+    // preferred_username becomes the provisioned user's display_name,
+    // which API-key/JWT auth resolves as the ABAC subject.id — and
+    // `system-full-access` (priority 1000) matches the reserved system
+    // identity. The claim content is caller-chosen, so provisioning under
+    // the reserved handle must fail closed (401) rather than create a
+    // user that can spoof the system principal.
+    if preferred_username == gyre_domain::SYSTEM_ABAC_IDENTITY {
+        tracing::warn!(
+            external_id,
+            "SSO provisioning with the reserved system ABAC identity as \
+             preferred_username; rejecting"
+        );
+        anyhow::bail!("preferred_username is the reserved system ABAC identity");
     }
 
     // Derive the URL-safe username from the SSO preferred_username. When
@@ -2817,6 +2854,56 @@ mod tests {
         let user = after.unwrap();
         assert_eq!(user.display_name, "dave");
         assert_eq!(user.email.as_deref(), Some("dave@example.com"));
+    }
+
+    /// Task-129 review round 3 (privilege escalation): the SSO
+    /// preferred_username claim is caller-chosen and becomes the
+    /// provisioned user's display_name — the ABAC subject.id under
+    /// API-key/JWT auth. `system-full-access` (priority 1000) matches the
+    /// reserved system identity, so provisioning under that handle must
+    /// fail closed (401) and create no user.
+    #[tokio::test]
+    async fn jwt_rejects_reserved_system_identity_provisioning() {
+        let state = make_test_state_with_jwt();
+
+        let claims = serde_json::json!({
+            "tenant_id": "default",
+            "sub": "spoof-sub-1",
+            "preferred_username": "gyre-system-token",
+            "realm_access": { "roles": ["developer"] }
+        });
+        let token = sign_test_jwt(&claims, 3600);
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "SSO provisioning under the reserved system ABAC identity must fail closed"
+        );
+
+        // And no user row was created for the spoofed handle.
+        let after = state
+            .users
+            .find_by_external_id("spoof-sub-1")
+            .await
+            .unwrap();
+        assert!(
+            after.is_none(),
+            "rejected reserved-identity SSO login must not provision a user"
+        );
     }
 
     #[tokio::test]
