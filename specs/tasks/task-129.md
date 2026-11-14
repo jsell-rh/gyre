@@ -13,7 +13,7 @@ coverage_sections:
   - "abac-policy-engine.md §Audit Integration"
   - "abac-policy-engine.md §API"
   - "abac-policy-engine.md §Dry-Run Evaluation"
-commits: ["a9f254b21b69ff07384f379502f5fc1cdff789b8", "1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61"]
+commits: ["a9f254b21b69ff07384f379502f5fc1cdff789b8", "1bb51ffe543ab2bcb71df3ce83b1dab0dfe24c97", "3471b92b89a81ae095f8076edc8f23eb2e08e7fb", "0dc466e798e554e648c46e608cf88ff91f86276d", "3571156517e360f1b7e9d34570dc15ea79827b11", "9ba4dd4064ae81fd259628dc8e71620453984dbc", "0c148e2827d70f449c22a30856cc610fbcb1e053", "81ccc2848be396f509f1e6bd37dcad87c4d4bc5f", "0dcb1017d6d7ea3709415efb6a98542f69f5ad61", "6e712b451a152eab71b9e3e9d53e69643424c25a"]
 ---
 
 ## Spec Excerpt
@@ -145,118 +145,76 @@ Read `specs/system/abac-policy-engine.md` §Evaluation Engine through §Dry-Run 
 
 ## Shipped
 
-### What is implemented (all in the listed commits)
+### ABAC evaluation engine, API, and audit integration (rounds 1–8)
 
-The ABAC evaluation engine and its full surface are in production code:
+Production code, in the listed commits:
 
-- **Evaluation engine** (`gyre-server/src/policy_engine.rs`): the
-  10-step flow — subject/resource/action/environment attribute
-  extraction, repo → workspace → tenant policy collection, immutable
-  Deny evaluated first (bypasses priority ordering and cannot be
-  overridden), then priority-DESC ordering with scope specificity as
-  tiebreaker, AND-condition evaluation, first-match-wins with
-  short-circuit, and a `PolicyDecision` audit record per evaluation.
-- **Policy composition** per §Policy Composition: scope precedence
-  (repo > workspace > tenant) at equal priority, higher priority wins
-  regardless of scope, Deny overrides Allow at the same priority+scope,
-  tenant-level `default-deny` catches the rest.
-- **Built-ins**: all seven policies from §Built-In Policies are seeded
-  on startup (`system-full-access`, `tenant-isolation`,
-  `agent-repo-scope`, `workspace-membership-required`,
-  `persona-human-approval`, `builtin:require-human-spec-approval`
-  (immutable, priority 999), `default-deny`). Built-ins cannot be
-  deleted; immutable ones cannot be overridden; trust-preset names
-  (`trust:`/`builtin:` prefix) are protected on update/delete by id.
-- **Performance**: per-scope policy-set cache with invalidation on
-  every policy write (`policy_cache.rs`); membership lookups
-  precomputed in the auth context; benchmark test asserts the <1ms
-  evaluation target.
-- **Audit integration**: every decision is persisted to the
-  `policy_decisions` table and logged (Deny at `warn`, Allow at
-  `debug`); audit-write failures warn via
-  `policy_engine::record_decision_audit` so a dropped decision is
-  distinguishable from "no decisions".
-- **API**: `GET/POST /api/v1/policies`, `GET/PUT/DELETE
-  /api/v1/policies/{id}` (create admin-only, built-ins undeletable),
-  `POST /api/v1/policies/evaluate` (dry-run), `GET
-  /api/v1/policies/decisions` (audit query), `GET
-  /api/v1/policies/effective` (effective permissions), all registered
-  in `api/mod.rs` with ABAC route-registry entries.
-- **Middleware migration**: `abac_middleware.rs` evaluates through the
-  new engine; attestation-gate paths fail closed on store errors
-  (hold-then-requeue on the enforced merge path, warn+skip on the
-  audit-only push path).
+- **Evaluation engine** (`gyre-server/src/policy_engine.rs`): the 10-step
+  flow — subject/resource/action/environment attribute extraction,
+  repo → workspace → tenant policy collection, immutable Deny evaluated
+  first (bypasses priority ordering, cannot be overridden), then
+  priority-DESC with scope specificity (repo > workspace > tenant) and
+  Deny-before-Allow as tiebreakers, AND-condition evaluation,
+  first-match-wins with short-circuit, default deny. `scope_applies` is
+  the single canonical scope filter every evaluation path shares
+  (middleware, dry-run, effective-permissions, merge-time, push-time).
+- **Built-in policies**: the full §Built-In Policies table seeded at
+  startup (`seed_builtin_policies`, fail-closed) — system-full-access
+  (1000, matched by the reserved identity `gyre-system-token`),
+  tenant-isolation (950, fires only when both tenant ids resolve),
+  workspace-membership-required (940, keyed on the membership-store
+  boolean), persona-human-approval (950), agent-repo-scope (750, seeded
+  enabled with the dynamic `$resource.repo_id` reference), the immutable
+  `builtin:require-human-spec-approval`, and default-deny. Built-ins
+  cannot be deleted; immutable ones cannot be overridden; drifted
+  built-ins are refreshed to the code definition.
+- **Performance**: read-through `CachedPolicyRepository` (per-scope set
+  caching, invalidated on every port mutation and on out-of-band trust
+  transitions); membership lookups precomputed into the auth context;
+  mean-latency benchmark over the full seeded set under the 1 ms target.
+- **Audit integration**: every evaluation path (middleware, dry-run,
+  effective, merge-time, push-time) persists a `PolicyDecision` via
+  `record_decision_audit` (denials warn, allowances debug) to the
+  queryable `policy_decisions` store.
+- **API** (`gyre-server/src/api/policies.rs`): list (scope-filtered),
+  create (Admin-only), get, update, delete (not built-ins), dry-run
+  `evaluate`, `decisions` audit query, `effective` permissions with
+  real-store subject attribute resolution — all registered in
+  `api/mod.rs` and the ABAC route registry.
+- **Middleware migration**: `abac_middleware.rs` runs every registered
+  route through the engine (no system-token bypass — the global token
+  is allowed BY `system-full-access`), with reserved-identity and
+  scoped-gate-token containment ahead of evaluation.
 
-Review rounds 1–7 (findings and fixes) are recorded in the earlier
-listed commits; round 6 closed the last seven findings, including
-re-spawn JWT worker-scope claims (`mint_worker_scoped`), reserved-
-prefix protection on policy update/delete, concrete decision resource
-ids, visible audit-write failures, and set-semantics
-`subject.global_role` handling; round 7 was a formatting-only repair
-of the verification gates.
+### Round-9 verification repair (commit 6e712b45)
 
-### Round 8 (this commit): merge reconciliation + round-7 lint repair
+Round-8 `cargo test --all` failed 68 gyre-server lib tests. Repaired:
 
-Review 2f0ffde2 (round 7) found the enforced pre-commit lint
-`scripts/check-abac-context-parity.sh` failing with 3 violations on the
-candidate (it passed at the assigned merge-base 7daca25d). Both sites
-fixed in `abac_middleware.rs`:
-
-- `path_resource_id` builds a scratch `AttributeContext` for resource-id
-  extraction only (it never evaluates policies); the sanctioned
-  `// abac-context:ok` exemption now sits on the construction line.
-- The canonical evaluation context sets `subject.tenant_id` after the
-  `global_role` block; round-6 comment blocks had pushed that set past
-  the lint's 30-line scan window. The set is hoisted above the block —
-  the attribute was always set, only the lint window moved.
-
-The same commit closes a CI-advisory `check-dead-parameters.sh`
-regression the candidate had introduced (4th finding at
-`git_http.rs evaluate_push_attestation_abac`; merge-base and base both
-have 3): `task_id` is now consumed in real logic — the push-path
-`PolicyDecision`'s `request_id` is the triggering push task (the chain
-under evaluation is located via `find_by_task(task_id)`, and no HTTP
-request exists on this path) instead of an opaque random UUID, so the
-audit trail answers "which task's push produced this decision".
-
-The branch was also reconciled with the assignment base 6f5a631
-(merge commit `verify(task-129): reconcile candidate with main`):
-auto-merge clean, main's task-195 deletion of the unrouted legacy
-inbox handlers honored, web/dist at base's committed assets.
+- `mem::test_state` now pre-seeds the startup builtin set into the
+  shared policy store (production parity — main.rs seeds the same set
+  before serving; an empty store made every registered route
+  default-deny the global token after the round-2 bypass removal).
+  Fixture-drift tests updated to the production shape (policies list,
+  effective-permissions subject binding, repo-access dangling-workspace
+  now asserts both the middleware containment 403 and the handler's
+  fail-closed 404, push-attestation audit subject tenant).
+- The three `policy_engine` spec-example tests now carry the addressed
+  `resource.workspace_id`/`resource.repo_id` so the Workspace/Repo-scoped
+  spec-example Denies pass the round-4 scope filter (assertion strength
+  unchanged — the Deny must still outrank the Allow).
+- Two live middleware tests updated to the merged 12-arg
+  `mint_worker_scoped` signature.
+- Resolved the merge onto assignment base 6ffd679 keeping the task-129
+  audit shape in the scoped-token deny block and the worker-scoped
+  re-spawn JWT mint.
 
 ### Test evidence
 
-- `bash scripts/check-abac-context-parity.sh` → exit 0 (was 1 with 3
-  violations). `bash scripts/check-dead-parameters.sh` → 3 findings,
-  identical to the merge-base 7daca25d and base 6f5a631 baseline (the
-  candidate's 4th finding is gone).
-- All 22 CI-workflow scripts pass except the two environmental failures
-  that also fail identically at the merge-base (`check-tenant-filter.sh`
-  — sandbox awk is mawk, no gawk; `ci-install-mold.sh` — no network) and
-  the advisory `check-dead-parameters.sh` baseline of 3. The 30
-  pre-commit-hook script failures on this candidate are byte-identical
-  in set to the merge-base's — no regressions.
-- `cargo fmt --check` → exit 0; `cargo check -p gyre-server` and
-  `cargo check -p gyre-server --tests` → ok; `cargo test -p gyre-domain
-  policy` → 6/6; `cargo test -p gyre-adapters policy` → 14/14.
-- Behavior tests from rounds 1–6 (one per finding, each with a
-  documented killing direction): `respawn_jwt_carries_worker_scope_claims`,
-  `condition_equals_on_list_attribute_uses_set_semantics`,
-  `roleless_caller_gets_no_fabricated_readonly_role`,
-  `decision_records_concrete_resource_id`,
-  `trust_preset_policy_cannot_be_updated_or_deleted_by_id`,
-  `attestation_deny_records_abac_denied_audit_event`,
-  `attestation_abac_fails_closed_on_workspace_store_error`, plus the
-  engine/benchmark/cache/API suites in `policy_engine`,
-  `abac_middleware`, `api::policies`, `merge_processor`,
-  `ralph_loop`, and `git_http` tests. Round 8 strengthens
-  `push_attestation_abac_records_decision_to_audit_trail` to assert the
-  new `request_id` task correlation.
-
-This sandbox is cgroup-capped at 4 GiB, so gyre-server test-binary
-compilation is deferred to the independent verifier: the verifier
-must run `cargo test -p gyre-server` for the `policy_engine`,
-`policy_cache`, `abac_middleware`, `api::policies`, `auth`,
-`merge_processor`, `ralph_loop`, and `git_http` suites (including the
-seven named round-6 tests and the round-8 request_id assertion) —
-`cargo check -p gyre-server --tests` type-checks all of them.
+`cargo check --workspace --all-targets`, `cargo fmt --check`, and all
+mechanical scripts (arch, ABAC registry, mem port contracts, scope
+literals, forwarded headers, …) run clean locally. gyre-server test
+compilation exceeds this sandbox's 4 GiB budget, so the independent
+verifier must run `cargo test --all --quiet` and the focused probes
+recorded in `/tmp/stage/review-evidence/round9-test-state-seeding.md`
+(they reproduce the round-8 failure list and the watchlist of tests
+that must not flip).
