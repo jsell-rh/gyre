@@ -115,27 +115,23 @@ async fn evaluate_workspace(
                 continue;
             }
 
-            // Suppress if an active AbandonedBranch notification already exists for this MR/user.
-            let existing = state
+            // Suppress if an active AbandonedBranch notification already exists
+            // for this MR/user. `has_active_notification` is an exact
+            // (workspace, user, type, entity_ref) storage lookup — unlike a
+            // paginated `list_for_user` scan it cannot miss an existing
+            // notification past the page limit and re-create a duplicate
+            // (same dedup mechanism as the GatePassed announcement job).
+            let already_active = state
                 .notifications
-                .list_for_user(
+                .has_active_notification(
+                    &ws.id,
                     &member.user_id,
-                    Some(&ws.id),
-                    Some(9),
-                    Some(9),
-                    Some(NotificationType::AbandonedBranch.as_str()),
-                    None,
-                    100,
+                    NotificationType::AbandonedBranch.as_str(),
+                    &mr_id_str,
                     0,
                 )
                 .await
-                .unwrap_or_default();
-
-            let already_active = existing.iter().any(|n| {
-                n.notification_type == NotificationType::AbandonedBranch
-                    && n.is_active()
-                    && n.source.entity_id == mr_id_str
-            });
+                .unwrap_or(false);
 
             if already_active {
                 debug!(
@@ -774,6 +770,125 @@ mod tests {
         assert_eq!(
             abandoned_count, 1,
             "should not duplicate — expected exactly 1 AbandonedBranch for mr8, got {abandoned_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_is_not_page_bounded() {
+        // The dedup check must be an exact storage lookup, not a paginated
+        // `list_for_user` scan: with more active AbandonedBranch notifications
+        // than a scan's page size, a page-bounded check misses the existing
+        // notification for this MR and the daily job stacks a duplicate.
+        let state = test_state();
+        let now = now_secs();
+        let now_i64 = now as i64;
+
+        let ws = make_workspace("ws9");
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&make_membership("user9", "ws9", WorkspaceRole::Admin))
+            .await
+            .unwrap();
+
+        let mr = make_mr(
+            "mr9",
+            "ws9",
+            "spec-edit/page-bounded-009",
+            MrStatus::Open,
+            now - SEVEN_DAYS_SECS - 1000,
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // 150 active AbandonedBranch notifications for this user in this
+        // workspace, each referencing a different MR, all newer than the one
+        // for the target MR — so the target's existing notification sits
+        // beyond any newest-first 100-item page.
+        for i in 0..150u32 {
+            let notif = Notification {
+                id: Id::new(format!("notif-noise-{i}")),
+                workspace_id: Id::new("ws9"),
+                user_id: Id::new("user9"),
+                notification_type: NotificationType::AbandonedBranch,
+                priority: gyre_common::NotificationPriority::Low,
+                priority_rank: 9,
+                title: format!("noise {i}"),
+                body: None,
+                source: gyre_common::NotificationSource {
+                    entity_type: "mr".to_string(),
+                    entity_id: format!("noise-mr-{i}"),
+                    workspace_id: Id::new("ws9"),
+                    repo_id: None,
+                },
+                action_url: None,
+                read: false,
+                read_at: None,
+                resolved_at: None,
+                dismissed_at: None,
+                created_at: now_i64 - 10_000 - (i as i64),
+                tenant_id: "tenant1".to_string(),
+            };
+            state.notifications.create(&notif).await.unwrap();
+        }
+
+        // The existing active notification for the target MR — created oldest.
+        let existing_for_target = Notification {
+            id: Id::new("notif-target"),
+            workspace_id: Id::new("ws9"),
+            user_id: Id::new("user9"),
+            notification_type: NotificationType::AbandonedBranch,
+            priority: gyre_common::NotificationPriority::Low,
+            priority_rank: 9,
+            title: "Already notified about mr9".to_string(),
+            body: None,
+            source: gyre_common::NotificationSource {
+                entity_type: "mr".to_string(),
+                entity_id: "mr9".to_string(),
+                workspace_id: Id::new("ws9"),
+                repo_id: Some(Id::new("repo1")),
+            },
+            action_url: None,
+            read: false,
+            read_at: None,
+            resolved_at: None,
+            dismissed_at: None,
+            created_at: now_i64 - 100_000,
+            tenant_id: "tenant1".to_string(),
+        };
+        state
+            .notifications
+            .create(&existing_for_target)
+            .await
+            .unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user9"),
+                Some(&Id::new("ws9")),
+                Some(9),
+                Some(9),
+                None,
+                None,
+                1000,
+                0,
+            )
+            .await
+            .unwrap();
+
+        let count = notifs
+            .iter()
+            .filter(|n| {
+                n.notification_type == NotificationType::AbandonedBranch
+                    && n.source.entity_id == "mr9"
+            })
+            .count();
+
+        assert_eq!(
+            count, 1,
+            "dedup must be exact, not page-bounded — expected exactly 1 AbandonedBranch for mr9, got {count}"
         );
     }
 }
