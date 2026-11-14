@@ -2971,7 +2971,7 @@ async fn emit_queue_processed_failed(
 /// production path that fails a queue entry must go through here so the
 /// status change and the analytics event cannot diverge (analytics.md
 /// §Auto-Emitted Events: "Queue entry processed").
-async fn fail_queue_entry(
+pub(crate) async fn fail_queue_entry(
     state: &AppState,
     entry: &MergeQueueEntry,
     mr: Option<&MergeRequest>,

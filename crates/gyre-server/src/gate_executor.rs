@@ -6,6 +6,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use gyre_common::attestation::GateAttestation;
+use gyre_common::message::{Destination, MessageKind};
 use gyre_common::Id;
 use gyre_domain::{AgentStatus, GateResult, GateStatus, GateType, Review, ReviewDecision};
 
@@ -733,7 +734,7 @@ async fn bump_gate_attempt(state: &AppState, mr_id: &Id, gate_id: &Id) -> u64 {
 /// Current attempt number for (MR, gate). Defaults to 1 when no counter
 /// is recorded — a result armed before the counter existed is still the
 /// first observed attempt for that gate.
-async fn gate_attempt_count(state: &AppState, mr_id: &Id, gate_id: &Id) -> u64 {
+pub(crate) async fn gate_attempt_count(state: &AppState, mr_id: &Id, gate_id: &Id) -> u64 {
     let key = format!("{}:{}", mr_id.as_str(), gate_id.as_str());
     state
         .kv_store
@@ -744,6 +745,775 @@ async fn gate_attempt_count(state: &AppState, mr_id: &Id, gate_id: &Id) -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(1)
+}
+
+// ── Gate Failure Feedback (agent-gates.md §Gate Failure Feedback) ─────────
+
+/// Consecutive-failure streak threshold for the escalation protocol and
+/// deferred task creation ("3+ failures on the same gate for the same MR").
+const GATE_FAILURE_ESCALATION_THRESHOLD: u64 = 3;
+
+/// KV namespace for the per-(MR, gate) consecutive-failure streak.
+/// Incremented on each failure, reset on pass (a new MR is a new key, so a
+/// fresh MR starts at zero — "Reset on gate pass or new MR push").
+const GATE_FAILURE_STREAK_NS: &str = "gate_failure_streak";
+
+/// KV namespace marking that a GateResult for (MR, gate) has already been
+/// delivered to an author agent's inbox. The executor delivers at failure
+/// time ("Speed matters"); the Ralph loop's `on_gates_failed` re-checks the
+/// inbox later and only emits for gates that were NOT covered (e.g. optional
+/// gates, or results seeded by paths that bypass the executor) — without
+/// the marker the author's next session would read the same failure twice.
+const GATE_RESULT_DELIVERED_NS: &str = "gate_result_delivered";
+
+fn gate_result_delivered_key(mr_id: &Id, gate_id: &Id, author_id: &Id) -> String {
+    format!(
+        "{}:{}:{}",
+        mr_id.as_str(),
+        gate_id.as_str(),
+        author_id.as_str()
+    )
+}
+
+/// Has the author already received a GateResult for this (MR, gate)?
+pub(crate) async fn gate_result_already_delivered(
+    state: &AppState,
+    mr_id: &Id,
+    gate_id: &Id,
+    author_id: &Id,
+) -> bool {
+    state
+        .kv_store
+        .kv_get(
+            GATE_RESULT_DELIVERED_NS,
+            &gate_result_delivered_key(mr_id, gate_id, author_id),
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Record that the author received a GateResult for this (MR, gate).
+/// `pub(crate)` — the Ralph loop's fallback delivery path
+/// (`on_gates_failed`) marks its own emissions with the same marker the
+/// executor uses, so the two paths stay mutually de-duplicated.
+pub(crate) async fn mark_gate_result_delivered(
+    state: &AppState,
+    mr_id: &Id,
+    gate_id: &Id,
+    author_id: &Id,
+) {
+    if let Err(e) = state
+        .kv_store
+        .kv_set(
+            GATE_RESULT_DELIVERED_NS,
+            &gate_result_delivered_key(mr_id, gate_id, author_id),
+            now_secs().to_string(),
+        )
+        .await
+    {
+        warn!(
+            mr_id = %mr_id,
+            gate_id = %gate_id,
+            error = format!("{e:#}"),
+            "gate feedback: failed to record GateResult delivery marker"
+        );
+    }
+}
+
+/// Increment the consecutive-failure streak for (MR, gate) and return the
+/// new value.
+async fn bump_gate_failure_streak(state: &AppState, mr_id: &Id, gate_id: &Id) -> u64 {
+    let key = format!("{}:{}", mr_id.as_str(), gate_id.as_str());
+    let prior = state
+        .kv_store
+        .kv_get(GATE_FAILURE_STREAK_NS, &key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let streak = prior.saturating_add(1);
+    if let Err(e) = state
+        .kv_store
+        .kv_set(GATE_FAILURE_STREAK_NS, &key, streak.to_string())
+        .await
+    {
+        warn!(
+            mr_id = %mr_id,
+            gate_id = %gate_id,
+            error = format!("{e:#}"),
+            "gate feedback: failure streak update failed"
+        );
+    }
+    streak
+}
+
+/// Reset the consecutive-failure streak for (MR, gate) — a pass breaks the
+/// "3+ consecutive failures" chain (§Gate Failure Feedback: "Reset on gate
+/// pass").
+async fn reset_gate_failure_streak(state: &AppState, mr_id: &Id, gate_id: &Id) {
+    let key = format!("{}:{}", mr_id.as_str(), gate_id.as_str());
+    if let Err(e) = state
+        .kv_store
+        .kv_set(GATE_FAILURE_STREAK_NS, &key, "0".to_string())
+        .await
+    {
+        warn!(
+            mr_id = %mr_id,
+            gate_id = %gate_id,
+            error = format!("{e:#}"),
+            "gate feedback: failure streak reset failed"
+        );
+    }
+}
+
+/// Is this a security gate? A gate is a security gate when it runs the
+/// security persona (persona reference `personas/security.md` — slug
+/// `security`) or is named for security review.
+fn is_security_gate(gate: &gyre_domain::QualityGate) -> bool {
+    let persona_is_security = gate
+        .persona
+        .as_deref()
+        .is_some_and(|p| persona_slug(p) == "security");
+    persona_is_security || gate.name.to_lowercase().contains("security")
+}
+
+/// Does a security gate's failure output report at least one CRITICAL
+/// finding? The security persona's report format (specs/personas/security.md
+/// §What You Produce) separates findings into severity sections, with the
+/// critical ones under a "Critical Findings" heading. A critical finding is
+/// present when that section exists and carries any content before the next
+/// section. An output with no structured sections falls back to a standalone
+/// "critical" marker (e.g. "ChangesRequested: critical SQL injection in
+/// handlers.rs:47").
+fn has_critical_finding(output: &str) -> bool {
+    let mut saw_critical_section = false;
+    let mut in_critical_section = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        // Section headings: markdown `###` headings or bare
+        // "Critical Findings:" labels.
+        let heading_body = trimmed.trim_start_matches('#').trim_start();
+        let lower = heading_body.to_lowercase();
+        let is_heading = trimmed.starts_with('#')
+            || lower.starts_with("critical findings")
+            || lower.starts_with("high findings")
+            || lower.starts_with("medium findings")
+            || lower.starts_with("informational")
+            || lower.starts_with("verified controls");
+        if is_heading {
+            in_critical_section = lower.starts_with("critical findings");
+            if in_critical_section {
+                saw_critical_section = true;
+            }
+            continue;
+        }
+        if in_critical_section && !trimmed.is_empty() {
+            return true;
+        }
+    }
+    if saw_critical_section {
+        // Structured report present and its critical section is empty.
+        return false;
+    }
+    // Unstructured output: a standalone "critical" word flags criticality.
+    output
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("critical"))
+}
+
+/// Gate failure feedback (agent-gates.md §Gate Failure Feedback):
+///
+/// 1. `GateResult` Directed message → the author agent's inbox (read by the
+///    next session; live sessions also get the WebSocket broadcast —
+///    `emit_event` fans every bus message out to WS subscribers and the
+///    agent's own connection receives Agent-destined messages).
+/// 2. Security gate failure → the security persona is notified in addition
+///    to the author; critical security findings escalate to the Overseer.
+/// 3. 3+ consecutive failures on the same gate → the repo orchestrator is
+///    notified directly; when the author's session has ended (converged /
+///    stopped / gone), the deferred gate-failure task is created.
+/// 4. All gates failed → the MR is removed from the merge queue and a
+///    reassessment task is created.
+///
+/// Called from `run_gate` AFTER the final status is persisted, so the
+/// all-gates-failed check observes this gate's own Failed row.
+async fn gate_failure_feedback(
+    state: &Arc<AppState>,
+    mr_id: &Id,
+    gate: &gyre_domain::QualityGate,
+    output: &str,
+    attempt: u64,
+    gate_type_str: &str,
+    gate_agent_id: &str,
+) {
+    let mr = match state.merge_requests.find_by_id(mr_id).await {
+        Ok(Some(mr)) => mr,
+        Ok(None) => {
+            warn!(
+                mr_id = %mr_id,
+                "gate feedback: merge request not found; skipping failure feedback"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                mr_id = %mr_id,
+                error = format!("{e:#}"),
+                "gate feedback: merge request lookup failed; skipping failure feedback"
+            );
+            return;
+        }
+    };
+
+    let payload = serde_json::json!({
+        "mr_id": mr_id.to_string(),
+        "gate_name": gate.name,
+        "gate_type": gate_type_str,
+        "status": "Failed",
+        "output": output,
+        "spec_ref": mr.spec_ref,
+        "attempt": attempt,
+        "gate_agent_id": gate_agent_id,
+    });
+
+    // 1. Author inbox delivery (§Agent Inbox Delivery).
+    if let Some(ref author_id) = mr.author_agent_id {
+        if !gate_result_already_delivered(state, mr_id, &gate.id, author_id).await {
+            state
+                .emit_event(
+                    Some(mr.workspace_id.clone()),
+                    Destination::Agent(author_id.clone()),
+                    MessageKind::GateResult,
+                    Some(payload.clone()),
+                )
+                .await;
+            mark_gate_result_delivered(state, mr_id, &gate.id, author_id).await;
+        }
+    }
+
+    // 2. Consecutive-failure streak (reset on pass — see `run_gate`).
+    let streak = bump_gate_failure_streak(state, mr_id, &gate.id).await;
+
+    // 3. Security gate failure → security persona + Overseer escalation
+    //    for critical findings (§Escalation).
+    if is_security_gate(gate) {
+        security_gate_escalation(state, &mr, gate, output, &payload).await;
+    }
+
+    // 4. 3+ consecutive failures on the same gate (§Escalation + §Deferred:
+    //    Task Creation).
+    if streak >= GATE_FAILURE_ESCALATION_THRESHOLD {
+        notify_repo_orchestrator_of_streak(state, &mr, gate, streak).await;
+        if let Some(ref author_id) = mr.author_agent_id {
+            if author_session_ended(state, author_id).await {
+                create_gate_failure_task(state, &mr, gate, output, attempt, author_id).await;
+            }
+        }
+    }
+
+    // 5. All gates failed → out of the merge queue + reassessment task
+    //    (§Escalation).
+    if all_gates_failed(state, mr_id).await {
+        handle_all_gates_failed(state, &mr).await;
+    }
+}
+
+/// Security gate failure escalation (§Escalation): the security persona is
+/// notified in addition to the author, and critical findings escalate to
+/// the Overseer (human).
+async fn security_gate_escalation(
+    state: &Arc<AppState>,
+    mr: &gyre_domain::MergeRequest,
+    gate: &gyre_domain::QualityGate,
+    output: &str,
+    gate_result_payload: &serde_json::Value,
+) {
+    let repo = match state.repos.find_by_id(&mr.repository_id).await {
+        Ok(Some(repo)) => repo,
+        Ok(None) => {
+            warn!(
+                repo_id = %mr.repository_id,
+                "gate feedback: repo not found; skipping security persona notification"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                repo_id = %mr.repository_id,
+                error = format!("{e:#}"),
+                "gate feedback: repo lookup failed; skipping security persona notification"
+            );
+            return;
+        }
+    };
+
+    // The security persona is a template, not a mailbox: its notification
+    // surface is the inbox of every agent instantiated from it — the next
+    // security-persona session reads the GateResult on startup, exactly
+    // like the author does.
+    match resolve_review_persona(state, &repo, "security").await {
+        Some(persona) => {
+            let recipients = state
+                .agents
+                .list_by_workspace(&mr.workspace_id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|a| a.persona_id == Some(persona.id.clone()))
+                .collect::<Vec<_>>();
+            if recipients.is_empty() {
+                info!(
+                    persona_id = %persona.id,
+                    "gate feedback: no live agent running the security persona; \
+                     security persona notification has no inbox to land in"
+                );
+            }
+            for agent in recipients {
+                state
+                    .emit_event(
+                        Some(mr.workspace_id.clone()),
+                        Destination::Agent(agent.id.clone()),
+                        MessageKind::GateResult,
+                        Some(gate_result_payload.clone()),
+                    )
+                    .await;
+            }
+        }
+        None => {
+            info!(
+                repo_id = %repo.id,
+                "gate feedback: no security persona resolvable in scope chain; \
+                 skipping security persona notification"
+            );
+        }
+    }
+
+    // Critical security findings escalate to the Overseer (human).
+    if has_critical_finding(output) {
+        escalate_critical_security_finding(state, mr, gate, output).await;
+    }
+}
+
+/// Escalate a critical security finding to the Overseer (§Escalation:
+/// "Critical security findings escalate to the Overseer (human)"). The
+/// Overseer is resolved per user-management.md (§Notification Routing for
+/// Agent Escalations / "Security finding (Critical/High)"): workspace
+/// Owners + tenant Admins, reached through a push notification, plus an
+/// `Escalation` message on the bus so the orchestrators observe it.
+async fn escalate_critical_security_finding(
+    state: &Arc<AppState>,
+    mr: &gyre_domain::MergeRequest,
+    gate: &gyre_domain::QualityGate,
+    output: &str,
+) {
+    let title = format!("Critical security finding on MR '{}'", mr.title);
+    state
+        .emit_event(
+            Some(mr.workspace_id.clone()),
+            Destination::Workspace(mr.workspace_id.clone()),
+            MessageKind::Escalation,
+            Some(serde_json::json!({
+                "reason": format!(
+                    "Critical security finding: gate '{}' failed on MR '{}'",
+                    gate.name, mr.title
+                ),
+                "context": "agent-gates.md §Gate Failure Feedback — critical \
+                 security findings escalate to the Overseer (human)",
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "gate_name": gate.name,
+                "severity": "critical",
+                "source": "gate_executor",
+                "output": truncate_bytes(output, 2048),
+            })),
+        )
+        .await;
+
+    let Some(ws) = state
+        .workspaces
+        .find_by_id(&mr.workspace_id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        warn!(
+            workspace_id = %mr.workspace_id,
+            "gate feedback: workspace not found; skipping Overseer escalation"
+        );
+        return;
+    };
+
+    // Workspace Owners (memberships) + tenant Admins (user roles), de-duplicated.
+    let mut recipients: Vec<Id> = Vec::new();
+    if let Ok(members) = state
+        .workspace_memberships
+        .list_by_workspace(&mr.workspace_id)
+        .await
+    {
+        recipients.extend(
+            members
+                .into_iter()
+                .filter(|m| m.role == gyre_domain::WorkspaceRole::Owner)
+                .map(|m| m.user_id),
+        );
+    }
+    if let Ok(users) = state.users.list().await {
+        recipients.extend(
+            users
+                .into_iter()
+                .filter(|u| {
+                    u.tenant_id == Some(ws.tenant_id.clone())
+                        && u.roles.contains(&gyre_domain::UserRole::Admin)
+                })
+                .map(|u| u.id),
+        );
+    }
+    recipients.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    recipients.dedup_by(|a, b| a == b);
+
+    if recipients.is_empty() {
+        info!(
+            workspace_id = %mr.workspace_id,
+            "gate feedback: no Overseer recipients resolvable (no workspace Owner, no tenant Admin)"
+        );
+    }
+    for user_id in recipients {
+        crate::notifications::notify_rich(
+            state.as_ref(),
+            mr.workspace_id.clone(),
+            user_id,
+            gyre_common::NotificationType::SecurityFinding,
+            title.clone(),
+            ws.tenant_id.as_str(),
+            Some(
+                serde_json::json!({
+                    "type": "GateResult",
+                    "mr_id": mr.id.to_string(),
+                    "gate_name": gate.name,
+                    "severity": "critical",
+                    "output": truncate_bytes(output, 2048),
+                })
+                .to_string(),
+            ),
+            Some(mr.id.to_string()),
+            Some(mr.repository_id.to_string()),
+            "merge_request",
+            None,
+        )
+        .await;
+    }
+}
+
+/// 3+ consecutive failures on the same gate → the repo orchestrator is
+/// notified directly (§Escalation: "a signal that the task may need
+/// re-scoping or the spec may be ambiguous"). Same routing as
+/// `ralph_loop::notify_task_blocked`: ensure a live repo orchestrator
+/// (spawn on demand), deliver to its Directed inbox, fall back to a
+/// workspace-destined message when none can be ensured.
+async fn notify_repo_orchestrator_of_streak(
+    state: &Arc<AppState>,
+    mr: &gyre_domain::MergeRequest,
+    gate: &gyre_domain::QualityGate,
+    streak: u64,
+) {
+    let repo = match state.repos.find_by_id(&mr.repository_id).await {
+        Ok(Some(repo)) => repo,
+        Ok(None) => {
+            warn!(
+                repo_id = %mr.repository_id,
+                "gate feedback: repo not found; skipping orchestrator escalation"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                repo_id = %mr.repository_id,
+                error = format!("{e:#}"),
+                "gate feedback: repo lookup failed; skipping orchestrator escalation"
+            );
+            return;
+        }
+    };
+    let orchestrator =
+        crate::signal_chain::ensure_repo_orchestrator_for_failure(state, &repo).await;
+    let destination = match orchestrator {
+        Some(o) => Destination::Agent(o.id.clone()),
+        None => Destination::Workspace(mr.workspace_id.clone()),
+    };
+    state
+        .emit_event(
+            Some(mr.workspace_id.clone()),
+            destination,
+            MessageKind::Escalation,
+            Some(serde_json::json!({
+                "reason": format!(
+                    "Gate '{}' has failed {streak} consecutive times on MR '{}'",
+                    gate.name, mr.title
+                ),
+                "context": "agent-gates.md §Gate Failure Feedback — 3+ consecutive \
+                 failures on the same gate: the task may need re-scoping or the \
+                 spec may be ambiguous",
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "gate_name": gate.name,
+                "consecutive_failures": streak,
+                "source": "gate_executor",
+            })),
+        )
+        .await;
+}
+
+/// Has the author agent's session ended (converged / been stopped / gone)?
+/// An `Active` agent has a live session that will read its inbox; anything
+/// else (Idle = converged, Stopped, Failed, Dead) — or a vanished author —
+/// has no session coming, which is the §Deferred: Task Creation condition.
+async fn author_session_ended(state: &AppState, author_id: &Id) -> bool {
+    match state.agents.find_by_id(author_id).await {
+        Ok(Some(agent)) => agent.status != AgentStatus::Active,
+        Ok(None) => true,
+        Err(_) => false,
+    }
+}
+
+/// Create the deferred gate-failure task (§Deferred: Task Creation):
+/// status Backlog, priority High, labels ["gate-failure", "auto-created"],
+/// description carrying the gate output, spec_ref, attempt count, and
+/// author agent id. The repo orchestrator picks it up in its next OBSERVE
+/// cycle. De-duplicated per (MR, gate): one active gate-failure task,
+/// not one per retry.
+async fn create_gate_failure_task(
+    state: &Arc<AppState>,
+    mr: &gyre_domain::MergeRequest,
+    gate: &gyre_domain::QualityGate,
+    output: &str,
+    attempt: u64,
+    author_id: &Id,
+) {
+    let title_prefix = format!("Gate failure: {} on MR #{}", gate.name, mr.id);
+    let title = format!("{title_prefix} (attempt {attempt})");
+    if let Ok(existing) = state.tasks.list_by_repo(&mr.repository_id).await {
+        if existing.iter().any(|t| {
+            t.title.starts_with(&title_prefix)
+                && !matches!(
+                    t.status,
+                    gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+                )
+        }) {
+            info!(
+                mr_id = %mr.id,
+                gate_id = %gate.id,
+                "gate feedback: active gate-failure task already exists; skipping"
+            );
+            return;
+        }
+    }
+
+    let spec_ref_line = mr.spec_ref.as_deref().unwrap_or("(none)");
+    let description = format!(
+        "Gate '{}' failed on MR #{}.
+
+Failure output:
+{output}
+
+Spec reference: {spec_ref_line}
+Attempts: {attempt}
+Author agent: {author_id} (session ended)
+
+Fix the issue and re-push to trigger gate re-evaluation.",
+        gate.name,
+        mr.id
+    );
+
+    let now = now_secs();
+    // Deterministic id (per MR + gate): the executor runs one feedback task
+    // per gate concurrently, so a streak-3 feedback can race a concurrent
+    // attempt's existence check above — a deterministic id makes a second
+    // create idempotent (mem overwrites the same row, SQLite rejects the
+    // duplicate PK) instead of leaving two tasks.
+    let mut task = gyre_domain::Task::new(
+        Id::new(format!("gate-failure-task:{}:{}", mr.id.as_str(), gate.id.as_str())),
+        &title,
+        now,
+    );
+    task.status = gyre_domain::TaskStatus::Backlog;
+    task.priority = gyre_domain::TaskPriority::High;
+    task.labels = vec!["gate-failure".to_string(), "auto-created".to_string()];
+    task.description = Some(description);
+    task.repo_id = mr.repository_id.clone();
+    task.workspace_id = mr.workspace_id.clone();
+    task.spec_ref = mr.spec_ref.clone();
+    task.spec_path = mr
+        .spec_ref
+        .as_deref()
+        .and_then(|r| r.split('@').next())
+        .map(|p| p.to_string());
+    // task_type intentionally None: like push-hook auto-tasks, this is
+    // informational until the repo orchestrator picks it up in its next
+    // OBSERVE cycle (agent-runtime.md §1 Phase 4) — it must not trigger
+    // mechanical agent spawning on creation.
+
+    if let Err(e) = state.tasks.create(&task).await {
+        warn!(
+            mr_id = %mr.id,
+            gate_id = %gate.id,
+            error = format!("{e:#}"),
+            "gate feedback: failed to create gate-failure task"
+        );
+        return;
+    }
+    info!(
+        mr_id = %mr.id,
+        gate_id = %gate.id,
+        task_id = %task.id,
+        "gate feedback: created deferred gate-failure task (author session ended)"
+    );
+    state
+        .emit_event(
+            Some(mr.workspace_id.clone()),
+            Destination::Workspace(mr.workspace_id.clone()),
+            MessageKind::TaskCreated,
+            Some(serde_json::json!({"task_id": task.id.to_string()})),
+        )
+        .await;
+}
+
+/// Are ALL of the MR's gate results Failed (at least one result recorded)?
+async fn all_gates_failed(state: &AppState, mr_id: &Id) -> bool {
+    let results = state
+        .gate_results
+        .list_by_mr_id(mr_id.as_str())
+        .await
+        .unwrap_or_default();
+    !results.is_empty() && results.iter().all(|r| r.status == GateStatus::Failed)
+}
+
+/// All gates failed on an MR (§Escalation): the MR is removed from the
+/// merge queue and a task is created to reassess the approach.
+async fn handle_all_gates_failed(state: &Arc<AppState>, mr: &gyre_domain::MergeRequest) {
+    // Remove from the merge queue: fail every non-terminal entry for the
+    // MR (list_queue returns exactly the non-terminal entries).
+    let entries = state
+        .merge_queue
+        .list_queue()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.merge_request_id == mr.id)
+        .collect::<Vec<_>>();
+    for entry in &entries {
+        if let Err(e) = crate::merge_processor::fail_queue_entry(
+            state,
+            entry,
+            Some(mr),
+            "all_gates_failed",
+            &format!("all gates failed on MR '{}'", mr.title),
+        )
+        .await
+        {
+            warn!(
+                entry_id = %entry.id,
+                error = format!("{e:#}"),
+                "gate feedback: failed to remove all-failed MR from merge queue"
+            );
+        }
+    }
+
+    // Reassessment task, de-duplicated by title among the repo's
+    // non-terminal tasks.
+    let title = format!("Reassess approach: all gates failed on MR #{}", mr.id);
+    if let Ok(existing) = state.tasks.list_by_repo(&mr.repository_id).await {
+        if existing.iter().any(|t| {
+            t.title == title
+                && !matches!(
+                    t.status,
+                    gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+                )
+        }) {
+            info!(
+                mr_id = %mr.id,
+                "gate feedback: all-gates-failed reassessment task already exists; skipping"
+            );
+            return;
+        }
+    }
+
+    // Description: every failed gate and its output, so the reassessment
+    // starts from the real evidence.
+    let mut gates_summary = String::new();
+    if let Ok(results) = state.gate_results.list_by_mr_id(mr.id.as_str()).await {
+        for r in results {
+            let gate_name = state
+                .quality_gates
+                .find_by_id(r.gate_id.as_str())
+                .await
+                .ok()
+                .flatten()
+                .map(|g| g.name)
+                .unwrap_or_else(|| r.gate_id.to_string());
+            gates_summary.push_str(&format!(
+                "- {}:\n  {}\n",
+                gate_name,
+                r.output.as_deref().unwrap_or("(no output)")
+            ));
+        }
+    }
+    let description = format!(
+        "All gates failed on MR #{} ('{}'). The approach itself may be wrong — 
+reassess before retrying.
+
+Failed gates:
+{gates_summary}
+Author agent: {}
+
+agent-gates.md §Gate Failure Feedback — all gates failed: the MR was removed 
+from the merge queue and this task was created to reassess the approach.",
+        mr.id,
+        mr.title,
+        mr.author_agent_id
+            .as_ref()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "(none)".to_string())
+    );
+
+    let now = now_secs();
+    // Deterministic id per MR: same concurrent-feedback race containment
+    // as the deferred gate-failure task above (two all-failed gates can
+    // race past the existence check).
+    let mut task = gyre_domain::Task::new(
+        Id::new(format!("all-gates-failed-task:{}", mr.id.as_str())),
+        &title,
+        now,
+    );
+    task.status = gyre_domain::TaskStatus::Backlog;
+    task.priority = gyre_domain::TaskPriority::High;
+    task.labels = vec!["gate-failure".to_string(), "auto-created".to_string()];
+    task.description = Some(description);
+    task.repo_id = mr.repository_id.clone();
+    task.workspace_id = mr.workspace_id.clone();
+    if let Err(e) = state.tasks.create(&task).await {
+        warn!(
+            mr_id = %mr.id,
+            error = format!("{e:#}"),
+            "gate feedback: failed to create all-gates-failed reassessment task"
+        );
+        return;
+    }
+    info!(
+        mr_id = %mr.id,
+        task_id = %task.id,
+        "gate feedback: all gates failed — MR removed from merge queue, reassessment task created"
+    );
+    state
+        .emit_event(
+            Some(mr.workspace_id.clone()),
+            Destination::Workspace(mr.workspace_id.clone()),
+            MessageKind::TaskCreated,
+            Some(serde_json::json!({"task_id": task.id.to_string()})),
+        )
+        .await;
 }
 
 /// Create pending GateResult records for all gates belonging to the MR's
@@ -1061,6 +1831,29 @@ async fn run_gate(
             error = format!("{e:#}"),
             "failed to persist final gate result status after retries"
         );
+    }
+
+    // ── Gate Failure Feedback (agent-gates.md §Gate Failure Feedback) ────
+    // Runs AFTER the final status is persisted so the all-gates-failed
+    // check inside observes this gate's own Failed row. Required gates
+    // only — an optional gate's advisory failure already reaches the
+    // author through the MR comment and must not run the escalation
+    // protocol.
+    if status == GateStatus::Failed && gate.required {
+        gate_failure_feedback(
+            &state,
+            &mr_id,
+            &gate,
+            &output,
+            attempt,
+            &gate_type_str,
+            &gate_agent_id,
+        )
+        .await;
+    } else if status == GateStatus::Passed {
+        // A pass breaks the consecutive-failure chain (§Gate Failure
+        // Feedback: "Reset on gate pass").
+        reset_gate_failure_streak(state.as_ref(), &mr_id, &gate.id).await;
     }
 
     // Notify the MR author when this pass makes ALL gates green
@@ -6608,5 +7401,713 @@ specs:
             format!("gate-agent:{}", gate.id.as_str())
         );
         assert_eq!(body["agent_id"], "agent-retry-author");
+    }
+
+    // ── §Gate Failure Feedback (task-137) ──────────────────────────────────
+
+    /// Seed an author agent for an MR. `status` models the session state:
+    /// Active = live session; anything else = converged/stopped (session
+    /// ended — the §Deferred: Task Creation condition).
+    async fn seed_author_agent(
+        state: &Arc<AppState>,
+        agent_id: &str,
+        status: AgentStatus,
+    ) -> gyre_domain::Agent {
+        let mut agent = gyre_domain::Agent::new(Id::new(agent_id), agent_id, now_secs());
+        agent.workspace_id = Id::new("ws-test");
+        agent.status = status;
+        state.agents.create(&agent).await.unwrap();
+        agent
+    }
+
+    async fn gate_results_for(
+        state: &Arc<AppState>,
+        mr_id: &Id,
+    ) -> Vec<GateResult> {
+        state
+            .gate_results
+            .list_by_mr_id(mr_id.as_str())
+            .await
+            .unwrap_or_default()
+    }
+
+    /// §Agent Inbox Delivery: a failed required gate delivers a GateResult
+    /// Directed message to the author agent's inbox with the full field set
+    /// — mr_id, gate_name, gate_type, status, output, spec_ref, attempt,
+    /// gate_agent_id — and the attempt advances across re-enqueues.
+    #[tokio::test]
+    async fn gate_failure_delivers_gate_result_to_author_inbox() {
+        let state = test_state();
+        let (mr_id, repo_id) = seed_mr_with_repo(&state).await;
+
+        let author = seed_author_agent(&state, "agent-gf-author", AgentStatus::Idle).await;
+        let mut mr = state
+            .merge_requests
+            .find_by_id(&mr_id)
+            .await
+            .unwrap()
+            .unwrap();
+        mr.author_agent_id = Some(author.id.clone());
+        mr.spec_ref = Some(
+            "specs/system/agent-gates.md@0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        state.merge_requests.update(&mr).await.unwrap();
+
+        let gate = QualityGate {
+            id: Id::new("gate-gf-inbox"),
+            repo_id: repo_id.clone(),
+            name: "unit tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("false".to_string()),
+            required_approvals: None,
+            persona: None,
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            position: 0,
+            timeout_secs: None,
+            created_at: now_secs(),
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        // Attempt 1: one GateResult in the author's inbox, all fields.
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        let inbox_has_attempt = |state: Arc<AppState>, attempt: u64| async move {
+            state
+                .messages
+                .list_unacked(&Id::new("agent-gf-author"), 100)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| {
+                    m.kind == MessageKind::GateResult
+                        && m.payload
+                            .as_ref()
+                            .and_then(|p| p["attempt"].as_u64())
+                            .map(|a| a == attempt)
+                            .unwrap_or(false)
+                })
+        };
+        assert!(
+            eventually(|| async { inbox_has_attempt(state.clone(), 1).await }).await,
+            "failed gate must deliver a GateResult to the author's inbox"
+        );
+        let inbox = state
+            .messages
+            .list_unacked(&Id::new("agent-gf-author"), 100)
+            .await
+            .unwrap();
+        let msg = inbox
+            .iter()
+            .find(|m| m.kind == MessageKind::GateResult)
+            .expect("GateResult in author inbox");
+        assert_eq!(
+            msg.to,
+            Destination::Agent(Id::new("agent-gf-author"))
+        );
+        let p = msg.payload.as_ref().unwrap();
+        assert_eq!(p["mr_id"], mr_id.to_string());
+        assert_eq!(p["gate_name"], "unit tests");
+        assert_eq!(p["gate_type"], "TestCommand");
+        assert_eq!(p["status"], "Failed");
+        assert_eq!(
+            p["spec_ref"],
+            "specs/system/agent-gates.md@0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(p["attempt"], 1);
+        assert_eq!(
+            p["gate_agent_id"],
+            format!("gate-agent:{}", gate.id.as_str())
+        );
+        // The gate's REAL failure output is carried for context.
+        assert!(
+            p["output"].as_str().is_some(),
+            "GateResult carries the gate output"
+        );
+
+        // Attempt 2 (re-enqueue): the inbox message reports attempt 2 — and
+        // the first delivery is not re-sent (delivery marker de-dupes per
+        // attempt, one GateResult per run).
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async { inbox_has_attempt(state.clone(), 2).await }).await,
+            "second failed attempt must deliver its own GateResult"
+        );
+    }
+
+    /// §Deferred: Task Creation + §Escalation: 3+ consecutive failures on
+    /// the same gate notify the repo orchestrator directly, and when the
+    /// author's session has ended, create the Backlog/High gate-failure
+    /// task with the spec's exact shape. Two failures must NOT trigger
+    /// either.
+    #[tokio::test]
+    async fn gate_failure_streak_escalates_and_creates_deferred_task() {
+        let state = test_state();
+        let (mr_id, repo_id) = seed_mr_with_repo(&state).await;
+
+        // Author converged (Idle): session ended per the spec's deferred
+        // condition.
+        let author = seed_author_agent(&state, "agent-gf-idle", AgentStatus::Idle).await;
+        let mut mr = state
+            .merge_requests
+            .find_by_id(&mr_id)
+            .await
+            .unwrap()
+            .unwrap();
+        mr.author_agent_id = Some(author.id.clone());
+        mr.spec_ref = Some(
+            "specs/system/agent-gates.md@0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        state.merge_requests.update(&mr).await.unwrap();
+
+        // Live repo orchestrator for the repo (so the escalation routes to
+        // its Directed inbox instead of spawning one on demand).
+        let mut orch = gyre_domain::Agent::new(
+            Id::new("agent-gf-orchestrator"),
+            "repo-orchestrator",
+            now_secs(),
+        );
+        orch.workspace_id = Id::new("ws-test");
+        orch.status = AgentStatus::Active;
+        orch.orchestrator_type = gyre_domain::OrchestratorType::RepoOrchestrator;
+        orch.repo_id = Some(repo_id.clone());
+        state.agents.create(&orch).await.unwrap();
+
+        let gate = QualityGate {
+            id: Id::new("gate-gf-streak"),
+            repo_id: repo_id.clone(),
+            name: "unit tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("false".to_string()),
+            required_approvals: None,
+            persona: None,
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            position: 0,
+            timeout_secs: None,
+            created_at: now_secs(),
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        let streak_is = |n: u64| {
+            let state = state.clone();
+            let mr_id = mr_id.clone();
+            let gate_id = gate.id.clone();
+            async move {
+                streak_value(&state, &mr_id, &gate_id)
+                    .await
+                    .as_deref()
+                    .map(|v| v == n.to_string())
+                    .unwrap_or(false)
+            }
+        };
+
+        // Failures 1 and 2: no escalation, no task.
+        for _ in 0..2 {
+            trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+            assert!(
+                eventually(|| async {
+                    gate_results_for(&state, &mr_id)
+                        .await
+                        .iter()
+                        .any(|r| r.gate_id == gate.id && r.status == GateStatus::Failed)
+                })
+                .await,
+                "gate must fail"
+            );
+        }
+        assert!(
+            eventually(|| async { streak_is(2).await }).await,
+            "two failures = streak 2"
+        );
+        let tasks = state.tasks.list_by_repo(&repo_id).await.unwrap();
+        assert!(
+            tasks.iter().all(|t| !t.title.starts_with("Gate failure: ")),
+            "no deferred gate-failure task before 3 failures: {tasks:?}"
+        );
+        let orch_inbox = state
+            .messages
+            .list_unacked(&orch.id, 100)
+            .await
+            .unwrap();
+        assert!(
+            orch_inbox
+                .iter()
+                .all(|m| m.kind != MessageKind::Escalation),
+            "no orchestrator escalation before 3 consecutive failures"
+        );
+
+        // Failure 3: orchestrator escalation + deferred task.
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async { streak_is(3).await }).await,
+            "third failure = streak 3"
+        );
+
+        // Repo orchestrator notified directly (Directed Escalation in its
+        // inbox).
+        assert!(
+            eventually(|| async {
+                state
+                    .messages
+                    .list_unacked(&orch.id, 100)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.kind == MessageKind::Escalation)
+            })
+            .await,
+            "3+ consecutive failures must notify the repo orchestrator"
+        );
+        let escalation = state
+            .messages
+            .list_unacked(&orch.id, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.kind == MessageKind::Escalation)
+            .unwrap();
+        let ep = escalation.payload.as_ref().unwrap();
+        assert_eq!(ep["mr_id"], mr_id.to_string());
+        assert_eq!(ep["gate_name"], "unit tests");
+        assert_eq!(ep["consecutive_failures"], 3);
+
+        // Deferred task created (author session ended): exact spec shape.
+        let task = tokio::time::timeout(
+            Duration::from_secs(5),
+            eventually_task_with_label(&state, &repo_id, "Gate failure: unit tests on MR #"),
+        )
+        .await;
+        let task = task.expect("deferred gate-failure task must be created");
+        let expected_title =
+            format!("Gate failure: unit tests on MR #{} (attempt 3)", mr_id.as_str());
+        assert_eq!(task.title, expected_title);
+        assert_eq!(task.status, gyre_domain::TaskStatus::Backlog);
+        assert_eq!(task.priority, gyre_domain::TaskPriority::High);
+        assert_eq!(task.labels, vec!["gate-failure", "auto-created"]);
+        let desc = task.description.as_deref().unwrap();
+        assert!(desc.contains("Attempts: 3"), "description: {desc}");
+        assert!(
+            desc.contains("specs/system/agent-gates.md@0123456789abcdef0123456789abcdef01234567"),
+            "description carries the spec_ref: {desc}"
+        );
+        assert!(desc.contains("agent-gf-idle"), "description: {desc}");
+        assert!(
+            desc.contains("Fix the issue and re-push"),
+            "description: {desc}"
+        );
+    }
+
+    /// Helper: wait for (and return) the repo's first task whose title starts
+    /// with `prefix`.
+    async fn eventually_task_with_label(
+        state: &Arc<AppState>,
+        repo_id: &Id,
+        prefix: &str,
+    ) -> gyre_domain::Task {
+        loop {
+            let tasks = state.tasks.list_by_repo(repo_id).await.unwrap();
+            if let Some(t) = tasks.into_iter().find(|t| t.title.starts_with(prefix)) {
+                return t;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Current consecutive-failure streak recorded for (MR, gate).
+    async fn streak_value(state: &Arc<AppState>, mr_id: &Id, gate_id: &Id) -> Option<String> {
+        state
+            .kv_store
+            .kv_get(
+                GATE_FAILURE_STREAK_NS,
+                &format!("{}:{}", mr_id.as_str(), gate_id.as_str()),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// §Escalation — security gates: a security gate failure notifies the
+    /// security persona (the agents instantiated from it) in addition to
+    /// the author, and a CRITICAL finding escalates to the Overseer
+    /// (workspace Owners + tenant Admins via SecurityFinding notification,
+    /// plus an Escalation message on the bus).
+    #[tokio::test]
+    async fn security_gate_failure_notifies_persona_and_escalates_critical() {
+        let state = test_state();
+        let (mr_id, repo_id) = seed_mr_with_repo_and_persona(&state, "security").await;
+
+        let author = seed_author_agent(&state, "agent-sec-author", AgentStatus::Active).await;
+        let mut mr = state
+            .merge_requests
+            .find_by_id(&mr_id)
+            .await
+            .unwrap()
+            .unwrap();
+        mr.author_agent_id = Some(author.id.clone());
+        state.merge_requests.update(&mr).await.unwrap();
+
+        // The security persona, and a live agent instantiated from it (the
+        // persona's notification surface — its inbox).
+        let persona = state
+            .personas
+            .find_by_slug_and_scope(
+                "security",
+                &gyre_domain::PersonaScope::Workspace(Id::new("ws-test")),
+            )
+            .await
+            .unwrap()
+            .expect("seeded security persona");
+        let mut sec_agent =
+            gyre_domain::Agent::new(Id::new("agent-sec-persona"), "security", now_secs());
+        sec_agent.workspace_id = Id::new("ws-test");
+        sec_agent.status = AgentStatus::Active;
+        sec_agent.persona_id = Some(persona.id.clone());
+        state.agents.create(&sec_agent).await.unwrap();
+
+        // Overseer surface: a workspace Owner and a tenant Admin.
+        let owner_id = Id::new("user-sec-owner");
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("mem-sec-owner"),
+            owner_id.clone(),
+            Id::new("ws-test"),
+            gyre_domain::WorkspaceRole::Owner,
+            owner_id.clone(),
+            now_secs(),
+        );
+        state.workspace_memberships.create(&membership).await.unwrap();
+        let admin_id = Id::new("user-sec-tenant-admin");
+        let mut admin =
+            gyre_domain::User::new(admin_id.clone(), "ext-sec-admin", "sec-admin", now_secs());
+        admin.tenant_id = Some(Id::new("default")); // ws-test's tenant
+        admin.roles = vec![gyre_domain::UserRole::Admin];
+        state.users.create(&admin).await.unwrap();
+
+        // A security gate that FAILS with a critical finding in its output:
+        // `ls` on a missing path exits non-zero and its stderr names the
+        // path — the word "critical" in the failure output flags the
+        // finding's severity (the unstructured form of the security
+        // persona's "Critical Findings" report section).
+        let gate = QualityGate {
+            id: Id::new("gate-sec-critical"),
+            repo_id: repo_id.clone(),
+            name: "security-review".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("ls /nonexistent-gyre-critical-finding".to_string()),
+            required_approvals: None,
+            persona: Some("personas/security.md".to_string()),
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            position: 0,
+            timeout_secs: None,
+            created_at: now_secs(),
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async {
+                gate_results_for(&state, &mr_id)
+                    .await
+                    .iter()
+                    .any(|r| r.gate_id == gate.id && r.status == GateStatus::Failed)
+            })
+            .await,
+            "security gate must fail"
+        );
+
+        // Security persona notified: the persona's agent has a GateResult in
+        // its inbox, in addition to the author's.
+        assert!(
+            eventually(|| async {
+                state
+                    .messages
+                    .list_unacked(&sec_agent.id, 100)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.kind == MessageKind::GateResult)
+            })
+            .await,
+            "security gate failure must notify the security persona"
+        );
+        let sec_inbox = state
+            .messages
+            .list_unacked(&sec_agent.id, 100)
+            .await
+            .unwrap();
+        let sec_msg = sec_inbox
+            .iter()
+            .find(|m| m.kind == MessageKind::GateResult)
+            .unwrap();
+        assert_eq!(
+            sec_msg.payload.as_ref().unwrap()["gate_name"],
+            "security-review"
+        );
+
+        // Critical finding → Overseer escalation: Escalation message on the
+        // bus...
+        assert!(
+            eventually(|| async {
+                state
+                    .messages
+                    .list_by_workspace(
+                        &Id::new("ws-test"),
+                        Some(MessageKind::Escalation.as_str()),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|m| {
+                        m.payload
+                            .as_ref()
+                            .and_then(|p| p["severity"].as_str())
+                            .map(|s| s == "critical")
+                            .unwrap_or(false)
+                    })
+            })
+            .await,
+            "critical security finding must produce an Escalation message"
+        );
+        // ...and SecurityFinding notifications for the workspace Owner and
+        // the tenant Admin (the Overseer resolution surface).
+        for uid in [&owner_id, &admin_id] {
+            assert!(
+                eventually(|| async {
+                    state
+                        .notifications
+                        .list_for_user(uid, None, None, None, None, None, 50, 0)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|n| n.notification_type
+                            == gyre_common::NotificationType::SecurityFinding)
+                })
+                .await,
+                "critical security finding must notify the Overseer recipient {uid}"
+            );
+        }
+    }
+
+    /// §Escalation — all gates failed: the MR is removed from the merge
+    /// queue (its entry goes terminal) and a reassessment task is created.
+    #[tokio::test]
+    async fn all_gates_failed_removes_mr_from_queue_and_creates_reassessment_task() {
+        let state = test_state();
+        let (mr_id, repo_id) = seed_mr_with_repo(&state).await;
+
+        let author = seed_author_agent(&state, "agent-allfail", AgentStatus::Active).await;
+        let mut mr = state
+            .merge_requests
+            .find_by_id(&mr_id)
+            .await
+            .unwrap()
+            .unwrap();
+        mr.author_agent_id = Some(author.id.clone());
+        state.merge_requests.update(&mr).await.unwrap();
+
+        for (i, name) in ["lint", "unit tests"].iter().enumerate() {
+            let gate = QualityGate {
+                id: Id::new(format!("gate-allfail-{i}")),
+                repo_id: repo_id.clone(),
+                name: name.to_string(),
+                gate_type: GateType::TestCommand,
+                command: Some("false".to_string()),
+                required_approvals: None,
+                persona: None,
+                validation_type: None,
+                required: true,
+                gate_phase: Default::default(),
+                position: i as u32,
+                timeout_secs: None,
+                created_at: now_secs(),
+            };
+            state.quality_gates.save(&gate).await.unwrap();
+        }
+
+        // The MR sits in the merge queue when its gates all fail.
+        let entry = gyre_domain::MergeQueueEntry::new(
+            Id::new("qentry-allfail"),
+            mr_id.clone(),
+            50,
+            now_secs(),
+        );
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async {
+                let results = gate_results_for(&state, &mr_id).await;
+                results.len() == 2
+                    && results.iter().all(|r| r.status == GateStatus::Failed)
+            })
+            .await,
+            "both gates must fail"
+        );
+
+        // MR removed from the merge queue: the entry is terminal (Failed).
+        assert!(
+            eventually(|| async {
+                state
+                    .merge_queue
+                    .find_by_id(&Id::new("qentry-allfail"))
+                    .await
+                    .unwrap()
+                    .map(|e| e.is_terminal())
+                    .unwrap_or(false)
+            })
+            .await,
+            "all gates failed must remove the MR from the merge queue"
+        );
+
+        // Reassessment task created.
+        let task = tokio::time::timeout(
+            Duration::from_secs(5),
+            eventually_task_with_label(
+                &state,
+                &repo_id,
+                &format!("Reassess approach: all gates failed on MR #{}", mr_id.as_str()),
+            ),
+        )
+        .await
+        .expect("all-gates-failed reassessment task must be created");
+        assert_eq!(task.status, gyre_domain::TaskStatus::Backlog);
+        assert_eq!(task.priority, gyre_domain::TaskPriority::High);
+        assert_eq!(task.labels, vec!["gate-failure", "auto-created"]);
+        let desc = task.description.as_deref().unwrap();
+        assert!(desc.contains("lint"), "description lists failed gates: {desc}");
+        assert!(desc.contains("unit tests"), "description: {desc}");
+    }
+
+    /// §Gate Failure Feedback attempt tracking: the consecutive-failure
+    /// streak resets on a pass ("Reset on gate pass"), so a pass between
+    /// failures breaks the 3-consecutive-failure chain.
+    #[tokio::test]
+    async fn gate_pass_resets_failure_streak() {
+        let state = test_state();
+        let (mr_id, repo_id) = seed_mr_with_repo(&state).await;
+
+        let author = seed_author_agent(&state, "agent-reset", AgentStatus::Idle).await;
+        let mut mr = state
+            .merge_requests
+            .find_by_id(&mr_id)
+            .await
+            .unwrap()
+            .unwrap();
+        mr.author_agent_id = Some(author.id.clone());
+        state.merge_requests.update(&mr).await.unwrap();
+
+        let mut gate = QualityGate {
+            id: Id::new("gate-reset"),
+            repo_id: repo_id.clone(),
+            name: "flaky".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("false".to_string()),
+            required_approvals: None,
+            persona: None,
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            position: 0,
+            timeout_secs: None,
+            created_at: now_secs(),
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        // Failure → streak 1.
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async {
+                state
+                    .kv_store
+                    .kv_get(
+                        GATE_FAILURE_STREAK_NS,
+                        &format!("{}:{}", mr_id.as_str(), gate.id.as_str()),
+                    )
+                    .await
+                    .unwrap()
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+            })
+            .await,
+            "first failure = streak 1"
+        );
+
+        // Fix the gate (pass) → streak reset to 0.
+        gate.command = Some("true".to_string());
+        state.quality_gates.save(&gate).await.unwrap();
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async {
+                state
+                    .kv_store
+                    .kv_get(
+                        GATE_FAILURE_STREAK_NS,
+                        &format!("{}:{}", mr_id.as_str(), gate.id.as_str()),
+                    )
+                    .await
+                    .unwrap()
+                    .map(|v| v == "0")
+                    .unwrap_or(false)
+            })
+            .await,
+            "a pass must reset the consecutive-failure streak"
+        );
+
+        // Next failure starts a fresh streak at 1 — not 2.
+        gate.command = Some("false".to_string());
+        state.quality_gates.save(&gate).await.unwrap();
+        trigger_gates_for_mr(state.clone(), mr_id.clone(), repo_id.clone()).await;
+        assert!(
+            eventually(|| async {
+                state
+                    .kv_store
+                    .kv_get(
+                        GATE_FAILURE_STREAK_NS,
+                        &format!("{}:{}", mr_id.as_str(), gate.id.as_str()),
+                    )
+                    .await
+                    .unwrap()
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+            })
+            .await,
+            "streak after reset restarts at 1"
+        );
+    }
+
+    /// `has_critical_finding`: the security persona's report format puts
+    /// critical findings under a "Critical Findings" section — the section
+    /// must exist AND carry content. Unstructured outputs fall back to a
+    /// standalone "critical" marker.
+    #[test]
+    fn critical_finding_detection() {
+        // Structured report with a populated critical section.
+        assert!(has_critical_finding(
+            "## Security Report\n\n### Critical Findings\nSQL injection in handlers.rs:47\n\n### High Findings\nweak headers\n"
+        ));
+        // Structured report with an EMPTY critical section → not critical.
+        assert!(!has_critical_finding(
+            "## Security Report\n\n### Critical Findings\n\n### High Findings\nweak headers\n"
+        ));
+        // No critical section at all, no marker → not critical.
+        assert!(!has_critical_finding(
+            "## Security Report\n\n### High Findings\nweak headers\n"
+        ));
+        // Unstructured output with an inline critical marker.
+        assert!(has_critical_finding(
+            "ChangesRequested: critical SQL injection in handlers.rs:47"
+        ));
+        // Unstructured, non-critical.
+        assert!(!has_critical_finding(
+            "ChangesRequested: high-severity header weakness"
+        ));
+        // The word must be whole — "uncritical" is not "critical".
+        assert!(!has_critical_finding("reviewed, uncritical"));
     }
 }

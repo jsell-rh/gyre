@@ -434,7 +434,26 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 // Must be subscribed AND workspace must be in caller's tenant.
                                 subscribed_workspaces.contains(ws_id)
                             }
-                            Destination::Agent(_) => false, // Agent-directed: not delivered via WS
+                            Destination::Agent(aid) => {
+                                // Agent-directed messages reach the WS only on
+                                // the agent's OWN live session (agent-gates.md
+                                // §Gate Failure Feedback: "For live sessions:
+                                // also broadcast via WebSocket for immediate
+                                // reaction"). Identity, not subscription,
+                                // gates delivery: the caller was verified
+                                // against the per-agent token store, so a
+                                // match on the verified agent id IS the
+                                // destination. User identities (user_id set)
+                                // and the global token (Admin role,
+                                // agent_id "system") never match — they see
+                                // agent inboxes through the REST/MCP read
+                                // paths, not the bus.
+                                caller.user_id.is_none()
+                                    && !caller
+                                        .roles
+                                        .contains(&gyre_domain::UserRole::Admin)
+                                    && caller.agent_id == aid.as_str()
+                            }
                         };
                         if deliver {
                             let payload = serde_json::to_string(&msg).unwrap();
@@ -706,6 +725,85 @@ mod tests {
         } else {
             panic!("expected text message");
         }
+    }
+
+    // ── Agent-directed WS delivery (agent-gates.md §Gate Failure Feedback:
+    // "For live sessions: also broadcast via WebSocket for immediate
+    // reaction") ────────────────────────────────────────────────────────
+
+    /// Seed a per-agent token + a workspace so a live agent session can
+    /// authenticate over WS and the bus emission resolves its tenant scope.
+    async fn seed_agent_ws_identity(state: &Arc<AppState>, agent_id: &str, token: &str) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-live-agents"),
+            gyre_common::Id::new("default"),
+            "live-agents",
+            "live-agents",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent_id, token.to_string())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ws_agent_directed_message_reaches_own_live_session_only() {
+        let (url, state) = start_test_server("tok").await;
+        seed_agent_ws_identity(&state, "agent-ws-live", "live-agent-token").await;
+        seed_agent_ws_identity(&state, "agent-ws-other", "other-agent-token").await;
+
+        let (mut ws_live, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws_live, "live-agent-token").await;
+        let (mut ws_other, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws_other, "other-agent-token").await;
+
+        // The forge emits a GateResult addressed to the live agent's inbox
+        // (the exact §Gate Failure Feedback message shape).
+        state
+            .emit_event(
+                Some(gyre_common::Id::new("ws-live-agents")),
+                gyre_common::message::Destination::Agent(gyre_common::Id::new("agent-ws-live")),
+                gyre_common::message::MessageKind::GateResult,
+                Some(serde_json::json!({
+                    "mr_id": "mr-42",
+                    "gate_name": "security-review",
+                    "gate_type": "AgentReview",
+                    "status": "Failed",
+                    "output": "ChangesRequested: SQL query uses string interpolation",
+                    "spec_ref": "specs/system/identity-security@abc123",
+                    "attempt": 2,
+                    "gate_agent_id": "security-gate-7",
+                })),
+            )
+            .await;
+
+        // The agent's own live session receives it immediately.
+        let msg = ws_live.next().await.unwrap().unwrap();
+        if let tungstenite::Message::Text(text) = msg {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["kind"], "gate_result");
+            assert_eq!(
+                v["to"],
+                serde_json::json!({"agent": "agent-ws-live"})
+            );
+            assert_eq!(v["payload"]["mr_id"], "mr-42");
+            assert_eq!(v["payload"]["attempt"], 2);
+            assert_eq!(v["payload"]["gate_name"], "security-review");
+        } else {
+            panic!("expected text message");
+        }
+
+        // A different agent's live session does not receive it: identity,
+        // not subscription, gates agent-directed delivery.
+        let got =
+            tokio::time::timeout(std::time::Duration::from_millis(300), ws_other.next()).await;
+        assert!(
+            matches!(got, Err(_)) || matches!(got, Ok(None)),
+            "agent-directed message must not reach another agent's session"
+        );
     }
 
     #[tokio::test]
