@@ -86,7 +86,16 @@ Each signer uses their own OIDC identity. The result is a multi-party attestatio
 - [x] Per-gate signing: forge signs TestCommand/LintCommand, gate agent signs AgentReview
 - [x] Bundle-level signature by forge covers the entire document
 - [x] Bundle serializes to the JSON schema defined in the spec
-- [ ] Tests pass (server test compilation deferred to the independent verifier — see Shipped)
+- [ ] Tests pass (server test execution deferred to the independent verifier — see Shipped)
+
+## Agent Instructions
+
+- Read `crates/gyre-server/src/merge_processor.rs` for the merge execution flow
+- Read `crates/gyre-domain/src/merge_request.rs` for MR and gate result types
+- Read `agent-gates.md` §Part 3 for the full JSON schema example
+- The hexagonal boundary applies: domain types in `gyre-domain`, signer trait in `gyre-ports`, forge signer implementation in `gyre-server`
+- For the initial implementation, the signer can use HMAC or a placeholder — Sigstore/OIDC integration comes later
+- Do NOT modify the merge processor's existing merge logic — only ADD bundle generation after merge succeeds
 
 ## Shipped
 
@@ -104,27 +113,17 @@ Each signer uses their own OIDC identity. The result is a multi-party attestatio
 Ran in this sandbox (build wrapper allows small packages):
 
 - `cargo test -p gyre-domain merge_attestation` — 4 passed (spec-schema field names + round-trip, canonical unsigned JSON excludes signature deterministically, gate unsigned JSON, sha256 fixed vector).
-- `cargo check -p gyre-server --tests` — clean (type-checks all new server tests).
-- `cargo clippy -p gyre-domain -p gyre-ports --all-targets` — no warnings in the new modules.
-- Mechanical checks: `check-arch.sh`, `check-inert-enforcement.sh`, `check-in-memory-state-stores.sh`, `check-mem-port-contracts.sh`, `check-abac-route-registry.sh`, `check-mcp-write-tools.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh`, `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`, `check-fail-open-ref-resolution.sh`, `check-fabricated-scope-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-scope-literal-defaults.sh`, `check-dead-message-kinds.sh`, `check-forwarded-header-trust.sh`, `check-unbounded-external-http.sh`, `check-forged-scope-fields.sh` — all OK.
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests` — clean (type-checks the lib and all new server tests).
+- `cargo clippy -p gyre-domain -p gyre-ports --all-targets` — zero warnings in the new modules (all reported warnings are pre-existing in other files).
+- `bash scripts/check-arch.sh` — hexagonal boundary passes (domain has no forbidden deps/I/O).
+- Evidence artifacts: `/tmp/stage/review-evidence/` (probe commands, exit codes, output).
 
 Deferred to the independent verifier (the build wrapper refuses gyre-server test compilation in the implement sandbox — 4 GiB budget):
 
 - `cargo test -p gyre-server --lib merge_attestation` — unit tests: bundle generation signs every party and serializes to the spec schema (all gate results included, forge vs gate-agent signers, distinct signatures, full verification); tampered bundle fails verification (mutated gate status, mutated `merged_at`, gate-agent signature swapped onto a forge-signed gate); unsigned/missing signatures fail; gate agents have distinct stable keys from the forge and from each other; MR without an agent author omits the author block rather than fabricating one.
 - `cargo test -p gyre-server --lib merge_processor_generates_multi_party_attestation_bundle` — integration test: `process_next` merges an MR with a TestCommand gate and an AgentReview gate (gate-agent approval), records the `merge_attestation_bundle` audit event, and every signature in the parsed-back bundle verifies. Removing the `generate_merge_attestation_bundle` call from `process_next` fails this test.
 
-Evidence artifacts: `/tmp/stage/review-evidence/` (probe commands, exit codes, output).
-
 ### Scope notes
 
 - Rekor transparency-log and AIBOM storage targets are task-144; offline/OIDC-issuer bundle verification is task-143. This task ships instance-local verification plus git-note + audit-event storage (the minimum its plan step 4 requires).
-- The spec-approval signature is carried from the ledger entry (Sigstore signatures land there via the approval API); it is not re-signed by the forge.
-
-## Agent Instructions
-
-- Read `crates/gyre-server/src/merge_processor.rs` for the merge execution flow
-- Read `crates/gyre-domain/src/merge_request.rs` for MR and gate result types
-- Read `agent-gates.md` §Part 3 for the full JSON schema example
-- The hexagonal boundary applies: domain types in `gyre-domain`, signer trait in `gyre-ports`, forge signer implementation in `gyre-server`
-- For the initial implementation, the signer can use HMAC or a placeholder — Sigstore/OIDC integration comes later
-- Do NOT modify the merge processor's existing merge logic — only ADD bundle generation after merge succeeds
+- This round re-verified the unchanged implementation from commit `331a6eaf` after the executor restored the assigned task document (contract repair `8531fbc3`): source, both merge-processor integration points, and all tests are intact; no code changes were needed.
