@@ -1872,8 +1872,7 @@ mod tests {
                     .header("Authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&serde_json::json!({ "retention_days": 30 }))
-                            .unwrap(),
+                        serde_json::to_vec(&serde_json::json!({ "retention_days": 30 })).unwrap(),
                     ))
                     .unwrap(),
             )

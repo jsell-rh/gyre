@@ -572,15 +572,19 @@ pub async fn count_events(
         ));
     }
     let count = match params.property.as_deref() {
-        None => state.analytics.count(&params.event_name, since, until).await?,
+        None => {
+            state
+                .analytics
+                .count(&params.event_name, since, until)
+                .await?
+        }
         Some(filter) => {
             // Property filters are evaluated in Rust over the filtered
             // event set (the storage layer has no properties index) —
             // same fetch cap as the /top ranking.
             let (key, value) = filter.split_once(':').ok_or_else(|| {
                 ApiError::InvalidInput(
-                    "property filter must be 'key:value' (e.g. new_status:InProgress)"
-                        .to_string(),
+                    "property filter must be 'key:value' (e.g. new_status:InProgress)".to_string(),
                 )
             })?;
             let filter = AnalyticsQueryFilter {
@@ -593,9 +597,7 @@ pub async fn count_events(
             let events = state.analytics.query_filtered(&filter).await?;
             events
                 .iter()
-                .filter(|e| {
-                    e.properties.get(key).and_then(|v| v.as_str()) == Some(value)
-                })
+                .filter(|e| e.properties.get(key).and_then(|v| v.as_str()) == Some(value))
                 .count() as u64
         }
     };
@@ -871,7 +873,7 @@ pub async fn top_events(
                 .into_iter()
                 .map(|(event_name, count)| TopEntry { event_name, count })
                 .collect();
-            entries.sort_by(|a, b| b.count.cmp(&a.count));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.count));
             entries.truncate(limit);
 
             Ok(Json(serde_json::to_value(entries).unwrap_or_default()))
@@ -911,9 +913,11 @@ pub async fn top_events(
                 match e.event_name.as_str() {
                     "agent.completed" => {
                         agg.completed += 1;
-                        if let Some(d) = e.properties.get("duration_secs").and_then(|v| {
-                            v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
-                        }) {
+                        if let Some(d) = e
+                            .properties
+                            .get("duration_secs")
+                            .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                        {
                             agg.duration_secs_sum += d;
                             agg.duration_samples += 1;
                         }
@@ -1254,9 +1258,11 @@ pub async fn cost_summary(
 
 #[cfg(test)]
 mod tests {
-    use super::{epoch_days_to_ymd, parse_time_param, ymd_to_epoch_days};
+    use super::{epoch_days_to_ymd, new_id, now_secs, parse_time_param, ymd_to_epoch_days};
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
+    use gyre_domain::AnalyticsEvent;
     use http::{Request, StatusCode};
     use serde_json::json;
     use tower::ServiceExt;
@@ -3348,8 +3354,14 @@ mod tests {
             ))
             .await
             .unwrap();
-        seed_agent_event(&state, "agent.spawned", Some("agent-own"), json!({}), Some("ws-own"))
-            .await;
+        seed_agent_event(
+            &state,
+            "agent.spawned",
+            Some("agent-own"),
+            json!({}),
+            Some("ws-own"),
+        )
+        .await;
         seed_agent_event(
             &state,
             "agent.spawned",
