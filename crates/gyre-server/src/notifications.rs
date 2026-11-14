@@ -171,17 +171,32 @@ pub async fn notify_rich(
     crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
-/// Notify the spawning user that a gate failed on their MR.
+/// Notify the MR author's spawning user that a quality gate failed on
+/// their MR, carrying the full GateResult context (agent-gates.md
+/// §Merge Processor Integration: "Any failed: notify author"; §Gate
+/// Failure Feedback — the GateResult payload: gate name, type, failure
+/// output, spec_ref, attempt count).
 ///
 /// GateFailure is High priority — created synchronously by the gate
 /// evaluation handler per HSI §2.
+///
+/// The tenant scope is resolved from the MR's workspace: when the
+/// workspace cannot be loaded there is no tenant to scope the
+/// notification to, so the inbox notification is skipped (logged) rather
+/// than fabricated — the GateFailure workspace event already reported the
+/// failure (check-fabricated-scope-defaults).
+#[allow(clippy::too_many_arguments)]
 pub async fn notify_gate_failure(
     state: &AppState,
     author_agent_id: &Id,
     workspace_id: &Id,
     mr_id: &str,
     gate_name: &str,
-    tenant_id: &str,
+    gate_type: &str,
+    output: &str,
+    spec_ref: Option<&str>,
+    attempt: u64,
+    gate_agent_id: &str,
 ) {
     let spawned_by = state
         .agents
@@ -210,9 +225,35 @@ pub async fn notify_gate_failure(
         .unwrap_or_else(|| mr_id.chars().take(8).collect());
     let repo_id = mr.as_ref().map(|mr| mr.repository_id.to_string());
 
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.as_str().to_string(),
+        Ok(None) => {
+            tracing::warn!(
+                "gate-failure notification: workspace {workspace_id} not found; skipping author inbox notification"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "gate-failure notification: workspace {workspace_id} lookup failed ({e:#}); skipping author inbox notification"
+            );
+            return;
+        }
+    };
+
+    // GateResult payload (agent-gates.md §Gate Failure Feedback — Agent
+    // Inbox Delivery): everything the author agent needs to react without
+    // re-fetching state.
     let body_json = serde_json::json!({
-        "gate_name": gate_name,
+        "type": "GateResult",
         "mr_id": mr_id,
+        "gate_name": gate_name,
+        "gate_type": gate_type,
+        "status": "Failed",
+        "output": output,
+        "spec_ref": spec_ref,
+        "attempt": attempt,
+        "gate_agent_id": gate_agent_id,
         "agent_id": author_agent_id.as_str(),
     })
     .to_string();
@@ -222,7 +263,7 @@ pub async fn notify_gate_failure(
         workspace_id.clone(),
         user_id,
         NotificationType::GateFailure,
-        format!("Gate '{gate_name}' failed on MR {mr_label}"),
+        format!("Gate '{gate_name}' failed on MR {mr_label} (attempt {attempt})"),
         tenant_id,
         Some(body_json),
         Some(mr_id.to_string()),
@@ -923,7 +964,11 @@ mod tests {
         );
     }
 
-    /// GateFailure keeps its High band and now also carries a deep link.
+    /// GateFailure keeps its High band, carries a deep link, and delivers
+    /// the full GateResult payload (agent-gates.md §Gate Failure Feedback):
+    /// gate name, type, failure output, spec_ref, attempt count, and gate
+    /// agent id — with the tenant scope resolved from the MR's workspace,
+    /// never a fabricated literal.
     #[tokio::test]
     async fn gate_failure_notification_carries_deep_link() {
         let (state, ws) = setup().await;
@@ -932,8 +977,12 @@ mod tests {
             &Id::new("agent-n1"),
             &ws,
             "mr-n1",
-            "tests",
-            "tenant-1",
+            "security-review",
+            "AgentReview",
+            "ChangesRequested: SQL query in handlers.rs:47 uses string interpolation",
+            Some("specs/system/identity-security.md@abc123"),
+            2,
+            "gate-agent-7",
         )
         .await;
 
@@ -945,6 +994,56 @@ mod tests {
         assert_eq!(
             n.action_url.as_deref(),
             Some("/workspaces/ws-one/r/myrepo/mrs/mr-n1")
+        );
+        // Tenant scope resolved from the MR's workspace — the workspace row
+        // is tenant-1; a fabricated "default" would leak the notification
+        // across tenant boundaries.
+        assert_eq!(n.tenant_id.as_str(), "tenant-1");
+        assert_eq!(
+            n.title,
+            "Gate 'security-review' failed on MR 'Add feature' (attempt 2)"
+        );
+        let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["type"], "GateResult");
+        assert_eq!(body["mr_id"], "mr-n1");
+        assert_eq!(body["gate_name"], "security-review");
+        assert_eq!(body["gate_type"], "AgentReview");
+        assert_eq!(body["status"], "Failed");
+        assert_eq!(
+            body["output"],
+            "ChangesRequested: SQL query in handlers.rs:47 uses string interpolation"
+        );
+        assert_eq!(body["spec_ref"], "specs/system/identity-security.md@abc123");
+        assert_eq!(body["attempt"], 2);
+        assert_eq!(body["gate_agent_id"], "gate-agent-7");
+        assert_eq!(body["agent_id"], "agent-n1");
+    }
+
+    /// An unresolvable workspace has no tenant to scope the notification
+    /// to — the inbox notification is skipped (never a fabricated
+    /// "default" tenant), matching the fail-closed scope rule.
+    #[tokio::test]
+    async fn gate_failure_notification_skipped_when_workspace_unresolvable() {
+        let state = test_state();
+        notify_gate_failure(
+            &state,
+            &Id::new("agent-n1"),
+            &Id::new("ws-does-not-exist"),
+            "mr-n1",
+            "tests",
+            "TestCommand",
+            "exit code 1",
+            None,
+            1,
+            "gate-agent-x",
+        )
+        .await;
+
+        let notifs = notifs_for(&state, "agent-n1").await;
+        assert_eq!(
+            notifs.len(),
+            0,
+            "no notification may be created under a fabricated tenant scope"
         );
     }
 

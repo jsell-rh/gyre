@@ -27,6 +27,10 @@ pub trait QualityGateRepository: Send + Sync {
 }
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async-trait 0.1.89 injects #[must_use] into every
+                                  // expanded method while the boxed-future return type is
+                                  // already #[must_use] (Future); upstream-suppressed set
+                                  // (lint_suppress_without_body) does not cover this lint.
 pub trait GateResultRepository: Send + Sync {
     async fn save(&self, result: &GateResult) -> Result<()>;
     async fn update_status(
@@ -39,4 +43,11 @@ pub trait GateResultRepository: Send + Sync {
     ) -> Result<()>;
     async fn find_by_id(&self, id: &str) -> Result<Option<GateResult>>;
     async fn list_by_mr_id(&self, mr_id: &str) -> Result<Vec<GateResult>>;
+    /// Delete every gate result recorded for `(mr_id, gate_id)` — the
+    /// prior attempts of one gate on one MR. No-op when none exist.
+    /// Used to arm a fresh gate attempt: the new attempt's row must
+    /// replace the prior attempt's, or a stale `Failed` row vetoes every
+    /// re-enqueued MR (the merge decision polls `list_by_mr_id`, which is
+    /// not attempt-scoped).
+    async fn delete_by_mr_id_and_gate_id(&self, mr_id: &str, gate_id: &str) -> Result<()>;
 }
