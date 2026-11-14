@@ -8,7 +8,7 @@ coverage_sections:
   - "analytics.md §Decision API for Agents"
   - "analytics.md §GET /api/v1/analytics/decide"
   - "analytics.md §POST /api/v1/analytics/decide/custom"
-commits: ["4201065ebb72677a584a90a566a56e6d99db36dd", "41b239140ee2ae658d64cde4cc266fe786cf6767"]
+commits: ["7a96cd4b04a6a4760fad89269c55eac8a1f2ac31", "4201065ebb72677a584a90a566a56e6d99db36dd", "41b239140ee2ae658d64cde4cc266fe786cf6767"]
 ---
 
 ## Spec Excerpt
@@ -101,9 +101,10 @@ Agents can define and evaluate custom decisions using a simple rule DSL with `me
 
 The analytics Decision API (analytics.md §Decision API for Agents): all
 six built-in decisions plus the custom rule DSL, evaluated over real
-platform data. Repair round 4201065e fixes the review findings against
-the original candidate (rustfmt + clippy gate failures); no behavior
-changed.
+platform data. Two repair rounds fixed gate findings without behavior
+changes: 4201065e (rustfmt + clippy on the original candidate) and
+7a96cd4b (inert-enforcement lint + unused-variable clippy from
+verification).
 
 ### Behavior
 
@@ -157,26 +158,36 @@ changed.
 - Routes registered in `api/mod.rs`; both mapped in the ABAC route
   registry (`analytics` resource).
 
-### Repair round (4201065e)
+### Repair rounds
 
-- rustfmt: formatted the changed lines the review flagged in
-  `decisions.rs`, `lib.rs`, `abac_middleware.rs`, `api/analytics.rs`.
-  `python3 scripts/check-rustfmt-diff.py cdd1dd02` now exits 0
-  ("changed lines clean, 6 Rust files checked"). Reproduced the failure
-  (exit 1) on the pre-repair head first.
-- clippy: `decisions.rs` — `percentile()` takes `&mut [f64]` (ptr_arg)
-  and the three `map_or(true, …)` filters use `is_none_or`
-  (unnecessary_map_or). `cargo clippy -p gyre-domain --lib` now emits
-  zero warnings referencing `decisions.rs` (was 4).
+- **4201065e** — rustfmt: formatted the changed lines the review flagged
+  in `decisions.rs`, `lib.rs`, `abac_middleware.rs`, `api/analytics.rs`.
+  clippy: `percentile()` takes `&mut [f64]` (ptr_arg); the three
+  `map_or(true, …)` filters use `is_none_or` (unnecessary_map_or).
+- **7a96cd4b** — verification flagged (a) the rustfmt-wrapped
+  merge_queue.health match arm as a discarded `evaluate_*()` result
+  (check-inert-enforcement reads the block form as statement position,
+  though the call was the arm's tail expression) and (b) two
+  unused-variable clippy warnings on test closures. Fixed by renaming
+  the `evaluate()` parameter `blocked_count` → `blocked` so the arm
+  fits the single-line form the lint parses correctly (same shape as
+  the other five arms), and `|i|` → `|_|` in the two test closures.
+  No behavior change; the evaluation result flow is identical.
 
 ### Test evidence
 
 - `cargo test -p gyre-domain decisions` — 24 unit tests pass on the
-  repair head: one per built-in evaluator (healthy + degraded +
-  empty-data cases), ISO8601 formatting, window parsing, nearest-rank
-  percentiles, significance confidence, DSL parse/validation, custom
-  evaluation (first-match, default, window + filter narrowing), and the
-  `DecisionResult` response shape.
+  current head (7a96cd4b): one per built-in evaluator (healthy +
+  degraded + empty-data cases), ISO8601 formatting, window parsing,
+  nearest-rank percentiles, significance confidence, DSL
+  parse/validation, custom evaluation (first-match, default, window +
+  filter narrowing), and the `DecisionResult` response shape.
+- Gates re-run locally on 7a96cd4b (logs under
+  /tmp/stage/review-evidence/): `rustfmt --check` on decisions.rs
+  clean; `bash scripts/check-inert-enforcement.sh` OK;
+  `python3 scripts/check-clippy-diff.py 7a96cd4b^` clean (zero warnings
+  on decisions.rs); `python3 scripts/check-rustfmt-diff.py 7a96cd4b^`
+  clean; `cargo check -p gyre-server` clean.
 - The server integration tests (14 new tests in `api/analytics.rs`:
   end-to-end decide for all six builtins against seeded mem-store
   events with controlled timestamps, budget headroom from real
