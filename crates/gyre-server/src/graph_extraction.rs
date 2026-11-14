@@ -2352,6 +2352,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -2382,6 +2383,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -2418,6 +2420,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -2451,6 +2454,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -2546,6 +2550,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )

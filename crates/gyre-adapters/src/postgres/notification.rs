@@ -155,6 +155,7 @@ impl NotificationRepository for PgStorage {
         max_priority: Option<u8>,
         notification_type: Option<&str>,
         repo_id: Option<&Id>,
+        exclude_types: &[&str],
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
@@ -162,6 +163,7 @@ impl NotificationRepository for PgStorage {
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
         let ntype = notification_type.map(|s| s.to_string());
+        let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
         let rid = repo_id.cloned();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
@@ -170,7 +172,7 @@ impl NotificationRepository for PgStorage {
                 .order(notifications::priority.asc())
                 .then_order_by(notifications::created_at.desc())
                 .into_boxed();
-            if let Some(ref ws) = ws_id {
+            if let Some(ws) = &ws_id {
                 query = query.filter(notifications::workspace_id.eq(ws.as_str()));
             }
             if let Some(min_p) = min_priority {
@@ -179,11 +181,16 @@ impl NotificationRepository for PgStorage {
             if let Some(max_p) = max_priority {
                 query = query.filter(notifications::priority.le(max_p as i32));
             }
-            if let Some(ref nt) = ntype {
+            if let Some(nt) = &ntype {
                 query = query.filter(notifications::notification_type.eq(nt));
             }
             if let Some(ref r) = rid {
                 query = query.filter(notifications::repo_id.eq(r.as_str()));
+            }
+            // NOT IN — applied before limit/offset so paging counts filtered rows.
+            // Empty list means "exclude nothing" (NOT IN () is invalid SQL).
+            if !excl.is_empty() {
+                query = query.filter(notifications::notification_type.ne_all(excl));
             }
             let rows = query
                 .limit(limit as i64)
@@ -300,10 +307,16 @@ impl NotificationRepository for PgStorage {
         .await?
     }
 
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> Result<u64> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
+        let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
@@ -311,8 +324,11 @@ impl NotificationRepository for PgStorage {
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())
                 .into_boxed();
-            if let Some(ref ws) = ws_id {
+            if let Some(ws) = &ws_id {
                 query = query.filter(notifications::workspace_id.eq(ws.as_str()));
+            }
+            if !excl.is_empty() {
+                query = query.filter(notifications::notification_type.ne_all(excl));
             }
             let count = query
                 .count()
