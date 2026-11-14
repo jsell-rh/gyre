@@ -94,49 +94,47 @@ When working on this task:
   the product-surface commit is `3488a06bf`)
 - `9b5b3ff1` — merge of assignment base `f7f5c59f` (task-125 mainline head);
   the `specs_assist.rs` resolution adapts the write-through call sites to the
-  evolved notification API (merge commit, listed for visibility only — the
-  product-surface commit is `3488a06bf`)
+  evolved notification API (merge commit, listed for visibility only —
+  the product-surface commit is `3488a06bf`)
 - `9c708d69` — merge of assignment base `6f5a631c` (task-195 mainline head);
   no task-011 product-surface file was touched by the merge (merge commit,
   listed for visibility only — the product-surface commit is `3488a06bf`)
 - `132be8a4` — process(task-011): re-apply completion record after contract
   restore (repair `d5237543`; doc-only — the product-surface commit is
   `3488a06bf`)
+- `90eda370` — merge of assignment base `6ffd6799` (task-130 mainline head);
+  adds test-fixture `AuthContext` fields (`workspace_id`, `repo_id`, `scope`)
+  to two `specs_assist.rs` test constructors only — no write-through product
+  code touched (merge commit, listed for visibility only — the product-surface
+  commit is `3488a06bf`)
 
 ## Shipped
 
-The spec save git write-through is fully implemented in production code on this
-branch (inherited from mainline; review history in `specs/reviews/task-011.md`,
-R2 verdict `complete`). The current round is a second contract repair (id
-`d5237543809a488986028de0a4cfde69`): the executor again restored the assigned
-task document, and the completion record is re-applied here on top of the
-restored document. No production code changed this round — the product surface
-is byte-identical to the previously reviewed head.
+The spec save git write-through is fully implemented in production code on
+this branch (inherited from mainline; review history in
+`specs/reviews/task-011.md`, R2 verdict `complete`). The current round is a
+third contract repair (id `7c7d22555b284cacb4573c5a7de1aa92`): the executor
+again restored the assigned task document, and the completion record is
+re-applied here on top of the restored document. This round also merged the
+assignment base `6ffd6799` (task-130 mainline head). No write-through product
+code changed this round.
 
-### Prior round: merge of base `6f5a631c` (`9c708d69`)
+### This round (repair `7c7d2255`, base merge `6ffd6799`)
 
-The previous round merged the assignment base `6f5a631c` (task-195 mainline
-head; manifest-driven gate selection, spawn/gate executor changes, regenerated
-web assets) and re-applied the completion record (`c0997930`). The merge
-required no resolution in the task-011 product surface: `git diff
-3faecf7a..9c708d69 --stat` over `crates/gyre-server/src/api/specs_assist.rs`,
-`crates/gyre-ports/src/git_ops.rs`, and `crates/gyre-adapters/src/git2_ops.rs`
-is empty — the write-through code is byte-identical to the previously reviewed
-head. The real `git_ops` calls (`write_file` at `specs_assist.rs:974/1053/1293`,
-`create_branch` at `:1046`) and the R2 review fixes (existing-MR author check
-at `:967`, `mr.author_agent_id` set at `:1074`) are preserved, and both
-retained test families (end-to-end write-through + prompt path-guard) remain
-in the merged test module.
-
-### This round (contract restore, repair `d5237543`)
-
-The executor restored the assigned task document (unchecked acceptance
-criteria, empty commit list) in the working tree. The restored document's
-normative text is identical to the recorded contract; only the completion
-record fields differed. The completion record — progress, acceptance
-checkboxes, commit attribution, and these Shipped notes — was re-applied
-verbatim from the reviewed head `c0997930` (no code change, no new base
-merge).
+- The assignment base `6ffd6799` (task-130 token scoping) was merged
+  (`90eda370`). `git diff 4fabb3c1..90eda370 --stat` over the task-011 product
+  surface (`specs_assist.rs`, `git_ops.rs`, `git2_ops.rs`) shows exactly 6
+  added lines — test-fixture `AuthContext` field additions (`workspace_id`,
+  `repo_id`, `scope`) in two test constructors. The real `git_ops` call sites
+  (`write_file` for existing-MR append, first save, and prompts/save;
+  `create_branch` for the `spec-edit/*` branch) and the R2 review fixes
+  (existing-MR author check, `mr.author_agent_id`) are byte-identical to the
+  previously reviewed head.
+- The executor restored the assigned task document (unchecked acceptance
+  criteria, empty commit list) in the working tree; the restored normative
+text is identical to the recorded contract. The completion record — progress,
+  acceptance checkboxes, commit attribution, and these Shipped notes — is
+  re-applied (doc-only).
 
 ### Actual behavior
 
@@ -144,8 +142,9 @@ merge).
   (`crates/gyre-ports/src/git_ops.rs`), implemented for real in the git2
   adapter (`crates/gyre-adapters/src/git2_ops.rs`): branch creation resolves
   `from_ref` to a commit and calls `Repository::branch`; `write_file` writes a
-  blob, rebuilds the tree (nested paths included) via treebuilder, commits with
-  the branch tip as parent, and updates the ref — returning the real commit SHA.
+  blob, rebuilds the tree (nested paths included) via treebuilder, commits
+  with the branch tip as parent, and updates the ref — returning the real
+  commit SHA.
 - `POST /specs/save` (`save_spec` in `crates/gyre-server/src/api/specs_assist.rs`)
   resolves the repo via `RepositoryPort`, creates `spec-edit/<slug>-<short_uuid>`
   from the default branch, commits the spec content there, auto-creates an MR
@@ -162,8 +161,8 @@ merge).
   The review-gate bypass is constrained to `specs/prompts/` by
   `validate_prompt_path` (rejects absolute paths, `..` traversal, and any path
   outside the directory with 400).
-- Slug: path → lowercase, `/` → `-`, strip `.md`, plus a 4-hex-char hash of the
-  full original path (collision-safe), per ui-layout.md §3.
+- Slug: path → lowercase, `/` → `-`, strip `.md`, plus a 4-hex-char hash of
+  the full original path (collision-safe), per ui-layout.md §3.
 
 ### Test evidence
 
@@ -182,23 +181,21 @@ merge).
   nested paths, overwrite, `create_branch` from existing ref, and
   `branch_exists`.
 
-### Probes this round (head `c0997930`)
+### Probes this round (head `90eda370`)
 
 Exit codes and output retained under `/tmp/stage/review-evidence/`:
 
+- `cargo check -p gyre-server --tests` → exit 0 (9m 56s) — confirms the
+  merged head (with the task-130 test-fixture field additions) type-checks
+  including the full `specs_assist` test module.
 - `cargo test -p gyre-adapters --lib git2_ops` → 35 passed, 0 failed, exit 0
-  (write-through adapter coverage: `write_file` on feature branches, nested
-  paths, overwrite, `create_branch`, `branch_exists`) — re-run this round at
-  the unchanged head (`task-011-contract-repair-git2ops.txt`).
-- `grep` confirmed the real write-through call sites are intact at head
-  (`git_ops.rs:76/79/87`, `specs_assist.rs:974/1053/1293/:1046`) and both
-  end-to-end test families are present (`task-011-contract-repair-round.txt`).
-- `git status` at round start: only `specs/tasks/task-011.md` modified (the
-  executor restore); no `crates/`, `web/src`, or `web/tests` change.
-- `cargo check -p gyre-server --tests` passed at the prior round's identical
-  product surface (exit 0, 9m52s). `cargo test -p gyre-server --lib
-  api::specs_assist` was NOT re-run in this sandbox (gyre-server test
-  compilation is deferred to the independent verifier per the 4 GiB build
-  budget). The verifier should execute `cargo test -p gyre-server --lib
-  api::specs_assist` at this head; no `specs_assist` source changed this
-  round, so the suite is exactly the one that passed at `3faecf7a`.
+  (write-through adapter coverage).
+- `git diff 4fabb3c1..90eda370 --stat` over the product surface files: only
+  the 6 test-fixture lines described above; `git status` at round start:
+  only `specs/tasks/task-011.md` modified (the executor restore).
+- `cargo test -p gyre-server --lib api::specs_assist` was NOT re-run in this
+  sandbox (gyre-server test compilation is deferred to the independent
+  verifier per the 4 GiB build budget). The verifier should execute
+  `cargo test -p gyre-server --lib api::specs_assist` at this head; `cargo
+  check -p gyre-server --tests` passing confirms the suite compiles against
+  the merged base.
