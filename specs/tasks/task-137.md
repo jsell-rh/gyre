@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Failure Feedback"
-commits: ["fdb0a05cabef6adb1c6801c996561dee454408a3", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "0e6ab6ad0a862ac91f322ec9c174933a245f21ea"]
+commits: ["f03a3c830c382d4f063244889f3a31ecfdad711b", "fdb0a05cabef6adb1c6801c996561dee454408a3", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "0e6ab6ad0a862ac91f322ec9c174933a245f21ea"]
 ---
 
 ## Spec Excerpt
@@ -95,9 +95,11 @@ Read `specs/system/agent-gates.md` §Gate Failure Feedback (all three subsection
 
 All of §Gate Failure Feedback runs as real production code in the gate
 executor (`crates/gyre-server/src/gate_executor.rs`), the single point
-where required-gate failures are decided. This round additionally repairs
-review ff8f761e (F1 blocking, F2/F3 minor) in the same file plus
-`ralph_loop.rs`.
+where required-gate failures are decided. Earlier rounds additionally
+repaired review ff8f761e (F1 blocking, F2/F3 minor) and the retained
+verification findings (rustfmt changed lines, trailing whitespace in
+the all-gates-failed description strings, clippy
+redundant_pattern_matching in `ws.rs`) — see commit f03a3c83.
 
 ### GateResult message + inbox delivery
 
@@ -182,13 +184,20 @@ positive cases),
 `failing_gate_notifies_author_with_gate_result_payload`,
 `ws_agent_directed_message_reaches_own_live_session_only`.
 
-This sandbox's build wrapper refuses gyre-server test execution (4 GiB
-budget), so the verifier must run the server suite; recorded probes and
-evidence in `/tmp/stage/review-evidence/task-137-repair.md`. Locally
-verified: `cargo check -p gyre-server --tests` exit 0 with no warnings in
-the touched files; `cargo clippy -p gyre-server --tests` clean for both
-touched files; the exact `has_critical_finding` source extracted and all
-its unit assertions re-run standalone under rustc (exit 0); the
-`ls severity:critical` fixture confirmed to exit 2 with the severity
-label in stderr; mechanical checks (arch, byte-slice truncation, dead
-message kinds, inert enforcement) all exit 0.
+This sandbox cannot run gyre-server test compilation (hard 4 GiB
+budget), so the verifier must execute the server suite — at minimum:
+`cargo test -p gyre-server gate_failure -- --nocapture`,
+`cargo test -p gyre-server critical_finding`,
+`cargo test -p gyre-server all_gates_failed`,
+`cargo test -p gyre-server ws_agent_directed`, plus
+`scripts/check-rustfmt-diff.py` and `scripts/check-clippy-diff.py`
+against the merge base. Probes run in this round (evidence under
+`/tmp/stage/review-evidence/`): `cargo check -p gyre-server --tests`
+exit 0; `cargo clippy -p gyre-server --tests -W clippy::all` filtered
+to changed lines — 0 findings (512 pre-existing warnings outside the
+change set, unchanged); `scripts/check-rustfmt-diff.py` clean; no
+trailing whitespace in the touched files. The ws.rs assertion rewrite
+was verified case-equivalent (pass on timeout or clean close, fail iff
+a message arrived), and the reassessment-description string edit was
+checked against the test's `contains("lint")` /
+`contains("unit tests")` assertions.
