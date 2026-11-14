@@ -24,8 +24,8 @@ struct QualityGateRow {
     required: i32,
     gate_phase: String,
     timeout_secs: Option<i64>,
-    created_at: i64,
     position: i32,
+    created_at: i64,
 }
 
 impl QualityGateRow {
@@ -51,8 +51,8 @@ impl QualityGateRow {
             required: self.required != 0,
             gate_phase: GatePhase::parse(&self.gate_phase).unwrap_or_default(),
             timeout_secs: self.timeout_secs.map(|v| v as u64),
+            position: self.position.max(0) as u32,
             created_at: self.created_at as u64,
-            position: self.position as u32,
         }
     }
 }
@@ -71,8 +71,8 @@ struct NewQualityGateRow<'a> {
     required: i32,
     gate_phase: &'a str,
     timeout_secs: Option<i64>,
-    created_at: i64,
     position: i32,
+    created_at: i64,
 }
 
 fn gate_type_str(gt: &GateType) -> &'static str {
@@ -105,8 +105,8 @@ impl QualityGateRepository for PgStorage {
                 required: if g.required { 1 } else { 0 },
                 gate_phase: g.gate_phase.as_str(),
                 timeout_secs: g.timeout_secs.map(|v| v as i64),
-                created_at: g.created_at as i64,
                 position: g.position as i32,
+                created_at: g.created_at as i64,
             };
             diesel::insert_into(quality_gates::table)
                 .values(&row)
@@ -153,10 +153,8 @@ impl QualityGateRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = quality_gates::table
                 .filter(quality_gates::repo_id.eq(&repo_id))
-                .order((
-                    quality_gates::position.asc(),
-                    quality_gates::created_at.asc(),
-                ))
+                .order(quality_gates::position.asc())
+                .then_order_by(quality_gates::created_at.asc())
                 .load::<QualityGateRow>(&mut *conn)
                 .context("list quality gates by repo")?;
             Ok(rows.into_iter().map(QualityGateRow::into_gate).collect())
