@@ -3,7 +3,7 @@ title: "Implement analytics decision API with built-in decision types"
 spec_ref: "analytics.md §Decision API for Agents"
 depends_on:
   - task-146
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "analytics.md §Decision API for Agents"
   - "analytics.md §GET /api/v1/analytics/decide"
