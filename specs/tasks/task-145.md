@@ -3,10 +3,10 @@ title: "Implement spec enforcement validation tests for attack/drift prevention"
 spec_ref: "agent-gates.md §Part 2 What This Prevents"
 depends_on:
   - task-139
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §What This Prevents"
-commits: ["0d3c6a58147ae47ff616371d8db02b49c15883f2", "6128a39c8fa30617634c5ac192529ee469506ffb", "0c0529449e16bbb3ae93b099f5b5907fc2aa791b", "0de2f4e4cb9b591e951718aa7bba459e77479152", "f4b7f15195215cd8695e682404343ea4f1db325a"]
+commits: ["0d3c6a58147ae47ff616371d8db02b49c15883f2", "6128a39c8fa30617634c5ac192529ee469506ffb", "0c0529449e16bbb3ae93b099f5b5907fc2aa791b", "0de2f4e4cb9b591e951718aa7bba459e77479152", "f4b7f15195215cd8695e682404343ea4f1db325a", "de74a59fa8656c4cb224ac96996d8479925bf733"]
 ---
 
 ## Spec Excerpt
@@ -91,7 +91,7 @@ From `agent-gates.md` §Part 2 What This Prevents:
 `crates/gyre-server/tests/spec_enforcement.rs` (commit `f4b7f151`) — one
 integration test per attack/drift row of agent-gates.md §Part 2 "What This
 Prevents", each self-contained (own server on an ephemeral loopback port,
-own state, own real on-disk git repos, own policies — no shared fixtures):
+own state, own real on-disk git repo, own policies; no shared fixtures):
 
 - **Row 1 (code without a spec)** — `code_without_spec_is_rejected`:
   `require_spec_ref` via the REST policy surface; MR with no `spec_ref`
@@ -110,83 +110,57 @@ own state, own real on-disk git repos, own policies — no shared fixtures):
   `stale_spec_warns_or_blocks_by_policy`: same repo moves the spec from
   v1 to v2: under `warn_stale_spec` the merge proceeds and the advisory
   lands as an MR comment from `forge:spec-policy`; under
-  `require_current_spec` the stale reference is blocked.
+  `require_current_spec` the stale reference is blocked with a reason
+  naming the policy.
 - **Row 5 (agent implements wrong spec version)** —
   `gate_agent_reviews_pinned_sha_and_catches_wrong_version`: a real
-  `agent_review` gate whose reviewer process (bash + curl, scoped
-  `review:submit` token) compares the MR diff against the spec content
-  at the PINNED SHA and submits its verdict through the review API:
-  wrong version → `changes_requested` → gate Failed → merge blocked;
-  correct pairing → `approved` → merged.
+  reviewer script (registered gate agent, scoped token) reads the spec at
+  the PINNED SHA via `GYRE_SPEC_FILE` (never HEAD), diffs it against the
+  MR implementation, and submits its verdict through the review API;
+  matching and mismatching versions produce approved / changes_requested.
 - **Row 6 (retroactive spec modification)** —
-  `retroactive_spec_modification_requires_new_approval`: approval on
-  SHA-1 stays active after the spec moves to SHA-2; SHA-2 has no
-  approval and an MR referencing it under `require_approved_spec` is
-  rejected.
-- **Row 7 (unauthorized approver)** — `unauthorized_approver_is_denied_by_abac`:
-  an agent JWT attempting spec approval is denied 403 by the immutable
-  `builtin:require-human-spec-approval` ABAC policy (denial recorded in
-  the audit trail against that policy id, no ledger row created); a
-  human Admin via API key succeeds and the ledger records the approver
-  identity.
+  `retroactive_spec_modification_requires_new_approval`: approving SHA-1
+  leaves SHA-2 unapproved in the ledger; an MR referencing SHA-2 under
+  `require_approved_spec` is rejected with the unapproved SHA named.
+- **Row 7 (spec approved by unauthorized person)** —
+  `unauthorized_approver_is_denied_by_abac`: a registered agent JWT
+  (minted with self-consistent scope claims) is refused by the immutable
+  `builtin:require-human-spec-approval` deny, and the denial is recorded
+  in the audit trail against that policy id.
 
-Merge-queue cycles run through `merge_processor::run_once` (the same
-`process_next` the spawned processor loop runs) for determinism; merges
-in control cases are real git merges through the git2 adapter.
-
-Unit tests in `merge_processor.rs` cover all five forge enforcement
-policies at the merge level:
+Forge enforcement policy unit tests (merge_processor.rs): one per policy —
 `require_spec_ref_blocks_mr_without_spec_ref`,
 `require_approved_spec_blocks_unapproved_spec`,
 `warn_stale_spec_adds_advisory_comment_without_blocking`,
-`require_current_spec_blocks_stale_spec_ref`, and
-`require_signed_approval_blocks_unsigned_spec_approval`: rejection with
-a clear reason, author notification, and a positive control that
-merges.
+`require_current_spec_blocks_stale_spec_ref`,
+`require_signed_approval_blocks_unsigned_spec_approval`.
 
-Follow-up commits keep the suite green against merged upstream changes:
-`0de2f4e4` polls for the owner notification in the persona push test
-support (notification race), `0c052944` adapts to the repo-scoped
-notification-list port signature, and `6128a39c` supplies the four
-hierarchy scope arguments to `AgentSigningKey::mint` in the Row 7
-rogue-JWT fixture (task-130's token-scoping API; also attributed to
-task-130's frontmatter). The Row 7 denial under test is role-based —
-the immutable `builtin:require-human-spec-approval` Deny fires on
-`subject.type != "user"` — so the scoped claims neither widen nor
-narrow the condition.
+### CI repair (commit `de74a59f`)
 
-### Merge repair (this round)
-
-The published candidate conflicted with the assignment base `32c4faef`
-(task-135's tip). Resolved as merge `f2f4c0ef`: the only textual
-conflict was `specs/coverage/system/agent-gates.md`, resolved as the
-union — rows 6–7 keep task-135's implemented markings, row 23 keeps
-task-145's implemented marking, coverage 3/25, audit note names both.
-The task-145 branch had already absorbed task-135's production logic
-in earlier reconcile rounds, so the remaining deltas (migration
-`000062_gate_chain_config`, `PUT/GET /repos/:id/gate-chain`, chain-config
-storage, docs) are additive to the surfaces this suite drives; the
-`agent_review` gate created in Row 5 defaults to `required: true`, so a
-failed gate still blocks the merge under task-135's two-pass decision
-logic.
+Candidate head `39388628` failed CI run 43585665655 on
+`notifications::tests::notify_rich_falls_back_to_workspace_home_link`
+("unresolvable workspace must not fabricate a link"). Root cause is a test
+flake, not a production defect: `notify_rich` stamps `created_at` at
+whole-second granularity and `list_for_user` sorts `created_at` descending,
+so when the test's two `notify_rich` calls straddle a wall-clock second
+boundary the newer unknown-workspace notification sorts first and index
+`[1]` is the known-workspace notification, whose legitimate deep link then
+reads as a fabricated one. Identical code passed the main-branch CI run
+43586273005 seven minutes later, confirming a one-off timing flake. The
+test now selects the unknown-workspace notification by source entity id
+instead of list index; `deep_link` already failed closed and needed no
+change.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --test spec_enforcement` on merged head
-  `f2f4c0ef`: clean in 7m39s (evidence:
-  `/tmp/stage/review-evidence/cargo-check-spec-enforcement.txt`). This
-  is the exact probe that caught the earlier E0061 mint-arity breakage.
-- `scripts/check-abac-route-registry.sh`,
-  `scripts/check-migration-versions.sh`, and
-  `scripts/check-migration-sql-portability.sh` on merged head `f2f4c0ef`:
-  all pass (the merge adds routes and a migration, so these were
-  re-run; evidence under `/tmp/stage/review-evidence/`).
-- Full `cargo test --all` on the earlier candidate `9b9954f1` (same test
-tree): 1974/1975 passed, the single failure being the notification
-race fixed in `0de2f4e4` — i.e. the spec-enforcement suite itself
-passed in that run.
-- Server test execution is deferred to the independent verifier per the
-  build-budget constraint. The verifier must execute:
-  - `cargo test -p gyre-server --test spec_enforcement`
-  - `cargo test -p gyre-server --lib merge_processor`
-  - then the full `cargo test --all`
+- `cargo check -p gyre-server --tests` — clean (this sandbox; server test
+  execution deferred to the verifier per build-wrapper policy).
+- Verifier must run:
+  `cargo nextest run -p gyre-server --lib notifications::tests::notify_rich_falls_back_to_workspace_home_link`
+  and
+  `cargo nextest run -p gyre-server --test spec_enforcement`
+  plus the five merge_processor policy unit tests
+  (`cargo nextest run -p gyre-server --lib spec_ref spec_policy stale signed_approval`
+  filter set). All 3764-test suite evidence from CI run 43585665655:
+  every test except the flake passed, including the full spec-enforcement
+  suite at candidate head `39388628`.
