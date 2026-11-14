@@ -136,16 +136,28 @@ pub struct PolicyDecision {
 // Built-in policy helpers
 // ---------------------------------------------------------------------------
 
+/// The reserved ABAC subject identity of the global system principal
+/// (the global `GYRE_AUTH_TOKEN`). `system-full-access` matches this exact
+/// identity, so it MUST NOT be assignable to any other subject: API-key and
+/// JWT auth resolve a user's ABAC `subject.id` from the user's display_name,
+/// so every display_name write path (profile update, admin provisioning, SSO
+/// provisioning) rejects this string, and the ABAC middleware denies any
+/// non-system principal that still presents it (pre-existing row, direct DB
+/// edit) before policy evaluation.
+pub const SYSTEM_ABAC_IDENTITY: &str = "gyre-system-token";
+
 /// Create the set of built-in tenant-level policies that Gyre ships with.
 ///
 /// These enforce fundamental invariants and cannot be deleted.
 ///
 /// # Key design decisions (HSI §2)
 ///
-/// - `system-full-access` matches on `subject.id == "gyre-system-token"` (NOT
-///   `subject.type == "system"`). This means the merge processor (`subject.type:
-///   "system"`, `subject.id: "merge-processor"`) is subject to ABAC and can be
-///   blocked by trust-preset policies such as `trust:require-human-mr-review`.
+/// - `system-full-access` matches on `subject.id == SYSTEM_ABAC_IDENTITY`
+///   (NOT `subject.type == "system"`). This means the merge processor
+///   (`subject.type: "system"`, `subject.id: "merge-processor"`) is subject
+///   to ABAC and can be blocked by trust-preset policies such as
+///   `trust:require-human-mr-review`. The identity is reserved (see
+///   [`SYSTEM_ABAC_IDENTITY`]): only the genuine global token carries it.
 ///
 /// - `builtin:require-human-spec-approval` is `immutable: true`. Immutable Deny
 ///   policies are evaluated before all priority-based evaluation — including the
@@ -175,10 +187,123 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
             conditions: vec![Condition {
                 attribute: "subject.id".to_string(),
                 operator: ConditionOp::Equals,
-                value: ConditionValue::String("gyre-system-token".to_string()),
+                value: ConditionValue::String(SYSTEM_ABAC_IDENTITY.to_string()),
             }],
             actions: vec!["*".to_string()],
             resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // TASK-129 (§Built-In Policies): users and agents cannot access
+        // other tenants. Fires only when BOTH tenant ids are known —
+        // `resource.tenant_id` resolves through the entity scope chain
+        // (repo → workspace → tenant), so resource types without an entity
+        // lookup fail closed (attribute unset → condition unmet → fall
+        // through to the rest of the policy set). Priority 950: above
+        // admin-all-operations (900) so even global Admin roles cannot cross
+        // tenants, and below system-full-access (1000) so the global
+        // GYRE_AUTH_TOKEN identity (which legitimately spans tenants) is
+        // still allowed.
+        Policy {
+            id: Id::new("builtin-tenant-isolation"),
+            name: "tenant-isolation".to_string(),
+            description: "Users and agents cannot access resources belonging to another tenant"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 950,
+            effect: PolicyEffect::Deny,
+            conditions: vec![
+                Condition {
+                    attribute: "subject.tenant_id".to_string(),
+                    operator: ConditionOp::Exists,
+                    value: ConditionValue::Null,
+                },
+                Condition {
+                    attribute: "resource.tenant_id".to_string(),
+                    operator: ConditionOp::Exists,
+                    value: ConditionValue::Null,
+                },
+                Condition {
+                    attribute: "subject.tenant_id".to_string(),
+                    operator: ConditionOp::NotEquals,
+                    value: ConditionValue::String("$resource.tenant_id".to_string()),
+                },
+            ],
+            actions: vec!["*".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // TASK-129 (§Built-In Policies): users must be workspace members to
+        // access workspace-scoped resources (user-management.md §Repo
+        // Access: repo access is inherited from workspace membership). The
+        // middleware sets the derived boolean `subject.member_of_resource_workspace`
+        // from the real membership store whenever the request addresses a
+        // workspace (directly or via a repo/entity scope chain); agents and
+        // the system principal carry no user membership and are keyed out by
+        // the `subject.type == "user"` condition. Priority 940: above
+        // admin-all-operations (900) — a global Admin role does not bypass
+        // membership, matching the per-handler containment checks (e.g.
+        // explorer_views / saved_views / messages) that already enforce
+        // this invariant without an admin exemption.
+        Policy {
+            id: Id::new("builtin-workspace-membership-required"),
+            name: "workspace-membership-required".to_string(),
+            description: "Users must be members of the addressed workspace to access its resources"
+                .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 940,
+            effect: PolicyEffect::Deny,
+            conditions: vec![
+                Condition {
+                    attribute: "subject.type".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("user".to_string()),
+                },
+                Condition {
+                    attribute: "subject.member_of_resource_workspace".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::Bool(false),
+                },
+            ],
+            actions: vec!["*".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
+        // TASK-129 (§Built-In Policies): persona approval is human-only.
+        // Agents (and any other non-user subject) cannot approve personas.
+        // Priority 950: above agent-scoped-access (700), which would
+        // otherwise allow the `approve` action for the global Agent role.
+        Policy {
+            id: Id::new("builtin-persona-human-approval"),
+            name: "persona-human-approval".to_string(),
+            description: "Only human users can approve personas".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 950,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.type".to_string(),
+                operator: ConditionOp::NotEquals,
+                value: ConditionValue::String("user".to_string()),
+            }],
+            actions: vec!["approve".to_string()],
+            resource_types: vec!["persona".to_string()],
             enabled: true,
             built_in: true,
             immutable: false,
@@ -212,14 +337,34 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
-        // Agents can only access resources in the repo they were spawned against.
+        // Agents can only access resources in the repo they were spawned
+        // against (§Policy Examples "agent-repo-scope"): Deny when the
+        // subject is an agent AND its repo scope differs from the
+        // resource's repo. The `$resource.repo_id` dynamic reference is
+        // resolved at evaluation time: an agent acting inside its scoped
+        // repo (repo_scope == resource.repo_id) does not match, an
+        // unscoped agent or a non-repo-addressed resource fails the
+        // condition closed (a missing attribute or unresolvable reference
+        // never matches — no fabricated empty string, which would deny
+        // repo-scoped agents everything), and only genuinely out-of-scope
+        // access is denied.
+        //
+        // Priority 750 sits ABOVE the m34 agent-scoped-access role Allow
+        // (priority 700): composition is "higher priority always wins",
+        // so a containment Deny at the §Policy Examples illustration
+        // priority (100) would be overridden by the role Allow and enforce
+        // nothing. 750 keeps containment above the role Allow while
+        // staying below the tenant-isolation (950) and system (1000)
+        // bands. Enabled: the §Built-In Policies table lists this row as a
+        // shipped invariant ("Agents can't access resources outside their
+        // scoped repo"), not an opt-in.
         Policy {
             id: Id::new("builtin-agent-repo-scope"),
             name: "agent-repo-scope".to_string(),
             description: "Agents can only access resources in their scoped repo".to_string(),
             scope: PolicyScope::Tenant,
             scope_id: None,
-            priority: 100,
+            priority: 750,
             effect: PolicyEffect::Deny,
             conditions: vec![
                 Condition {
@@ -229,13 +374,13 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
                 },
                 Condition {
                     attribute: "subject.repo_scope".to_string(),
-                    operator: ConditionOp::Exists,
-                    value: ConditionValue::Null,
+                    operator: ConditionOp::NotEquals,
+                    value: ConditionValue::String("$resource.repo_id".to_string()),
                 },
             ],
             actions: vec!["*".to_string()],
             resource_types: vec!["*".to_string()],
-            enabled: false, // Off by default; enable to enforce strict agent scoping.
+            enabled: true,
             built_in: true,
             immutable: false,
             created_by: by.clone(),
