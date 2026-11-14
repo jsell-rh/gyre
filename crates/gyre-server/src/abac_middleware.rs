@@ -226,6 +226,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api(REPOS_WORKTREES_ID_ROUTE, "worktree", None),
                 RouteResourceMapping::api(REPOS_GATES_ROUTE, "gate", None),
                 RouteResourceMapping::api(REPOS_GATES_ID_ROUTE, "gate", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/gate-chain", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/push-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
