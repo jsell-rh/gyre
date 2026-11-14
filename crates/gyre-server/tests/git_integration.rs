@@ -730,13 +730,21 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
+    // Seed a real repository: create_mr resolves the MR's workspace scope
+    // from its repository and refuses unknown repositories (M34
+    // scope-fabrication repair), so MR fixtures need an existing repo like
+    // every other test in this file. Autonomous trust keeps the queue
+    // mechanics under test free of the supervised-trust approval hold.
+    let ws_id = uniq("ws-dep-block");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "dep-block-repo").await;
+
     // Create two MRs via the API (no real git operations needed for this test).
     // MR-A: the dependency (open, not yet enqueued)
     let mr_a: serde_json::Value = client
         .post(format!("{api}/merge-requests"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "repository_id": "dep-test-repo",
+            "repository_id": repo_id.clone(),
             "title": "dep-block: MR A (dependency)",
             "source_branch": "feat/dep-a",
             "target_branch": "main",
@@ -755,7 +763,7 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
         .post(format!("{api}/merge-requests"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "repository_id": "dep-test-repo",
+            "repository_id": repo_id,
             "title": "dep-block: MR B (depends on A)",
             "source_branch": "feat/dep-b",
             "target_branch": "main",
@@ -1298,18 +1306,25 @@ async fn queue_graph_reflects_enqueued_mrs_and_deps() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
+    // Seed a real repository: create_mr resolves the MR's workspace scope
+    // from its repository and refuses unknown repositories (M34
+    // scope-fabrication repair), so MR fixtures need an existing repo.
+    let ws_id = uniq("ws-graph");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "graph-repo").await;
+
     // Create 3 MRs: C → B → A (C depends on B, B depends on A).
     let create_mr = |title: &str| {
         let client = client.clone();
         let api = api.clone();
         let auth_hdr = auth_hdr.clone();
+        let repository_id = repo_id.clone();
         let title = title.to_string();
         async move {
             let resp: serde_json::Value = client
                 .post(format!("{api}/merge-requests"))
                 .header("Authorization", auth_hdr)
                 .json(&serde_json::json!({
-                    "repository_id": "graph-repo",
+                    "repository_id": repository_id,
                     "title": title,
                     "source_branch": "feat/x",
                     "target_branch": "main",
