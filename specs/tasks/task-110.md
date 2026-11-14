@@ -2,7 +2,7 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
@@ -100,82 +100,64 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-**This round: rebase repair onto assignment base 5984177** (durable finding
-6f6a6b73 — merge conflicts in `abac_middleware.rs`, `api/mod.rs`, and
-`specs/coverage/system/user-management.md`). The base advanced past the
-previously reconciled 4b9220bc with task-124 (user management + workspace
-membership API endpoints). The invitation flow itself is the independently
-approved implementation from prior rounds (domain entities, ports,
-SQLite/Postgres/mem adapters, migrations 2026-11-13-000063/64/65, the five
-tenant endpoints, workspace invitation lifecycle, CSPRNG + SHA-256 tokens,
-per-tenant `InvitationPolicy`, bulk invite, background expiry job, ABAC
-mappings) — no invitation behavior changed this round.
+**This round: re-verify the independently approved invitation flow on
+assignment base 9afd66c7 (which carries task-133's ABAC MCP permission
+resources) and resolve the durable CI finding** — no invitation behavior
+changed; the implementation is the one approved across the prior repair
+rounds (domain entities, ports, SQLite/Postgres/mem adapters, migrations
+2026-11-13-000063/64/65, the five tenant endpoints plus policy endpoints,
+workspace invitation lifecycle, CSPRNG + SHA-256 tokens, per-tenant
+`InvitationPolicy`, bulk invite, background expiry job, ABAC mappings,
+docs).
 
-### Conflicts resolved
+### CI finding 7ec83a8d (candidate_failed) — resolved as a transient flake
 
-- `api/mod.rs` + `abac_middleware.rs` `/users/me` blocks (textual): both
-  sides kept — task-110's `GET /users/me/invitations` route/mapping plus
-  task-124's `GET /users/:username` and `PUT /users/:id/deactivate`.
-- **Duplicate workspace-invitation routes (semantic, both sides added at
-  different spots so git auto-merged them into a tree axum rejects):**
-  task-124 and task-110 had each implemented the SAME four spec paths
-  (`POST /workspaces/{id}/invite`, `GET .../invitations`,
-  `POST .../invite/accept`, `DELETE .../invitations/{id}`) — task-124 as
-  unaccepted membership rows (api/users.rs), task-110 as the
-  `WorkspaceInvitation` entity (api/invitations.rs). Resolution: task-110's
-  model keeps the paths (this task's contract; strict superset covering
-  §Workspace Invitation Flow's decline, configurable expiry, per-tenant
-  policy, `max_pending_invitations` cap, and the background expiry job).
-  task-124's three now-orphaned handlers (`list_invitations`,
-  `accept_invitation`, `revoke_invitation`), their route registrations,
-  ABAC resolver entries, api-reference rows, and their
-  `workspace_invitation_lifecycle` test were removed; task-124's member
-  list/role-change/removal endpoints, deactivation cascade, and user
-  listing are untouched. `POST /workspaces/{id}/members` (M22.8
-  `invite_member`) is unchanged from the merge base.
-- **Diesel version collision:** task-124's
-  `2026-11-13-000063_user_deactivated_at` and task-110's
-  `2026-11-13-000063_invitations` both map to version 20261113000063 (only
-  one runs per version — the alphabetically first — so
-  `users.deactivated_at` would silently never be created on fresh
-  databases). Renumbered to `2026-11-13-000066_user_deactivated_at` (next
-  unused sequence), with a renumber note in its up.sql;
-  `check-migration-versions.sh` passes.
-- `specs/coverage/system/user-management.md`: merged audit header and rows
-  25/26/27 recomputed against the merged tree (15/36 implemented, 10
-  task-assigned, 11 n/a); row 27's seven-endpoint table remains satisfied
-  (invitation paths now served by task-110's model). `SUMMARY.md`
-  regenerated with the canonical script.
+PR #825 head a8996690, CI run 43610196702: the "Development controller"
+check failed on attempt 1 at the `test_pipeline*.py` step, then the SAME
+tree passed every job on attempt 2 — the run's final conclusion is
+`success` (GitHub API evidence saved under
+`/tmp/stage/review-evidence/`). Attempt-1 job logs were never retrievable
+(blob host denied from this sandbox); with an identical tree passing on
+re-run there is no deterministic defect to repair. The two
+`test_pipeline*.py` failures that DO reproduce in this sandbox are
+environment restrictions, not code defects: this sandbox denies
+`os.killpg(2)` (EPERM; plain child kill works — probe saved), which is
+exactly what both tests exercise, and they fail identically on the
+assignment base. The `test_dev*.py` failures here are the 4 GiB cargo
+build wrapper, also unrelated to this branch (it changes no scripts or
+manifests).
 
-### Merge-integrity and gate evidence (this head)
+### Repairs this round
 
-- `cargo check -p gyre-server` passes (8m00s, 4 GiB sandbox).
-- `cargo fmt --all --check` clean.
-- Mechanical checks pass: architecture, migration versions (post-renumber),
-  migration SQL portability, ABAC route registry, ABAC exempt handlers,
-  MCP write tools, mem port contracts, dead message kinds, byte-slice
-  truncation, relative path defaults, fail-open ref resolution, fabricated
-  scope defaults, lossy secret conversion, scope literal defaults, inert
-  enforcement, forwarded header trust, in-memory state stores, unbounded
-  external HTTP (sweep logs in `/tmp/stage/review-evidence/gate-*.log`).
-- Focused tests: `cargo test -p gyre-adapters` 533 passed / 0 failed —
-  includes the merged migration suite (renumbered 000066 runs; the 000058
-  backfill exclusion-set test), the SQLite invitation repositories, and
-  the mem-port contract tests; `-p gyre-domain -p gyre-common -p gyre-ports`
-  672 passed / 0 failed.
-- gyre-server test compilation is deferred to the independent verifier
-  (4 GiB cgroup build budget — environment restriction, not a defect). The
-  verifier must run the full workspace suite — in particular the 26
-  `api::invitations` tests (tenant lifecycle, revocation blocks accept,
-  expiry job marks expired, bulk invite, non-admin 403, local-mode accept
-  mints an authenticating API key, re-invite fresh key, SSO link, workspace
-  lifecycle incl. accept/decline/revoke, cross-tenant containment,
-  `max_pending` cap, `allow_re_invite`), `auth::` invitation/SSO-link and
-  task-129 reserved-identity tests (the previously conflicted region), and
-  task-124's user-management tests in `api::users` (deactivate cascade,
-  username profile, users listing — the handlers this merge kept).
+- Restored this task's `commits:` frontmatter, which the assignment reset
+  had emptied: `check-task-commit-attribution.sh` was FAILING on the tree
+  because the seven task-110-labeled product-surface commits in branch
+  history were orphaned from review scoping. All nine previously recorded
+  SHAs verified in-branch (`git merge-base --is-ancestor`).
 
-Coverage rows 5, 6, 7, 25 (task-110) plus 27 (merged) in
-`specs/coverage/system/user-management.md` are `implemented` and describe
-the merged tree; the audit header records this repair merge and the model
-choice.
+### Verification on the merged tree (head f56a47df)
+
+- `cargo check -p gyre-server` — clean (adapters/domain/ports included).
+- `cargo test -p gyre-domain` — 8 passed. `cargo test -p gyre-adapters` —
+  533 passed, 0 failed (6 ignored are Docker/SSH/credential-gated
+  compute/llm tests, untouched by this branch).
+- `check-clippy-diff.py HEAD^1` and `check-rustfmt-diff.py HEAD^1` —
+  changed lines clean.
+- All non-advisory mechanical gates pass: arch, hierarchy, ABAC route
+  registry, ABAC exempt handlers, migration versions + SQL portability,
+  mem port contracts, in-memory state stores, forged scope fields, inert
+  enforcement, dead message kinds, byte-slice truncation, unwired port
+  methods, sandbox sweep artifacts, scope/lossy/fabricated-defaults
+  lints. Advisory failures (dead-parameters, ignored-tool-tests,
+  tenant-filter/crypto-verify awk) are byte-identical on the assignment
+  base in files this branch never touched.
+
+### Verifier must run (blocked in-sandbox by the 4 GiB build wrapper)
+
+- `cargo test -p gyre-server --lib api::invitations` — 28 tests
+  (lifecycle, revoke, bulk, expiry job, policy, CSPRNG/hash, SSO link,
+  local-mode key mint, cross-tenant guards, concurrency).
+- `cargo test -p gyre-server --lib auth::tests` — invitation email-link
+  tests (`jwt_email_link_claims_invitation_account`,
+  `jwt_unverified_email_does_not_claim_invitation_account`).
+- Full `cargo test --all` (CI Test job) and the exact-head GitHub checks.
