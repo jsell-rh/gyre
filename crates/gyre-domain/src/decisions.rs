@@ -161,14 +161,14 @@ impl BuiltinDecision {
 
     /// Evaluate the decision. `events` must cover [`Self::event_names`]
     /// from [`Self::fetch_since`] to `now`; `budget` is only read by
-    /// `budget.headroom`; `blocked_count` (non-terminal merge queue
+    /// `budget.headroom`; `blocked` (count of non-terminal merge queue
     /// entries) is only read by `merge_queue.health`.
     pub fn evaluate(
         &self,
         context: &Value,
         events: &[AnalyticsEvent],
         budget: Option<(&BudgetConfig, Option<&BudgetUsage>)>,
-        blocked_count: u64,
+        blocked: u64,
         now: u64,
     ) -> Value {
         match self {
@@ -185,9 +185,7 @@ impl BuiltinDecision {
                     "reason": "no budget configuration available",
                 }),
             },
-            Self::MergeQueueHealth => {
-                evaluate_merge_queue_health(context, events, blocked_count, now)
-            }
+            Self::MergeQueueHealth => evaluate_merge_queue_health(context, events, blocked, now),
         }
     }
 }
@@ -1518,10 +1516,10 @@ mod tests {
         }));
         // 2 approvals in window (threshold 3), 0 failed queue entries.
         let approvals: Vec<AnalyticsEvent> = (0..2)
-            .map(|i| ev("spec.approved", json!({}), NOW - 100))
+            .map(|_| ev("spec.approved", json!({}), NOW - 100))
             .collect();
         let queue: Vec<AnalyticsEvent> = (0..3)
-            .map(|i| {
+            .map(|_| {
                 ev(
                     "merge_queue.processed",
                     json!({"outcome": "merged", "wait_secs": 10}),
