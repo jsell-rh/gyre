@@ -13,6 +13,7 @@ pub mod agent;
 pub mod agent_card;
 pub mod agent_tracking;
 pub mod analytics;
+pub mod decisions;
 pub mod attestation;
 pub mod audit;
 pub mod budget;
@@ -67,6 +68,10 @@ pub use agent::{
 pub use agent_card::AgentCard;
 pub use agent_tracking::{AgentCommit, AgentWorktree, LoopConfig, Session};
 pub use analytics::{AnalyticsEvent, CostEntry};
+pub use decisions::{
+    evaluate_custom, BuiltinDecision, CustomDecisionSpec, CustomRule, DecisionRequest,
+    DecisionResult,
+};
 pub use attestation::{
     constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
 };

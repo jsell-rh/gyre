@@ -408,6 +408,12 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/analytics/usage", "analytics", None),
                 RouteResourceMapping::api("/api/v1/analytics/compare", "analytics", None),
                 RouteResourceMapping::api("/api/v1/analytics/top", "analytics", None),
+                RouteResourceMapping::api("/api/v1/analytics/decide", "analytics", None),
+                RouteResourceMapping::api(
+                    "/api/v1/analytics/decide/custom",
+                    "analytics",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/costs", "cost", None),
                 RouteResourceMapping::api("/api/v1/costs/summary", "cost", None),
                 // ── Audit ──────────────────────────────────────────────────
