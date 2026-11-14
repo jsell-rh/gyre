@@ -1151,12 +1151,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(
-            json.as_array()
-                .unwrap()
-                .iter()
-                .any(|p| p["name"].as_str() == Some("ws-case-allow"))
-        );
+        assert!(json
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"].as_str() == Some("ws-case-allow")));
 
         // A different workspace's scope_id must not match.
         let resp = app
@@ -1171,12 +1170,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(
-            !json.as_array()
-                .unwrap()
-                .iter()
-                .any(|p| p["name"].as_str() == Some("ws-case-allow"))
-        );
+        assert!(!json
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"].as_str() == Some("ws-case-allow")));
     }
 
     #[tokio::test(flavor = "multi_thread")]
