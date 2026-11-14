@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -97,63 +97,3 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
-## Shipped
-
-**This round: repair rebase onto assignment base 8d07a41a (main's merge
-carrying task-126's user-management CLI commands)** — no invitation
-behavior changed. The implementation approved across the prior repair
-rounds (domain entities, ports, SQLite/Postgres/mem adapters, migrations
-2026-11-13-000063/64/65, the five tenant endpoints plus policy
-endpoints, workspace invitation lifecycle, CSPRNG + SHA-256 tokens,
-per-tenant `InvitationPolicy`, bulk invite, background expiry job, ABAC
-mappings, docs) carries over unchanged: the server-side crates are
-byte-identical to the prior head aa92dbe9
-(`git diff aa92dbe9..HEAD -- crates/gyre-server crates/gyre-domain
-crates/gyre-ports crates/gyre-adapters crates/gyre-common` is empty).
-
-### Repairs this round
-
-- Resolved the rebase conflict in `specs/coverage/system/user-management.md`:
-  the merged audit header keeps both lines' running narrative with the
-  mechanically recounted table counts (15 implemented / 10 task-assigned /
-  11 n/a / 0 not-started of 36 — verified by per-row recount), and row 30
-  (§CLI, task-126) was de-staled for the merged tree: the CLI
-  tenant-invitation group (`gyre tenant invite`, `gyre tenant invitations
-  list/revoke`) now has live task-110 backends (rows 5/25), so only
-  `gyre sessions` (task-111, §Session Management) keeps that row open.
-- Restored this task's `commits:` frontmatter, which the assignment reset
-  had emptied — `check-task-commit-attribution.sh` was FAILING on the
-  tree. All nine previously recorded SHAs re-verified in-branch
-  (`git merge-base --is-ancestor`), plus this round's merge commit
-  07cf13dd.
-- Verified task-126's merged CLI against task-110's server surface: every
-  invitation path the CLI calls (`POST /api/v1/tenant/invite[/bulk]`,
-  `GET/DELETE /api/v1/tenant/invitations[/:id]`,
-  `POST/GET/DELETE /api/v1/workspaces/:id/invite[/invitations...]`) is
-  registered in `api/mod.rs` with matching request-body shapes
-  (`InviteRequest`, `WorkspaceInviteRequest`).
-
-### Verification on the merged tree (head 07cf13dd)
-
-- `cargo check -p gyre-cli` — clean.
-- `cargo test -p gyre-cli` — 189 passed + 1 ws integration, 0 failed
-  (includes task-126's invitation CLI mock-server request/body flows).
-- `bash scripts/check-task-commit-attribution.sh` — PASS after the
-  frontmatter restore (FAILed with `commits: []`).
-- `bash scripts/check-cli-spec-parity.sh` — exit 0 (one advisory note,
-  pre-existing in task-126's code, untouched by this branch).
-- Server/domain/adapters untouched by this merge (empty diff vs
-  aa92dbe9), so the prior round's head evidence stands: `cargo check -p
-  gyre-server` clean; `cargo test -p gyre-domain` 8 passed;
-  `cargo test -p gyre-adapters` 533 passed, 0 failed.
-
-### Verifier must run (blocked in-sandbox by the 4 GiB build wrapper)
-
-- `cargo test -p gyre-server --lib api::invitations` — 28 tests
-  (lifecycle, revoke, bulk, expiry job, policy, CSPRNG/hash, SSO link,
-  local-mode key mint, cross-tenant guards, concurrency).
-- `cargo test -p gyre-server --lib auth::tests` — invitation email-link
-  tests (`jwt_email_link_claims_invitation_account`,
-  `jwt_unverified_email_does_not_claim_invitation_account`).
-- Full `cargo test --all` (CI Test job) and the exact-head GitHub checks.
