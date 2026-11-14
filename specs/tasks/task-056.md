@@ -2,7 +2,7 @@
 title: "Abandoned Branch Detection Job"
 spec_ref: "human-system-interface.md §8 (Inbox Detail, priority 9: Abandoned Branch)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-056.md
 coverage_sections: []
 commits: ["52101cd0a05798168095ea1247570d87e12259c4", "d5b463e109599315f6329aab8d12c2fa5a74fe31"]
