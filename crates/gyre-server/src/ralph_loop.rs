@@ -325,8 +325,8 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
             .map(|g| format!("{:?}", g.gate_type))
             .unwrap_or_else(|| "Unknown".to_string());
         let attempt =
-            crate::gate_executor::gate_attempt_count(&state, &mr.id, &r.gate_id).await;
-        if crate::gate_executor::gate_result_already_delivered(&state, &mr.id, &r.gate_id, &agent.id)
+            crate::gate_executor::gate_attempt_count(state, &mr.id, &r.gate_id).await;
+        if crate::gate_executor::gate_result_already_delivered(state, &mr.id, &r.gate_id, &agent.id)
             .await
         {
             continue;
@@ -348,7 +348,7 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
                 })),
             )
             .await;
-        crate::gate_executor::mark_gate_result_delivered(&state, &mr.id, &r.gate_id, &agent.id)
+        crate::gate_executor::mark_gate_result_delivered(state, &mr.id, &r.gate_id, &agent.id)
             .await;
     }
 

@@ -1404,6 +1404,16 @@ async fn handle_all_gates_failed(state: &Arc<AppState>, mr: &gyre_domain::MergeR
         .filter(|e| e.merge_request_id == mr.id)
         .collect::<Vec<_>>();
     for entry in &entries {
+        // Re-check terminality right before failing: the merge processor
+        // can fail the same entry concurrently when it observes the failed
+        // gate rows (update_status itself is idempotent, but
+        // fail_queue_entry also emits the terminal analytics event — a
+        // second emit would double-count queue.processed for the entry).
+        if let Ok(Some(current)) = state.merge_queue.find_by_id(&entry.id).await {
+            if current.is_terminal() {
+                continue;
+            }
+        }
         if let Err(e) = crate::merge_processor::fail_queue_entry(
             state,
             entry,
