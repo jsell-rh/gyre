@@ -96,13 +96,13 @@ use impersonation::{
 };
 use std::sync::Arc;
 use users::{
-    add_team_member, create_team, create_token, create_user, delete_team, delete_token,
-    dismiss_notification, get_judgments, get_me, get_my_notifications, get_notification_count,
-    get_notification_preferences, get_unread_count, invite_member, list_members,
-    list_my_notifications, list_teams, list_tokens, mark_all_read_notifications,
-    mark_notification_read, mark_notification_unread, notification_stream, remove_member,
-    remove_team_member, resolve_notification, update_me, update_member_role,
-    update_notification_preferences, update_team,
+    accept_invitation, add_team_member, create_team, create_token, create_user, deactivate_user,
+    delete_team, delete_token, dismiss_notification, get_judgments, get_me, get_my_notifications,
+    get_notification_count, get_notification_preferences, get_unread_count, get_user_by_username,
+    invite_member, list_invitations, list_members, list_my_notifications, list_teams, list_tokens,
+    list_users, mark_all_read_notifications, mark_notification_read, mark_notification_unread,
+    notification_stream, remove_member, remove_team_member, resolve_notification,
+    revoke_invitation, update_me, update_member_role, update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -916,10 +916,16 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .put(policies::update_policy)
                 .delete(policies::delete_policy),
         )
-        // Bootstrap user provisioning - Admin-only, per-handler check.
-        .route("/api/v1/users", post(create_user))
+        // Bootstrap user provisioning + user listing - Admin-only, per-handler check.
+        .route("/api/v1/users", get(list_users).post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
+        // Tenant-public profile by username (user-management.md §API >
+        // User Management). Registered after /users/me: axum's matchit
+        // prioritizes the static segment, so /users/me never lands here.
+        .route("/api/v1/users/:username", get(get_user_by_username))
+        // Deactivate a user (TenantAdmin only, per-handler check)
+        .route("/api/v1/users/:id/deactivate", put(deactivate_user))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",
@@ -978,6 +984,23 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/members",
             post(invite_member).get(list_members),
+        )
+        // Spec-named invite path (user-management.md §API > Workspace
+        // Membership: `POST /workspaces/{id}/invite`) — same handler, same
+        // authorization as POST /members.
+        .route("/api/v1/workspaces/:id/invite", post(invite_member))
+        // Workspace invitations (user-management.md §API > Workspace
+        // Membership): list pending, accept, revoke.
+        .route("/api/v1/workspaces/:id/invitations", get(list_invitations))
+        // ABAC-exempt with per-handler auth: the acceptor must be the
+        // invited user themselves (any global role can be an invitee).
+        .route(
+            "/api/v1/workspaces/:id/invite/accept",
+            post(accept_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invitations/:invitation_id",
+            delete(revoke_invitation),
         )
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
