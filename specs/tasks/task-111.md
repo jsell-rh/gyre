@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["c947d22f1aa9b66f30b26b913aeda2e6c506fb94", "bdf1855d12d8837e6142b7ab060b09ac3cb63e55", "fd4351b9988673828b61a2b1379057db07548018", "97ef01dd7c12d9f49f03f49ce64829916871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["c947d22f1aa9b66f30b26b913aeda2e6c506fb94", "bdf1855d12d8837e6142b7ab060b09ac3cb63e55", "fd4351b9988673828b61a2b1379057db07548018", "97ef01dd7c12d9f49f03f49ce64829116871df79", "db116ab7498d7ef385b229a9761d487bee10297e", "ed6a9adc819dd87a141af3fecee543c909233f97", "6a8d4a7cdd53c43eee53110c13b734d3d60d6168", "57f6d144a5bd01905efa6889dade4ce3487c34ea", "f811501fb395c914da41dc11ba2d9e91d3611e54", "4a71f98e3f43d72732ada3bf3ec08353a81b4a3e", "a4e0eaf8f87de1d3483e9cb2813e6e5434acffeb", "6f20bcb241f6dee4f991553edf35e3ec90c97b3e", "74749334f8f2846a81a9c108c72ebce383d5222f", "5a0816fe602097c22a86d51c7095b644ca1d4893", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713", "5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "30cb6ddd4231defa2c773cd7137ae20d3bdcfdc0", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "1b6d9d2ea13cb5687f6cffcb8abd0e656145d581", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
 ---
 
 ## Spec Excerpt
@@ -70,16 +70,16 @@ Users can:
 
 ## Acceptance Criteria
 
-- [x] `UserSession` domain entity in gyre-domain
-- [x] `SessionRepository` port trait and SQLite implementation
-- [x] DB migration creates `user_sessions` table
-- [x] Sessions created on auth, `last_active_at` updated (throttled)
-- [x] GET endpoint lists current user's active sessions
-- [x] DELETE endpoint revokes individual session
-- [x] POST revoke-all revokes all sessions for user
-- [x] Revoked sessions rejected in auth middleware
-- [x] Routes registered with ABAC mappings
-- [ ] `cargo test --all` passes (deferred to the independent verifier; see Shipped)
+- [ ] `UserSession` domain entity in gyre-domain
+- [ ] `SessionRepository` port trait and SQLite implementation
+- [ ] DB migration creates `user_sessions` table
+- [ ] Sessions created on auth, `last_active_at` updated (throttled)
+- [ ] GET endpoint lists current user's active sessions
+- [ ] DELETE endpoint revokes individual session
+- [ ] POST revoke-all revokes all sessions for user
+- [ ] Revoked sessions rejected in auth middleware
+- [ ] Routes registered with ABAC mappings
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -87,30 +87,28 @@ Read `specs/system/user-management.md` §Session Management for full requirement
 
 ## Shipped
 
-Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history. This round merges the new assignment base `c844ea52` (task-129 ABAC evaluation engine, API, and audit integration) and repairs the compile fallout that merge introduced in three base test fixtures. No session-management behavior changed this round.
+Session management per `user-management.md` §Session Management is implemented end-to-end by this branch's reviewed history; the coverage matrix row (`specs/coverage/system/user-management.md` row 12) is `implemented | task-111`. This round changed no code: the executor restored the assigned task contract (finding `f68118b6`, category contract), so this commit re-records the frontmatter (`progress`, `commits`) and these shipped notes on the unchanged tree at `06fcc511` (merge of base `c844ea52`).
 
-### Implementation (unchanged this round)
+### Implementation
 
 - **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields; only the SHA-256 of the session token is stored, never plaintext.
-- **Port + adapters:** `SessionRepository` (create, list, find, touch, revoke, revoke_all, delete_expired) implemented by SQLite, PostgreSQL, and mem adapters.
-- **Auth integration:** sessions minted on API-key auth keyed by (credential, IP, User-Agent); `last_active_at` + sliding expiry refreshed at most once per 60s; revoked sessions reject auth on both HTTP and WS paths; IP from socket peer only.
-- **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants with tenant-containment checks.
-- **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days.
+- **Port + adapters:** `SessionRepository` (create, list, find, touch, revoke, revoke_all, delete_expired) implemented by SQLite, PostgreSQL, and mem adapters on migration `2026-10-08-000064_user_sessions`.
+- **Auth integration:** sessions minted on API-key auth keyed by (credential, IP, User-Agent); `last_active_at` + sliding expiry refreshed at most once per 60s; revoked sessions reject auth on both HTTP and WS/TTY paths; `credential_revoked` rejects the key when every session for it is revoked; IP from socket peer only (CWE-348).
+- **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants (`/users/:user_id/sessions...`) with per-handler role checks and tenant containment. Session routes are ABAC-exempt by design with per-handler authorization (validated by `check-abac-exempt-handlers.sh`).
+- **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days (revoked rows kept as the durable sign-out record).
+- **Prior base-merge repairs on this branch:** `bdf1855d`/`c947d22f` re-seeded repo fixtures and adapted base audit-trail fixtures to the 7-arg `MergeRequest::new`, repairing the four `merge_requests` failures from verification finding `4fb29ee2`.
 
-### This round's repair (`c947d22f`, on merge `0c135ca9` of base `c844ea52`)
+### Acceptance-criteria status
 
-The base `c844ea52` and this branch both descend from `32c4faef`; git auto-merged them without textual conflicts, but the base's three merge-processor decision-recording tests (`trust-audit`, `att-audit`, `fail-closed`) construct `MergeRequest` with the pre-M34 6-arg signature and patch `workspace_id` after the fact, while this branch's `MergeRequest::new` takes the workspace `Id` as its third argument — the same failure class repaired in `6a8d4a7c`/`ed6a9adc`/`f811501f`. All three fixtures now inline their workspace `Id` at the construction site (identical final state to the removed post-construction assignment); the trust-audit fixture's now-unneeded `mut` was dropped. No product code changed. The merged `test_state()` keeps both sides' wiring: the base's seeded builtin ABAC policies (`shared_workspace_policy_pair_seeded`) and this branch's `MemSessionRepository` session store; session routes remain ABAC-exempt with per-handler enforcement, and `check-abac-route-registry`/`check-abac-exempt-handlers` pass on the merged tree.
+All body checkboxes above are satisfied by the shipped code except `cargo test --all`, which is deferred to the independent verifier (gyre-server test codegen exceeds the in-sandbox 4 GiB budget; the build wrapper blocks it by design). The full suite must run `cargo test --all` on this exact head; the four `merge_requests` tests from finding `4fb29ee2` were repaired by `bdf1855d` and the merge with base `c844ea52` type-checks clean including all test targets.
 
-### Test evidence
+### Test evidence (this round, tree unchanged at `06fcc511`)
 
-In-sandbox this round (log: `/tmp/stage/review-evidence/task-111-c844ea52-merge-round.log`):
+Logs under `/tmp/stage/review-evidence/`:
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — clean (the merge plus the three fixture repairs type-check, including the base's new `policy_cache`, `evaluate_push_attestation_abac`, and reserved-system-identity call sites).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — clean (7m18s).
 - `cargo fmt --check` — clean.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-domain -p gyre-common -p gyre-ports` — 643 passed, 0 failed.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters` — 534 passed, 0 failed (includes the SQLite `SessionRepository` suite).
-- All mechanical invariant gates pass on the merged tree: architecture/hierarchy lint, ABAC route registry + exempt-handler parity, MCP write-tool gating, migration versions and SQL portability, dead message kinds, byte-slice truncation, relative path defaults, fail-open ref resolution, mem port contracts, fabricated scope defaults (lookup and construction), lossy secret conversion, inert enforcement, forged scope fields, forwarded-header trust, in-memory state stores, unbounded external HTTP (logs in `/tmp/stage/review-evidence/check-*.log`).
-
-Deferred to the independent verifier (gyre-server test codegen exceeds the in-sandbox 4 GiB budget; the wrapper blocks it by design):
-
-- `cargo test --all` — expected: the three repaired `merge_processor` tests compile and pass; the full suite last ran green on this branch's tree at base `32c4faef` (finding `4fb29ee2`: 2181 passed, only the 4 `merge_requests` failures since repaired in `bdf1855d`), and the only compile-level interaction with the new base was the constructor drift fixed in `c947d22f`.
+- All 19 mechanical invariant gates pass: architecture, ABAC route registry + exempt-handler parity, MCP write-tool gating, migration versions + SQL portability, dead message kinds, byte-slice truncation, relative path defaults, fail-open ref resolution, mem port contracts, fabricated scope defaults (lookup + construction), lossy secret conversion, scope-literal defaults, inert enforcement, forged scope fields, forwarded-header trust, in-memory state stores, unbounded external HTTP.
+- `scripts/check-task-commit-attribution.sh` — passes with the frontmatter commit list restored by this commit (17 labeled product-surface commits + 5 unlabeled product commits from this branch recorded for review scoping).
