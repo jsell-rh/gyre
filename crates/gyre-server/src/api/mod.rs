@@ -200,6 +200,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/gates/:gate_id",
             put(gates::update_gate).delete(gates::delete_gate),
         )
+        // Gate chain configuration (agent-gates.md §Gate Chains)
+        .route(
+            "/api/v1/repos/:id/gate-chain",
+            get(gates::get_gate_chain).put(gates::set_gate_chain),
+        )
         // Pre-accept push gates
         .route(
             "/api/v1/repos/:id/push-gates",
@@ -521,6 +526,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/analytics/usage", get(analytics::usage))
         .route("/api/v1/analytics/compare", get(analytics::compare))
         .route("/api/v1/analytics/top", get(analytics::top_events))
+        // Analytics Decision API (analytics.md §Decision API for Agents)
+        .route("/api/v1/analytics/decide", get(analytics::decide))
+        .route(
+            "/api/v1/analytics/decide/custom",
+            post(analytics::decide_custom),
+        )
         // Costs
         .route(
             "/api/v1/costs",

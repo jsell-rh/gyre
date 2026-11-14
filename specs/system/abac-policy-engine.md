@@ -286,6 +286,8 @@ Gyre ships with a set of built-in tenant-level policies that enforce fundamental
 
 Built-in policies cannot be deleted. Non-immutable built-in policies can be overridden by higher-priority custom policies (with audit logging). Immutable built-in policies (where `immutable: true`) cannot be overridden regardless of priority — immutable Deny policies are evaluated before all priority-based evaluation (see `human-system-interface.md` §2).
 
+The `gyre-system-token` subject identity is **reserved**: only the genuine global `GYRE_AUTH_TOKEN` principal (no backing user row) may carry it. Every `display_name` write path (profile update, admin user creation, SSO provisioning) rejects the string — a user's display name is the ABAC subject identity under API-key/JWT auth — and any non-system principal that still presents it (pre-existing row, direct DB edit) is denied before policy evaluation. The global token itself is allowed *by* `system-full-access` through the normal evaluation flow (there is no separate middleware bypass for it).
+
 ### Performance
 
 Policy evaluation happens on every request. It must be fast:

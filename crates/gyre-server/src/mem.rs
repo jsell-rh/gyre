@@ -14,9 +14,9 @@ use gyre_domain::{
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
-    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsQueryFilter, AnalyticsRepository,
+    ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository,
+    CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
     MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
     RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
     TaskRepository, TenantMetaSpecSetRepository, TenantRepository, UserRepository,
@@ -1368,6 +1368,40 @@ pub struct MemAnalyticsRepository {
     store: Arc<Mutex<Vec<AnalyticsEvent>>>,
 }
 
+/// Shared filter predicate for `MemAnalyticsRepository` — the exact
+/// semantics of `AnalyticsRepository::query_filtered` (exact or
+/// trailing-`*` event_name, scope equality, inclusive since/until).
+/// `count_grouped` reuses it so the grouped path can never drift from
+/// the filtered path.
+fn analytics_event_matches_filter(e: &AnalyticsEvent, filter: &AnalyticsQueryFilter) -> bool {
+    let name_ok = match &filter.event_name {
+        None => true,
+        Some(pat) => match pat.strip_suffix('*') {
+            Some(prefix) => e.event_name.starts_with(prefix),
+            None => e.event_name == *pat,
+        },
+    };
+    name_ok
+        && filter
+            .agent_id
+            .as_ref()
+            .is_none_or(|id| e.agent_id.as_ref() == Some(id))
+        && filter
+            .user_id
+            .as_ref()
+            .is_none_or(|id| e.user_id.as_ref() == Some(id))
+        && filter
+            .workspace_id
+            .as_ref()
+            .is_none_or(|id| e.workspace_id.as_ref() == Some(id))
+        && filter
+            .repo_id
+            .as_ref()
+            .is_none_or(|id| e.repo_id.as_ref() == Some(id))
+        && filter.since.is_none_or(|s| e.timestamp >= s)
+        && filter.until.is_none_or(|u| e.timestamp <= u)
+}
+
 #[async_trait]
 impl AnalyticsRepository for MemAnalyticsRepository {
     async fn record(&self, event: &AnalyticsEvent) -> Result<()> {
@@ -1390,8 +1424,20 @@ impl AnalyticsRepository for MemAnalyticsRepository {
             })
             .cloned()
             .collect();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         events.truncate(limit);
+        Ok(events)
+    }
+
+    async fn query_filtered(&self, filter: &AnalyticsQueryFilter) -> Result<Vec<AnalyticsEvent>> {
+        let store = self.store.lock().await;
+        let mut events: Vec<AnalyticsEvent> = store
+            .iter()
+            .filter(|e| analytics_event_matches_filter(e, filter))
+            .cloned()
+            .collect();
+        events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+        events.truncate(filter.limit);
         Ok(events)
     }
 
@@ -1402,6 +1448,39 @@ impl AnalyticsRepository for MemAnalyticsRepository {
             .filter(|e| e.event_name == event_name && e.timestamp >= since && e.timestamp <= until)
             .count();
         Ok(count as u64)
+    }
+
+    async fn count_grouped(
+        &self,
+        filter: &AnalyticsQueryFilter,
+        group_by: gyre_ports::AnalyticsGroupBy,
+    ) -> Result<Vec<(String, u64)>> {
+        use std::collections::BTreeMap;
+        // Aggregate the FULL filtered set (task-146 review F1): the
+        // event-level limit never truncates the input; `filter.limit`
+        // bounds the number of returned groups, mirroring the SQL
+        // adapters' `GROUP BY ... LIMIT`.
+        let store = self.store.lock().await;
+        let mut groups: BTreeMap<String, u64> = BTreeMap::new();
+        for e in store.iter() {
+            if !analytics_event_matches_filter(e, filter) {
+                continue;
+            }
+            let key = match group_by {
+                gyre_ports::AnalyticsGroupBy::EventName => e.event_name.clone(),
+                gyre_ports::AnalyticsGroupBy::AgentId => {
+                    e.agent_id.clone().unwrap_or_else(|| "(none)".into())
+                }
+                gyre_ports::AnalyticsGroupBy::WorkspaceId => {
+                    e.workspace_id.clone().unwrap_or_else(|| "(none)".into())
+                }
+                gyre_ports::AnalyticsGroupBy::Day => {
+                    epoch_days_to_date((e.timestamp / 86_400) as i64)
+                }
+            };
+            *groups.entry(key).or_insert(0) += 1;
+        }
+        Ok(groups.into_iter().take(filter.limit).collect())
     }
 
     async fn aggregate_by_day(
@@ -1449,6 +1528,281 @@ fn epoch_days_to_date(days: i64) -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+#[cfg(test)]
+mod analytics_query_tests {
+    use super::*;
+    use gyre_ports::AnalyticsGroupBy;
+    use gyre_ports::AnalyticsRepository;
+
+    fn scoped_event(
+        id: &str,
+        name: &str,
+        agent_id: Option<&str>,
+        user_id: Option<&str>,
+        workspace_id: Option<&str>,
+        repo_id: Option<&str>,
+        ts: u64,
+    ) -> AnalyticsEvent {
+        AnalyticsEvent {
+            id: Id::new(id),
+            event_name: name.to_string(),
+            agent_id: agent_id.map(str::to_string),
+            user_id: user_id.map(str::to_string),
+            session_id: None,
+            workspace_id: workspace_id.map(str::to_string),
+            repo_id: repo_id.map(str::to_string),
+            properties: serde_json::json!({}),
+            timestamp: ts,
+        }
+    }
+
+    #[tokio::test]
+    async fn query_filtered_matches_sqlite_filter_semantics() {
+        let repo = MemAnalyticsRepository::default();
+        repo.record(&scoped_event(
+            "e1",
+            "mr.merged",
+            Some("a1"),
+            None,
+            Some("ws-1"),
+            Some("r1"),
+            100,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "e2",
+            "mr.merged",
+            Some("a2"),
+            Some("u9"),
+            Some("ws-2"),
+            Some("r1"),
+            200,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "e3",
+            "task.status_changed",
+            Some("a1"),
+            None,
+            Some("ws-1"),
+            None,
+            300,
+        ))
+        .await
+        .unwrap();
+
+        // Prefix wildcard.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 2, "mr.* prefix match");
+
+        // Literal, case-sensitive prefix semantics (task-146 review R4,
+        // same contract as the SQLite/Postgres adapters): `MR.*` and a
+        // wildcard-bearing `mr.m_rged*` must not match `mr.merged`.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("MR.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "case-variant prefix must not match: {out:?}"
+        );
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.m_rged*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "wildcard-bearing prefix must not match: {out:?}"
+        );
+
+        // Scope filters are conjunctive.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.merged".into()),
+            repo_id: Some("r1".into()),
+            workspace_id: Some("ws-2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // user_id filter.
+        let f = AnalyticsQueryFilter {
+            user_id: Some("u9".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // since/until inclusive bounds.
+        let f = AnalyticsQueryFilter {
+            since: Some(200),
+            until: Some(200),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // limit truncates (newest first ordering).
+        let f = AnalyticsQueryFilter {
+            limit: 2,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, Id::new("e3"), "newest event first");
+    }
+
+    #[tokio::test]
+    async fn count_grouped_over_full_filtered_set() {
+        // task-146 review F1 regression (mem contract): grouped counts
+        // aggregate the FULL filtered set — the event-level limit bounds
+        // the number of returned groups, never the input to the
+        // aggregation. Mirrors the SQLite adapter test.
+        let repo = MemAnalyticsRepository::default();
+        for i in 0..150u64 {
+            repo.record(&scoped_event(
+                &format!("m{i}"),
+                "mr.merged",
+                Some("a1"),
+                None,
+                Some("ws-1"),
+                None,
+                1000 + i,
+            ))
+            .await
+            .unwrap();
+        }
+        repo.record(&scoped_event(
+            "c0",
+            "mr.closed",
+            Some("a2"),
+            None,
+            Some("ws-2"),
+            None,
+            2000,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "c1",
+            "mr.closed",
+            None,
+            None,
+            Some("ws-2"),
+            None,
+            2001,
+        ))
+        .await
+        .unwrap();
+
+        let f = AnalyticsQueryFilter {
+            limit: 100,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo
+            .count_grouped(&f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![("mr.closed".to_string(), 2), ("mr.merged".to_string(), 150)],
+            "grouped totals must not be truncated by the event-level limit"
+        );
+
+        // Consistent with count() on the same question (i64::MAX, not
+        // u64::MAX: the SQL adapters bind `until` as i64).
+        assert_eq!(
+            repo.count("mr.merged", 0, i64::MAX as u64).await.unwrap(),
+            150
+        );
+
+        // limit bounds the number of returned groups.
+        let f = AnalyticsQueryFilter {
+            limit: 1,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo
+            .count_grouped(&f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert_eq!(out, vec![("mr.closed".to_string(), 2)]);
+
+        // NULL agent_id groups under "(none)".
+        let out = repo
+            .count_grouped(&AnalyticsQueryFilter::new(), AnalyticsGroupBy::AgentId)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                ("(none)".to_string(), 1),
+                ("a1".to_string(), 150),
+                ("a2".to_string(), 1)
+            ]
+        );
+
+        // Same filter semantics as query_filtered: prefix + workspace.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.m*".into()),
+            workspace_id: Some("ws-1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo
+            .count_grouped(&f, AnalyticsGroupBy::EventName)
+            .await
+            .unwrap();
+        assert_eq!(out, vec![("mr.merged".to_string(), 150)]);
+
+        // Day grouping: Jan 1 / Jan 2 2024 UTC buckets.
+        let day1: u64 = 1_704_067_200;
+        repo.record(&scoped_event("d1", "ev2", None, None, None, None, day1))
+            .await
+            .unwrap();
+        repo.record(&scoped_event(
+            "d2",
+            "ev2",
+            None,
+            None,
+            None,
+            None,
+            day1 + 3600,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "d3",
+            "ev2",
+            None,
+            None,
+            None,
+            None,
+            day1 + 86_400,
+        ))
+        .await
+        .unwrap();
+        let f = AnalyticsQueryFilter {
+            event_name: Some("ev2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.count_grouped(&f, AnalyticsGroupBy::Day).await.unwrap();
+        assert_eq!(
+            out,
+            vec![("2024-01-01".to_string(), 2), ("2024-01-02".to_string(), 1)]
+        );
+    }
+}
+
 #[derive(Default)]
 pub struct MemCostRepository {
     store: Arc<Mutex<Vec<CostEntry>>>,
@@ -1470,7 +1824,7 @@ impl CostRepository for MemCostRepository {
             })
             .cloned()
             .collect();
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         Ok(entries)
     }
 
@@ -1481,7 +1835,7 @@ impl CostRepository for MemCostRepository {
             .filter(|e| e.task_id.as_ref().map(|id| id.as_str()) == Some(task_id.as_str()))
             .cloned()
             .collect();
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         Ok(entries)
     }
 
@@ -3018,12 +3372,10 @@ impl gyre_ports::QualityGateRepository for MemQualityGateRepository {
             .filter(|g| g.repo_id.to_string() == repo_id)
             .cloned()
             .collect();
-        // Same ordering contract as the SQL adapters: (position, created_at).
-        gates.sort_by(|a, b| {
-            a.position
-                .cmp(&b.position)
-                .then(a.created_at.cmp(&b.created_at))
-        });
+        // Chain order (agent-gates.md §Gate Chains): position first,
+        // creation order as the tiebreak — mirrors the SQL adapters'
+        // ORDER BY position, created_at.
+        gates.sort_by_key(|g| (g.position, g.created_at));
         Ok(gates)
     }
     async fn delete(&self, id: &str) -> Result<()> {
@@ -4365,7 +4717,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair_seeded();
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
@@ -4570,6 +4922,42 @@ fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
     (Arc::new(workspaces), policies, ws_store)
 }
 
+/// Production-parity variant of [`shared_workspace_policy_pair`]: the
+/// shared policy store comes pre-populated with the full built-in ABAC
+/// policy set — `abac_middleware::m34_builtin_policies()` chained with
+/// `abac_middleware::domain_builtin_policies()`, the exact set
+/// [`abac_middleware::seed_builtin_policies`] persists at startup
+/// (main.rs), keyed by policy id exactly as `MemPolicyRepository::create`
+/// writes them. Constructing the map synchronously (before it is wrapped
+/// in the store mutex) keeps every `test_state*` builder callable from
+/// sync and current-thread-runtime contexts alike.
+///
+/// task-129 removed the middleware's system-token bypass: the global
+/// GYRE_AUTH_TOKEN is allowed BY the `system-full-access` policy
+/// (priority 1000), so a test state whose policy store is empty
+/// default-denies every ABAC-evaluated route — the seeded builtin set is
+/// part of production wiring (`main.rs` seeds it before serving), not an
+/// optional extra. Test states that specifically exercise empty- or
+/// failing-policy behavior (`test_state_failing_policy_creates`,
+/// `test_state_failing_policy_lists`) build their own stores and stay
+/// unseeded.
+#[cfg(test)]
+fn shared_workspace_policy_pair_seeded() -> SharedWorkspacePolicyPair {
+    let mut seeded = std::collections::HashMap::new();
+    for policy in crate::abac_middleware::m34_builtin_policies()
+        .into_iter()
+        .chain(crate::abac_middleware::domain_builtin_policies())
+    {
+        seeded.insert(policy.id.to_string(), policy);
+    }
+    let pol_store = Arc::new(tokio::sync::Mutex::new(seeded));
+    let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
+    (Arc::new(workspaces), policies, ws_store)
+}
+
 /// Build an AppState with a custom GitOpsPort for tests that need to control
 /// git operation behavior (e.g., configurable `can_merge` results).
 #[cfg(test)]
@@ -4624,6 +5012,12 @@ fn test_state_inner(
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
     let meta_spec_binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    // §Performance: wrap the policy repo in the read-through cache, same as
+    // build_state, so middleware/engine tests exercise the cached path.
+    let policy_cache = Arc::new(crate::policy_cache::PolicyCache::default());
+    let cached_policies: Arc<dyn gyre_ports::PolicyRepository> = Arc::new(
+        crate::policy_cache::CachedPolicyRepository::new(policies, Arc::clone(&policy_cache)),
+    );
 
     // Mirror production wiring (lib.rs): entity repositories are wrapped in
     // search-sync decorators so tests exercise the same index-on-write
@@ -4744,7 +5138,8 @@ fn test_state_inner(
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
         personas,
-        policies,
+        policies: cached_policies,
+        policy_cache,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
         repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),

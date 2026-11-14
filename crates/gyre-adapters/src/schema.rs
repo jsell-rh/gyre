@@ -132,6 +132,8 @@ diesel::table! {
         reviewer_agent_id -> Text,
         decision -> Text,
         body -> Nullable<Text>,
+        reviewer_persona -> Nullable<Text>,
+        gate_id -> Nullable<Text>,
         created_at -> BigInt,
     }
 }
@@ -245,6 +247,10 @@ diesel::table! {
         id -> Text,
         event_name -> Text,
         agent_id -> Nullable<Text>,
+        user_id -> Nullable<Text>,
+        session_id -> Nullable<Text>,
+        workspace_id -> Nullable<Text>,
+        repo_id -> Nullable<Text>,
         properties -> Text,
         timestamp -> BigInt,
         tenant_id -> Text,
@@ -563,8 +569,8 @@ diesel::table! {
         required -> Integer,
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,
-        created_at -> BigInt,
         position -> Integer,
+        created_at -> BigInt,
     }
 }
 

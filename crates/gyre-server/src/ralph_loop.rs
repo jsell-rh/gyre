@@ -22,7 +22,9 @@ use std::sync::Arc;
 
 use gyre_common::message::{Destination, MessageKind};
 use gyre_common::Id;
-use gyre_domain::{Agent, AgentStatus, GateStatus, MergeRequest, MrStatus, Task, TaskStatus};
+use gyre_domain::{
+    Agent, AgentStatus, AnalyticsEvent, GateStatus, MergeRequest, MrStatus, Task, TaskStatus,
+};
 
 use crate::AppState;
 
@@ -216,6 +218,11 @@ async fn complete_task_on_merge(state: &Arc<AppState>, mr: &MergeRequest, agent_
     if task.status == TaskStatus::Done {
         return;
     }
+    // The persisted transition runs from the status loaded above to Done
+    // (task-146 review R4): the in-memory InProgress→Review hop below only
+    // satisfies the domain's transition graph — the row this path persists
+    // changes from `old_status` (the loaded status) to Done.
+    let old_status = task.status.clone();
     // Navigate to Review first (an InProgress task at merge time — e.g. the
     // MR merged while a re-spawn had returned the task to InProgress —
     // needs InProgress → Review → Done).
@@ -235,6 +242,11 @@ async fn complete_task_on_merge(state: &Arc<AppState>, mr: &MergeRequest, agent_
         tracing::warn!(task_id = %task.id, "ralph-loop: task Done persist failed: {e}");
         return;
     }
+    // Auto-track the Review→Done terminal transition (analytics.md
+    // §Auto-Emitted Events — every persisted task status transition
+    // records a task.status_changed event; task-146 review R4: this
+    // pass-path tail previously persisted Done without it).
+    crate::api::analytics::record_task_status_changed(state, &task, &old_status).await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
@@ -276,9 +288,14 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
     // 1. Task remains InProgress (Phase 7 step 1) — move it back from the
     //    Review state the completion handler set.
     if task.status == TaskStatus::Review {
+        let old_status = task.status.clone();
         let _ = task.transition_status(TaskStatus::InProgress);
         task.updated_at = now;
         let _ = state.tasks.update(&task).await;
+        // Auto-track the re-open transition (analytics.md
+        // §Auto-Emitted Events — every persisted task status transition
+        // records a task.status_changed event).
+        crate::api::analytics::record_task_status_changed(state, &task, &old_status).await;
     }
 
     // 2. Gate failure details → the agent's inbox, as messages the next
@@ -326,6 +343,23 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
     if closed.transition_status(MrStatus::Closed).is_ok() {
         closed.updated_at = now;
         let _ = state.merge_requests.update(&closed).await;
+        // Auto-track mr.closed (analytics.md §Auto-Emitted Events): the
+        // ralph loop closes the failed MR without merge so the next
+        // completion creates a fresh one — same event shape as the MR
+        // close endpoint, with the gate-failure cause as the reason.
+        let ev = AnalyticsEvent::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            "mr.closed",
+            mr.author_agent_id.as_ref().map(|id| id.to_string()),
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "reason": "gate_failure",
+            }),
+            now,
+        )
+        .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+        let _ = state.analytics.record(&ev).await;
     }
 
     // 4. Iteration accounting against the repo's ceiling.
@@ -340,9 +374,20 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
         agent.iteration = iteration;
         let _ = agent.transition_status(AgentStatus::Failed);
         let _ = state.agents.update(&agent).await;
+        let old_status = task.status.clone();
         let _ = task.transition_status(TaskStatus::Blocked);
         task.updated_at = now;
         let _ = state.tasks.update(&task).await;
+        // Auto-track the terminal transitions (analytics.md
+        // §Auto-Emitted Events): agent.failed on the iteration ceiling,
+        // task.status_changed on the Block.
+        crate::api::analytics::record_agent_failed(
+            state,
+            &agent,
+            &format!("max iterations reached ({max_iterations}) with failing gates"),
+        )
+        .await;
+        crate::api::analytics::record_task_status_changed(state, &task, &old_status).await;
         // The agent's token was already revoked at completion; make sure a
         // terminal agent cannot re-authenticate.
         let _ = state
@@ -450,13 +495,25 @@ async fn respawn_with_retry(
     // (cancellation, spec rejection).
     let blocked = match state.tasks.find_by_id(&task.id).await {
         Ok(Some(mut t)) => {
+            let old_status = t.status.clone();
             let _ = t.transition_status(TaskStatus::Blocked);
             t.updated_at = now;
             let _ = state.tasks.update(&t).await;
+            // Auto-track the Block (analytics.md §Auto-Emitted Events —
+            // every persisted task status transition records).
+            crate::api::analytics::record_task_status_changed(state, &t, &old_status).await;
             t
         }
         _ => task.clone(),
     };
+    // Auto-track the terminal agent death (analytics.md §Auto-Emitted
+    // Events: agent.failed covers "fails or is killed").
+    crate::api::analytics::record_agent_failed(
+        state,
+        &failed,
+        &format!("re-spawn failed after all retries: {reason}"),
+    )
+    .await;
     notify_task_blocked(
         state,
         &blocked,
@@ -604,8 +661,9 @@ pub(crate) async fn relaunch_agent_session(
     let branch = wt.branch.clone();
     let work_dir = wt.path.clone();
 
-    // Fresh JWT (the completion path revoked the previous one) — minted
-    // with the same workload claims as the first spawn.
+    // Resolve the workspace compute target (same as the first spawn) —
+    // used both for the JWT's workload/attestation claims and the launch
+    // context below.
     let resolved_ct_entity = match workspace.as_ref() {
         Some(ws) => resolve_workspace_target(state, ws).await?,
         None => None,
@@ -661,12 +719,19 @@ pub(crate) async fn relaunch_agent_session(
         None => None,
     };
 
-    // Fresh JWT (§1 Token Scoping): minted with the same hierarchy context
-    // as the first spawn — tenant from the repo's workspace (fail-closed: an
-    // unresolvable workspace means the tenant scope cannot be determined,
-    // never a fabricated identity), the fine-grained `repo:{name}:write`
-    // scope list, the persona slug bound to the agent row, and the
-    // identity-security.md attestation level implied by the compute target.
+    // Fresh JWT (§1 Token Scoping + task-129 review round 6): minted with
+    // the SAME worker scope claims as the first spawn
+    // (`mint_worker_scoped`: tenant, `workspace_id`, `repo_id`, and the
+    // fine-grained `repo:{name}:write` scope list) so the ABAC subject
+    // attribute `subject.repo_scope` (§Attributes, source "Agent OIDC
+    // claim") is real on every request the re-spawned session makes —
+    // without it the `builtin-agent-repo-scope` containment Deny fails
+    // its condition and the agent gains tenant-wide access. Tenant comes
+    // from the repo's workspace, resolved fail-closed: an unresolvable
+    // workspace means the tenant scope cannot be determined, never a
+    // fabricated identity. The persona slug bound to the agent row and
+    // the identity-security.md attestation level implied by the compute
+    // target mirror the first-spawn mint.
     let ws_tenant = match &workspace {
         Some(ws) => ws.tenant_id.to_string(),
         None => anyhow::bail!(
@@ -678,7 +743,7 @@ pub(crate) async fn relaunch_agent_session(
     };
     let token = state
         .agent_signing_key
-        .mint_with_workload(
+        .mint_worker_scoped(
             agent.id.as_str(),
             task.id.as_str(),
             agent.spawned_by.as_deref().unwrap_or("system"),
@@ -695,17 +760,12 @@ pub(crate) async fn relaunch_agent_session(
             Some(
                 resolved_ct_entity
                     .as_ref()
-                    .map_or(1u32, |ct| match ct.target_type {
+                    .map_or(1u8, |ct| match ct.target_type {
                         gyre_domain::ComputeTargetType::Container => 3,
                         gyre_domain::ComputeTargetType::Ssh => 2,
                         gyre_domain::ComputeTargetType::Kubernetes => 1,
                     }),
             ),
-            None,
-            None,
-            None,
-            None,
-            None,
             wl_image_hash,
         )
         .map_err(|e| anyhow::anyhow!("re-spawn JWT mint: {e}"))?;
@@ -713,6 +773,17 @@ pub(crate) async fn relaunch_agent_session(
         .kv_store
         .kv_set("agent_tokens", agent.id.as_str(), token.clone())
         .await;
+
+    // analytics.md §Auto-Emitted Events: the re-spawn's `agent.spawned`
+    // persona property reports the persona bound to the agent row (the
+    // same persona resolved above), not a hardcoded bootstrap label —
+    // persona-performance decision signals keyed on this property are
+    // garbage otherwise. Captured before `persona` moves into the
+    // launch ctx.
+    let persona_label = persona
+        .as_ref()
+        .map(|p| p.slug.clone())
+        .unwrap_or_else(|| "default-worker".to_string());
 
     let launch = crate::api::spawn::launch_agent_process(
         state,
@@ -766,6 +837,27 @@ pub(crate) async fn relaunch_agent_session(
     // Budget: the completion path decremented the active-agent counter;
     // the re-spawned session occupies a slot again.
     crate::api::budget::increment_active_agents(state, &repo.workspace_id.to_string()).await;
+
+    // Auto-track agent spawn (analytics.md §Auto-Emitted Events — a
+    // re-spawned session is an agent spawn). Same shape as the first-spawn
+    // event in spawn_agent_core: the persona bound to the agent row, the
+    // launch's resolved compute target, scoped to the workspace/repo.
+    let ev = AnalyticsEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        "agent.spawned",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": task.id.to_string(),
+            "compute_target": launch.compute_target_label,
+            "persona": persona_label,
+            "orchestrator_type": "worker",
+            "respawn": true,
+            "iteration": agent.iteration,
+        }),
+        now_secs(),
+    )
+    .with_scope(None, None, Some(&repo.workspace_id), Some(&repo.id));
+    let _ = state.analytics.record(&ev).await;
 
     tracing::info!(
         agent_id = %agent.id,
@@ -855,6 +947,12 @@ mod tests {
         task.task_type = Some(gyre_domain::TaskType::Implementation);
         task.workspace_id = Id::new("ws-1");
         task.repo_id = Id::new("r-1");
+        // Production parity: the spawn path assigns the spawned agent onto
+        // the task (spawn.rs sets task.assigned_to = agent.id before the
+        // session starts), so a task an agent is working through review
+        // carries its assignee — the task.status_changed re-open event's
+        // assigned_to property reports it.
+        task.assigned_to = Some(Id::new("agent-1"));
         task.transition_status(TaskStatus::InProgress).unwrap();
         task.transition_status(TaskStatus::Review).unwrap();
         state.tasks.create(&task).await.unwrap();
@@ -903,8 +1001,8 @@ mod tests {
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
-            timeout_secs: None,
             position: 0,
+            timeout_secs: None,
             created_at: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
@@ -945,6 +1043,22 @@ mod tests {
         let _env_guard = EnvVarRemove("GYRE_AGENT_COMMAND");
         std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
         let state = loop_state(None).await; // default ceiling: 10
+
+        // Bind an approved persona to the agent row so the re-spawn's
+        // `agent.spawned` persona property is observable: analytics.md
+        // §Auto-Emitted Events requires the property to report the
+        // persona bound to the agent row, not a hardcoded bootstrap label
+        // (regression: the emit site hardcoded "default-worker").
+        {
+            let mut bound = state
+                .agents
+                .find_by_id(&Id::new("agent-1"))
+                .await
+                .unwrap()
+                .unwrap();
+            bound.persona_id = Some(Id::new("repo-orchestrator-persona"));
+            state.agents.update(&bound).await.unwrap();
+        }
 
         on_gates_failed(&state, &Id::new("mr-1"), &Id::new("agent-1")).await;
 
@@ -1008,6 +1122,122 @@ mod tests {
             .await
             .unwrap();
         assert!(token.is_some(), "re-spawned agent has a fresh token");
+
+        // analytics.md §Auto-Emitted Events: a re-spawned session is an
+        // agent spawn — `agent.spawned` must record with the same shape as
+        // the first-spawn event (task_id, compute_target, persona), scoped
+        // to the workspace/repo, and marked as a re-spawn.
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.agent_id.as_deref() == Some("agent-1"))
+            .expect("re-spawn must record an agent.spawned event");
+        assert_eq!(ev.properties["task_id"], "task-1");
+        assert_eq!(ev.properties["respawn"], true);
+        assert_eq!(ev.properties["iteration"], 1);
+        assert!(
+            ev.properties["compute_target"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
+            "compute_target must be a non-empty string"
+        );
+        assert_eq!(
+            ev.properties["persona"], "repo-orchestrator",
+            "persona property must report the persona bound to the agent row, not a hardcoded label"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(ev.repo_id.as_deref(), Some("r-1"));
+
+        // analytics.md §Auto-Emitted Events (review round 2): the ralph
+        // loop's MR close and task re-open are real trigger points —
+        // mr.closed carries mr_id/repo_id/reason, task.status_changed
+        // carries the Review→InProgress re-open.
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.properties["mr_id"].as_str() == Some("mr-1"))
+            .expect("gate-failure MR close must record an mr.closed event");
+        assert_eq!(ev.properties["repo_id"], "r-1");
+        assert_eq!(ev.properties["reason"], "gate_failure");
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(ev.repo_id.as_deref(), Some("r-1"));
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.properties["task_id"].as_str() == Some("task-1"))
+            .expect("gate-failure re-open must record a task.status_changed event");
+        assert_eq!(ev.properties["old_status"], "Review");
+        assert_eq!(ev.properties["new_status"], "InProgress");
+        assert_eq!(ev.properties["assigned_to"], "agent-1");
+    }
+
+    /// Review round 6 (task-129, §Built-In Policies agent-repo-scope): the
+    /// re-spawn JWT must carry the SAME worker scope claims as the first
+    /// spawn (`mint_worker_scoped`: workspace_id + repo_id). The previous
+    /// mint (`mint_with_workload`) hardcoded `repo_id: None`, so a
+    /// re-spawned agent's requests had NO `subject.repo_scope` — the
+    /// builtin-agent-repo-scope containment Deny (750) failed its
+    /// condition and builtin-agent-scoped-access (700) granted
+    /// tenant-wide access. Killing direction: with the claim-less mint,
+    /// both assertions below fail (claims are None).
+    #[tokio::test]
+    async fn respawn_jwt_carries_worker_scope_claims() {
+        struct EnvVarRemove(&'static str);
+        impl Drop for EnvVarRemove {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _env_guard = EnvVarRemove("GYRE_AGENT_COMMAND");
+        std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
+        let state = loop_state(None).await; // default ceiling: 10
+
+        on_gates_failed(&state, &Id::new("mr-1"), &Id::new("agent-1")).await;
+
+        let agent = state
+            .agents
+            .find_by_id(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.status, AgentStatus::Active, "agent re-spawned");
+
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", "agent-1")
+            .await
+            .unwrap()
+            .expect("re-spawned agent has a fresh token");
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("re-spawn JWT must validate against the signing key");
+        assert_eq!(
+            claims.repo_id.as_deref(),
+            Some("r-1"),
+            "the re-spawn JWT must carry the task's repo scope — without it, \
+             agent-repo-scope containment is not enforced for re-spawned sessions"
+        );
+        assert_eq!(
+            claims.workspace_id.as_deref(),
+            Some("ws-1"),
+            "the re-spawn JWT must carry the repo's workspace scope, like the \
+             first-spawn JWT"
+        );
     }
 
     /// Phase 7 spawn-failure policy on the RE-SPAWN path (review F1,
@@ -1122,6 +1352,39 @@ mod tests {
             }),
             "priority-1 ComputeTargetUnavailable notification created: {notifs:?}"
         );
+
+        // analytics.md §Auto-Emitted Events (review round 2): the terminal
+        // re-spawn failure records agent.failed and task.status_changed —
+        // the spec trigger points the reviewer found silent.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.agent_id.as_deref() == Some("agent-1"))
+            .expect("terminal re-spawn failure must record an agent.failed event");
+        assert_eq!(ev.properties["task_id"], "task-1");
+        assert!(
+            ev.properties["reason"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("re-spawn failed after all retries")),
+            "reason names the re-spawn failure: {:?}",
+            ev.properties["reason"]
+        );
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.iter().any(|e| e.properties["task_id"] == "task-1"
+                && e.properties["old_status"] == "InProgress"
+                && e.properties["new_status"] == "Blocked"),
+            "terminal Block must record a task.status_changed event: {events:?}"
+        );
     }
 
     /// Phase 7 at the ceiling: max iterations → task Blocked, agent Failed,
@@ -1184,6 +1447,57 @@ mod tests {
             .await
             .unwrap();
         assert!(token.is_none(), "failed agent's token revoked");
+
+        // analytics.md §Auto-Emitted Events (review round 2): the ceiling
+        // records mr.closed, agent.failed, and both task.status_changed
+        // transitions (Review→InProgress re-open, InProgress→Blocked).
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.iter().any(
+                |e| e.properties["mr_id"] == "mr-1" && e.properties["reason"] == "gate_failure"
+            ),
+            "ceiling MR close must record an mr.closed event: {events:?}"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.agent_id.as_deref() == Some("agent-1"))
+            .expect("iteration ceiling must record an agent.failed event");
+        assert_eq!(ev.properties["task_id"], "task-1");
+        assert!(
+            ev.properties["reason"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("max iterations reached")),
+            "reason names the iteration ceiling: {:?}",
+            ev.properties["reason"]
+        );
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.iter().any(|e| e.properties["task_id"] == "task-1"
+                && e.properties["old_status"] == "InProgress"
+                && e.properties["new_status"] == "Blocked"),
+            "ceiling Block must record a task.status_changed event: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.properties["task_id"] == "task-1"
+                && e.properties["old_status"] == "Review"
+                && e.properties["new_status"] == "InProgress"),
+            "ceiling re-open must record a task.status_changed event: {events:?}"
+        );
     }
 
     /// Phase 7 pass path tail: when the merged MR's author task is in
@@ -1227,5 +1541,21 @@ mod tests {
         assert!(msgs
             .iter()
             .any(|m| { m.payload.as_ref().and_then(|p| p["task_id"].as_str()) == Some("task-1") }));
+
+        // task-146 review R4: the Review→Done terminal transition is a
+        // persisted production status change — it must record a
+        // task.status_changed analytics event like every sibling path.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.iter().any(|e| e.properties["task_id"] == "task-1"
+                && e.properties["old_status"] == "Review"
+                && e.properties["new_status"] == "Done"
+                && e.properties["assigned_to"] == "agent-1"),
+            "merge completion must record a task.status_changed event: {events:?}"
+        );
     }
 }

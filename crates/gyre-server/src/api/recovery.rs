@@ -240,9 +240,9 @@ pub async fn repo_status(
         .unwrap_or(false);
 
     // main_green: run post-merge gates against current default-branch HEAD.
-    // Fail CLOSED (task-095 R3-F3): when the HEAD ref does not resolve there
-    // is no tree to validate — report `main_green: false` with the failure in
-    // `pause_reason` context, never a green reading from an unvalidated tree.
+    // Fail closed (task-095 R3-F3): when the HEAD ref does not resolve there
+    // is no tree to validate — report `main_green: false`, never a green
+    // reading from an unvalidated tree or an empty-string SHA.
     let main_green = if skip_gates || gates.is_empty() {
         None
     } else {
@@ -253,11 +253,18 @@ pub async fn repo_status(
         .await
         {
             Some(head_sha) => Some(
-                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha, None)
                     .await
                     .is_ok(),
             ),
-            None => Some(false),
+            None => {
+                tracing::warn!(
+                    repo_id = %repo.id,
+                    branch = %repo.default_branch,
+                    "recovery: default-branch HEAD unresolvable; reporting main_green=false"
+                );
+                Some(false)
+            }
         }
     };
 
@@ -436,8 +443,8 @@ pub async fn set_post_merge_gates(
             required: dto.required,
             gate_phase: GatePhase::PostMerge,
             timeout_secs: dto.timeout_secs,
-            created_at: now,
             position: 0,
+            created_at: now,
         };
         state.quality_gates.save(&gate).await?;
     }
@@ -747,8 +754,8 @@ mod tests {
                 required: true,
                 gate_phase: GatePhase::PostMerge,
                 timeout_secs: Some(10),
-                created_at: 1000,
                 position: 0,
+                created_at: 1000,
             })
             .await
             .unwrap();
@@ -795,8 +802,8 @@ mod tests {
                 required: true,
                 gate_phase: GatePhase::PostMerge,
                 timeout_secs: Some(10),
-                created_at: 1000,
                 position: 0,
+                created_at: 1000,
             })
             .await
             .unwrap();

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use gyre_common::Id;
 use gyre_domain::{
@@ -684,6 +684,18 @@ pub(crate) async fn trip_circuit_breaker(
                 Some("circuit breaker: failed post-merge validation 3 times".to_string()),
             )
             .await;
+        // merge_queue.processed analytics event (analytics.md §Auto-Emitted
+        // Events: "Queue entry processed") — a circuit-breaker cancellation
+        // is a terminal outcome; the spec outcome value is "skipped".
+        emit_queue_processed_terminal(
+            state,
+            entry,
+            None,
+            "skipped",
+            "circuit_breaker",
+            "circuit breaker: failed post-merge validation 3 times",
+        )
+        .await;
     }
 
     // Spec Circuit Breaker item 3: name the spec the human must revisit.
@@ -925,14 +937,14 @@ async fn handle_dep_health_issues(
                 warn!(mr_id = %mr.id, "failed to create dep-failure task: {e}");
             }
 
-            state
-                .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some(format!("dependency MR-{dep_id} was closed")),
-                )
-                .await?;
+            fail_queue_entry(
+                state,
+                entry,
+                Some(mr),
+                "dependency_closed",
+                &format!("dependency MR-{dep_id} was closed"),
+            )
+            .await?;
 
             return Ok(true);
         }
@@ -1271,14 +1283,7 @@ async fn merge_atomic_group(
         None => {
             warn!(repo_id = %first_mr.repository_id, "repository not found for atomic group");
             for ge in &group_entries {
-                state
-                    .merge_queue
-                    .update_status(
-                        &ge.id,
-                        MergeQueueEntryStatus::Failed,
-                        Some("repository not found".to_string()),
-                    )
-                    .await?;
+                fail_queue_entry(state, ge, None, "repo_not_found", "repository not found").await?;
             }
             return Ok(());
         }
@@ -1387,17 +1392,18 @@ async fn merge_atomic_group(
                 &mr.id,
             )
             .await?;
-            state
-                .merge_queue
-                .update_status(
-                    &ge.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some(format!(
-                        "merge request status {:?} cannot be merged",
-                        mr.status
-                    )),
-                )
-                .await?;
+            // fail_queue_entry keeps the status change and the spec-required
+            // merge_queue.processed event from diverging (same invariant as
+            // every other Failed transition); it runs AFTER the rollback
+            // because the rollback requeues every entry.
+            fail_queue_entry(
+                state,
+                ge,
+                Some(&mr),
+                "mr_not_mergeable",
+                &format!("merge request status {:?} cannot be merged", mr.status),
+            )
+            .await?;
             return Ok(());
         }
 
@@ -1552,7 +1558,8 @@ async fn merge_atomic_group(
             serde_json::json!({
                 "entry_id": ge.id.to_string(),
                 "mr_id": updated_mr.id.to_string(),
-                "result": "merged",
+                "outcome": "merged",
+                "wait_secs": now.saturating_sub(ge.enqueued_at),
                 "atomic_group": group_name,
                 // Scope facets (search.md §Searchable Entities: Activity
                 // Event is filterable by workspace/repo).
@@ -1560,11 +1567,21 @@ async fn merge_atomic_group(
                 "repo_id": updated_mr.repository_id.to_string(),
             }),
             now,
+        )
+        .with_scope(
+            None,
+            None,
+            Some(&updated_mr.workspace_id),
+            Some(&updated_mr.repository_id),
         );
         let _ = state.analytics.record(&ev).await;
         // search.md §Searchable Entities: activity events are indexed on write.
         crate::search_indexer::index(state, crate::search_indexer::activity_event_document(&ev))
             .await;
+        // mr.merged analytics event — deferred with the other side effects
+        // so a group rollback (which reverts MR statuses to Open) never
+        // leaves a phantom "merged" event behind.
+        emit_mr_merged(state, updated_mr, now, Some(ge.enqueued_at)).await;
 
         if let Some(ref author_id) = updated_mr.author_agent_id {
             crate::notifications::notify_mr_merged(
@@ -1592,7 +1609,7 @@ async fn merge_atomic_group(
     // gate results. See platform-model.md §6.
     if let Some(last_sha) = group_merge_shas.last() {
         if let Err(failure_reason) =
-            crate::gate_executor::run_post_merge_gates(state, &repo, last_sha).await
+            crate::gate_executor::run_post_merge_gates(state, &repo, last_sha, None).await
         {
             recover_atomic_group_from_post_merge_failure(
                 state,
@@ -1841,14 +1858,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                         reason = %reason,
                         "quality gate failed during candidate selection, failing entry"
                     );
-                    state
-                        .merge_queue
-                        .update_status(
-                            &candidate.id,
-                            MergeQueueEntryStatus::Failed,
-                            Some(format!("quality gate failed: {reason}")),
-                        )
-                        .await?;
+                    fail_queue_entry(
+                        state,
+                        candidate,
+                        None,
+                        "quality_gate",
+                        &format!("quality gate failed: {reason}"),
+                    )
+                    .await?;
                     continue;
                 }
             }
@@ -1862,14 +1879,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 Some(mr) => mr,
                 None => {
                     warn!(mr_id = %candidate.merge_request_id, "MR not found for queue entry, skipping");
-                    state
-                        .merge_queue
-                        .update_status(
-                            &candidate.id,
-                            MergeQueueEntryStatus::Failed,
-                            Some("merge request not found".to_string()),
-                        )
-                        .await?;
+                    fail_queue_entry(
+                        state,
+                        candidate,
+                        None,
+                        "mr_not_found",
+                        "merge request not found",
+                    )
+                    .await?;
                     continue;
                 }
             };
@@ -1885,17 +1902,17 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     status = ?candidate_mr.status,
                     "queue entry references non-mergeable MR, failing entry"
                 );
-                state
-                    .merge_queue
-                    .update_status(
-                        &candidate.id,
-                        MergeQueueEntryStatus::Failed,
-                        Some(format!(
-                            "merge request status {:?} cannot be merged",
-                            candidate_mr.status
-                        )),
-                    )
-                    .await?;
+                fail_queue_entry(
+                    state,
+                    candidate,
+                    Some(&candidate_mr),
+                    "mr_not_mergeable",
+                    &format!(
+                        "merge request status {:?} cannot be merged",
+                        candidate_mr.status
+                    ),
+                )
+                .await?;
                 continue;
             }
 
@@ -2020,14 +2037,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         Some(r) => r,
         None => {
             warn!(repo_id = %mr.repository_id, "repository not found for MR");
-            state
-                .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some("repository not found".to_string()),
-                )
-                .await?;
+            fail_queue_entry(
+                state,
+                &entry,
+                Some(&mr),
+                "repo_not_found",
+                "repository not found",
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -2099,14 +2116,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
 
         if let Some(reason) = violation {
             warn!(entry_id = %entry.id, %reason, "spec policy blocked merge");
-            state
-                .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some(reason.clone()),
-                )
-                .await?;
+            // fail_queue_entry keeps the status change and the spec-required
+            // merge_queue.processed analytics event tied together
+            // (analytics.md §Auto-Emitted Events).
+            fail_queue_entry(state, &entry, Some(&mr), "spec_policy", &reason).await?;
             report_spec_policy_violation(state, &mr, &repo.id, &reason).await;
             return Ok(());
         }
@@ -2129,13 +2142,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                 "spec policy requires current spec: '{path}' HEAD is {current_sha} but MR references {sha}"
                             );
                             warn!(entry_id = %entry.id, %reason, "stale spec blocked merge");
-                            state
-                                .merge_queue
-                                .update_status(
-                                    &entry.id,
-                                    MergeQueueEntryStatus::Failed,
-                                    Some(reason.clone()),
-                                )
+                            fail_queue_entry(state, &entry, Some(&mr), "spec_policy", &reason)
                                 .await?;
                             report_spec_policy_violation(state, &mr, &repo.id, &reason).await;
                             return Ok(());
@@ -2204,9 +2211,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                          breaking change(s) from this repo"
                     );
                     warn!(entry_id = %entry.id, %reason, "breaking change policy blocked merge");
-                    state
-                        .merge_queue
-                        .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                    fail_queue_entry(state, &entry, Some(&mr), "breaking_change_policy", &reason)
                         .await?;
                     return Ok(());
                 }
@@ -2257,10 +2262,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     spec_path, link.source_path
                 );
                 warn!(entry_id = %entry.id, %reason, "spec link merge gate blocked merge");
-                state
-                    .merge_queue
-                    .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
-                    .await?;
+                fail_queue_entry(state, &entry, Some(&mr), "spec_link_gate", &reason).await?;
                 return Ok(());
             }
         }
@@ -2286,9 +2288,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                             spec_path, other_spec_path
                         );
                         warn!(entry_id = %entry.id, %reason, "spec link merge gate blocked merge");
-                        state
-                            .merge_queue
-                            .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                        fail_queue_entry(state, &entry, Some(&mr), "spec_link_gate", &reason)
                             .await?;
                         return Ok(());
                     }
@@ -2365,10 +2365,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 %reason,
                 "constraint enforcement blocked merge"
             );
-            state
-                .merge_queue
-                .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
-                .await?;
+            fail_queue_entry(state, &entry, Some(&mr), "constraint_enforcement", &reason).await?;
             return Ok(());
         }
     }
@@ -2404,56 +2401,78 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
 
     // TASK-061 (§7.2): Populate attestation chain ABAC subject attributes
     // and evaluate policies with action=merge, resource_type=attestation.
-    // The decision gates the merge: a Deny fails the queue entry with the
-    // matched policy, mirroring the constraint-enforcement block above
-    // (task-077 F5 flaw class — an evaluation whose result is discarded
-    // gates nothing). Look up attestation chain via the source branch head
-    // commit or agent task.
+    // A Deny decision blocks the merge (authorization-provenance.md Phase 3:
+    // "Push and merge are rejected if the attestation chain is invalid or
+    // constraints fail"); with no policies stored the evaluation is Allow
+    // and the merge proceeds unchanged.
+    // A store-read failure inside the gate FAILS CLOSED (requeues the entry,
+    // task-129 review round 6): the evaluation result cannot be determined,
+    // and proceeding could let a merge through that a tenant-scoped Deny
+    // would have blocked.
+    // Look up attestation chain via the source branch head commit or agent task.
     {
+        let mut denial: Option<String> = None;
         let mut chain_found = false;
 
         // Try by source branch head commit first.
-        if let Some(source_sha) =
+        if let Some(ref source_sha) =
             crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
                 .await
         {
-            if let Ok(Some(chain_att)) = state.chain_attestations.find_by_commit(&source_sha).await
-            {
+            if let Ok(Some(chain_att)) = state.chain_attestations.find_by_commit(source_sha).await {
                 let chain = state
                     .chain_attestations
                     .load_chain(&chain_att.id)
                     .await
                     .unwrap_or_default();
-                let decision = evaluate_attestation_abac(
+                // Review round 6 (task-129): a store-read failure inside the
+                // attestation gate FAILS CLOSED (requeue) — the evaluation
+                // result cannot be determined, and proceeding would let a
+                // merge through that a tenant-scoped Deny would have
+                // blocked. Same hold-then-retry semantics as
+                // supervised_trust_hold's fail-closed path.
+                let decision = match evaluate_attestation_abac(
                     state, &chain, &chain_att, &mr, &entry, &repo, "merge",
                 )
-                .await;
-                chain_found = true;
+                .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!(
+                            entry_id = %entry.id,
+                            mr_id = %mr.id,
+                            error = %e,
+                            "attestation ABAC gate unavailable, failing closed (requeue)"
+                        );
+                        state
+                            .merge_queue
+                            .update_status(
+                                &entry.id,
+                                MergeQueueEntryStatus::Queued,
+                                Some(format!(
+                                    "attestation ABAC evaluation unavailable for MR {}, failing closed",
+                                    mr.id
+                                )),
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                };
                 if decision.effect == gyre_domain::policy::PolicyEffect::Deny {
-                    let reason = format!(
+                    denial = Some(format!(
                         "attestation ABAC policy denied merge (matched policy: {:?})",
                         decision.matched_policy
-                    );
-                    warn!(
-                        entry_id = %entry.id,
-                        mr_id = %mr.id,
-                        matched_policy = ?decision.matched_policy,
-                        "attestation ABAC denied merge — failing queue entry"
-                    );
-                    state
-                        .merge_queue
-                        .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
-                        .await?;
-                    return Ok(());
+                    ));
                 }
+                chain_found = true;
             }
         }
 
         // Fallback: look up via agent's current task.
-        if !chain_found {
-            if let Some(author_id) = &mr.author_agent_id {
+        if !chain_found && denial.is_none() {
+            if let Some(ref author_id) = mr.author_agent_id {
                 if let Ok(Some(agent)) = state.agents.find_by_id(author_id).await {
-                    if let Some(task_id) = &agent.current_task_id {
+                    if let Some(ref task_id) = agent.current_task_id {
                         if let Ok(atts) = state
                             .chain_attestations
                             .find_by_task(task_id.as_str())
@@ -2465,36 +2484,60 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                     .load_chain(&leaf.id)
                                     .await
                                     .unwrap_or_default();
-                                let decision = evaluate_attestation_abac(
+                                // Same fail-closed (requeue) treatment as the
+                                // branch-head path above (review round 6).
+                                let decision = match evaluate_attestation_abac(
                                     state, &chain, leaf, &mr, &entry, &repo, "merge",
                                 )
-                                .await;
+                                .await
+                                {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        warn!(
+                                            entry_id = %entry.id,
+                                            mr_id = %mr.id,
+                                            error = %e,
+                                            "attestation ABAC gate unavailable, failing closed (requeue)"
+                                        );
+                                        state
+                                            .merge_queue
+                                            .update_status(
+                                                &entry.id,
+                                                MergeQueueEntryStatus::Queued,
+                                                Some(format!(
+                                                    "attestation ABAC evaluation unavailable for MR {}, failing closed",
+                                                    mr.id
+                                                )),
+                                            )
+                                            .await?;
+                                        return Ok(());
+                                    }
+                                };
                                 if decision.effect == gyre_domain::policy::PolicyEffect::Deny {
-                                    let reason = format!(
+                                    denial = Some(format!(
                                         "attestation ABAC policy denied merge (matched policy: {:?})",
                                         decision.matched_policy
-                                    );
-                                    warn!(
-                                        entry_id = %entry.id,
-                                        mr_id = %mr.id,
-                                        matched_policy = ?decision.matched_policy,
-                                        "attestation ABAC denied merge — failing queue entry"
-                                    );
-                                    state
-                                        .merge_queue
-                                        .update_status(
-                                            &entry.id,
-                                            MergeQueueEntryStatus::Failed,
-                                            Some(reason),
-                                        )
-                                        .await?;
-                                    return Ok(());
+                                    ));
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Enforcement (task-077 F5): a Deny decision fails the queue entry
+        // before the merge commit is created, mirroring constraint
+        // enforcement above.
+        if let Some(reason) = denial {
+            warn!(
+                entry_id = %entry.id,
+                mr_id = %mr.id,
+                %reason,
+                "attestation ABAC denied merge"
+            );
+            fail_queue_entry(state, &entry, Some(&mr), "attestation_abac", &reason).await?;
+            return Ok(());
         }
     }
 
@@ -2545,13 +2588,16 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 serde_json::json!({
                     "entry_id": entry.id.to_string(),
                     "mr_id": updated_mr.id.to_string(),
-                    "result": "merged",
-                    // Scope facets (search.md §Searchable Entities: Activity
-                    // Event is filterable by workspace/repo).
-                    "workspace_id": updated_mr.workspace_id.to_string(),
-                    "repo_id": updated_mr.repository_id.to_string(),
+                    "outcome": "merged",
+                    "wait_secs": now.saturating_sub(entry.enqueued_at),
                 }),
                 now,
+            )
+            .with_scope(
+                None,
+                None,
+                Some(&updated_mr.workspace_id),
+                Some(&updated_mr.repository_id),
             );
             let _ = state.analytics.record(&ev).await;
             // search.md §Searchable Entities: activity events are indexed on write.
@@ -2560,6 +2606,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 crate::search_indexer::activity_event_document(&ev),
             )
             .await;
+
+            // mr.merged analytics event (analytics.md §Auto-Emitted Events)
+            // — the queue is the primary merge path; the HTTP transition
+            // endpoint is the other. Both must record.
+            emit_mr_merged(state, &updated_mr, now, Some(entry.enqueued_at)).await;
 
             // Build and store a signed merge attestation bundle (G5).
             let gate_results_snapshot = state
@@ -2787,8 +2838,13 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             // against the new HEAD of the default branch. On failure, run
             // the recovery protocol (pause queue, revert, notify, task,
             // invalidate gates). See platform-model.md §6.
-            if let Err(failure_reason) =
-                crate::gate_executor::run_post_merge_gates(state, &repo, &merge_commit_sha).await
+            if let Err(failure_reason) = crate::gate_executor::run_post_merge_gates(
+                state,
+                &repo,
+                &merge_commit_sha,
+                Some(&updated_mr.id),
+            )
+            .await
             {
                 recover_from_post_merge_failure(
                     state,
@@ -2825,6 +2881,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     Some(format!("conflict: {}", message)),
                 )
                 .await?;
+            emit_queue_processed_failed(state, &entry, &mr, "conflict", &message).await;
         }
         Err(e) => {
             error!(entry_id = %entry.id, error = %e, "git merge error");
@@ -2836,10 +2893,135 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     Some(format!("git error: {e}")),
                 )
                 .await?;
+            emit_queue_processed_failed(state, &entry, &mr, "git_error", &e.to_string()).await;
         }
     }
 
     Ok(())
+}
+
+/// Emit a `merge_queue.processed` analytics event for a queue entry that
+/// reached a terminal outcome without merging (analytics.md §Auto-Emitted
+/// Events: trigger "Queue entry processed"; terminal outcomes are `failed`
+/// and `skipped`).
+///
+/// `mr` supplies author/scope when the caller already holds the MR record;
+/// otherwise the MR is resolved from the entry so scope filters still work,
+/// and the event records unscoped when the MR no longer resolves (e.g. the
+/// MR was deleted before the entry was processed).
+pub(crate) async fn emit_queue_processed_terminal(
+    state: &AppState,
+    entry: &MergeQueueEntry,
+    mr: Option<&MergeRequest>,
+    outcome: &str,
+    failure_kind: &str,
+    detail: &str,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mr = match mr {
+        Some(m) => Some(m.clone()),
+        None => state
+            .merge_requests
+            .find_by_id(&entry.merge_request_id)
+            .await
+            .ok()
+            .flatten(),
+    };
+    let ev = AnalyticsEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        "merge_queue.processed",
+        mr.as_ref()
+            .and_then(|m| m.author_agent_id.as_ref().map(|id| id.to_string())),
+        serde_json::json!({
+            "entry_id": entry.id.to_string(),
+            "mr_id": entry.merge_request_id.to_string(),
+            "outcome": outcome,
+            "wait_secs": now.saturating_sub(entry.enqueued_at),
+            "failure_kind": failure_kind,
+            "detail": detail,
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        mr.as_ref().map(|m| &m.workspace_id),
+        mr.as_ref().map(|m| &m.repository_id),
+    );
+    let _ = state.analytics.record(&ev).await;
+}
+
+/// Emit a `merge_queue.processed` analytics event with `outcome: "failed"`
+/// (analytics.md §Auto-Emitted Events) when a queue entry fails without merging.
+async fn emit_queue_processed_failed(
+    state: &AppState,
+    entry: &MergeQueueEntry,
+    mr: &MergeRequest,
+    failure_kind: &str,
+    detail: &str,
+) {
+    emit_queue_processed_terminal(state, entry, Some(mr), "failed", failure_kind, detail).await;
+}
+
+/// Fail a merge-queue entry (terminal `Failed`) and record the spec-required
+/// `merge_queue.processed` analytics event with outcome "failed". Every
+/// production path that fails a queue entry must go through here so the
+/// status change and the analytics event cannot diverge (analytics.md
+/// §Auto-Emitted Events: "Queue entry processed").
+async fn fail_queue_entry(
+    state: &AppState,
+    entry: &MergeQueueEntry,
+    mr: Option<&MergeRequest>,
+    failure_kind: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    state
+        .merge_queue
+        .update_status(
+            &entry.id,
+            MergeQueueEntryStatus::Failed,
+            Some(reason.to_string()),
+        )
+        .await?;
+    emit_queue_processed_terminal(state, entry, mr, "failed", failure_kind, reason).await;
+    Ok(())
+}
+
+/// Emit an `mr.merged` analytics event (analytics.md §Auto-Emitted Events:
+/// "MR successfully merged"). The merge queue is the primary merge path —
+/// the HTTP transition endpoint in api/merge_requests.rs is the other. Both
+/// must record the event, with the same spec-required properties
+/// (`mr_id`, `repo_id`, `gate_count`, `queue_wait_secs`).
+///
+/// `now` is the merge completion time (unix seconds); `enqueued_at` is the
+/// queue entry's enqueue time, when the MR passed through the queue.
+async fn emit_mr_merged(state: &AppState, mr: &MergeRequest, now: u64, enqueued_at: Option<u64>) {
+    // gate_count: number of gate results recorded for this MR.
+    let gate_count = state
+        .gate_results
+        .list_by_mr_id(mr.id.as_str())
+        .await
+        .map(|rs| rs.len() as u64)
+        .unwrap_or(0);
+    // queue_wait_secs: time from merge-queue enqueue to merge completion.
+    let queue_wait_secs = enqueued_at.map(|t| now.saturating_sub(t));
+    let ev = AnalyticsEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        "mr.merged",
+        mr.author_agent_id.as_ref().map(|id| id.to_string()),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "repo_id": mr.repository_id.to_string(),
+            "gate_count": gate_count,
+            "queue_wait_secs": queue_wait_secs,
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+    let _ = state.analytics.record(&ev).await;
 }
 
 /// Author identity for forge-generated advisory MR comments.
@@ -3109,9 +3291,10 @@ async fn recover_from_post_merge_failure(
     };
 
     // Step 3: re-run post-merge gates on the reverted HEAD.
-    let revert_green = crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha)
-        .await
-        .is_ok();
+    let revert_green =
+        crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha, Some(&mr.id))
+            .await
+            .is_ok();
 
     if revert_green {
         // Main is green again — resume the queue.
@@ -3346,7 +3529,7 @@ async fn recover_atomic_group_from_post_merge_failure(
     };
 
     // Step 3: re-run post-merge gates on the reverted HEAD.
-    let revert_green = crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha)
+    let revert_green = crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha, None)
         .await
         .is_ok();
 
@@ -3754,9 +3937,15 @@ pub(crate) async fn report_cascade_test_result(
 /// the merge processor is an internal service whose merge authority is
 /// governed by trust-preset and user Denies, not the pipeline catch-all.
 ///
-/// Workspace-scoped policies from OTHER workspaces are filtered out: the
-/// engine's `evaluate` does not check scope_id, and one workspace's trust Deny
-/// must not hold another workspace's merges.
+/// Scope applicability is enforced canonically inside the engine's
+/// `evaluate` (`policy_engine::scope_applies`, review round 4): policies
+/// scoped (scope_id set) to another workspace, repo, or tenant are filtered
+/// out, so one workspace's trust Deny cannot hold another workspace's
+/// merges. `scope_id: None` means "all entities at that scope level"
+/// (every seeded builtin), so a Workspace/None policy applies to merges in
+/// any workspace — the documented domain semantics
+/// (gyre-domain/src/policy.rs: "None means the policy applies to ALL
+/// entities at this scope level").
 ///
 /// Returns `Err` when the policy or workspace store cannot be READ (review
 /// F9): a read failure means the trust state cannot be determined, and the
@@ -3792,6 +3981,11 @@ async fn evaluate_merge_abac(
     ctx.set("resource.type", "mr");
     ctx.set("resource.repo_id", repo.id.as_str());
     ctx.set("resource.workspace_id", mr.workspace_id.as_str());
+    // Complete the resource scope chain so the engine's canonical scope
+    // filter (scope_applies) can tenant-scope policies on this path too.
+    if let Some(tid) = &tenant_id {
+        ctx.set("resource.tenant_id", tid);
+    }
 
     // Review F9: the policy-list read error PROPAGATES. The previous
     // `.unwrap_or_default()` degraded a store failure to an empty policy
@@ -3805,19 +3999,53 @@ async fn evaluate_merge_abac(
         .list()
         .await
         .context("supervised trust gate: policy store read failed")?;
+    // Scope applicability is NOT filtered here: the engine's `evaluate`
+    // applies the canonical `scope_applies` filter against the resource
+    // scope chain set above (review round 4 — previously this call site
+    // carried its own workspace-only filter while the HTTP path had none).
+    // Only the pipeline catch-all is excluded here, for the reason above.
     let policies: Vec<_> = policies
         .into_iter()
         .filter(|p| {
             // Pipeline catch-all: unconditional deny for HTTP subjects — not a
             // statement about system merge authority (see doc comment above).
             p.id.as_str() != crate::abac_middleware::DEFAULT_DENY_POLICY_ID
-                && (p.scope != gyre_domain::policy::PolicyScope::Workspace
-                    || p.scope_id.as_ref() == Some(&mr.workspace_id))
         })
         .collect();
-    Ok(crate::policy_engine::evaluate(
-        policies, &ctx, "merge", "mr",
-    ))
+    let result = crate::policy_engine::evaluate(policies, &ctx, "merge", "mr");
+
+    // §Audit Integration (task-129 review round 5): EVERY evaluation path
+    // persists its PolicyDecision. The middleware request path and
+    // evaluate_attestation_abac already record; this supervised-trust-hold
+    // evaluation records too, so merge-time trust decisions are queryable
+    // via GET /api/v1/policies/decisions like every other path. An explicit
+    // Deny match (the hold) logs at warn, everything else at debug — the
+    // same log-level contract as the middleware.
+    let decision = crate::policy_engine::build_decision(
+        &result,
+        "merge-processor",
+        "system",
+        "merge",
+        "mr",
+        mr.id.as_str(),
+    );
+    crate::policy_engine::record_decision_audit(state, &decision).await;
+    if result.effect == gyre_domain::policy::PolicyEffect::Deny && result.matched_policy.is_some() {
+        warn!(
+            mr_id = %mr.id,
+            workspace_id = %mr.workspace_id,
+            matched_policy = ?result.matched_policy,
+            "supervised trust gate: explicit Deny policy held the merge"
+        );
+    } else {
+        debug!(
+            mr_id = %mr.id,
+            decision = ?result.effect,
+            "supervised trust gate evaluation recorded to the policy decision audit"
+        );
+    }
+
+    Ok(result)
 }
 
 /// TASK-077 / HSI §2 (F5): the supervised-trust hold predicate shared by the
@@ -3963,8 +4191,18 @@ async fn selection_meta_spec_drift_hold(
 ///
 /// Builds an `AttributeContext` from the attestation chain (chain_depth,
 /// root_signer, constraint_count, tenant_id) and evaluates policies with the
-/// given action and resource_type=attestation. Audit-only — result is logged
-/// but not enforced. Returns the evaluation result for testability.
+/// given action and resource_type=attestation. The result GATES the merge
+/// (callers fail the queue entry on Deny). Returns the evaluation result
+/// for testability.
+///
+/// Returns `Err` when the workspace or policy store cannot be READ (review
+/// round 6, task-129): the caller FAILS CLOSED (requeues the merge entry).
+/// The previous `_ => None` swallow degraded a workspace-store failure to
+/// "no tenant scope", leaving `resource.tenant_id` unset so tenant-scoped
+/// Deny policies silently did not apply while `builtin:attested-authorization`
+/// still granted — a store error could let a merge through that a
+/// tenant-scoped Deny would have blocked. This is the same fail-closed
+/// treatment the sibling `evaluate_merge_abac` already gives store errors.
 async fn evaluate_attestation_abac(
     state: &AppState,
     chain: &[gyre_common::Attestation],
@@ -3973,16 +4211,22 @@ async fn evaluate_attestation_abac(
     entry: &MergeQueueEntry,
     repo: &gyre_domain::Repository,
     action: &str,
-) -> crate::policy_engine::EvalResult {
+) -> anyhow::Result<crate::policy_engine::EvalResult> {
+    use anyhow::Context as _;
+
     let chain_depth = leaf.metadata.chain_depth;
     let signer = gyre_domain::root_signer(chain);
     let cc = gyre_domain::constraint_count(chain) as i64;
 
-    // Resolve tenant_id from repo → workspace (checklist item 125: ABAC context parity).
-    let tenant_id = match state.workspaces.find_by_id(&repo.workspace_id).await {
-        Ok(Some(ws)) => Some(ws.tenant_id.to_string()),
-        _ => None,
-    };
+    // Resolve tenant_id from repo → workspace (checklist item 125: ABAC
+    // context parity). A workspace-store read failure PROPAGATES (see doc
+    // comment) — never degraded to "no tenant scope".
+    let workspace = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .context("attestation ABAC gate: workspace store read failed")?;
+    let tenant_id = workspace.map(|w| w.tenant_id.to_string());
 
     let mut ctx = crate::policy_engine::AttributeContext::default();
     ctx.set("subject.type", "agent");
@@ -4003,8 +4247,23 @@ async fn evaluate_attestation_abac(
     ctx.set_bool("subject.attestation_chain_present", true);
     ctx.set("resource.type", "attestation");
     ctx.set("resource.repo_id", repo.id.as_str());
+    // Complete the resource scope chain so the engine's canonical scope
+    // filter (policy_engine::scope_applies) scopes policies on this path
+    // exactly like the HTTP middleware path (review round 4).
+    ctx.set("resource.workspace_id", repo.workspace_id.as_str());
+    if let Some(ref tid) = tenant_id {
+        ctx.set("resource.tenant_id", tid);
+    }
 
-    let policies = state.policies.list().await.unwrap_or_default();
+    // Policy-list read errors propagate too (same fail-closed class as the
+    // workspace read above and `evaluate_merge_abac`'s policy read): an
+    // empty-set degradation would drop every tenant-scoped Deny while the
+    // attestation Allow still matched.
+    let policies = state
+        .policies
+        .list()
+        .await
+        .context("attestation ABAC gate: policy store read failed")?;
     let eval_result = crate::policy_engine::evaluate(policies, &ctx, action, "attestation");
 
     // Record the decision in the policy-decision audit trail, exactly as the
@@ -4021,20 +4280,50 @@ async fn evaluate_attestation_abac(
         "attestation",
         repo.id.as_str(),
     );
-    let _ = state.policies.record_decision(&decision).await;
+    crate::policy_engine::record_decision_audit(state, &decision).await;
 
-    tracing::info!(
-        entry_id = %entry.id,
-        mr_id = %mr.id,
-        chain_depth = chain_depth,
-        root_signer = ?signer,
-        constraint_count = cc,
-        decision = ?eval_result.effect,
-        matched_policy = ?eval_result.matched_policy,
-        "attestation ABAC evaluation for {action}"
-    );
+    // §Audit Integration log-level contract (review round 6, task-129):
+    // denials at warn, allowances at debug — the same contract as the
+    // middleware path and evaluate_merge_abac. A Deny additionally emits
+    // an AbacDenied audit event (observability.md §Audit Event Types); on
+    // this ENFORCED path the caller fails the merge queue entry on it.
+    if eval_result.effect == gyre_domain::policy::PolicyEffect::Deny {
+        tracing::warn!(
+            entry_id = %entry.id,
+            mr_id = %mr.id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation denied {action}"
+        );
+        crate::abac_middleware::record_abac_denied_service(
+            state,
+            mr.author_agent_id
+                .as_ref()
+                .map(|a| a.as_str())
+                .unwrap_or("unknown-agent"),
+            "attestation",
+            action,
+            eval_result.matched_policy.as_deref(),
+            "merge-queue",
+            true,
+        )
+        .await;
+    } else {
+        tracing::debug!(
+            entry_id = %entry.id,
+            mr_id = %mr.id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            decision = ?eval_result.effect,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation for {action}"
+        );
+    }
 
-    eval_result
+    Ok(eval_result)
 }
 
 #[cfg(test)]
@@ -5297,8 +5586,8 @@ mod tests {
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
-            created_at: 1000,
             position: 0,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -5423,8 +5712,8 @@ mod tests {
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
-            created_at: 1000,
             position: 0,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -5468,6 +5757,406 @@ mod tests {
             MrStatus::Merged,
             "mr-b should be merged after mr-a was failed due to gate failure"
         );
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` (trigger
+    /// "Queue entry processed") must record on EVERY terminal outcome, not
+    /// only on concluded merge attempts. A quality-gate failure during
+    /// candidate selection is the primary failure mode — the entry reaches
+    /// terminal `Failed` without a merge ever being attempted. Regression:
+    /// this path previously failed the entry with no analytics event.
+    #[tokio::test]
+    async fn gate_failure_during_selection_records_queue_processed_failed() {
+        use gyre_domain::{GateResult, GateType, QualityGate};
+
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-gate-fail"),
+            repo.id.clone(),
+            "MR (gate failed)",
+            "feat/gate-fail",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.author_agent_id = Some(Id::new("agent-gate-fail"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        enqueue_mr(&state, "mr-gate-fail", 100, 2000).await;
+
+        let gate = QualityGate {
+            id: Id::new("gate-gf-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
+            position: 0,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        let gate_result = GateResult {
+            id: Id::new("gr-gf-1"),
+            gate_id: Id::new("gate-gf-1"),
+            mr_id: Id::new("mr-gate-fail"),
+            status: GateStatus::Failed,
+            output: Some("test failure".to_string()),
+            started_at: Some(1000),
+            finished_at: Some(1001),
+        };
+        state.gate_results.save(&gate_result).await.unwrap();
+
+        // event-emission:ok — asserts the analytics emission directly via
+        // state.analytics.query below; the broadcast channel is not under test.
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-gate-fail"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Failed);
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "gate failure during selection must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-gate-fail");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "quality_gate");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-gate-fail"));
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` must
+    /// record when an entry is failed because its MR no longer resolves.
+    /// The MR record is gone, so the event records unscoped with the MR id
+    /// from the entry itself. Regression: this path previously failed the
+    /// entry with no analytics event.
+    #[tokio::test]
+    async fn mr_not_found_during_selection_records_queue_processed_failed() {
+        let state = test_state();
+
+        // Enqueue an entry whose MR does not exist.
+        enqueue_mr(&state, "mr-ghost", 100, 2000).await;
+
+        // event-emission:ok — asserts the analytics emission directly via
+        // state.analytics.query below; the broadcast channel is not under test.
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-ghost"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Failed);
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "MR-not-found failure must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-ghost");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "mr_not_found");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert!(
+            ev.workspace_id.is_none(),
+            "event records unscoped when the MR no longer resolves"
+        );
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` must
+    /// record when an entry is failed because its MR became non-mergeable
+    /// after enqueue (4b'' — e.g. reverted by the recovery protocol while
+    /// the entry sat queued). Regression: this path previously failed the
+    /// entry with no analytics event while the adjacent MR-not-found site
+    /// in the same loop was wired.
+    #[tokio::test]
+    async fn non_mergeable_mr_during_selection_records_queue_processed_failed() {
+        let state = test_state();
+        let (_repo, mut mr) = setup_recovery_mr(&state).await;
+
+        // The MR was reverted after enqueueing (Open→…→Reverted persisted).
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        mr.transition_status(MrStatus::Reverted).unwrap();
+        state.merge_requests.update(&mr).await.unwrap();
+
+        // event-emission:ok — asserts the analytics emission directly via
+        // state.analytics.query below; the broadcast channel is not under test.
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-recov"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Failed,
+            "stale entry for a Reverted MR must be failed, not merged"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "non-mergeable-MR failure during selection must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-recov");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "mr_not_mergeable");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` must
+    /// record when an atomic-group member is failed at fetch time (R4)
+    /// because its MR became non-mergeable after enqueue — the selection
+    /// loop's 4b'' check only validates the first candidate, so this member
+    /// reaches the group path. Regression: this path previously failed the
+    /// member's entry with no analytics event.
+    #[tokio::test]
+    async fn atomic_group_non_mergeable_member_records_queue_processed_failed() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        create_mr_in_group(
+            &state,
+            "mr-first",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/first",
+            Some("agent-1"),
+        )
+        .await;
+        let mut mr_second = create_mr_in_group(
+            &state,
+            "mr-second",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/second",
+            Some("agent-2"),
+        )
+        .await;
+
+        enqueue_mr(&state, "mr-first", 50, 1000).await;
+        enqueue_mr(&state, "mr-second", 50, 1001).await;
+
+        // The second member was reverted after enqueueing; only the first
+        // member is validated during selection, so the stale member is
+        // caught by the group path's R4 re-validation.
+        mr_second.transition_status(MrStatus::Approved).unwrap();
+        mr_second.transition_status(MrStatus::Merged).unwrap();
+        mr_second.transition_status(MrStatus::Reverted).unwrap();
+        state.merge_requests.update(&mr_second).await.unwrap();
+
+        process_next(&state).await.unwrap();
+
+        let entry_second = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-second"))
+            .await
+            .unwrap()
+            .expect("mr-second entry should exist");
+        assert_eq!(
+            entry_second.status,
+            MergeQueueEntryStatus::Failed,
+            "the stale member's entry must be failed terminally"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "R4 non-mergeable-member failure must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-second");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "mr_not_mergeable");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` must
+    /// record when spec enforcement policy blocks a merge before any merge
+    /// attempt. Regression: this path previously failed the entry with no
+    /// analytics event.
+    #[tokio::test]
+    async fn spec_policy_block_records_queue_processed_failed() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Policy: MRs without a spec_ref are blocked from merging.
+        let policy = gyre_domain::SpecPolicy {
+            require_spec_ref: true,
+            ..Default::default()
+        };
+        state
+            .spec_policies
+            .set_for_repo(&repo.id.to_string(), policy)
+            .await
+            .unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-no-spec"),
+            repo.id.clone(),
+            "MR (no spec_ref)",
+            "feat/no-spec",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr).await.unwrap();
+
+        enqueue_mr(&state, "mr-no-spec", 100, 2000).await;
+
+        // event-emission:ok — asserts the analytics emission directly via
+        // state.analytics.query below; the broadcast channel is not under test.
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-no-spec"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Failed);
+        assert!(
+            entry
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("spec_ref"),
+            "entry failure reason should name the spec policy: {:?}",
+            entry.error_message
+        );
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "spec-policy block must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-no-spec");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "spec_policy");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` outcome
+    /// `skipped` — the circuit breaker cancels a reverted MR's queue
+    /// entries permanently; that cancellation is a terminal processing
+    /// outcome and must record. Regression: Cancelled entries previously
+    /// recorded no event at all, so the spec outcome value "skipped" was
+    /// never emitted.
+    #[tokio::test]
+    async fn circuit_breaker_cancel_records_queue_processed_skipped() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-cb"),
+            repo.id.clone(),
+            "MR (circuit breaker)",
+            "feat/cb",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr).await.unwrap();
+
+        enqueue_mr(&state, "mr-cb", 100, 2000).await;
+
+        trip_circuit_breaker(&state, repo.id.as_str(), &mr)
+            .await
+            .unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-cb"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Cancelled);
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "circuit-breaker cancellation must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-cb");
+        assert_eq!(ev.properties["outcome"], "skipped");
+        assert_eq!(ev.properties["failure_kind"], "circuit_breaker");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
     }
 
     /// Verify that a candidate whose atomic group is not ready is skipped,
@@ -5539,8 +6228,8 @@ mod tests {
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
-            created_at: 1000,
             position: 0,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -5765,12 +6454,42 @@ mod tests {
             assert_eq!(ev.event_name, "merge_queue.processed");
             let payload = &ev.properties;
             assert_eq!(
-                payload["result"], "merged",
-                "analytics event result should be 'merged'"
+                payload["outcome"], "merged",
+                "analytics event outcome should be 'merged' (analytics.md §Auto-Emitted Events)"
             );
             assert_eq!(
                 payload["atomic_group"], "bundle",
                 "analytics event should reference the atomic group name"
+            );
+        }
+
+        // mr.merged analytics events (analytics.md §Auto-Emitted Events):
+        // each merged member must ALSO record an mr.merged event with the
+        // spec-required properties.
+        let mr_merged_events = state
+            .analytics
+            .query(Some("mr.merged"), None, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            mr_merged_events.len(),
+            2,
+            "two mr.merged events should be recorded (one per merged member)"
+        );
+        for ev in &mr_merged_events {
+            let payload = &ev.properties;
+            assert!(payload["mr_id"].is_string(), "mr_id required: {payload}");
+            assert!(
+                payload["repo_id"].is_string(),
+                "repo_id required: {payload}"
+            );
+            assert!(
+                payload["gate_count"].is_u64(),
+                "gate_count required: {payload}"
+            );
+            assert!(
+                payload["queue_wait_secs"].is_u64(),
+                "queue_wait_secs required: {payload}"
             );
         }
 
@@ -5821,6 +6540,82 @@ mod tests {
             notifs_user2[0].title.contains("merged"),
             "notification title should mention 'merged'"
         );
+    }
+
+    /// analytics.md §Auto-Emitted Events: a queue-driven single-entry merge
+    /// (the primary merge path) must record `mr.merged` alongside
+    /// `merge_queue.processed`, with the spec-required properties
+    /// (`mr_id`, `repo_id`, `gate_count`, `queue_wait_secs`). Regression:
+    /// previously only the HTTP transition endpoint emitted `mr.merged`,
+    /// so queue merges were invisible to analytics.
+    #[tokio::test]
+    async fn queue_merge_records_mr_merged_analytics_event() {
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-solo-merge"),
+            repo.id.clone(),
+            "Solo MR",
+            "feat/solo-merge",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.author_agent_id = Some(Id::new("agent-solo"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Enqueue with a known enqueued_at so queue_wait_secs is checkable.
+        let entry = enqueue_mr(&state, "mr-solo-merge", 50, 2000).await;
+
+        // A recorded gate result makes gate_count verifiably 1.
+        let gate_result = gyre_domain::GateResult {
+            id: Id::new("gr-solo"),
+            gate_id: Id::new("gate-solo"),
+            mr_id: Id::new("mr-solo-merge"),
+            status: GateStatus::Passed,
+            output: Some("ok".to_string()),
+            started_at: Some(2000),
+            finished_at: Some(2001),
+        };
+        state.gate_results.save(&gate_result).await.unwrap();
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-solo-merge"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(updated.status, MrStatus::Merged, "mr should be merged");
+
+        let events = state
+            .analytics
+            .query(Some("mr.merged"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "one mr.merged event expected from the queue merge path"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-solo"));
+        assert_eq!(ev.properties["mr_id"], "mr-solo-merge");
+        assert_eq!(ev.properties["repo_id"], repo.id.to_string());
+        assert_eq!(ev.properties["gate_count"], 1u64);
+        let wait = ev.properties["queue_wait_secs"]
+            .as_u64()
+            .expect("queue_wait_secs");
+        assert!(
+            wait >= entry.enqueued_at.saturating_sub(1000),
+            "queue_wait_secs should be measured from enqueued_at (got {wait})"
+        );
+        // Scope fields are set so workspace/repo filters work.
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(ev.repo_id.as_deref(), Some(repo.id.as_str()));
     }
 
     /// Test: No interleaving — a non-group MR does not merge between group members.
@@ -6525,13 +7320,17 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-abac"), mr.id.clone(), 50, 1000);
 
             // Seed a deny policy: chain_depth > 1 → deny push to attestation resources.
+            // Priority 250: the user band (200–299) sits above the builtin
+            // attested-authorization Allow (150) that the seeded startup set
+            // contributes, so this Deny — not the builtin — decides deep
+            // chains (the builtin's definition documents the band).
             let deny_policy = Policy {
                 id: Id::new("deny-deep-chain"),
                 name: "deny-deep-chain".to_string(),
                 description: "Deny pushes with chain_depth > 1".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 100,
+                priority: 250,
                 effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
                     attribute: "subject.chain_depth".to_string(),
@@ -6549,14 +7348,16 @@ mod tests {
             };
             state.policies.create(&deny_policy).await.unwrap();
 
-            // Also seed a blanket allow so shallow chains would pass.
+            // Also seed a blanket allow so shallow chains would pass
+            // (priority 200 — user band, above the builtin Allow at 150 so
+            // it is the policy that actually carries a shallow-chain Allow).
             let allow_policy = Policy {
                 id: Id::new("allow-attestation"),
                 name: "allow-attestation".to_string(),
                 description: "Allow attestation merges".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 10,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![],
                 actions: vec!["merge".to_string()],
@@ -6572,7 +7373,9 @@ mod tests {
 
             // Call the production function with the real chain data.
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // chain_depth=2 > 1 → deny policy should match.
             assert_eq!(result.effect, PolicyEffect::Deny);
@@ -6622,13 +7425,15 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-shallow"), mr.id.clone(), 50, 1000);
 
             // Deny policy for deep chains only (chain_depth > 5).
+            // Priority 250: user band, above the seeded builtin
+            // attested-authorization Allow (150).
             let deny_policy = Policy {
                 id: Id::new("deny-deep-5"),
                 name: "deny-deep-5".to_string(),
                 description: "Deny deep chains".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 100,
+                priority: 250,
                 effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
                     attribute: "subject.chain_depth".to_string(),
@@ -6646,13 +7451,16 @@ mod tests {
             };
             state.policies.create(&deny_policy).await.unwrap();
 
+            // Priority 200: user band, above the seeded builtin
+            // attested-authorization Allow (150), so THIS policy is the
+            // matched one on the allow path.
             let allow_policy = Policy {
                 id: Id::new("allow-shallow"),
                 name: "allow-shallow".to_string(),
                 description: "Allow attestation merges".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 10,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![],
                 actions: vec!["merge".to_string()],
@@ -6667,7 +7475,9 @@ mod tests {
             state.policies.create(&allow_policy).await.unwrap();
 
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // chain_depth=0 ≤ 5 → deny doesn't fire, allow matches.
             assert_eq!(result.effect, PolicyEffect::Allow);
@@ -6718,13 +7528,15 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-signer"), mr.id.clone(), 50, 1000);
 
             // Allow only when root_signer == "user:trusted-principal".
+            // Priority 200: user band, above the seeded builtin
+            // attested-authorization Allow (150).
             let allow_trusted = Policy {
                 id: Id::new("allow-trusted-signer"),
                 name: "allow-trusted-signer".to_string(),
                 description: "Allow only trusted signer".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 50,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![Condition {
                     attribute: "subject.root_signer".to_string(),
@@ -6743,7 +7555,9 @@ mod tests {
             state.policies.create(&allow_trusted).await.unwrap();
 
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // root_signer "user:trusted-principal" matches the policy condition.
             assert_eq!(result.effect, PolicyEffect::Allow);
@@ -6790,13 +7604,15 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-cc"), mr.id.clone(), 50, 1000);
 
             // Allow when constraint_count < 10.
+            // Priority 200: user band, above the seeded builtin
+            // attested-authorization Allow (150).
             let allow_low_cc = Policy {
                 id: Id::new("allow-low-cc"),
                 name: "allow-low-cc".to_string(),
                 description: "Allow when few constraints".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 50,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![Condition {
                     attribute: "subject.constraint_count".to_string(),
@@ -6815,7 +7631,9 @@ mod tests {
             state.policies.create(&allow_low_cc).await.unwrap();
 
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // constraint_count=4 < 10 → allow.
             assert_eq!(result.effect, PolicyEffect::Allow);
@@ -6863,13 +7681,15 @@ mod tests {
             let entry = MergeQueueEntry::new(Id::new("entry-tenant"), mr.id.clone(), 50, 1000);
 
             // Allow only when tenant_id == "tenant-specific-id".
+            // Priority 200: user band, above the seeded builtin
+            // attested-authorization Allow (150).
             let allow_tenant = Policy {
                 id: Id::new("allow-tenant"),
                 name: "allow-tenant".to_string(),
                 description: "Allow only specific tenant".to_string(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 50,
+                priority: 200,
                 effect: PolicyEffect::Allow,
                 conditions: vec![Condition {
                     attribute: "subject.tenant_id".to_string(),
@@ -6888,11 +7708,315 @@ mod tests {
             state.policies.create(&allow_tenant).await.unwrap();
 
             let result =
-                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
 
             // tenant_id resolved from workspace → "tenant-specific-id" → matches.
             assert_eq!(result.effect, PolicyEffect::Allow);
             assert_eq!(result.matched_policy, Some("allow-tenant".to_string()),);
+        }
+
+        /// task-129 §Audit Integration (review round 5): the
+        /// supervised-trust-hold evaluation (evaluate_merge_abac) persists its
+        /// PolicyDecision to the audit trail. Previously the only merge-path
+        /// recording was inside evaluate_attestation_abac, so trust-hold
+        /// decisions were invisible to GET /api/v1/policies/decisions.
+        #[tokio::test]
+        async fn evaluate_merge_abac_records_decision_to_audit_trail() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-trust-audit"),
+                Id::new("tenant-trust-audit"),
+                "ws-trust-audit",
+                "ws-trust-audit",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-trust-audit"),
+                Id::new("ws-trust-audit"),
+                "trust-audit-repo",
+                "/tmp/trust-audit-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            let mut mr = MergeRequest::new(
+                Id::new("mr-trust-audit"),
+                repo.id.clone(),
+                "trust audit MR",
+                "feat/trust-audit",
+                "main",
+                1000,
+            );
+            mr.workspace_id = Id::new("ws-trust-audit");
+
+            // Seed an explicit Allow for the merge-processor service identity
+            // so the recorded decision carries a real matched policy — an
+            // empty-store run would record the engine default deny with no
+            // matched_policy, which would not distinguish a faithful record
+            // from a stub that persists a hardcoded decision.
+            let allow = Policy {
+                id: Id::new("allow-merge-processor"),
+                name: "allow-merge-processor".to_string(),
+                description: "Allow the merge processor service identity".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 200,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.type".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("system".to_string()),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["mr".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("test"),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&allow).await.unwrap();
+
+            let result = evaluate_merge_abac(&state, &mr, &repo).await.unwrap();
+            assert_eq!(result.effect, PolicyEffect::Allow);
+            assert_eq!(
+                result.matched_policy,
+                Some("allow-merge-processor".to_string())
+            );
+
+            // The decision must be persisted and queryable via the audit
+            // store — the exact surface GET /api/v1/policies/decisions reads.
+            let decisions = state
+                .policies
+                .list_decisions(Some("merge-processor"), Some("mr"), 10)
+                .await
+                .unwrap();
+            assert_eq!(
+                decisions.len(),
+                1,
+                "every evaluation path must record its decision"
+            );
+            let d = &decisions[0];
+            assert_eq!(d.subject_id, "merge-processor");
+            assert_eq!(d.subject_type, "system");
+            assert_eq!(d.action, "merge");
+            assert_eq!(d.resource_type, "mr");
+            assert_eq!(d.resource_id, mr.id.as_str());
+            assert_eq!(d.decision, PolicyEffect::Allow);
+            assert_eq!(
+                d.matched_policy.as_ref().map(|p| p.as_str()),
+                Some("allow-merge-processor")
+            );
+        }
+
+        /// Review round 6 (task-129, §Audit Integration): an ENFORCED
+        /// attestation-gate Deny must land in the audit trail as an
+        /// `AbacDenied` event — previously this path logged at info and
+        /// emitted no audit event at all, so a policy-held merge was
+        /// invisible to the compliance query surface. Killing direction:
+        /// removing the record_abac_denied_service call (or keying it on
+        /// the wrong outcome) leaves the query empty and this fails.
+        #[tokio::test]
+        async fn attestation_deny_records_abac_denied_audit_event() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-att-audit"),
+                Id::new("tenant-att-audit"),
+                "ws-att-audit",
+                "ws-att-audit",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-att-audit"),
+                Id::new("ws-att-audit"),
+                "att-audit-repo",
+                "/tmp/att-audit-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            let chain = vec![root_attestation("user:att-signer"), derived_attestation(1)];
+            let leaf = &chain[1];
+
+            let mut mr = MergeRequest::new(
+                Id::new("mr-att-audit"),
+                repo.id.clone(),
+                "att audit MR",
+                "feat/att-audit",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:att-worker"));
+            mr.workspace_id = Id::new("ws-att-audit");
+            let entry = MergeQueueEntry::new(Id::new("entry-att-audit"), mr.id.clone(), 50, 1000);
+
+            // Deny: chain_depth > 0 → deny merge on attestation resources.
+            // Priority 250: user band, above the seeded builtin
+            // attested-authorization Allow (150) — otherwise the builtin
+            // Allow would decide and this Deny would never be attributed.
+            let deny = Policy {
+                id: Id::new("deny-att-audit"),
+                name: "deny-att-audit".to_string(),
+                description: "Deny deep chains".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 250,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.chain_depth".to_string(),
+                    operator: ConditionOp::GreaterThan,
+                    value: ConditionValue::Number(0),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("test"),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&deny).await.unwrap();
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
+            assert_eq!(result.effect, PolicyEffect::Deny);
+            assert_eq!(result.matched_policy, Some("deny-att-audit".to_string()));
+
+            // The Deny is in the AbacDenied audit trail, attributed to the
+            // MR's author agent, naming the matched policy and the
+            // enforced merge-queue endpoint.
+            let events = state
+                .audit
+                .query(&gyre_ports::AuditQueryFilter {
+                    agent_id: Some("agent:att-worker".to_string()),
+                    event_type: Some("abac_denied".to_string()),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(
+                events.iter().any(|e| {
+                    e.event_type == gyre_domain::AuditEventType::AbacDenied
+                        && e.detail["policy_id"] == "deny-att-audit"
+                        && e.detail["resource"] == "attestation"
+                        && e.detail["action"] == "merge"
+                        && e.detail["enforced"] == true
+                }),
+                "the enforced attestation Deny must be recorded as an AbacDenied \
+                 audit event: {:?}",
+                events
+            );
+        }
+
+        /// Review round 6 (task-129): a workspace-store read failure inside
+        /// the ENFORCED attestation gate must FAIL CLOSED (Err), not degrade
+        /// to "no tenant scope" — the previous `_ => None` swallow left
+        /// `resource.tenant_id` unset so tenant-scoped Deny policies
+        /// silently did not apply while the attestation Allow still
+        /// granted. Killing direction: with the swallow restored, this
+        /// returns Ok and the assertion on Err fails.
+        #[tokio::test]
+        async fn attestation_abac_fails_closed_on_workspace_store_error() {
+            use gyre_ports::WorkspaceRepository;
+
+            /// Delegates every method to the real store except `find_by_id`,
+            /// which fails — the exact store-read failure the review
+            /// finding describes.
+            struct FailingWorkspaceReads {
+                inner: std::sync::Arc<dyn WorkspaceRepository>,
+            }
+
+            #[async_trait::async_trait]
+            impl WorkspaceRepository for FailingWorkspaceReads {
+                async fn create(&self, workspace: &Workspace) -> anyhow::Result<()> {
+                    self.inner.create(workspace).await
+                }
+                async fn find_by_id(&self, _id: &Id) -> anyhow::Result<Option<Workspace>> {
+                    Err(anyhow::anyhow!("injected workspace store read failure"))
+                }
+                async fn find_by_slug(
+                    &self,
+                    tenant_id: &Id,
+                    slug: &str,
+                ) -> anyhow::Result<Option<Workspace>> {
+                    self.inner.find_by_slug(tenant_id, slug).await
+                }
+                async fn list(&self) -> anyhow::Result<Vec<Workspace>> {
+                    self.inner.list().await
+                }
+                async fn list_by_tenant(&self, tenant_id: &Id) -> anyhow::Result<Vec<Workspace>> {
+                    self.inner.list_by_tenant(tenant_id).await
+                }
+                async fn update(&self, workspace: &Workspace) -> anyhow::Result<()> {
+                    self.inner.update(workspace).await
+                }
+                async fn delete(&self, id: &Id) -> anyhow::Result<()> {
+                    self.inner.delete(id).await
+                }
+                async fn apply_trust_transition(
+                    &self,
+                    workspace: &Workspace,
+                    delete_trust_policies: bool,
+                    new_policies: &[Policy],
+                ) -> anyhow::Result<()> {
+                    self.inner
+                        .apply_trust_transition(workspace, delete_trust_policies, new_policies)
+                        .await
+                }
+            }
+
+            let mut state = test_state();
+            let real = state.workspaces.clone();
+            {
+                let s = std::sync::Arc::get_mut(&mut state).expect("test state is uniquely owned");
+                s.workspaces = std::sync::Arc::new(FailingWorkspaceReads { inner: real });
+            }
+
+            // Minimal fixtures: the gate reads the workspace BEFORE any
+            // other store, so the repo/MR/chain need not resolve further.
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-fail-closed"),
+                Id::new("ws-fail-closed"),
+                "fail-closed-repo",
+                "/tmp/fail-closed-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            let chain = vec![root_attestation("user:fail-signer")];
+            let leaf = &chain[0];
+            let mut mr = MergeRequest::new(
+                Id::new("mr-fail-closed"),
+                repo.id.clone(),
+                "fail closed MR",
+                "feat/fail",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:fail-worker"));
+            mr.workspace_id = Id::new("ws-fail-closed");
+            let entry = MergeQueueEntry::new(Id::new("entry-fail-closed"), mr.id.clone(), 50, 1000);
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+            assert!(
+                result.is_err(),
+                "a workspace-store read failure must propagate (fail closed), not \
+                 degrade to a tenant-scope-less evaluation — got {:?}",
+                result.map(|r| r.effect)
+            );
         }
     }
 
@@ -6916,8 +8040,8 @@ mod tests {
             required,
             gate_phase: GatePhase::PostMerge,
             timeout_secs: Some(30),
-            created_at: 1000,
             position: 0,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
     }
@@ -7181,11 +8305,144 @@ mod tests {
         assert!(merge_queue_paused(&state, &repo.id).await);
     }
 
-    /// Task-095 R4-F1: when the recovery revert's inverse patch conflicts
-    /// with later changes on the default branch, the branch is untouched —
-    /// the protocol must stay paused, escalate to a human, and apply NO
-    /// per-MR side effects (the MR is still merged; marking it Reverted
-    /// would record a revert that never happened).
+    /// TASK-077 F5 / task-146 repair: a Deny attestation-ABAC decision must
+    /// block the merge — the evaluation result is enforced at the merge
+    /// queue, not merely logged. Regression test for the audit-only flaw
+    /// (evaluate_attestation_abac results discarded; merge proceeded
+    /// regardless of the policy decision).
+    #[tokio::test]
+    async fn attestation_abac_deny_blocks_merge() {
+        use gyre_common::{
+            Attestation, AttestationInput, AttestationMetadata, AttestationOutput, DerivedInput,
+            KeyBinding,
+        };
+        use gyre_domain::policy::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
+        };
+
+        let state = test_state();
+        let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // Link the author agent to a task with an attestation chain — the
+        // find_by_task fallback lookup path used when the source branch head
+        // has no chain (and here the repo has no git refs at all).
+        let mut agent = state
+            .agents
+            .find_by_id(&Id::new("agent-recov"))
+            .await
+            .unwrap()
+            .expect("author agent exists");
+        agent.current_task_id = Some(Id::new("task-abac-deny"));
+        state.agents.update(&agent).await.unwrap();
+
+        // Chain leaf (depth=2) for that task. A Derived input whose parent_ref
+        // resolves to nothing makes load_chain return just this node.
+        let att = Attestation {
+            id: "sha256:deny-leaf".to_string(),
+            input: AttestationInput::Derived(DerivedInput {
+                parent_ref: vec![],
+                preconditions: vec![],
+                update: "narrow_scope".to_string(),
+                output_constraints: vec![],
+                signature: vec![1],
+                key_binding: KeyBinding {
+                    public_key: vec![1, 2, 3, 4],
+                    user_identity: "user:deny-signer".to_string(),
+                    issuer: "https://keycloak.example.com".to_string(),
+                    trust_anchor_id: "tenant-keycloak".to_string(),
+                    issued_at: 1_700_000_000,
+                    expires_at: 1_700_003_600,
+                    user_signature: vec![10, 20],
+                    platform_countersign: vec![30, 40],
+                },
+            }),
+            output: AttestationOutput {
+                content_hash: vec![7, 8, 9],
+                commit_sha: "ccc333".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: AttestationMetadata {
+                created_at: 1_700_000_100,
+                workspace_id: "ws-1".to_string(),
+                repo_id: repo.id.to_string(),
+                task_id: "task-abac-deny".to_string(),
+                agent_id: "agent-recov".to_string(),
+                chain_depth: 2,
+            },
+        };
+        state.chain_attestations.save(&att).await.unwrap();
+
+        // Deny policy: chain_depth > 1 denies merge on attestation resources
+        // (same shape as the evaluate_attestation_abac unit tests). Priority
+        // 250: the user band (200–299) sits above the builtin
+        // attested-authorization Allow (150) that the seeded startup set
+        // contributes, so this Deny — not the builtin — decides deep chains
+        // (the builtin's definition documents the band; at priority 100 the
+        // builtin Allow legitimately wins under "higher priority always
+        // wins" and the merge proceeds).
+        let deny_policy = Policy {
+            id: Id::new("deny-deep-chain-merge"),
+            name: "deny-deep-chain-merge".to_string(),
+            description: "Deny merges with chain_depth > 1".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 250,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.chain_depth".to_string(),
+                operator: ConditionOp::GreaterThan,
+                value: ConditionValue::Number(1),
+            }],
+            actions: vec!["merge".to_string()],
+            resource_types: vec!["attestation".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: Id::new("test"),
+            created_at: 0,
+            updated_at: 0,
+        };
+        state.policies.create(&deny_policy).await.unwrap();
+
+        process_next(&state).await.unwrap();
+
+        // The queue entry FAILED with the ABAC denial as the reason...
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-recov"))
+            .await
+            .unwrap()
+            .expect("queue entry exists");
+        assert_eq!(
+            entry.status,
+            gyre_domain::MergeQueueEntryStatus::Failed,
+            "a Deny attestation-ABAC decision must fail the queue entry"
+        );
+        let reason = entry.error_message.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("attestation ABAC policy denied merge"),
+            "failure reason should name the ABAC denial, got: {reason}"
+        );
+
+        // ...and the merge never happened.
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            updated.status,
+            MrStatus::Merged,
+            "merge must not proceed after a Deny attestation-ABAC decision"
+        );
+    }
+
+    /// task-095 R4-F1: when the revert's inverse patch conflicts with later
+    /// changes on the branch, the recovery must stay paused with NO per-MR
+    /// side effects — the branch is untouched, so recording a revert would
+    /// be a false record.
     #[tokio::test]
     async fn post_merge_recovery_revert_conflict_stays_paused_without_side_effects() {
         let git = crate::mem::ConfigurableGitOps {
@@ -8368,18 +9625,53 @@ mod tests {
         // for head_sha's tree, false for the base tree.
         create_post_merge_gate(&state, &repo.id, "test -f marker", true).await;
 
-        // Gates run at head_sha: marker exists → pass.
-        crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+        // Gates run at head_sha: marker exists → pass. The run is
+        // attributed to a real MR id so the analytics events carry it
+        // (task-146 review R4: post-merge evaluations must record
+        // gate.passed/gate.failed like the pre-merge path).
+        let mr_id = Id::new("mr-post-merge-r21");
+        crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha, Some(&mr_id))
             .await
             .expect("gates must pass at head_sha");
 
         // Gates run at the base SHA: marker absent → required gate fails.
-        let err = crate::gate_executor::run_post_merge_gates(&state, &repo, &base_sha)
-            .await
-            .expect_err("gates must fail at base sha");
+        let err =
+            crate::gate_executor::run_post_merge_gates(&state, &repo, &base_sha, Some(&mr_id))
+                .await
+                .expect_err("gates must fail at base sha");
         assert!(
             err.contains("post-merge-tests"),
             "failure should name the gate: {err}"
+        );
+
+        // Both post-merge evaluations recorded their gate analytics
+        // events with the gate's real ids and the attributed MR.
+        let passed = state
+            .analytics
+            .query(Some("gate.passed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            passed
+                .iter()
+                .any(|e| e.properties["mr_id"] == "mr-post-merge-r21"
+                    && e.properties["gate_type"] == "TestCommand"
+                    && e.properties["duration_secs"].is_u64()
+                    && e.repo_id.as_deref() == Some("repo-gate-r21")),
+            "post-merge gate pass must record gate.passed: {passed:?}"
+        );
+        let failed = state
+            .analytics
+            .query(Some("gate.failed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            failed
+                .iter()
+                .any(|e| e.properties["mr_id"] == "mr-post-merge-r21"
+                    && e.properties["gate_type"] == "TestCommand"
+                    && e.properties["output_snippet"].is_string()),
+            "post-merge gate failure must record gate.failed: {failed:?}"
         );
 
         // The detached gate worktree was deregistered: the only registered

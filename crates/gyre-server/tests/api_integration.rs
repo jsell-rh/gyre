@@ -1648,3 +1648,92 @@ async fn cors_includes_server_port() {
         "CORS allow-origin should include the server's own port (http://localhost:{port})"
     );
 }
+
+// ── 34. Orchestrator spawn tenant containment (task-093 F2/F3, task-146 repair) ─
+
+#[tokio::test]
+async fn orchestrator_spawn_denied_across_tenants() {
+    // The spawn routes run without middleware ABAC (registry-exempt), so the
+    // handler's tenant containment is the only authorization surface: a
+    // caller whose tenant does not match the workspace's tenant must get 403,
+    // never a workspace-scoped orchestrator JWT.
+    let ctx = Ctx::new().await;
+
+    // Workspace in a foreign tenant. The integration token is a global token
+    // whose AuthenticatedAgent.tenant_id is "default", so this workspace is
+    // out of scope for the caller.
+    let ws = gyre_domain::Workspace::new(
+        gyre_common::Id::new("ws-foreign"),
+        gyre_common::Id::new("tenant-foreign"),
+        "Foreign",
+        "foreign",
+        0,
+    );
+    ctx.state.workspaces.create(&ws).await.unwrap();
+
+    // Seed the built-in personas in BOTH tenants (bootstrap step 5): the
+    // spawn path resolves the orchestrator persona fail-closed, so the
+    // own-tenant positive control below needs an approved persona in the
+    // caller's scope chain — and seeding the foreign tenant too proves the
+    // 403 below comes from tenant containment, not from a missing persona.
+    gyre_server::seed_builtin_personas_for_tenant(
+        &ctx.state,
+        &gyre_common::Id::new("tenant-foreign"),
+    )
+    .await;
+    gyre_server::seed_builtin_personas_for_tenant(&ctx.state, &gyre_common::Id::new("default"))
+        .await;
+
+    let resp = ctx
+        .post(
+            "/api/v1/workspaces/ws-foreign/orchestrator/spawn",
+            json!({ "name": "should-not-spawn" }),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "cross-tenant orchestrator spawn must be Forbidden, got {}",
+        resp.status()
+    );
+
+    // No orchestrator was created for the foreign workspace.
+    let agents = ctx
+        .state
+        .agents
+        .list_by_workspace(&gyre_common::Id::new("ws-foreign"))
+        .await
+        .unwrap();
+    assert!(
+        agents.is_empty(),
+        "no agent may be created for a cross-tenant spawn"
+    );
+
+    // Positive control: a workspace in the caller's own tenant ("default")
+    // still spawns successfully.
+    let ws = gyre_domain::Workspace::new(
+        gyre_common::Id::new("ws-own"),
+        gyre_common::Id::new("default"),
+        "Own",
+        "own",
+        0,
+    );
+    ctx.state.workspaces.create(&ws).await.unwrap();
+    let resp = ctx
+        .post(
+            "/api/v1/workspaces/ws-own/orchestrator/spawn",
+            json!({ "name": "own-orchestrator" }),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        201,
+        "same-tenant orchestrator spawn must succeed, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["agent"]["id"].as_str().is_some_and(|s| !s.is_empty()),
+        "spawn response must include the created agent"
+    );
+}

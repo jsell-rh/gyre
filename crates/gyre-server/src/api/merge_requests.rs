@@ -163,6 +163,14 @@ pub struct ReviewResponse {
     pub reviewer_agent_id: String,
     pub decision: String,
     pub body: Option<String>,
+    /// Gate persona attribution (agent-gates.md §Gate Agent Lifecycle):
+    /// the persona of the gate whose agent produced this review. `None` for
+    /// reviews not produced by a gate agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_persona: Option<String>,
+    /// Id of the gate whose agent produced this review, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_id: Option<String>,
     pub created_at: u64,
 }
 
@@ -174,6 +182,8 @@ impl From<Review> for ReviewResponse {
             reviewer_agent_id: r.reviewer_agent_id,
             decision: review_decision_str(&r.decision),
             body: r.body,
+            reviewer_persona: r.reviewer_persona,
+            gate_id: r.gate_id.map(|g| g.to_string()),
             created_at: r.created_at,
         }
     }
@@ -954,21 +964,52 @@ pub async fn transition_mr_status(
             .await;
     }
 
-    // Auto-track mr.merged analytics event
-    if is_merge {
-        let ev = AnalyticsEvent::new(
-            new_id(),
-            "mr.merged",
-            mr.author_agent_id.as_ref().map(|id| id.to_string()),
+    // Auto-track mr.merged / mr.closed analytics events (analytics.md §Auto-Emitted Events).
+    if is_merge || is_close {
+        // gate_count: number of gate results recorded for this MR.
+        let gate_count = state
+            .gate_results
+            .list_by_mr_id(mr.id.as_str())
+            .await
+            .map(|rs| rs.len() as u64)
+            .unwrap_or(0);
+        // queue_wait_secs: time from merge-queue enqueue to now, if the MR
+        // passed through the queue.
+        let queue_wait_secs = state
+            .merge_queue
+            .list_queue()
+            .await
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|e| e.merge_request_id == mr.id)
+                    .map(|e| ts.saturating_sub(e.enqueued_at))
+            });
+
+        let event_name = if is_merge { "mr.merged" } else { "mr.closed" };
+        let properties = if is_merge {
             serde_json::json!({
                 "mr_id": mr.id.to_string(),
-                // Scope facets (search.md §Searchable Entities: Activity
-                // Event is filterable by workspace/repo).
-                "workspace_id": mr.workspace_id.to_string(),
                 "repo_id": mr.repository_id.to_string(),
-            }),
+                "gate_count": gate_count,
+                "queue_wait_secs": queue_wait_secs,
+            })
+        } else {
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "reason": "closed_without_merge",
+            })
+        };
+        let ev = AnalyticsEvent::new(
+            new_id(),
+            event_name,
+            mr.author_agent_id.as_ref().map(|id| id.to_string()),
+            properties,
             ts,
-        );
+        )
+        .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
         let _ = state.analytics.record(&ev).await;
         // search.md §Searchable Entities: activity events are indexed on write.
         crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev))
@@ -1098,6 +1139,54 @@ pub async fn submit_review(
     let decision = parse_review_decision(&req.decision)?;
     let mut review = Review::new(new_id(), mr_id, reviewer_agent_id, decision, now_secs());
     review.body = req.body;
+
+    // Gate-agent attribution (agent-gates.md §Gate Agent Lifecycle: "gate
+    // agent reviews are attributed — the review shows which gate persona
+    // produced it"). The scoped reviewer token's `task_id` claim carries the
+    // id of the gate that minted it (see `mint_scoped`), so the persona and
+    // gate binding are derived server-side from the token — a caller-
+    // supplied attribution would be forgeable exactly like a forged
+    // reviewer_agent_id. A token whose gate no longer exists records no
+    // attribution (the identity is still bound to the token subject above).
+    // §1 Token Scoping: the scope claim is a list; read it through the
+    // extractor-derived `auth.scope` (mirrored from signature-verified
+    // claims), never the raw JSON string form — an array claim read as a
+    // string silently fails open (this gate would never fire, stripping
+    // every gate review of its persona attribution).
+    if auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE)
+    {
+        let token_gate_id = auth
+            .jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("task_id"))
+            .and_then(|s| s.as_str());
+        if let Some(gate_id) = token_gate_id {
+            match state.quality_gates.find_by_id(gate_id).await {
+                Ok(Some(gate)) => {
+                    review.gate_id = Some(gate.id.clone());
+                    review.reviewer_persona = gate.persona.clone();
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        mr_id = %id,
+                        gate_id,
+                        "scoped reviewer token references a gate that no longer exists; review recorded without gate attribution"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        mr_id = %id,
+                        gate_id,
+                        error = %e,
+                        "gate lookup for review attribution failed; review recorded without gate attribution"
+                    );
+                }
+            }
+        }
+    }
 
     state.reviews.submit_review(&review).await?;
     // search.md §Searchable Entities + §Index Updates ("MR created/reviewed ->
@@ -1581,6 +1670,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn closing_mr_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: mr.closed carries mr_id, repo_id,
+        // reason; scope fields workspace_id/repo_id are attached for filtering.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Analytics close").await;
+
+        let body = serde_json::json!({ "status": "closed" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.closed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], mr_id);
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert!(
+            ev.properties["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "reason must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn merging_mr_emits_analytics_event_with_gate_count() {
+        // analytics.md §Auto-Emitted Events: mr.merged carries mr_id, repo_id,
+        // gate_count, queue_wait_secs.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Analytics merge").await;
+
+        // Approve first (Open → Merged is invalid; Open → Approved → Merged).
+        let body = serde_json::json!({ "status": "approved" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Seed two gate results so gate_count is non-zero.
+        for gid in ["gate-1", "gate-2"] {
+            state
+                .gate_results
+                .save(&gyre_domain::GateResult {
+                    id: gyre_common::Id::new(format!("gr-{gid}")),
+                    gate_id: gyre_common::Id::new(gid),
+                    mr_id: gyre_common::Id::new(&mr_id),
+                    status: gyre_domain::GateStatus::Passed,
+                    output: None,
+                    started_at: None,
+                    finished_at: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let body = serde_json::json!({ "status": "merged" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("mr.merged"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.merged event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], mr_id);
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert_eq!(
+            ev.properties["gate_count"], 2,
+            "gate_count counts gate results"
+        );
+        // The MR never entered the merge queue — queue_wait_secs is absent/null.
+        assert!(
+            ev.properties
+                .get("queue_wait_secs")
+                .is_none_or(|v| v.is_null()),
+            "queue_wait_secs must be null when the MR never queued"
+        );
+    }
+
+    #[tokio::test]
     async fn list_mrs_by_repository() {
         let app = app();
         let (_, _) = create_test_mr(app.clone(), "MR for repo").await;
@@ -1722,6 +1930,170 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["file_path"], "src/lib.rs");
         assert_eq!(json["line_number"], 10);
+    }
+
+    #[tokio::test]
+    async fn scoped_gate_review_records_persona_attribution() {
+        // agent-gates.md §Gate Agent Lifecycle: "gate agent reviews are
+        // attributed — the review shows which gate persona produced it".
+        // A reviewer authenticating with a gate-agent scoped token gets its
+        // persona and gate binding derived server-side from the token's
+        // task_id claim (the gate id); nothing in the request body can
+        // forge or suppress it.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Attribution test").await;
+
+        // A real gate row: the persona the review must be attributed to.
+        let gate = gyre_domain::QualityGate {
+            id: gyre_common::Id::new("gate-attrib-1"),
+            repo_id: gyre_common::Id::new("repo-1"),
+            name: "security-review".to_string(),
+            gate_type: gyre_domain::GateType::AgentReview,
+            command: Some("true".to_string()),
+            required_approvals: None,
+            persona: Some("personas/security.md".to_string()),
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            position: 0,
+            created_at: 1_700_000_000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        // Scoped reviewer token, minted exactly as the gate executor mints
+        // them: task_id carries the gate id, tenant resolved fail-closed
+        // from the MR's workspace (task-130 hierarchy claims), persona slug
+        // from the gate persona reference. The API-created MR binds to the
+        // bootstrap workspace because the mem repo store has no repo-1
+        // row, so seed that workspace row for the tenant resolution —
+        // never a fabricated literal at the mint site.
+        let mr = state
+            .merge_requests
+            .find_by_id(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap()
+            .expect("test MR");
+        if state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            let ws = gyre_domain::Workspace::new(
+                mr.workspace_id.clone(),
+                gyre_common::Id::new("default"),
+                format!("Test workspace {}", mr.workspace_id.as_str()),
+                mr.workspace_id.as_str().to_string(),
+                1_700_000_000,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
+        let workspace = state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .expect("test MR workspace");
+        let gate_agent_id = "gate-review-attrib".to_string();
+        let token = state
+            .agent_signing_key
+            .mint_scoped(
+                &gate_agent_id,
+                gate.id.as_str(),
+                "forge",
+                &state.base_url,
+                60,
+                crate::auth::REVIEW_SUBMIT_SCOPE,
+                workspace.tenant_id.as_str(),
+                Some("security"),
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &gate_agent_id, token.clone())
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "forged-reviewer",
+            "decision": "approved",
+            "body": "checked against the security persona"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], gate_agent_id);
+        assert_eq!(
+            json["reviewer_persona"], "personas/security.md",
+            "the review shows which gate persona produced it"
+        );
+        assert_eq!(json["gate_id"], "gate-attrib-1");
+
+        // Persisted with attribution (not just the response envelope).
+        let reviews = state
+            .reviews
+            .list_reviews(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(
+            reviews[0].reviewer_persona.as_deref(),
+            Some("personas/security.md")
+        );
+        assert_eq!(
+            reviews[0].gate_id,
+            Some(gyre_common::Id::new("gate-attrib-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_review_has_no_gate_attribution() {
+        // A regular (non-gate) reviewer gets no persona attribution — the
+        // fields are gate-agent concepts, derived from the scoped token.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "No attribution test").await;
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agent-1",
+            "decision": "approved",
+            "body": "LGTM"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert!(
+            json.get("reviewer_persona").is_none(),
+            "non-gate reviews carry no persona attribution"
+        );
+        assert!(json.get("gate_id").is_none());
     }
 
     #[tokio::test]
