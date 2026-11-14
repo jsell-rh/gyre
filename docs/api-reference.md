@@ -275,7 +275,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/analytics/events` | Record an analytics event |
 | `GET` | `/api/v1/analytics/events` | Query analytics events (`?event_name=&agent_id=&since=`) |
 | `GET` | `/api/v1/analytics/count` | Count events by name (aggregated); `?event_name=&since=&until=` (both bounds optional — since defaults to 0, until to now); `?property=key:value` counts only events whose `properties[key]` equals `value` (string equality, funnel step support — malformed filter 400) |
-| `GET` | `/api/v1/analytics/daily` | Daily event counts (time-series) |
+| `GET` | `/api/v1/analytics/daily` | Daily event counts (time-series); `?event_name=` is optional — absent/empty aggregates across ALL event names (total daily volume, the dashboard bar-chart form `?days=30`); `?since=&until=&days=` set the window (days defaults to 30, until to now) |
 | `GET` | `/api/v1/analytics/usage` | Event count, unique agent count, and trend (`up`/`down`/`flat` vs prior equal-length period); `?event_name=&since=&until=` (M23) |
 | `GET` | `/api/v1/analytics/compare` | Before/after pivot comparison: `before_count`, `after_count`, `change_pct` (null when before=0), `improved`; `?event_name=&before=&pivot=&after=` (M23) |
 | `GET` | `/api/v1/analytics/top` | Top N event names by count; `?limit=10&since=` (M23); `?dimension=agent` ranks top agents instead — `{agent_id, event_count, completed, failed, completion_rate (null when no completions/failures), avg_duration_secs}` over `agent.completed`/`agent.failed` events, `?workspace_id=` scopes the ranking (tenant-validated like decide: 403 cross-tenant, 404 unknown), unknown dimension 400 (analytics.md §Analytics Dashboard, task-149) |

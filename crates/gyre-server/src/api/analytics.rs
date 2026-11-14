@@ -202,7 +202,14 @@ pub struct CountEventsParams {
 
 #[derive(Deserialize)]
 pub struct DailyParams {
-    pub event_name: String,
+    /// Exact event-name filter. Optional: absent or empty (`?event_name=`)
+    /// aggregates across ALL event names — the total daily event volume
+    /// the Analytics Dashboard bar chart renders (analytics.md
+    /// §Analytics Dashboard: "daily event volume for the last 30 days").
+    /// The bare `?days=30` form (what the dashboard's chart sends) MUST
+    /// work — it is not an error to omit the filter.
+    #[serde(default)]
+    pub event_name: Option<String>,
     /// ISO8601 timestamp or unix seconds. Optional when `days` is given.
     pub since: Option<String>,
     /// ISO8601 timestamp or unix seconds. Defaults to now (analytics.md
@@ -627,9 +634,17 @@ pub async fn daily_events(
             "since must not be after until".to_string(),
         ));
     }
+    // Empty string (`?event_name=`) is the spec's "no filter" form, same
+    // as omitting the parameter entirely — the dashboard's bar chart
+    // sends the bare `?days=30` form and must get TOTAL daily volume.
+    let event_name = params
+        .event_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
     let rows = state
         .analytics
-        .aggregate_by_day(&params.event_name, since, until)
+        .aggregate_by_day(event_name, since, until)
         .await?;
     Ok(Json(
         rows.into_iter()
@@ -2433,7 +2448,115 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    // ─── Decision API (analytics.md §Decision API for Agents) ───────────────
+    #[tokio::test]
+    async fn daily_events_bare_days_form_returns_total_volume() {
+        // The Analytics Dashboard bar chart (analytics.md §Analytics
+        // Dashboard: "daily event volume for the last 30 days") sends the
+        // bare `GET /daily?days=30` form with NO event_name. That request
+        // must NOT 400 on a missing required parameter (task-149 review
+        // finding), and it must return TOTAL daily volume across ALL
+        // event names — not the per-event-name series — so the chart's
+        // bars are the aggregate counts. Seeded events deliberately use
+        // two DISTINCT event names on the same day: the total form must
+        // count both, the per-name form only one.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let now = crate::api::now_secs();
+        for (id, name, ts) in [
+            ("tv-1", "agent.spawned", now),
+            ("tv-2", "agent.completed", now),
+            ("tv-3", "agent.spawned", now),
+            // Out of window (40 days ago): excluded from every form.
+            ("tv-old", "agent.spawned", now.saturating_sub(40 * 86_400)),
+        ] {
+            let ev = gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(id),
+                name,
+                None,
+                serde_json::json!({}),
+                ts,
+            );
+            state.analytics.record(&ev).await.unwrap();
+        }
+
+        // Bare `?days=30` — the exact request the dashboard chart sends.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri("/api/v1/analytics/daily?days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "bare ?days=30 (no event_name) must not be rejected — \
+             the dashboard bar chart sends exactly this form"
+        );
+        let json = body_json(resp).await;
+        let total: u64 = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["count"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(
+            total, 3,
+            "no event_name = total daily volume across ALL event names \
+             (2x agent.spawned + 1x agent.completed today, old event excluded)"
+        );
+
+        // Spec-documented empty-value form `?event_name=&days=30` is the
+        // same "no filter" request.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri("/api/v1/analytics/daily?event_name=&days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let total: u64 = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["count"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(total, 3, "empty event_name aggregates all names");
+
+        // Explicit event_name still filters to that name's series.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri("/api/v1/analytics/daily?event_name=agent.spawned&days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let total: u64 = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["count"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(total, 2, "explicit event_name filters to that name only");
+    }
+
+    // ─── Decision API (analytics.md §Decision API for Agents) ─────────────────
 
     /// Percent-encode a query-parameter value (the `context` JSON is
     /// passed URL-encoded per the spec example).
