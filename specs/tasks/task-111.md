@@ -97,21 +97,25 @@ Session management per `user-management.md` §Session Management is implemented 
 - **API:** `GET/DELETE /users/me/sessions[...]`, `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants (`/users/:user_id/sessions...`) with per-handler role checks and tenant containment. Session routes are ABAC-exempt by design with per-handler authorization (validated by `check-abac-exempt-handlers.sh`).
 - **Cleanup:** daily `spawn_session_cleanup` deletes unrevoked sessions expired >30 days (revoked rows kept as the durable sign-out record).
 
-### This round: review-finding repair (commit 9db91887)
+### This round: base merge 9bfab36 (rebase repair b1b4c6e5)
 
-Repair of review finding ea8e3c88: the gyre-server lib test target did not compile — four merge_processor.rs test MRs (`mr-no-spec-ref`, `mr-with-spec-ref`, `mr-unapproved-spec`, `mr-approved-spec`, from task-145 via the base merge) called the 6-arg `MergeRequest::new` while commit 74749334 had added `workspace_id` as the third parameter. All four sites now pass `Id::new("ws-1")` at construction; the redundant post-construction assignments were removed. No production (non-test) code changed this round; the session surface is exactly the reviewed candidate state merged with base `44cf25bf`.
+Resolved the assigned rebase: merged base `9bfab365` (task-126 CLI pass + task-133/149 analytics) into the task-111 branch. The only content conflict was the `specs/coverage/system/user-management.md` audit header — resolved by merging both sides' audit trails (task-111 row 12 + task-126 row 30) with a mechanical recount via `scripts/update-coverage-summary.sh` (11 n/a, 0 not-started, 12 task-assigned, 13 implemented); row 30's stale "sessions endpoints do not exist" note was corrected (session CLI commands now hit live task-111 endpoints; only tenant-invitation commands remain blocked on task-110), and SUMMARY.md recounts for abac-policy-engine.md / agent-gates.md were recomputed from their auto-merged tables. No production (non-test, non-coverage) code changed this round; the session surface is exactly the previously reviewed candidate state (`df0c1da2`) merged with base `9bfab365` (merge commit `ddf3907a`).
 
 ### Acceptance criteria status
 
 All criteria above are satisfied by the shipped code and test evidence, except `cargo test --all`, which is deferred to the independent verifier (gyre-server test codegen exceeds the in-sandbox 4 GiB build-wrapper budget). The checkboxes are left unchecked deliberately: the task body is the protected assigned contract, and modifying it (checking boxes) is a normative change requiring separate spec review — completion state lives in this section and the frontmatter, not in edits to the protected text.
 
-### Test evidence (this round, on this head after 9db91887)
+### Test evidence (this round, on head ddf3907a)
 
-- `cargo check -p gyre-server --lib --tests` → exit 0 (the reviewer's reproduction command; the prior 8 errors are gone). Evidence: `/tmp/stage/review-evidence/round-2-repair-summary.md`.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` → exit 0 (the new base's analytics/CLI/ABAC changes type-check together with the session surface).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-adapters -p gyre-domain -p gyre-ports -p gyre-cli -p gyre-common --tests` → exit 0.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters session` → 9/9 passed (create/roundtrip, duplicate-id contract, credential+device matching, newest-match, touch/sliding expiry, revoke scoping, revoke-all + delete-expired, retention never deleting revoked rows).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters` (full) → 536 passed, 0 failed.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib` → 535/535 passed.
-- Mechanical gates all exit 0 on this head: `check-arch.sh`, `check-migration-versions.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`.
-- No conflict markers in `crates/`/`specs/`; no duplicate migration sequence numbers; session surface (domain entity, port, routes, migration) verified present at this head.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-cli` → 189 unit + 1 integration passed (includes task-126's session-command client tests now hitting live endpoints).
+- All 19 mechanical gates exit 0 on this head (arch, migration versions, ABAC route registry + exempt handlers, mem port contracts, forwarded-header trust, in-memory state stores, dead message kinds, byte-slice truncation, relative path defaults, fail-open ref resolution, fabricated scope defaults ×2, lossy secret conversion, inert enforcement, forged scope fields, unbounded external HTTP, MCP write tools, migration SQL portability); `check-task-commit-attribution.sh` passes once the frontmatter commit list (restored in this commit) is present.
+- No conflict markers in `crates/`/`specs/`; session surface (domain entity, port, routes, ABAC mappings, migration `2026-10-08-000064_user_sessions`) verified present at this head.
+- Evidence retained under `/tmp/stage/review-evidence/` (controller artifact paths, not sandbox paths).
 
 ### Deferred to the independent verifier
 
