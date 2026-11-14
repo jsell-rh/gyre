@@ -2097,7 +2097,12 @@ mod tests {
             .collect();
         branches.sort();
         assert_eq!(branches, vec!["main".to_string()]);
-        assert!(state.merge_requests.list_by_repo(&repo.id).await.unwrap().is_empty());
+        assert!(state
+            .merge_requests
+            .list_by_repo(&repo.id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
