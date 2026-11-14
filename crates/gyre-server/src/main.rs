@@ -3,8 +3,8 @@ use gyre_server::{
     abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
     merge_processor, procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
     seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
-    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_stale_agent_detector,
-    spawn_stale_peer_detector, telemetry, JwtConfig,
+    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_session_cleanup,
+    spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -154,6 +154,7 @@ async fn main() -> Result<()> {
     spawn_budget_daily_reset(state.clone());
     spawn_llm_rate_limiter_cleanup(state.clone());
     gyre_server::api::invitations::spawn_invitation_expiry(state.clone());
+    spawn_session_cleanup(state.clone());
 
     let app = build_router(state);
 

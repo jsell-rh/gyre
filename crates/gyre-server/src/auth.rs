@@ -30,6 +30,163 @@ use subtle::ConstantTimeEq;
 
 use crate::AppState;
 
+// -- User session tracking (user-management.md §Session Management) -----------
+
+/// Session lifetime: 30 days (user-management.md §Session Management).
+pub(crate) const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
+/// Minimum seconds between `last_active_at` writes for one session
+/// (task-111 plan §4: throttled to avoid write amplification).
+pub(crate) const SESSION_TOUCH_THROTTLE_SECS: u64 = 60;
+
+/// Record or refresh the session for an API-key-authenticated user, and
+/// decide whether the request may proceed.
+///
+/// Returns `false` when the session for this credential+device has been
+/// revoked — the caller must reject auth (task-111 plan §4: "check session
+/// revocation status in auth middleware (reject revoked sessions)"). A
+/// revoked row is never resurrected or replaced, so revoking a session
+/// signs that device out until the user mints a new credential.
+/// `credential_revoked` covers the complementary case: every session for
+/// the credential revoked ("sign out everywhere", including devices never
+/// seen before).
+///
+/// One session row per (credential, device): the same key re-presented from
+/// the same IP + User-Agent is the same session (auth path avoids creating
+/// a row per request); a different device is a new session row, so revoking
+/// one device does not sign out every device (SessionRepository port doc).
+///
+/// A session found expired-but-not-revoked is re-minted (same device, new
+/// row with a fresh TTL) rather than silently kept: expiry is not a logout
+/// gesture for the credential, and the row must not linger in a state where
+/// auth succeeds but `GET /users/me/sessions` filters the device out
+/// forever. Re-minting keeps exactly one live row per device.
+///
+/// `credential_hash` is the SHA-256 of the raw API key (`hash_api_key`) —
+/// the same value stored in the session's `token_hash` column.
+///
+/// Fails soft: a session-store error must not lock the user out of the
+/// platform (the credential itself already authenticated); it is logged.
+pub(crate) async fn track_session(
+    state: &AppState,
+    user_id: &Id,
+    credential_hash: &str,
+    ip_address: &str,
+    user_agent: &str,
+) -> bool {
+    let now = now_epoch_secs();
+    let existing = state
+        .sessions
+        .find_by_credential_and_device(user_id, credential_hash, ip_address, user_agent)
+        .await;
+
+    match existing {
+        Ok(Some(session)) if session.revoked => {
+            // A revoked session for this device is a logout gesture for
+            // that device: reject the request instead of touching or
+            // replacing the row.
+            false
+        }
+        Ok(Some(session)) => {
+            // Sliding expiry: the found session's TTL restarts on use, so
+            // a live device never crosses its expiry wall while still
+            // authenticating. A found-but-expired row (device returned
+            // after > TTL idle) is re-minted as a new session.
+            if session.expires_at > now {
+                // Throttled activity write; also slides `expires_at`.
+                if now.saturating_sub(session.last_active_at) >= SESSION_TOUCH_THROTTLE_SECS {
+                    if let Err(e) = state
+                        .sessions
+                        .touch(&session.id, now, now + SESSION_TTL_SECS)
+                        .await
+                    {
+                        tracing::warn!(session_id = %session.id, "session touch failed: {e}");
+                    }
+                }
+                true
+            } else {
+                // Expired row: the credential is still valid (expiry is
+                // not revocation), so re-mint the session for this device
+                // with a fresh TTL. The stale row remains (revoked=false,
+                // expired) until retention cleanup removes it.
+                mint_session(state, user_id, credential_hash, ip_address, user_agent, now).await;
+                true
+            }
+        }
+        Ok(None) => {
+            // First presentation of this credential from this device:
+            // create the session row.
+            mint_session(state, user_id, credential_hash, ip_address, user_agent, now).await;
+            true
+        }
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, "session lookup failed: {e}");
+            true
+        }
+    }
+}
+
+/// Create a new session row for (credential, device), logging (not
+/// propagating) storage failures — session tracking must not lock an
+/// already-authenticated credential out.
+async fn mint_session(
+    state: &AppState,
+    user_id: &Id,
+    credential_hash: &str,
+    ip_address: &str,
+    user_agent: &str,
+    now: u64,
+) {
+    let session = gyre_domain::UserSession::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        user_id.clone(),
+        credential_hash,
+        ip_address,
+        user_agent,
+        now,
+        now + SESSION_TTL_SECS,
+    );
+    if let Err(e) = state.sessions.create(&session).await {
+        tracing::warn!(user_id = %user_id, "session create failed: {e}");
+    }
+}
+
+/// Reject API-key auth when every session for that credential is revoked
+/// ("sign out everywhere"). Sessions for the credential that are merely
+/// expired still allow auth (the key itself is long-lived; only revocation
+/// is a logout gesture).
+///
+/// Returns `true` when auth must be rejected (all sessions revoked).
+pub(crate) async fn credential_revoked(
+    state: &AppState,
+    user_id: &Id,
+    credential_hash: &str,
+) -> bool {
+    match state.sessions.list_for_user(user_id).await {
+        Ok(sessions) => {
+            let credential_sessions: Vec<_> = sessions
+                .iter()
+                .filter(|s| s.token_hash == credential_hash)
+                .collect();
+            // No session rows yet → nothing has been revoked; allow.
+            !credential_sessions.is_empty() && credential_sessions.iter().all(|s| s.revoked)
+        }
+        Err(e) => {
+            // Storage failure must not become an authentication bypass in
+            // either direction: log and allow (the key itself was validated
+            // against api_keys; revocation state is unavailable, not "no").
+            tracing::warn!(user_id = %user_id, "session revocation check failed: {e}");
+            false
+        }
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 // -- Federation JWKS cache (G11) ----------------------------------------------
 
 /// Cached JWKS entry for a trusted remote Gyre instance.
@@ -1400,6 +1557,58 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                             .into_response());
                     }
                 };
+                let credential_hash = hash_api_key(token);
+                // "Sign out everywhere" enforcement: an API key whose every
+                // session is revoked is rejected here (user-management.md
+                // §Session Management — revoking all sessions signs the
+                // credential out).
+                if credential_revoked(state, &user.id, &credential_hash).await {
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "session has been revoked",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "Session has been revoked").into_response()
+                    );
+                }
+                // Session tracking (user-management.md §Session Management:
+                // one session row per credential+device; throttled
+                // last-active updates). The IP is the socket peer address
+                // from the ConnectInfo extension (main.rs serves with
+                // into_make_service_with_connect_info). Forwarded headers
+                // are NOT consulted — they are caller-controlled without a
+                // trusted-proxy gate (CWE-348).
+                let ip_address = parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|ci| ci.0.ip().to_string())
+                    .unwrap_or_default();
+                let user_agent = parts
+                    .headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                // A revoked session for this device rejects auth; a new or
+                // still-active session is recorded/refreshed.
+                if !track_session(state, &user.id, &credential_hash, &ip_address, &user_agent).await
+                {
+                    record_auth_failure(
+                        state,
+                        "api_key",
+                        "session has been revoked",
+                        forensic_ip,
+                        forensic_ua,
+                    )
+                    .await;
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "Session has been revoked").into_response()
+                    );
+                }
                 if !auth_already_audited {
                     record_auth_success(
                         state,
@@ -1632,6 +1841,19 @@ pub async fn authenticate_token(
                     return Err("user has no tenant binding; re-provision via POST /api/v1/users");
                 }
             };
+            let credential_hash = hash_api_key(token);
+            // "Sign out everywhere" enforcement (same rule as the HTTP
+            // extractor path). The WebSocket authenticate path has no
+            // request headers, so the session is tracked with empty
+            // device attributes.
+            if credential_revoked(state, &user.id, &credential_hash).await {
+                return Err("Session has been revoked");
+            }
+            // A revoked session for the (credential, empty device) pair
+            // rejects auth — same per-device rule as the HTTP path.
+            if !track_session(state, &user.id, &credential_hash, "", "").await {
+                return Err("Session has been revoked");
+            }
             record_auth_success(
                 state,
                 "api_key",
@@ -2446,11 +2668,16 @@ mod tests {
     use super::AgentSigningKey;
     use crate::mem::test_state;
     use axum::{body::Body, routing::get, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    use super::{system_principal_tenant, test_helpers::*, AuthenticatedAgent, WsTicketStore};
+    use super::{
+        authenticate_token, credential_revoked, system_principal_tenant, test_helpers::*,
+        track_session, AuthenticatedAgent, WsTicketStore, SESSION_TOUCH_THROTTLE_SECS,
+        SESSION_TTL_SECS,
+    };
     use gyre_domain::UserRole;
 
     #[test]
@@ -4515,6 +4742,382 @@ mod tests {
         // Ticket is a UUID, not a Bearer token or API key
         assert!(ticket.len() == 36, "Ticket should be a UUID format");
         assert!(!ticket.starts_with("ey"), "Ticket must not be a JWT");
+    }
+
+    // ── Session tracking (user-management.md §Session Management) ─────────
+
+    /// `track_session` throttles `last_active_at` writes: a session whose
+    /// last activity is older than SESSION_TOUCH_THROTTLE_SECS is touched;
+    /// one inside the window is left alone (no write amplification).
+    #[tokio::test]
+    async fn session_last_active_touch_is_throttled() {
+        let state = test_state();
+        let user_id = Id::new("throttle-user");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Stale session: last active 2 throttle windows ago → must be touched.
+        let stale = gyre_domain::UserSession::new(
+            Id::new("sess-stale"),
+            user_id.clone(),
+            "cred-stale",
+            "127.0.0.1",
+            "gyre-test/1.0",
+            now - 2 * SESSION_TOUCH_THROTTLE_SECS,
+            now + 3600,
+        );
+        state.sessions.create(&stale).await.unwrap();
+        assert!(
+            track_session(&state, &user_id, "cred-stale", "127.0.0.1", "gyre-test/1.0").await,
+            "active session must allow auth"
+        );
+        let touched = state
+            .sessions
+            .find_by_id(&stale.id)
+            .await
+            .unwrap()
+            .expect("session must survive tracking");
+        assert!(
+            touched.last_active_at >= now,
+            "session idle beyond the throttle window must have last_active_at \
+             refreshed to ~now, got {} (seeded {})",
+            touched.last_active_at,
+            stale.last_active_at
+        );
+        // Sliding expiry: the same throttled write must restart the TTL —
+        // a daily-active device never crosses its expiry wall.
+        assert!(
+            touched.expires_at >= now + SESSION_TTL_SECS,
+            "touch must slide expires_at to now + TTL (got {}, seeded {})",
+            touched.expires_at,
+            stale.expires_at
+        );
+
+        // Fresh session: last active seconds ago (inside the window) → must
+        // NOT be re-written.
+        let fresh = gyre_domain::UserSession::new(
+            Id::new("sess-fresh"),
+            user_id.clone(),
+            "cred-fresh",
+            "127.0.0.1",
+            "gyre-test/1.0",
+            now - 5,
+            now + 3600,
+        );
+        state.sessions.create(&fresh).await.unwrap();
+        let seeded_active = fresh.last_active_at;
+        let seeded_expiry = fresh.expires_at;
+        assert!(
+            track_session(&state, &user_id, "cred-fresh", "127.0.0.1", "gyre-test/1.0").await,
+            "active session must allow auth"
+        );
+        let after = state
+            .sessions
+            .find_by_id(&fresh.id)
+            .await
+            .unwrap()
+            .expect("session must survive tracking");
+        assert_eq!(
+            after.last_active_at, seeded_active,
+            "session inside the throttle window must not get a last_active_at \
+             write (write amplification)"
+        );
+        assert_eq!(
+            after.expires_at, seeded_expiry,
+            "session inside the throttle window must not get an expires_at \
+             write (write amplification)"
+        );
+    }
+
+    /// A device returning after an idle expiry (session found but
+    /// `expires_at` in the past) keeps authenticating and gets exactly one
+    /// fresh session row — the auth path must re-mint, not return to a row
+    /// that `GET /users/me/sessions` would filter out forever.
+    #[tokio::test]
+    async fn expired_session_is_reminted_not_zombified() {
+        let state = test_state();
+        let user_id = Id::new("remint-user");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Expired-but-not-revoked row for this device.
+        let expired = gyre_domain::UserSession::new(
+            Id::new("sess-expired"),
+            user_id.clone(),
+            "cred-remint",
+            "10.1.1.1",
+            "gyre-old/1.0",
+            now - SESSION_TTL_SECS - 100,
+            now - 50,
+        );
+        state.sessions.create(&expired).await.unwrap();
+
+        assert!(
+            track_session(&state, &user_id, "cred-remint", "10.1.1.1", "gyre-old/1.0").await,
+            "an expired-but-not-revoked session must not reject auth \
+             (expiry is not revocation)"
+        );
+
+        // Exactly one live row for the device now exists.
+        let all = state.sessions.list_for_user(&user_id).await.unwrap();
+        let live: Vec<_> = all
+            .iter()
+            .filter(|s| s.ip_address == "10.1.1.1" && s.user_agent == "gyre-old/1.0")
+            .filter(|s| !s.revoked && s.expires_at > now)
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "expired session must be re-minted as exactly one live row, got {live:?}"
+        );
+        assert_ne!(
+            live[0].id, expired.id,
+            "the re-minted row must be a new row (fresh TTL), not the expired one"
+        );
+        assert!(
+            live[0].expires_at > now,
+            "re-minted session must be live (expires_at in the future)"
+        );
+
+        // Second request on the same device must find the new row (no
+        // re-mint-per-request explosion).
+        assert!(track_session(&state, &user_id, "cred-remint", "10.1.1.1", "gyre-old/1.0").await);
+        let all = state.sessions.list_for_user(&user_id).await.unwrap();
+        let live: Vec<_> = all
+            .iter()
+            .filter(|s| s.ip_address == "10.1.1.1" && s.user_agent == "gyre-old/1.0")
+            .filter(|s| !s.revoked && s.expires_at > now)
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "re-presenting the same device must not mint a second live row"
+        );
+    }
+
+    /// "Sign out everywhere" must survive retention cleanup: revoked rows
+    /// are never deleted, so a credential whose every session was revoked
+    /// stays rejected forever — the cleanup job must not re-authorize it.
+    #[tokio::test]
+    async fn signout_everywhere_survives_retention_cleanup() {
+        let state = test_state();
+        let user_id = Id::new("retention-user");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Two long-expired sessions for this credential, both revoked.
+        for i in 0..2 {
+            let s = gyre_domain::UserSession::new(
+                Id::new(format!("sess-ret-{i}")),
+                user_id.clone(),
+                "cred-ret",
+                "10.2.2.2",
+                "gyre-ret/1.0",
+                now - 2 * SESSION_TTL_SECS,
+                now - SESSION_TTL_SECS,
+            );
+            state.sessions.create(&s).await.unwrap();
+            state.sessions.revoke(&s.id, &user_id).await.unwrap();
+        }
+        // An unrevoked long-expired row for another credential: this one
+        // MUST be deleted by retention cleanup.
+        let garbage = gyre_domain::UserSession::new(
+            Id::new("sess-ret-garbage"),
+            user_id.clone(),
+            "cred-other",
+            "10.2.2.2",
+            "gyre-ret/1.0",
+            now - 2 * SESSION_TTL_SECS,
+            now - SESSION_TTL_SECS,
+        );
+        state.sessions.create(&garbage).await.unwrap();
+
+        assert!(
+            credential_revoked(&state, &user_id, "cred-ret").await,
+            "all-revoked credential must be rejected (sign out everywhere)"
+        );
+
+        // Retention cleanup with a cutoff past everything.
+        let deleted = state
+            .sessions
+            .delete_expired_before(now - 100)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "only the unrevoked expired row is deleted");
+
+        // The signed-out credential is STILL rejected.
+        assert!(
+            credential_revoked(&state, &user_id, "cred-ret").await,
+            "retention cleanup must not re-authorize a signed-out credential"
+        );
+    }
+
+    /// The WebSocket/TTY auth path (`authenticate_token` — ws.rs and tty.rs
+    /// present a raw token from the client's Auth message, with no HTTP
+    /// headers) must enforce "sign out everywhere": a credential whose
+    /// every session has been revoked is rejected there too, not only on
+    /// the HTTP extractor path.
+    ///
+    /// The signed-out credential never authenticated over WS before the
+    /// revoke-all (its only session row is an HTTP device), so the WS
+    /// path's ("", "") device pair has no revoked row of its own — only
+    /// the credential-wide `credential_revoked` check can reject it.
+    /// Removing that check (or both session checks) from
+    /// `authenticate_token` makes this test fail: the stolen key would
+    /// mint a fresh WS session and authenticate.
+    #[tokio::test]
+    async fn ws_auth_rejects_signed_out_everywhere_credential() {
+        use gyre_domain::User;
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Control: a live credential authenticates on the WS path (proves
+        // the Err below comes from revocation, not from broken setup).
+        // The user must carry a tenant binding (task-099 F1): API-key auth
+        // resolves the tenant scope from user.tenant_id and fail-closes
+        // when it is absent, so an unbound user would be rejected here.
+        let mut live_user = User::new(Id::new("ws-live-user"), "ext-ws-live", "ws-live", 1000);
+        live_user.tenant_id = Some(Id::new("t1"));
+        state.users.create(&live_user).await.unwrap();
+        let live_key = "gyre_ws_live_key";
+        state
+            .api_keys
+            .create(&super::hash_api_key(live_key), &live_user.id, "ws-live-key")
+            .await
+            .unwrap();
+        assert!(
+            authenticate_token(live_key, &state).await.is_ok(),
+            "control: a live credential must authenticate on the WS path"
+        );
+
+        // Victim: authenticated only from an HTTP device, then signed out
+        // everywhere. The WS device pair ("", "") has no session row, so
+        // the per-device check alone would mint a fresh one.
+        let mut victim = User::new(
+            Id::new("ws-victim-user"),
+            "ext-ws-victim",
+            "ws-victim",
+            1000,
+        );
+        victim.tenant_id = Some(Id::new("t1"));
+        state.users.create(&victim).await.unwrap();
+        let victim_key = "gyre_ws_victim_key";
+        state
+            .api_keys
+            .create(
+                &super::hash_api_key(victim_key),
+                &victim.id,
+                "ws-victim-key",
+            )
+            .await
+            .unwrap();
+        let http_session = gyre_domain::UserSession::new(
+            Id::new("sess-ws-victim-http"),
+            victim.id.clone(),
+            super::hash_api_key(victim_key),
+            "127.0.0.1",
+            "gyre-cli/1.0",
+            now,
+            now + SESSION_TTL_SECS,
+        );
+        state.sessions.create(&http_session).await.unwrap();
+        state
+            .sessions
+            .revoke_all_for_user(&victim.id)
+            .await
+            .unwrap();
+
+        // "Sign out everywhere" must hold on the WS path as well: the key
+        // cannot open a WebSocket even from a device (the WS ("", "")
+        // pair) that never presented it before.
+        assert!(
+            authenticate_token(victim_key, &state).await.is_err(),
+            "a signed-out-everywhere credential must be rejected by the WS auth path"
+        );
+    }
+
+    /// Per-device revocation on the WS path: a WS session that has been
+    /// revoked rejects `authenticate_token` even though the credential
+    /// still has other live sessions (so the credential-wide check alone
+    /// would allow it). Removing the `track_session` rejection from
+    /// `authenticate_token` (or both checks) makes this test fail.
+    #[tokio::test]
+    async fn ws_auth_rejects_revoked_ws_device_session() {
+        use gyre_domain::User;
+
+        let state = test_state();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut victim = User::new(
+            Id::new("ws-device-user"),
+            "ext-ws-device",
+            "ws-device",
+            1000,
+        );
+        victim.tenant_id = Some(Id::new("t1"));
+        state.users.create(&victim).await.unwrap();
+        let raw_key = "gyre_ws_device_key";
+        let credential_hash = super::hash_api_key(raw_key);
+        state
+            .api_keys
+            .create(&credential_hash, &victim.id, "ws-device-key")
+            .await
+            .unwrap();
+
+        // First WS presentation mints the ("", "") session row.
+        assert!(
+            authenticate_token(raw_key, &state).await.is_ok(),
+            "live credential must authenticate on the WS path"
+        );
+        let ws_session = state
+            .sessions
+            .list_for_user(&victim.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.ip_address.is_empty() && s.user_agent.is_empty())
+            .expect("WS presentation must mint a ('', '') session row");
+
+        // A sibling HTTP session stays live, so the credential as a whole
+        // is NOT signed out everywhere (the credential-wide check passes).
+        let http_session = gyre_domain::UserSession::new(
+            Id::new("sess-ws-device-http"),
+            victim.id.clone(),
+            &credential_hash,
+            "127.0.0.1",
+            "gyre-cli/1.0",
+            now,
+            now + SESSION_TTL_SECS,
+        );
+        state.sessions.create(&http_session).await.unwrap();
+
+        // Revoke only the WS device's session.
+        state
+            .sessions
+            .revoke(&ws_session.id, &victim.id)
+            .await
+            .unwrap();
+
+        // The WS path must reject: this device's session is revoked, even
+        // though the credential still has a live HTTP session.
+        assert!(
+            authenticate_token(raw_key, &state).await.is_err(),
+            "a revoked WS device session must be rejected even while \
+             sibling sessions stay live"
+        );
     }
 
     // ── task-107 F12: key persistence across restarts ─────────────────────

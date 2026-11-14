@@ -96,28 +96,18 @@ pub struct MergeRequest {
     pub revert_commit_sha: Option<String>,
 }
 
-/// Bind constructors without a workspace parameter to the provisioned
-/// bootstrap workspace.
-///
-/// This is the DOCUMENTED contract, not a fabricated fallback (same pattern
-/// as `Agent::new`): hierarchy-enforcement.md §1 "Bootstrap Behavior"
-/// provisions a default workspace under the default tenant on first startup,
-/// and its migration strategy backfills tasks, agents, and merge requests
-/// into that workspace ("Same for tasks, agents, merge_requests"); its
-/// single-tenant note states construction-time scope defaults suffice while
-/// the default tenant is the only tenant. Constructors without a workspace
-/// parameter bind the entity to that provisioned bootstrap workspace;
-/// callers with a real workspace at hand MUST assign it explicitly (the
-/// create paths do — e.g. REST/MCP `create_mr` resolve the repo's workspace
-/// and set `mr.workspace_id`).
-fn bootstrap_workspace() -> Id {
-    Id::new("default")
-}
+// `MergeRequest::new` requires the workspace as an explicit constructor
+// parameter (task-111 scope-fabrication fix): a merge request cannot be
+// constructed without its mandatory scope, so no bootstrap binding is
+// needed here — unlike `Agent::new` / `Task::new`, which keep the
+// documented bootstrap-workspace default for callers without a real
+// workspace at hand.
 
 impl MergeRequest {
     pub fn new(
         id: Id,
         repository_id: Id,
+        workspace_id: Id,
         title: impl Into<String>,
         source_branch: impl Into<String>,
         target_branch: impl Into<String>,
@@ -126,6 +116,7 @@ impl MergeRequest {
         Self {
             id,
             repository_id,
+            workspace_id,
             title: title.into(),
             source_branch: source_branch.into(),
             target_branch: target_branch.into(),
@@ -139,7 +130,6 @@ impl MergeRequest {
             atomic_group: None,
             created_at,
             updated_at: created_at,
-            workspace_id: bootstrap_workspace(),
             merge_commit_sha: None,
             revert_commit_sha: None,
             reverted_at: None,
@@ -195,6 +185,7 @@ mod tests {
         MergeRequest::new(
             Id::new("mr1"),
             Id::new("repo1"),
+            Id::new("default"),
             "Add feature",
             "feat/thing",
             "main",
