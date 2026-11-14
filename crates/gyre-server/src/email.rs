@@ -577,7 +577,9 @@ fn dot_stuff(body: &str) -> String {
 
 /// Read one SMTP reply (possibly multi-line `250-...` continuation) and
 /// return its 3-digit code.
-async fn read_reply(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> anyhow::Result<u16> {
+async fn read_reply<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> anyhow::Result<u16> {
     loop {
         let mut line = String::new();
         tokio::time::timeout(
@@ -586,15 +588,26 @@ async fn read_reply(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> a
         )
         .await??;
         let line = line.trim_end();
-        if line.len() < 4 {
+        let bytes = line.as_bytes();
+        if bytes.len() < 4 {
             anyhow::bail!("short SMTP reply: {line:?}");
         }
-        let code: u16 = line[..3].parse()?;
+        // Parse the 3-digit code from raw bytes. Never slice the &str at a
+        // fixed byte index: a reply line whose byte 3 falls inside a
+        // multibyte UTF-8 char (e.g. "üü\r\n" — 4 bytes, passing the length
+        // guard) would panic on a non-char-boundary, unwinding through
+        // send_email → run_digest_once → the spawned email_digest job loop
+        // and killing the drain until restart (task-113 review finding;
+        // same class as the task-095 byte-slice invariant).
+        let code: u16 = std::str::from_utf8(&bytes[..3])
+            .map_err(|_| anyhow::anyhow!("malformed SMTP reply code (non-ASCII): {line:?}"))?
+            .parse()
+            .map_err(|_| anyhow::anyhow!("malformed SMTP reply code: {line:?}"))?;
         // "250-..." = continuation; "250 ..." = final line of the reply.
-        if line.as_bytes()[3] == b' ' {
+        if bytes[3] == b' ' {
             return Ok(code);
         }
-        if line.as_bytes()[3] != b'-' {
+        if bytes[3] != b'-' {
             anyhow::bail!("malformed SMTP reply: {line:?}");
         }
     }
@@ -1017,6 +1030,65 @@ mod tests {
         assert_eq!(e.notif.title, "queue paused");
         assert_eq!(e.notif.priority_rank, 3);
         assert_eq!(e.notif.action_url.as_deref(), Some("/workspaces/acme"));
+    }
+
+    /// `read_reply` must never panic on a reply line whose byte 3 falls
+    /// inside a multibyte UTF-8 char (task-113 review finding: the old
+    /// `line[..3]` slice killed the spawned email_digest job on panic —
+    /// "üü\r\n" is 4 bytes after trim_end, passing the length guard).
+    /// It must return an error instead, keeping the drain loop alive.
+    #[test]
+    fn read_reply_non_char_boundary_line_errors_not_panics() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (client, mut server) = tokio::io::duplex(64);
+            let writer = tokio::spawn(async move {
+                server.write_all("\u{fc}\u{fc}\r\n".as_bytes()).await.unwrap();
+            });
+            let mut reader = BufReader::new(client);
+            let result = read_reply(&mut reader).await;
+            writer.await.unwrap();
+            let err = result.expect_err("non-ASCII reply must error, not panic");
+            assert!(
+                err.to_string().contains("malformed SMTP reply"),
+                "unexpected error: {err:#}"
+            );
+        });
+    }
+
+    /// Positive control: multi-line `250-...` continuation replies are
+    /// joined and the final code returned; a short garbage line errors.
+    #[test]
+    fn read_reply_continuation_and_short_line() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (client, mut server) = tokio::io::duplex(64);
+            let writer = tokio::spawn(async move {
+                server
+                    .write_all(b"250-relay.local\r\n250 8BITMIME\r\n")
+                    .await
+                    .unwrap();
+            });
+            let mut reader = BufReader::new(client);
+            let code = read_reply(&mut reader).await.expect("valid reply");
+            writer.await.unwrap();
+            assert_eq!(code, 250);
+
+            let (client, mut server) = tokio::io::duplex(64);
+            let writer = tokio::spawn(async move {
+                server.write_all(b"250\r\n").await.unwrap();
+            });
+            let mut reader = BufReader::new(client);
+            let result = read_reply(&mut reader).await;
+            writer.await.unwrap();
+            assert!(result.is_err(), "3-byte line has no separator byte");
+        });
     }
 
     /// End-to-end digest drain against a real in-process SMTP listener:
