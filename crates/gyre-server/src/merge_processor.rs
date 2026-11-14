@@ -8374,14 +8374,20 @@ mod tests {
         state.chain_attestations.save(&att).await.unwrap();
 
         // Deny policy: chain_depth > 1 denies merge on attestation resources
-        // (same shape as the evaluate_attestation_abac unit tests).
+        // (same shape as the evaluate_attestation_abac unit tests). Priority
+        // 250: the user band (200–299) sits above the builtin
+        // attested-authorization Allow (150) that the seeded startup set
+        // contributes, so this Deny — not the builtin — decides deep chains
+        // (the builtin's definition documents the band; at priority 100 the
+        // builtin Allow legitimately wins under "higher priority always
+        // wins" and the merge proceeds).
         let deny_policy = Policy {
             id: Id::new("deny-deep-chain-merge"),
             name: "deny-deep-chain-merge".to_string(),
             description: "Deny merges with chain_depth > 1".to_string(),
             scope: PolicyScope::Tenant,
             scope_id: None,
-            priority: 100,
+            priority: 250,
             effect: PolicyEffect::Deny,
             conditions: vec![Condition {
                 attribute: "subject.chain_depth".to_string(),
