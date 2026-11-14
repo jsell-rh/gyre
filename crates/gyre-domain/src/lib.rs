@@ -21,6 +21,7 @@ pub mod compose;
 pub mod compute_target;
 pub mod constraint_evaluator;
 pub mod container_audit;
+pub mod decisions;
 pub mod dependency;
 pub mod extractor;
 pub mod git_types;
@@ -80,6 +81,10 @@ pub use constraint_evaluator::{
     TargetContext,
 };
 pub use container_audit::ContainerAuditRecord;
+pub use decisions::{
+    evaluate_custom, BuiltinDecision, CustomDecisionSpec, CustomRule, DecisionRequest,
+    DecisionResult,
+};
 pub use dependency::{
     BreakingChange, BreakingChangeBehavior, DependencyEdge, DependencyPolicy, DependencyStatus,
     DependencyType, DetectionMethod,
