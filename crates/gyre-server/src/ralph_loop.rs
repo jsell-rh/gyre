@@ -1342,7 +1342,17 @@ mod tests {
         // Priority-1 notification for the workspace admin.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-user"), None, None, None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("admin-user"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(

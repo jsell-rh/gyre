@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: []
+commits: ["e743177f5edecc31d937f136291c548146ef3d81", "07bb5685fe8d5e220c3b62259a102967104f411b", "a69b9ed8d8f1071a2198346da7e4392df921bb93", "d07a957fcf768d4d116f3e527788da7a2acb6076", "bc1d0c0cc30b775dc20f68cf5c2789e01a1ad5ce", "17bfb44719748cdaeb4e36a168acc996b778cb27", "22c4f6b5c604bbb55c7530fd2bed7733b743f492", "4d1d81b3e5d7ffdb22b7c6cb83fb4199457824e9", "eaca83fb8c0bf871c51a7ff7dc9adaea4b9f83ad", "062f925e2d5abdf4196291df05fac6cf9e9fbd06", "b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
 ---
 
 ## Spec Excerpt
@@ -118,3 +118,102 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
+
+## Shipped
+
+HSI §12 profile gaps (notification filtering, judgment ledger, auth
+provider info) are implemented in production code across the commits
+listed in the frontmatter.
+
+What shipped, per acceptance criterion:
+
+- **Spec amendment (Part 1)** — HSI §12 Judgment Ledger names the four
+  concrete sources (`spec_approvals`; `audit_events` rows with
+  `event_type IN (gate_override, trust_change, meta_spec_publish)`;
+  `meta_spec_versions` joined to `meta_specs`), and the `?type=` values
+  are `approval|rejection|gate|trust|meta-spec`, matching
+  `JudgmentType::as_str()`.
+- **JudgmentType::GateOverride** — `as_str() = "gate"`,
+  `from_db_str("gate")` parses (`gyre-domain/src/user_profile.rs`).
+- **Aggregation (Part 2)** — `JudgmentLedgerRepository::list_for_user`
+  (sqlite/postgres/mem parity) unions all four categories from real
+  tables, filters `?workspace_id=` in the queries (no stamping), sorts
+  reverse-chronologically with a deterministic tie-break, and applies
+  limit/offset after the union+sort.
+- **Trust-change write path** — PUT /api/v1/workspaces/:id writes a
+  `trust_change` audit event (from/to/workspace_id) on real transitions.
+- **Gate-override write path** — a human (user-principal) approval
+  review on an MR with failed gate results writes one `gate_override`
+  event per failed gate (mr_id/gate_id/gate_type/failed→overridden);
+  agent-token approvals are excluded.
+- **Meta-spec publish attribution** — meta-spec registry create/update
+  write `meta_spec_publish` events (kind/name/version/content_hash).
+- **Inbox filtering** — `user_notification_preferences` rows with
+  `enabled = 0` are excluded in-query (before pagination) from the
+  inbox list, the unread-count badge, and the MCP inbox tool.
+- **Auth provider info** — `users.oidc_issuer` + `last_login_at`
+  recorded by JWT validation via debounced
+  `UserRepository::record_login`; `GET /api/v1/users/me` returns both
+  read-only.
+- **Profile ledger UI** — type filter
+  (all/approval/rejection/gate/trust/meta-spec), workspace filter, and
+  Load More pagination; `GET /users/me/judgments?type=<unknown>`
+  returns 400 listing accepted values.
+
+### This round: base merge 44cf25bf (task-132) + unauthorized-approver test repair
+
+The controller rebased the assignment onto base 44cf25bf; merge 570859c6
+resolved cleanly (the base delta is task-132's ABAC policy-management UI
+in `web/` plus `crates/gyre-server/src/api/policies.rs`; no task-209
+surface changed).
+
+The verification run on the pre-merge candidate (8eda66da) failed one
+integration test — `spec_enforcement::unauthorized_approver_is_denied_by_abac`
+(task-145). Root cause: the task-145 control assertion expected the
+pre-task-209 writer format (`user:<display name>`) in
+`spec_approvals.approver_id`, while task-209 deliberately changed that
+durable ledger row to the acting human's canonical user Id — the same
+key `GET /users/me/judgments` resolves for the caller. The display-name
+label key could never match the judgment-ledger reader (writer/reader
+identity-key mismatch — the exact HSI §12 hollowness task-209 closes)
+and misattributes on display-name collisions; the `user:<name>` label
+remains on the approval-history event, where the KeyBinding contract
+requires it. Repair e743177f adapts the assertion to the canonical Id
+(`user-human-approver`); strength is preserved — the row must still
+carry the exact acting user's identity, so a system/agent/wrong-user
+attribution still fails. Task-209's in-module writer/reader tests
+(`api::specs`) assert both sides of the same contract.
+
+### Test evidence (this round, head e743177f)
+
+- `cargo check -p gyre-server --tests` — exit 0 on the merged tree
+  including the repaired spec_enforcement test and task-132's merged
+  policies.rs (evidence:
+  /tmp/stage/review-evidence/cargo-check-server-tests.log).
+- Invariant scripts run clean: check-arch, check-abac-route-registry,
+  check-migration-versions, check-dead-message-kinds,
+  check-mcp-write-tools, check-abac-exempt-handlers,
+  check-task-commit-attribution (evidence:
+  /tmp/stage/review-evidence/*.log).
+- Prior verification on candidate 8eda66da: full `cargo test --all` —
+  2253 lib tests + all integration suites passed except the single
+  task-145 assertion repaired above (durable finding
+  6f8b4aca63244fb7b37dc9bc5614749c).
+
+### Verifier must run (blocked here by the 4 GiB build budget)
+
+- `cargo test -p gyre-server --lib git_http` — persona-approval flow
+  including the resolved `wait_for_notification` call site.
+- `cargo test -p gyre-server --lib merge_processor` — require_spec_ref
+  author notification (the 07bb5685 call site).
+- `cargo test -p gyre-server --lib api::users` — judgments endpoint,
+  oidc_issuer/last_login, inbox filtering.
+- `cargo test -p gyre-server --lib api::workspaces` — trust_change
+  audit write path.
+- `cargo test -p gyre-server --lib api::gates` — gate_override write
+  path on failed-gate MRs.
+- `cargo test -p gyre-server --lib api::meta_specs` — meta_spec_publish
+  attribution.
+- `cargo test -p gyre-server --test spec_enforcement` — main's task-145
+  integration tests as merged.
+- Full gates: `cargo test --all`, `cd web && npm ci && npm test`.

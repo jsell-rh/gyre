@@ -33,6 +33,7 @@ struct UserRow {
     display_name: Option<String>,
     timezone: Option<String>,
     locale: Option<String>,
+    oidc_issuer: Option<String>,
     username: String,
     avatar_url: Option<String>,
     preferences: Option<String>,
@@ -68,7 +69,8 @@ impl From<UserRow> for User {
         u.locale = r.locale.unwrap_or_else(|| "en".to_string());
         u.avatar_url = r.avatar_url;
         u.preferences = preferences;
-        u.last_login_at = r.last_login_at.map(|v| v as u64);
+        u.oidc_issuer = r.oidc_issuer;
+        u.last_login_at = r.last_login_at.map(|v| v.max(0) as u64);
         u.tenant_id = r.tenant_id.map(Id::new);
         u.global_role = global_role;
         u.deactivated_at = r.deactivated_at.map(|v| v as u64);
@@ -294,6 +296,44 @@ impl UserRepository for SqliteStorage {
             diesel::delete(users::table.find(id.as_str()))
                 .execute(&mut *conn)
                 .context("delete user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn record_login(
+        &self,
+        user_id: &Id,
+        oidc_issuer: &str,
+        at: u64,
+        min_interval_secs: u64,
+    ) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let iss = oidc_issuer.to_string();
+        // Interval check and write in ONE statement (no read-modify-write race):
+        // the row is only touched when the verified issuer differs from the
+        // stored one, or last_login_at is NULL or at/older than the debounce
+        // threshold (the provisioning path re-stamps last_login_at on every
+        // auth, so the issuer carve-out is what keeps provenance correct).
+        let threshold = at.saturating_sub(min_interval_secs) as i64;
+        let at_i = at as i64;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(users::table.find(uid.as_str()))
+                .set((
+                    users::oidc_issuer.eq(iss.as_str()),
+                    users::last_login_at.eq(at_i),
+                ))
+                .filter(
+                    users::oidc_issuer
+                        .is_null()
+                        .or(users::oidc_issuer.ne(iss.as_str()))
+                        .or(users::last_login_at.is_null())
+                        .or(users::last_login_at.le(threshold)),
+                )
+                .execute(&mut *conn)
+                .context("record_login")?;
             Ok(())
         })
         .await?
