@@ -104,26 +104,39 @@ all 12 auto-emitted events recorded at their real trigger points with
 the spec-required properties: `task.status_changed`, `mr.merged`,
 `mr.closed`, `agent.spawned`, `agent.completed`, `agent.failed`,
 `merge_queue.processed`, `gate.failed`, `gate.passed`, `spec.approved`,
-`budget.warning`, `search.query`.
+`budget.warning`, `search.query`. Event identity is caller-bound and
+scope fields are tenant-validated (no forged attribution).
 
-### This round (rebase onto task-195 base)
+### This round (merge task-130 base + review-repair)
 
-Rebased the task-146 candidate onto 6f5a631c (task-195 manifest-driven
-gate selection), resolving the two textual conflicts and one semantic
-conflict the textual merge could not see:
+Two pieces of work:
 
-- **gate_executor.rs tests module** (855a3de9) — both sides appended
-  tests at the end of `mod tests`: kept both task-195's manifest-gate
-  selection tests and task-146's analytics `gate.passed`/`gate.failed`
-  tests; no duplicate test names.
-- **run_gate arity** (e5ee853a) — task-195 added a `GateConstraints`
-  parameter to `run_gate`; the task-146 analytics tests (TestCommand
-  gates, constraints unused) now pass `None`. Caught by
-  `cargo check -p gyre-server --tests` failing E0061 at the two test
-  call sites.
-- **fabricated-scope-defaults-exemptions.txt** (855a3de9) — both sides
-  had removed the gate_executor.rs GateFailure ws_id fallback entry;
-  combined the historical note, entry count stays 1.
+- **Merge 6ffd6799 (task-130 token scoping) into the candidate**
+  (288d7296) — resolved four conflicts. Three were comment/note
+  reconciliations where this branch's stricter text describes the merged
+  code (workspace-orchestrator spawn keeps the no-system-bypass tenant
+  containment pinned by `orchestrator_spawn_denied_across_tenants`;
+  inert-enforcement-exemptions note kept for this tree's fix set). Two
+  real semantic combinations:
+  - `ralph_loop.rs` — task-130 moved the re-spawn JWT mint after persona
+    resolution (hierarchy claims + persona slug + attestation level,
+    fail-closed on unresolvable workspace); task-146's `persona_label`
+    capture for the `agent.spawned` event was kept after it. Both sides'
+    behavior present.
+  - `mcp.rs` `handle_search` — combined task-146's caller-scope
+    validation of the `workspace_id` arg (event-attribution integrity)
+    with task-130's agent-JWT workspace-claim clamp, in that order.
+  - Also fixed two analytics test call sites git could not adjust
+    (task-146-only tests still calling the 4-arg
+    `spawn_workspace_orchestrator_core`; task-130 added the
+    `caller_tenant` parameter) and one comment the textual merge left
+    describing a system-principal bypass the merged handler no longer
+    has.
+- **Review repair (b78a2494)** — recorded e5ee853a in task-195's
+  `commits:` frontmatter per the reviewer's endorsed fix (the commit
+  adapts task-195's `run_gate` surface); `check-task-commit-attribution`
+  now exits 0 with the restored task-146 commit list. No exemption-file
+  entries added.
 
 Post-merge audit re-verified all 12 production emit sites, the 9-field
 schema, and the full filter parameter set are intact on the merged tree.
@@ -134,21 +147,36 @@ Run in this sandbox (focused probes; the build wrapper defers
 gyre-server test execution to the independent verifier):
 
 - `cargo check -p gyre-server --tests` — passes (merge resolution and
-  both sides' test modules compile together).
+  both sides' test modules compile together; this probe caught and
+  confirmed the fix for the 4-arg test call sites).
 - `cargo test -p gyre-domain analytics` — 3 passed.
 - `cargo test -p gyre-adapters analytics` — 16 passed (includes the
   literal/case-sensitive event_name prefix-filter regressions on
   SQLite + the grouped-count suites).
-- `scripts/check-arch.sh`, `scripts/check-fabricated-scope-defaults.sh`,
-  `scripts/check-abac-route-registry.sh` — pass.
+- `scripts/check-arch.sh`, `check-inert-enforcement.sh`,
+  `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
+  `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`,
+  `check-mcp-write-tools.sh`, `check-migration-versions.sh`,
+  `check-byte-slice-truncation.sh`, `check-dead-message-kinds.sh`,
+  `check-mem-port-contracts.sh`, `check-lossy-secret-conversion.sh`,
+  `check-forwarded-header-trust.sh`, `check-unbounded-external-http.sh`,
+  `check-relative-path-defaults.sh`, `check-fail-open-ref-resolution.sh`,
+  `check-in-memory-state-stores.sh`, `check-forged-scope-fields.sh`,
+  `check-migration-sql-portability.sh` — all pass.
+- `scripts/check-task-commit-attribution.sh` — passes with the restored
+  task-146 commit list and the task-195 attribution repair (exit 0).
 
 Server tests the verifier must execute (this round's conflict resolution
-lives in the gate_executor tests module):
+lives in ralph_loop/mcp/orchestrator and the gate_executor tests module):
 
 - `cargo test -p gyre-server gate_executor` — task-146 analytics gate
   tests + task-195 manifest gate tests.
-- Plus the pre-existing analytics suites unchanged by this round:
-  `merge_processor`, `api::analytics`, `mem`, `signal_chain`,
-  `ralph_loop`, `mcp`.
-
-Evidence retained under `/tmp/stage/review-evidence/`.
+- `cargo test -p gyre-server orchestrator` — spawn containment,
+  analytics persona/compute-target, and task-130 core-signature tests.
+- `cargo test -p gyre-server ralph_loop` — re-spawn JWT hierarchy-claim
+  behavior + `agent.spawned` re-spawn analytics.
+- `cargo test -p gyre-server mcp` — search tool scope validation +
+  agent-JWT workspace clamp.
+- `cargo test -p gyre-server --test api_integration orchestrator_spawn_denied_across_tenants`
+  — pins the no-bypass containment the merged comments describe.
+- Plus the pre-existing analytics suites unchanged by this round.
