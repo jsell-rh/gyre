@@ -305,6 +305,123 @@ pub struct CreateSecretRequest {
     pub expires_at: Option<u64>,
 }
 
+// ── ABAC policy types (mirrors /api/v1/policies, abac-policy-engine.md) ──────
+
+/// One condition of a policy: `{attribute, operator, value}`. Mirrors the
+/// server's ConditionRequest (POST /api/v1/policies). `value` is the raw
+/// JSON side of the comparison (string, number, bool, list, or null).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PolicyConditionRequest {
+    pub attribute: String,
+    pub operator: String,
+    pub value: serde_json::Value,
+}
+
+/// POST /api/v1/policies request body. Mirrors the server's
+/// CreatePolicyRequest field-for-field (Admin only server-side; reserved
+/// `trust:`/`builtin:` name prefixes are rejected there).
+#[derive(Serialize, Debug, Clone)]
+pub struct CreatePolicyRequest {
+    pub name: String,
+    pub description: Option<String>,
+    /// "tenant" | "workspace" | "repo"
+    pub scope: String,
+    /// Id of the scoped entity; None = applies to ALL entities at the scope.
+    pub scope_id: Option<String>,
+    pub priority: u32,
+    /// "allow" | "deny"
+    pub effect: String,
+    pub conditions: Vec<PolicyConditionRequest>,
+    pub actions: Vec<String>,
+    pub resource_types: Vec<String>,
+    pub enabled: Option<bool>,
+}
+
+/// A policy as returned by GET/POST /api/v1/policies. Mirrors
+/// `gyre_domain::Policy` as serialized by the server (scope/effect are
+/// snake_case strings; conditions and audit fields are present in the
+/// payload but not needed for CLI display, so they are not modeled).
+#[derive(Deserialize, Debug, Clone)]
+pub struct PolicyResponse {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub scope: String,
+    #[serde(default)]
+    pub scope_id: Option<String>,
+    pub priority: u32,
+    pub effect: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub built_in: bool,
+}
+
+/// POST /api/v1/policies/evaluate request body. Mirrors the server's
+/// EvaluateRequest; the CLI fills the subject type/id and resource
+/// type/id from `--subject user:jsell` / `--resource spec:identity`.
+#[derive(Serialize, Debug)]
+pub struct EvaluatePolicyRequest {
+    pub subject: EvaluateSubject,
+    pub action: String,
+    pub resource: EvaluateResource,
+}
+
+#[derive(Serialize, Debug)]
+pub struct EvaluateSubject {
+    pub r#type: String,
+    pub id: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct EvaluateResource {
+    pub r#type: String,
+    pub id: Option<String>,
+}
+
+/// POST /api/v1/policies/evaluate response.
+#[derive(Deserialize, Debug)]
+pub struct EvaluatePolicyResponse {
+    /// "allow" | "deny"
+    pub decision: String,
+    pub matched_policy: Option<String>,
+    pub evaluated_policies: u32,
+    pub evaluation_ms: f64,
+}
+
+/// One audit record from GET /api/v1/policies/decisions. Mirrors
+/// `gyre_domain::PolicyDecision` as serialized by the server.
+#[derive(Deserialize, Debug, Clone)]
+pub struct PolicyDecisionResponse {
+    #[allow(dead_code)]
+    pub request_id: String,
+    pub subject_id: String,
+    pub subject_type: String,
+    pub action: String,
+    pub resource_type: String,
+    #[serde(default)]
+    pub resource_id: String,
+    /// "allow" | "deny"
+    pub decision: String,
+    pub matched_policy: Option<String>,
+    #[allow(dead_code)]
+    pub evaluated_policies: u32,
+    #[allow(dead_code)]
+    pub evaluation_ms: f64,
+    pub evaluated_at: u64,
+}
+
+/// One row of GET /api/v1/policies/effective: the decision for one sampled
+/// action on the queried resource type.
+#[derive(Deserialize, Debug, Clone)]
+pub struct EffectivePermissionResponse {
+    pub action: String,
+    pub resource_type: String,
+    /// "allow" | "deny"
+    pub decision: String,
+    pub matched_policy: Option<String>,
+}
+
 // ── Search response types (mirrors GET /api/v1/search) ───────────────────────
 
 /// One search result row. `facets` mirrors the server's result facets
@@ -800,6 +917,128 @@ impl GyreClient {
             anyhow::bail!("rotate secret failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing rotate secret response")
+    }
+
+    /// GET /api/v1/policies[?scope=&scope_id=] — list ABAC policies.
+    /// `scope` filters by level (tenant/workspace/repo); `scope_id`
+    /// restricts to one entity at that level.
+    pub async fn list_policies(
+        &self,
+        scope: Option<&str>,
+        scope_id: Option<&str>,
+    ) -> Result<Vec<PolicyResponse>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/policies", self.base_url))
+            .header("Authorization", self.auth_header());
+        if let Some(s) = scope {
+            req = req.query(&[("scope", s)]);
+        }
+        if let Some(sid) = scope_id {
+            req = req.query(&[("scope_id", sid)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list policies failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing policies list response")
+    }
+
+    /// POST /api/v1/policies — create a policy (Admin only server-side;
+    /// reserved `trust:`/`builtin:` name prefixes rejected there with 400).
+    pub async fn create_policy(&self, req: &CreatePolicyRequest) -> Result<PolicyResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/policies", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(req)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create policy failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing create policy response")
+    }
+
+    /// POST /api/v1/policies/evaluate — dry-run the live policy set for a
+    /// hypothetical subject/action/resource.
+    pub async fn evaluate_policy(
+        &self,
+        req: &EvaluatePolicyRequest,
+    ) -> Result<EvaluatePolicyResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/policies/evaluate", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(req)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("evaluate policy failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing evaluate policy response")
+    }
+
+    /// GET /api/v1/policies/decisions — the decision audit log, newest
+    /// first. Filters (subject_id, resource_type, limit) are applied
+    /// server-side; outcome/age filtering is the caller's.
+    pub async fn list_policy_decisions(
+        &self,
+        subject_id: Option<&str>,
+        resource_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PolicyDecisionResponse>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/policies/decisions", self.base_url))
+            .header("Authorization", self.auth_header())
+            .query(&[("limit", limit)]);
+        if let Some(sid) = subject_id {
+            req = req.query(&[("subject_id", sid)]);
+        }
+        if let Some(rt) = resource_type {
+            req = req.query(&[("resource_type", rt)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list policy decisions failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing policy decisions response")
+    }
+
+    /// GET /api/v1/policies/effective?subject=&resource_type= — the
+    /// effective-permissions answer for a real subject (the server loads
+    /// the subject's actual attributes from the stores).
+    pub async fn effective_permissions(
+        &self,
+        subject: &str,
+        resource_type: Option<&str>,
+    ) -> Result<Vec<EffectivePermissionResponse>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/policies/effective", self.base_url))
+            .header("Authorization", self.auth_header())
+            .query(&[("subject", subject)]);
+        if let Some(rt) = resource_type {
+            req = req.query(&[("resource_type", rt)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("effective permissions failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing effective permissions response")
     }
 
     /// GET /api/v1/repos/:id/graph/concept/:name or
