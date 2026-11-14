@@ -622,50 +622,6 @@ pub(crate) async fn relaunch_agent_session(
         _ => None,
     };
 
-    // Fresh JWT (the completion path revoked the previous one) — minted
-    // with the SAME worker scope claims as the first spawn
-    // (`mint_worker_scoped`): `workspace_id` + `repo_id` so the ABAC
-    // subject attribute `subject.repo_scope` (§Attributes, source "Agent
-    // OIDC claim") is real on every request the re-spawned session makes.
-    // Review round 6 (task-129): this previously minted via
-    // `mint_with_workload`, which hardcodes `repo_id: None` — the re-spawned
-    // agent's requests then carried NO `subject.repo_scope`, the
-    // `builtin-agent-repo-scope` containment Deny (750) failed its
-    // condition, and `builtin-agent-scoped-access` (700) granted
-    // tenant-wide access (agent-repo-scope containment not enforced for
-    // re-spawned sessions). The attestation level mirrors the first-spawn
-    // computation (identity-security.md levels; Kubernetes falls back to 1
-    // until the runtime reports pod workload attestations).
-    let attestation_level = resolved_ct_entity
-        .as_ref()
-        .map_or(1u8, |ct| match ct.target_type {
-            gyre_domain::ComputeTargetType::Container => 3,
-            gyre_domain::ComputeTargetType::Ssh => 2,
-            gyre_domain::ComputeTargetType::Kubernetes => 1,
-        });
-    let token = state
-        .agent_signing_key
-        .mint_worker_scoped(
-            agent.id.as_str(),
-            task.id.as_str(),
-            agent.spawned_by.as_deref().unwrap_or("system"),
-            &state.base_url,
-            state.agent_jwt_ttl_secs,
-            repo.workspace_id.as_str(),
-            task.repo_id.as_str(),
-            // Persona-less, matching the first-spawn JWT shape: workers run
-            // persona-less at spawn; the persona is applied via the prompt
-            // set, not the JWT claims.
-            None,
-            Some(attestation_level),
-            wl_image_hash,
-        )
-        .map_err(|e| anyhow::anyhow!("re-spawn JWT mint: {e}"))?;
-    let _ = state
-        .kv_store
-        .kv_set("agent_tokens", agent.id.as_str(), token.clone())
-        .await;
-
     // Same meta-spec set: re-assembled from the registry at the pinned
     // versions (the set SHA is recomputed; a changed set is a changed
     // prompt, which is the reconciliation model, not history drift).
@@ -705,6 +661,61 @@ pub(crate) async fn relaunch_agent_session(
         }
         None => None,
     };
+
+    // Fresh JWT (§1 Token Scoping + task-129 review round 6): minted with
+    // the SAME worker scope claims as the first spawn
+    // (`mint_worker_scoped`: tenant, `workspace_id`, `repo_id`, and the
+    // fine-grained `repo:{name}:write` scope list) so the ABAC subject
+    // attribute `subject.repo_scope` (§Attributes, source "Agent OIDC
+    // claim") is real on every request the re-spawned session makes —
+    // without it the `builtin-agent-repo-scope` containment Deny fails
+    // its condition and the agent gains tenant-wide access. Tenant comes
+    // from the repo's workspace, resolved fail-closed: an unresolvable
+    // workspace means the tenant scope cannot be determined, never a
+    // fabricated identity. The persona slug bound to the agent row and
+    // the identity-security.md attestation level implied by the compute
+    // target mirror the first-spawn mint.
+    let ws_tenant = match &workspace {
+        Some(ws) => ws.tenant_id.to_string(),
+        None => anyhow::bail!(
+            "workspace {} for repo {} not found; the tenant scope for the \
+             re-spawn JWT cannot be determined",
+            repo.workspace_id,
+            repo.id
+        ),
+    };
+    let token = state
+        .agent_signing_key
+        .mint_worker_scoped(
+            agent.id.as_str(),
+            task.id.as_str(),
+            agent.spawned_by.as_deref().unwrap_or("system"),
+            &state.base_url,
+            state.agent_jwt_ttl_secs,
+            &ws_tenant,
+            &repo.workspace_id.to_string(),
+            &repo.id.to_string(),
+            &repo.name,
+            persona.as_ref().map(|p| p.slug.as_str()),
+            // identity-security.md attestation levels: 1=raw subprocess,
+            // 2=CLI-managed, 3=Gyre-managed container with attestation —
+            // the same mapping the spawn path applies.
+            Some(
+                resolved_ct_entity
+                    .as_ref()
+                    .map_or(1u8, |ct| match ct.target_type {
+                        gyre_domain::ComputeTargetType::Container => 3,
+                        gyre_domain::ComputeTargetType::Ssh => 2,
+                        gyre_domain::ComputeTargetType::Kubernetes => 1,
+                    }),
+            ),
+            wl_image_hash,
+        )
+        .map_err(|e| anyhow::anyhow!("re-spawn JWT mint: {e}"))?;
+    let _ = state
+        .kv_store
+        .kv_set("agent_tokens", agent.id.as_str(), token.clone())
+        .await;
 
     let launch = crate::api::spawn::launch_agent_process(
         state,

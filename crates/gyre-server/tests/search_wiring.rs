@@ -711,7 +711,11 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
             "system",
             &state.base_url,
             3600,
+            // §1: tenant from the seeded workspace row, repo_name for the
+            // fine-grained `repo:{name}:write` scope list.
+            "default",
             "ws-a",
+            Some("repo-1"),
             Some("repo-1"),
             "repo_orchestrator",
             "repo-orchestrator",
@@ -764,7 +768,9 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
             "system",
             &state.base_url,
             3600,
+            "default",
             "ws-a",
+            None,
             None,
             "workspace_orchestrator",
             "workspace-orchestrator",
@@ -789,38 +795,62 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
         "workspace orchestrator saw a document outside its workspace: {body}"
     );
 
-    // ── Worker agent without orchestrator claims: its agent record's scope ─
+    // ── Worker agent (§1): scoped to its repo claim, not the workspace ────
     let mut worker = gyre_domain::Agent::new(Id::new("agent-worker"), "worker", 0);
     worker.workspace_id = Id::new("ws-a");
     state.agents.create(&worker).await.unwrap();
     let worker_jwt = state
         .agent_signing_key
-        .mint("agent-worker", "task-9", "system", &state.base_url, 3600)
+        .mint(
+            "agent-worker",
+            "task-9",
+            "system",
+            &state.base_url,
+            3600,
+            "default",
+            "ws-a",
+            "repo-1",
+            "repo-1",
+        )
         .unwrap();
     state
         .kv_store
         .kv_set("agent_tokens", "agent-worker", worker_jwt.clone())
         .await
         .unwrap();
-    // Worker's agent record scopes it to ws-a: both ws-a docs, never ws-b.
+    // §1 Token Scoping: a worker's token is scoped to its repo — only the
+    // repo-1 doc, never repo-2's or ws-b's.
     let resp = call_with_token(&app, "GET", "/api/v1/search?q=needle", None, &worker_jwt).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     let results = body["results"].as_array().unwrap();
     assert_eq!(
         results.len(),
-        2,
-        "worker agent must see its workspace: {body}"
+        1,
+        "worker agent must see only its repo: {body}"
     );
+    assert_eq!(results[0]["entity_id"], "a-repo1");
     assert!(
         results.iter().all(|r| r["entity_id"] != "b-doc"),
         "worker agent saw a document outside its workspace: {body}"
     );
 
     // A worker agent with NO agent record: fail closed — zero results.
+    // (§1: the signed claims alone do not widen access for an unknown
+    // caller; a deleted agent with a live token is an inconsistent state.)
     let ghost_jwt = state
         .agent_signing_key
-        .mint("agent-ghost", "task-9", "system", &state.base_url, 3600)
+        .mint(
+            "agent-ghost",
+            "task-9",
+            "system",
+            &state.base_url,
+            3600,
+            "default",
+            "ws-a",
+            "repo-1",
+            "repo-1",
+        )
         .unwrap();
     state
         .kv_store
