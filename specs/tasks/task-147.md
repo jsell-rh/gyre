@@ -8,7 +8,7 @@ coverage_sections:
   - "analytics.md §Decision API for Agents"
   - "analytics.md §GET /api/v1/analytics/decide"
   - "analytics.md §POST /api/v1/analytics/decide/custom"
-commits: ["41b239140ee2ae658d64cde4cc266fe786cf6767", "4201065ebb72677a584a90a566a56e6d99db36dd"]
+commits: ["4201065ebb72677a584a90a566a56e6d99db36dd", "41b239140ee2ae658d64cde4cc266fe786cf6767"]
 ---
 
 ## Spec Excerpt
