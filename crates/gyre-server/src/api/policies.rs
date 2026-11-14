@@ -654,7 +654,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn list_policies_empty_initially() {
+    async fn list_policies_initially_only_builtins() {
+        // Production parity: `test_state` pre-seeds the built-in ABAC set
+        // (the same set `seed_builtin_policies` persists at startup), so a
+        // fresh deployment NEVER lists zero policies — the spec's
+        // `system-full-access` and its siblings are always present. What
+        // "empty" means here is "no operator-defined policies": every
+        // listed policy is built-in, and the spec-table builtins
+        // (system-full-access, tenant-isolation, default-deny) are all
+        // accounted for.
         let resp = app()
             .oneshot(
                 Request::builder()
@@ -667,7 +675,31 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(json.as_array().unwrap().is_empty());
+        let policies = json.as_array().unwrap();
+        assert!(
+            policies
+                .iter()
+                .all(|p| p["built_in"].as_bool().unwrap_or(false)),
+            "a fresh state must list only built-in policies, got {:?}",
+            policies
+                .iter()
+                .filter(|p| !p["built_in"].as_bool().unwrap_or(false))
+                .map(|p| p["name"].clone())
+                .collect::<Vec<_>>()
+        );
+        for expected in [
+            "system-full-access",
+            "tenant-isolation",
+            "workspace-membership-required",
+            "default-deny",
+        ] {
+            assert!(
+                policies
+                    .iter()
+                    .any(|p| p["name"].as_str() == Some(expected)),
+                "built-in policy {expected} must be seeded in a fresh state"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1070,7 +1102,9 @@ mod tests {
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
         assert!(!arr.is_empty());
-        // With no policies, everything should be deny.
+        // A bare (no-?subject) context carries no subject attributes, so no
+        // seeded builtin — every one keys on a subject attribute — can
+        // match: everything must be deny.
         assert!(arr.iter().all(|p| p["decision"] == "deny"));
     }
 
@@ -1078,7 +1112,7 @@ mod tests {
     /// docs/api-reference.md document
     /// (`GET /api/v1/policies/effective?subject={id}&resource_type={type}`).
     /// A caller following the docs must get the subject's REAL attributes
-    /// (user global role from the store) — not the no-subject fallback
+    /// (resolved identity from the store) — not the no-subject fallback
     /// (bare context → deny-everything). Killing case: a handler binding
     /// only `subject_id` ignores `?subject=` entirely and this test fails
     /// with read=deny. The `subject_id` alias must keep working too.
@@ -1087,39 +1121,44 @@ mod tests {
         use gyre_common::Id;
         use gyre_domain::{
             Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope, User,
-            UserRole,
         };
 
         let state = test_state();
 
-        // A real user whose global role the handler must load from the store.
+        // A real user whose identity the handler must load from the store.
+        // The custom Allow keys on `subject.id` at priority 2000 — above
+        // every seeded builtin (system-full-access is 1000) — because the
+        // seeded builtin role Allows (admin 900 / developer 800 / readonly
+        // 600) would otherwise shadow a role-keyed custom policy and the
+        // matched_policy assertion below could not pin THIS policy. The
+        // user carries no global role, so no builtin Allow matches: the
+        // only path to `read=allow` is the handler binding `?subject=`.
         let mut user = User::new(
             Id::new("eff-subject-user"),
             "eff-sub-external",
             "eff-user",
             0,
         );
-        user.roles = vec![UserRole::Admin];
         user.tenant_id = Some(Id::new("default"));
         state.users.create(&user).await.unwrap();
 
         // An Allow keyed on the attribute only the real-subject path sets:
-        // with the bare-context fallback, subject.global_role is absent and
-        // the condition fails closed → deny.
+        // with the bare-context fallback, subject.id is absent and the
+        // condition fails closed → deny.
         state
             .policies
             .create(&Policy {
-                id: Id::new("eff-admin-read"),
-                name: "eff-admin-read".to_string(),
+                id: Id::new("eff-subject-read"),
+                name: "eff-subject-read".to_string(),
                 description: String::new(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
-                priority: 100,
+                priority: 2000,
                 effect: PolicyEffect::Allow,
                 conditions: vec![Condition {
-                    attribute: "subject.global_role".to_string(),
+                    attribute: "subject.id".to_string(),
                     operator: ConditionOp::Equals,
-                    value: ConditionValue::String("Admin".to_string()),
+                    value: ConditionValue::String("eff-subject-user".to_string()),
                 }],
                 actions: vec!["read".to_string()],
                 resource_types: vec!["repo".to_string()],
@@ -1160,7 +1199,7 @@ mod tests {
             "?subject= must bind the subject and load its real attributes \
              (bare-context fallback would deny)"
         );
-        assert_eq!(read["matched_policy"], "eff-admin-read");
+        assert_eq!(read["matched_policy"], "eff-subject-read");
 
         // The alias spelling (?subject_id=) must keep working.
         let resp = app

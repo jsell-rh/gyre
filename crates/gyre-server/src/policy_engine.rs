@@ -2108,7 +2108,13 @@ mod tests {
         let allow = allow_policy(50, vec![]);
 
         // Developer managing a persona: not in [Owner, Admin] → deny.
+        // `resource.workspace_id` is set because the policy is
+        // Workspace-scoped: the engine's scope filter (round 4,
+        // §Evaluation Flow step 5) only admits a workspace-level policy
+        // when a workspace is actually addressed — a persona always lives
+        // in one, so the spec example's fixture must carry it.
         let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-1");
         ctx.set("subject.workspace_role", "Developer");
         let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "write", "persona");
         assert_eq!(result.effect, PolicyEffect::Deny);
@@ -2149,6 +2155,9 @@ mod tests {
         let allow = allow_policy(50, vec![]);
 
         let mut ctx = AttributeContext::default();
+        // Workspace-scoped policy: the addressed workspace must be in the
+        // context for the scope filter to admit it (round 4).
+        ctx.set("resource.workspace_id", "ws-1");
         ctx.set("subject.workspace_role", "Viewer");
         let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "spawn", "agent");
         assert_eq!(result.effect, PolicyEffect::Deny);
@@ -2185,8 +2194,12 @@ mod tests {
         );
         let allow = allow_policy(50, vec![]);
 
-        // Level-2 agent reviewing a gate: < 3 → deny.
+        // Level-2 agent reviewing a gate: < 3 → deny. `resource.repo_id`
+        // is set because the policy is Repo-scoped: the engine's scope
+        // filter (round 4) only admits a repo-level policy when a repo is
+        // addressed — an MR always belongs to one.
         let mut ctx = AttributeContext::default();
+        ctx.set("resource.repo_id", "r-1");
         ctx.set("subject.type", "agent");
         ctx.set_number("subject.attestation_level", 2);
         let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "gate_review", "mr");

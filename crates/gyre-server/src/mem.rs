@@ -4330,7 +4330,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair_seeded();
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
@@ -4532,6 +4532,42 @@ fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
     if fail_trust {
         workspaces.fail_trust_transitions();
     }
+    (Arc::new(workspaces), policies, ws_store)
+}
+
+/// Production-parity variant of [`shared_workspace_policy_pair`]: the
+/// shared policy store comes pre-populated with the full built-in ABAC
+/// policy set — `abac_middleware::m34_builtin_policies()` chained with
+/// `abac_middleware::domain_builtin_policies()`, the exact set
+/// [`abac_middleware::seed_builtin_policies`] persists at startup
+/// (main.rs), keyed by policy id exactly as `MemPolicyRepository::create`
+/// writes them. Constructing the map synchronously (before it is wrapped
+/// in the store mutex) keeps every `test_state*` builder callable from
+/// sync and current-thread-runtime contexts alike.
+///
+/// task-129 removed the middleware's system-token bypass: the global
+/// GYRE_AUTH_TOKEN is allowed BY the `system-full-access` policy
+/// (priority 1000), so a test state whose policy store is empty
+/// default-denies every ABAC-evaluated route — the seeded builtin set is
+/// part of production wiring (`main.rs` seeds it before serving), not an
+/// optional extra. Test states that specifically exercise empty- or
+/// failing-policy behavior (`test_state_failing_policy_creates`,
+/// `test_state_failing_policy_lists`) build their own stores and stay
+/// unseeded.
+#[cfg(test)]
+fn shared_workspace_policy_pair_seeded() -> SharedWorkspacePolicyPair {
+    let mut seeded = std::collections::HashMap::new();
+    for policy in crate::abac_middleware::m34_builtin_policies()
+        .into_iter()
+        .chain(crate::abac_middleware::domain_builtin_policies())
+    {
+        seeded.insert(policy.id.to_string(), policy);
+    }
+    let pol_store = Arc::new(tokio::sync::Mutex::new(seeded));
+    let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
     (Arc::new(workspaces), policies, ws_store)
 }
 

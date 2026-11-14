@@ -5136,13 +5136,18 @@ mod tests {
         };
         state.policies.create(&allow).await.unwrap();
 
+        // The pushing subject belongs to the workspace's tenant
+        // ("tenant-push-audit"): the seeded builtin `tenant-isolation`
+        // Deny (950) is above this test's Allow (200), so a cross-tenant
+        // subject would flip the decision to the containment Deny — this
+        // test is about the DECISION RECORDING, not tenant containment.
         let result = evaluate_push_attestation_abac(
             &state,
             "TASK-PUSH-AUDIT",
             "repo-push-audit",
             "ws-push-audit",
             "agent:worker-push",
-            "tenant-subject",
+            "tenant-push-audit",
             &leaf,
             &chain,
         )
