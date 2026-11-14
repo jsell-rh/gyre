@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f", "4de47315cc28796662ba04fb99cc36403390979a", "0f127bc0e111c65ace292e45231ab585242aad99"]
 ---
 
 ## Spec Excerpt
@@ -97,78 +97,79 @@ Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `
 
 ## Shipped
 
-All acceptance-criterion pages shipped as real Svelte 5 (runes) components against
-the task-124/125 endpoints. Product commit: `1a32b4e6` (plus asset build
-`4de47315`); this round (merge commit `7c838821`) rebased the branch onto
-current main (`9bfab36`, task-149 analytics dashboard) — sole conflict was in
-`web/src/App.svelte`, where both sides had extended the SPA mode list: resolved
-by unioning them (`public_profile`/`invite_accept` from this task + `analytics`
-from main) in all three spots (mode comment, popstate restore, parseUrl
-dispatch); `web/src/lib/api.js` auto-merged cleanly (analytics endpoints
-added, no duplicate keys). Rust sides were disjoint (this branch touched only
-`api/users.rs`; main touched only analytics/admin/mem/retention/search_sync).
+All acceptance-criterion pages shipped as real Svelte 5 (runes) components
+against the task-124/125 endpoints in `1a32b4e6` (asset build `4de47315`),
+rebased onto current main (`9bfab36`) via merge `7c838821` (App.svelte mode
+lists unioned), and repaired per review `44b2bd1d` in `0f127bc0`.
 
 ### Pages
 
 - **User Settings (`/profile`)** — profile edit + preferences fieldset (theme,
   density, diff view, feed scope, code font size) via `PUT /users/me`;
-  notification-preferences tab fixed to the real `{preferences, channels}`
-  contract and extended with email/webhook/Slack channel config via
-  `PUT /api/v1/notifications/preferences`; new Invitations tab (accept/decline
-  my pending memberships).
+  notification-preferences tab on the real `{preferences, channels}` contract
+  extended with email/webhook/Slack channel config via
+  `PUT /api/v1/notifications/preferences`; Invitations tab (accept/decline my
+  pending memberships).
 - **User Profile (`/@username`)** — `PublicUserProfile.svelte`: display name,
   username, avatar, timezone, member-since via `GET /users/{username}`;
-  accepted workspace memberships with role badges; team memberships;
-  honest 404 state.
+  workspace memberships with role badges; team memberships; honest 404 state.
 - **Tenant User Management (TenantSettings → Users tab)** — real `GET /users`
   list (TenantAdmin-gated; 403 renders a gated note, no fake list), search,
   Deactivate with reason → `PUT /users/{id}/deactivate`, Provision modal →
   `POST /users`, rows link to `/@username`.
 - **Workspace Members (WorkspaceSettings → Members tab)** — member list with
   role badges + inline role change (ownership-transfer reason prompt), remove,
-  invite-by-username (handle resolved via `GET /users/{username}` then
-  `POST /invite`), pending invitations table with revoke.
-- **Team Management (WorkspaceSettings → Teams tab)** — reworked from a
-  mislabeled member list to real team CRUD + membership management over the
-  task-122 endpoints.
+  invite-by-username (resolved via `GET /users/{username}` then `POST /invite`),
+  pending invitations table with revoke (invitee self-decline allowed by the
+  new decline path in `DELETE /workspaces/{id}/invitations/{invitation_id}`).
+- **Team Management (WorkspaceSettings → Teams tab)** — real team CRUD +
+  membership management over the task-122 endpoints.
 - **Invitation Accept (`/invite/{workspaceId}` + `InvitationAccept.svelte`)** —
   workspace preview, Accept → `POST /invite/accept`, Decline → self-decline;
   honest terminal states. The segment is the workspace id because task-124
-  models pending invitations as membership rows; the `/invite/{token}` form is
-  the tenant-invitation flow owned by task-110.
-- **Notification Drawer (`NotificationDrawer.svelte`)** — bell opens a
-  slide-out grouped by priority band, per-item read/unread, mark-all-read,
-  unread pill, deep links (SPA router; `InvitationReceived` →
-  `/invite/{workspace_id}`).
+  models pending invitations as membership rows; `/invite/{token}` is the
+  tenant-invitation flow owned by task-110.
+- **Notification Drawer (`NotificationDrawer.svelte`)** — bell with unread
+  badge, slide-out grouped by priority band, per-item read/unread,
+  mark-all-read, deep links (`InvitationReceived` → `/invite/{workspace_id}`).
 
-### Backend change
+### Review repair (`0f127bc0`)
 
-`DELETE /workspaces/{id}/invitations/{invitation_id}` (users.rs) now also
-allows the invitee to decline their own pending invitation (§Workspace
-Invitation Flow step 4 had no decline path): scoped to the caller's own
-membership row, foreign invitations 404-masked, distinct
-`workspace_invitation_declined` audit event. No new route, no ABAC registry
-change.
+Review `44b2bd1d` found `tenant_settings.users.col_role` and
+`.count_note` missing from `web/src/locales/en.json`, so the Users table
+header/count note rendered the raw key paths. Added both keys (a sweep of
+all 112 `tenant_settings.*` references confirmed these were the only
+missing entries) and a rendered-output regression guard asserting resolved
+copy (`Role`, `Showing 2 of 2 users.`) and that no raw
+`tenant_settings.users.*` path leaks into the panel. Evidence, including a
+kill-the-bug run that fails without the fix reproducing the reviewer's
+output exactly: `/tmp/stage/review-evidence/i18n-key-repair.md`.
+
+### Test evidence
+
+- This repair round (`0f127bc0`): `cd web && npm ci && npx vitest run
+  src/__tests__/TenantSettings.test.js` — **46/46 passed**; the new guard
+  fails against the unfixed en.json, reproducing the reviewer's output
+  exactly (evidence: `/tmp/stage/review-evidence/i18n-key-repair.md`).
+- Prior round (post-merge, tree at `7c838821`): `cd web && npm ci && npm test`
+  — **2395 passed, 41 skipped, 0 failed** (119 files); `SKIP_WEB_BUILD=1
+  cargo check -p gyre-server` — clean; `scripts/check-abac-route-registry.sh`
+  and `scripts/check-arch.sh` — clean.
+- Rust side unchanged this round; server tests the independent verifier must
+  execute (4 GiB budget blocks server test compilation in-sandbox):
+  - `cargo test -p gyre-server invitee_can_decline_own_pending_invitation`
+  - `cargo test -p gyre-server workspace_invitation_lifecycle`
+  - Full `cargo test --all` (task acceptance criterion)
 
 ### Known gaps (blocked on other tasks, not faked)
 
 - Session Management page — `/users/me/sessions` endpoints owned by task-111
-  (not-started).
+  (not-started); no page is stubbed for it.
 - Tenant Invitation Management incl. `/invite/{token}` magic links and bulk
-  invite — `/api/v1/tenant/invite*` owned by task-110 (not-started).
+  invite — `/api/v1/tenant/invite*` owned by task-110 (not-started); the
+  task-124 surface models invitations as membership rows, so the workspace
+  flow above is what this task's endpoints expose.
 - Invitation expiry countdown — `WorkspaceMembership` has no expiry field
   (task-110); invited date shown instead.
 - Public-profile activity feed/stats — no per-user endpoints exist.
 - Inline global-role editing — no endpoint exists; roles display read-only.
-
-### Test evidence
-
-- This round (post-merge, tree at `7c838821`): `cd web && npm ci && npm test` —
-  **2395 passed, 41 skipped, 0 failed** (119 files; includes the merged
-  AnalyticsView suite); `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — clean;
-  `scripts/check-abac-route-registry.sh` and `scripts/check-arch.sh` — clean.
-- Server tests the independent verifier must execute (4 GiB budget blocks
-  server test compilation in-sandbox):
-  - `cargo test -p gyre-server invitee_can_decline_own_pending_invitation`
-  - `cargo test -p gyre-server workspace_invitation_lifecycle`
-  - Full `cargo test --all` (task acceptance criterion)
