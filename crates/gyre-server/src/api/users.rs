@@ -4884,7 +4884,17 @@ mod tests {
         // Cascade 3 — the tenant's TenantAdmins were notified.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new(&admin_id), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new(&admin_id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
