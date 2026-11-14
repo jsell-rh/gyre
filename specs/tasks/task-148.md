@@ -3,7 +3,7 @@ title: "Implement gyre_analytics_decide MCP tool and Ralph Loop integration"
 spec_ref: "analytics.md §MCP Tool: gyre_analytics_decide"
 depends_on:
   - task-147
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "analytics.md §MCP Tool: gyre_analytics_decide"
   - "analytics.md §Integration with the Ralph Loop"
