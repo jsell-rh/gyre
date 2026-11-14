@@ -2,10 +2,10 @@
 title: "Spec Save Git Write-Through"
 spec_ref: "ui-layout.md §3 (LLM-Assisted Spec Editing, Save workflow), human-system-interface.md §3 (Explorer: Inline Spec Editing)"
 depends_on: []
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-011.md
 coverage_sections: []
-commits: ["3488a06bf40471867a51c08bd899888c66ac8b09"]
+commits: ["3488a06bf40471867a51c08bd899888c66ac8b09", "97ae5fa923b479420710a28839be49189220e428"]
 ---
 
 ## Spec Excerpt
@@ -91,38 +91,39 @@ _(none yet)_
 
 ## Shipped
 
-The spec save git write-through is fully implemented in production code on
-this branch (product-surface commit `3488a06bf`, recorded in the `commits:`
-frontmatter above — the review-scoping list; review history in
-`specs/reviews/task-011.md`, R2 verdict `complete`). The body `## Git Commits`
-section above is intentionally left at the assigned baseline: it is protected
-contract text, and filling it with the process-commit ledger would amend the
-contract (the recurring contract-repair trigger in prior rounds). Commit
-attribution lives in the frontmatter; round notes live here, under `##
-Shipped`.
+The spec save git write-through is implemented in production code on this
+branch. Product-surface commits (review-scoping list, frontmatter above):
+`3488a06b` (e2e write-through coverage) and `97ae5fa9` (this round's rustfmt
+repair). Review history: `specs/reviews/task-011.md`, R2 verdict `complete`
+with F1–F4 all process-revision-complete. The `## Git Commits` body section
+above is kept at the assigned baseline: it is protected contract text.
 
-### This round (repair `c4505676`)
+### This round (repair `97ae5fa9`)
 
-- The executor again restored the assigned task document; the completion
-  record — frontmatter attribution, acceptance checkboxes, and these Shipped
-  notes — is re-applied on top (doc-only). The restored contract records
-  `progress: complete`, consistent with the R2 review verdict, and is kept as
-  restored.
-- No merge was required and no product code changed: the assignment base
-  `6ffd6799` is already merged (`90eda370`), and the product surface
-  (`specs_assist.rs`, `git_ops.rs`, `git2_ops.rs`) is byte-identical to the
-  prior verified heads (`git diff d50831a6..940956bb -- crates/ web/ src/` is
-  empty; `940956bb` is doc-only relative to `d50831a6`).
-- Evidence retained under
-  `/tmp/stage/review-evidence/round-c4505676-git-verification.txt`.
+- The retained verification run (`bash /tmp/stage/checks.sh`, candidate
+  `ddd1a2c`) failed on exactly one gate: `rustfmt:
+  crates/gyre-server/src/api/specs_assist.rs: changed lines need formatting:
+  2100`. Everything else passed (clippy changed-lines clean, arch/hierarchy
+  lints, all invariant scripts, web build).
+- Fix: re-wrapped the one-line
+  `assert!(state.merge_requests.list_by_repo(...).is_empty())` in
+  `save_prompt_commits_directly_to_default_branch` into the edition-2021
+  rustfmt shape. Whitespace-only; no behavior change.
+- Local proof: `python3 scripts/check-rustfmt-diff.py b6892403` → "changed
+  lines clean" (exit 0), reproducing the failing gate verbatim before and
+  after the fix. Evidence under `/tmp/stage/review-evidence/`.
+- No merge was required: the assignment base `b6892403` was already merged
+  (`54fffafa`), and the product surface is otherwise byte-identical to the
+  previously verified candidate `ddd1a2c` (the only code delta this round
+  is the re-wrapped assert).
 
 ### Actual behavior
 
 - `GitOpsPort` exposes `write_file` / `create_branch` / `branch_exists`
   (`crates/gyre-ports/src/git_ops.rs`), implemented for real in the git2
   adapter (`crates/gyre-adapters/src/git2_ops.rs`): branch creation resolves
-  `from_ref` to a commit and calls `Repository::branch`; `write_file` writes a
-  blob, rebuilds the tree (nested paths included) via treebuilder, commits
+  `from_ref` to a commit and calls `Repository::branch`; `write_file` writes
+  a blob, rebuilds the tree (nested paths included) via treebuilder, commits
   with the branch tip as parent, and updates the ref — returning the real
   commit SHA.
 - `POST /specs/save` (`save_spec` in `crates/gyre-server/src/api/specs_assist.rs`)
@@ -133,9 +134,9 @@ Shipped`.
   ID (Inbox "Approve" linkage), fanned out to workspace Admin/Developer/Owner
   members (plus `human_approvers` team members, plus `system` fallback).
   Existing-MR detection matches open MRs by `spec-edit/<slug>-*` branch prefix
-  AND MR author == caller, then appends a commit to the existing branch
-  (HTTP 200, same `branch`/`mr_id`) and refreshes the pending-approval card's
-  `spec_sha` (task-175 F1).
+  AND MR author == caller (R2-F1), then appends a commit to the existing
+  branch (HTTP 200, same `branch`/`mr_id`) and refreshes the pending-approval
+  card's `spec_sha` (task-175 F1).
 - `POST /prompts/save` commits directly to the default branch — no feature
   branch, no MR, no approval notification — and returns the real commit SHA.
   The review-gate bypass is constrained to `specs/prompts/` by
@@ -147,33 +148,17 @@ Shipped`.
 ### Test evidence
 
 - Handler logic (NoopGitOps): tests covering branch naming, MR creation,
-  existing-MR append, priority-2 notification assertion
+  existing-MR append with author matching, priority-2 notification assertion
   (`save_spec_creates_mr_for_existing_repo` verifies `priority_rank == 2` and
-  `entity_id == mr_id`), prompt save SHA shape, slug format/collision, prompt
-  path-guard rejection, and the HSI §7 409 conflict path.
-- End-to-end tests (commit `3488a06bf`) inject the real `Git2OpsAdapter` with
-  an on-disk bare repo so the full chain — handler → GitOpsPort → libgit2 —
-  runs: real branch exists with content, default branch untouched by spec
-  saves, re-save appends exactly one commit (verified via `commit_log`) with no
-  second MR/branch, prompt save lands on `main` with the returned SHA equal to
-  the real new tip and no branch/MR created.
-- Adapter layer: 35 git2_ops tests including `write_file` on feature branches,
-  nested paths, overwrite, `create_branch` from existing ref, and
-  `branch_exists`.
-
-### Probes this round (head `940956bb`)
-
-- Git-level verification only (no cargo compile re-run): the sandbox has no
-  warm target dir and the code is byte-identical to the previously verified
-  heads, so a cold build would prove nothing new. Recorded under
-  `/tmp/stage/review-evidence/round-c4505676-git-verification.txt`:
-  `git merge-base --is-ancestor 6ffd6799 HEAD` (exit 0 — base already
-  merged), `git status --short` at round start (only the executor's task-doc
-  restore), `git diff d50831a6..940956bb -- crates/ web/ src/` (empty), and
-  grep spot checks of the write-through call sites and the R2 fix sites
-  (author check, `author_agent_id`, notification assertions) at HEAD.
-- The verifier should execute at the published head: `cargo test -p
-  gyre-adapters --lib git2_ops` and `cargo test -p gyre-server --lib
-  api::specs_assist` (gyre-server test compilation is deferred to the
-  verifier per the 4 GiB build budget; the identical code passed `cargo
-  check -p gyre-server --tests` at `90eda370` in a prior round).
+  `entity_id == mr_id`, R2-F4), prompt save SHA shape, slug format/collision,
+  prompt path-guard rejection, and the HSI §7 409 conflict path.
+- Real git write-through (e2e, real git2 adapter on a temp repo, commit
+  `3488a06b`): `save_spec_creates_branch_mr_and_commits_content`, existing-MR
+  append appends a real commit to the existing branch, prompt save commits to
+  the default branch and returns the real new tip SHA (no feature branch, no
+  MR — the assertion re-wrapped this round).
+- Verifier should run: `cargo test -p gyre-server specs_assist` (server test
+  compilation is deferred to the independent verifier per the 4 GiB budget;
+  this round's delta is whitespace-only inside one test assertion, and
+  rustfmt's successful parse plus the changed-lines gate prove syntax and
+  formatting validity).
