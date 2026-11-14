@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "abac-policy-engine.md §CLI"
-commits: ["05549afd91dfda702b701cd828359c6c93cae8be", "eae3a9349b4ee7c77a86e687a97eee0da895ae33"]
+commits: ["05549afd91dfda702b701cd828359c6c93cae8be"]
 ---
 
 ## Spec Excerpt
