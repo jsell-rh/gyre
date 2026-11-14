@@ -955,12 +955,12 @@ mod tests {
         let mut mr = MergeRequest::new(
             Id::new("mr-n1"),
             Id::new("repo-n1"),
+            Id::new("ws-n1"),
             "Add feature",
             "feat/x",
             "main",
             0,
         );
-        mr.workspace_id = Id::new("ws-n1");
         mr.author_agent_id = Some(Id::new("agent-n1"));
         state.merge_requests.create(&mr).await.unwrap();
         (state, Id::new("ws-n1"))

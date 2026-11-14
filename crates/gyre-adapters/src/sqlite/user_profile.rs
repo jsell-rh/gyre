@@ -3,16 +3,19 @@ use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::{
-    JudgmentEntry, JudgmentType, NotificationChannels, UserNotificationPreference, UserToken,
+    JudgmentEntry, JudgmentType, NotificationChannels, UserNotificationPreference, UserSession,
+    UserToken,
 };
 use gyre_ports::{
-    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    JudgmentLedgerRepository, SessionRepository, UserChannelPreferenceRepository,
     UserNotificationPreferenceRepository, UserTokenRepository,
 };
 use std::sync::Arc;
 
 use super::SqliteStorage;
-use crate::schema::{user_channel_preferences, user_notification_preferences, user_tokens};
+use crate::schema::{
+    user_channel_preferences, user_notification_preferences, user_sessions, user_tokens,
+};
 
 // ─── User Notification Preferences ──────────────────────────────────────────
 
@@ -336,6 +339,237 @@ impl JudgmentLedgerRepository for SqliteStorage {
     }
 }
 
+// ─── User Sessions ───────────────────────────────────────────────────────────
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = user_sessions)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct UserSessionRow {
+    id: String,
+    user_id: String,
+    token_hash: String,
+    ip_address: String,
+    user_agent: String,
+    created_at: i64,
+    last_active_at: i64,
+    expires_at: i64,
+    revoked: i32,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = user_sessions)]
+struct UserSessionRecord<'a> {
+    id: &'a str,
+    user_id: &'a str,
+    token_hash: &'a str,
+    ip_address: &'a str,
+    user_agent: &'a str,
+    created_at: i64,
+    last_active_at: i64,
+    expires_at: i64,
+    revoked: i32,
+}
+
+impl From<UserSessionRow> for UserSession {
+    fn from(r: UserSessionRow) -> Self {
+        UserSession {
+            id: Id::new(r.id),
+            user_id: Id::new(r.user_id),
+            token_hash: r.token_hash,
+            ip_address: r.ip_address,
+            user_agent: r.user_agent,
+            created_at: r.created_at as u64,
+            last_active_at: r.last_active_at as u64,
+            expires_at: r.expires_at as u64,
+            revoked: r.revoked != 0,
+        }
+    }
+}
+
+#[async_trait]
+impl SessionRepository for SqliteStorage {
+    async fn create(&self, session: &UserSession) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let s = session.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let record = UserSessionRecord {
+                id: s.id.as_str(),
+                user_id: s.user_id.as_str(),
+                token_hash: &s.token_hash,
+                ip_address: &s.ip_address,
+                user_agent: &s.user_agent,
+                created_at: s.created_at as i64,
+                last_active_at: s.last_active_at as i64,
+                expires_at: s.expires_at as i64,
+                revoked: if s.revoked { 1 } else { 0 },
+            };
+            diesel::insert_into(user_sessions::table)
+                .values(&record)
+                .execute(&mut *conn)
+                .context("insert user_session")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn list_for_user(&self, user_id: &Id) -> Result<Vec<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = user_sessions::table
+                .filter(user_sessions::user_id.eq(&uid))
+                .order(user_sessions::created_at.desc())
+                .load::<UserSessionRow>(&mut *conn)
+                .context("list user_sessions")?;
+            Ok(rows.into_iter().map(Into::into).collect())
+        })
+        .await?
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let row = user_sessions::table
+                .find(id.as_str())
+                .first::<UserSessionRow>(&mut *conn)
+                .optional()
+                .context("find user_session by id")?;
+            Ok(row.map(Into::into))
+        })
+        .await?
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let hash = token_hash.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let row = user_sessions::table
+                .filter(user_sessions::token_hash.eq(&hash))
+                // Newest first: a credential shared by several devices has
+                // several rows with the same hash.
+                .order(user_sessions::created_at.desc())
+                .then_order_by(user_sessions::id.desc())
+                .first::<UserSessionRow>(&mut *conn)
+                .optional()
+                .context("find user_session by token hash")?;
+            Ok(row.map(Into::into))
+        })
+        .await?
+    }
+
+    async fn find_by_credential_and_device(
+        &self,
+        user_id: &Id,
+        credential_hash: &str,
+        ip_address: &str,
+        user_agent: &str,
+    ) -> Result<Option<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        let cred = credential_hash.to_string();
+        let ip = ip_address.to_string();
+        let ua = user_agent.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Newest matching row first: after a re-mint (device returning
+            // after an idle expiry), both the stale expired row and the
+            // fresh row match this tuple; the fresh one must be found or
+            // the auth path would re-mint on every request.
+            let row = user_sessions::table
+                .filter(user_sessions::user_id.eq(&uid))
+                .filter(user_sessions::token_hash.eq(&cred))
+                .filter(user_sessions::ip_address.eq(&ip))
+                .filter(user_sessions::user_agent.eq(&ua))
+                .order(user_sessions::created_at.desc())
+                .then_order_by(user_sessions::id.desc())
+                .first::<UserSessionRow>(&mut *conn)
+                .optional()
+                .context("find user_session by credential+device")?;
+            Ok(row.map(Into::into))
+        })
+        .await?
+    }
+
+    async fn touch(&self, id: &Id, last_active_at: u64, expires_at: u64) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Sliding expiry: each throttled activity write also restarts
+            // the session TTL (port contract on `touch`).
+            diesel::update(user_sessions::table.find(id.as_str()))
+                .set((
+                    user_sessions::last_active_at.eq(last_active_at as i64),
+                    user_sessions::expires_at.eq(expires_at as i64),
+                ))
+                .execute(&mut *conn)
+                .context("touch user_session")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn revoke(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        let uid = user_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Scoped revoke: only mark revoked if the session belongs to the
+            // requesting user. Idempotent — already-revoked rows stay revoked.
+            diesel::update(
+                user_sessions::table
+                    .filter(user_sessions::id.eq(id.as_str()))
+                    .filter(user_sessions::user_id.eq(uid.as_str())),
+            )
+            .set(user_sessions::revoked.eq(1))
+            .execute(&mut *conn)
+            .context("revoke user_session")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn revoke_all_for_user(&self, user_id: &Id) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::update(
+                user_sessions::table
+                    .filter(user_sessions::user_id.eq(&uid))
+                    .filter(user_sessions::revoked.eq(0)),
+            )
+            .set(user_sessions::revoked.eq(1))
+            .execute(&mut *conn)
+            .context("revoke all user_sessions for user")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn delete_expired_before(&self, cutoff: u64) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Port contract: revoked rows are never deleted — they are the
+            // durable record that keeps a signed-out credential rejected.
+            let n = diesel::delete(user_sessions::table)
+                .filter(user_sessions::expires_at.lt(cutoff as i64))
+                .filter(user_sessions::revoked.eq(0))
+                .execute(&mut *conn)
+                .context("delete expired user_sessions")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
+}
+
 // ─── User Channel Preferences (task-112) ────────────────────────────────────
 
 #[derive(Queryable, Selectable)]
@@ -576,6 +810,332 @@ mod tests {
             list.len(),
             1,
             "token should still exist after wrong-user delete"
+        );
+    }
+
+    // ── SessionRepository (user-management.md §Session Management) ─────────
+
+    fn make_session(
+        id: &str,
+        user_id: &Id,
+        token_hash: &str,
+        created_at: u64,
+        expires_at: u64,
+    ) -> UserSession {
+        UserSession::new(
+            Id::new(id),
+            user_id.clone(),
+            token_hash,
+            "127.0.0.1",
+            "gyre-test/1.0",
+            created_at,
+            expires_at,
+        )
+    }
+
+    #[tokio::test]
+    async fn session_create_find_roundtrip() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u1");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let sess = make_session("sess-1", &u.id, "hash-1", 1_000, 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+
+        let found = SessionRepository::find_by_id(&s, &Id::new("sess-1"))
+            .await
+            .unwrap()
+            .expect("session must be findable by id");
+        assert_eq!(found.token_hash, "hash-1");
+        assert_eq!(found.user_agent, "gyre-test/1.0");
+        assert_eq!(found.ip_address, "127.0.0.1");
+        assert!(!found.revoked);
+
+        let by_hash = SessionRepository::find_by_token_hash(&s, "hash-1")
+            .await
+            .unwrap()
+            .expect("session must be findable by token hash");
+        assert_eq!(by_hash.id, Id::new("sess-1"));
+    }
+
+    #[tokio::test]
+    async fn session_create_duplicate_id_fails() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u2");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let sess = make_session("sess-dup", &u.id, "hash-dup", 1_000, 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+        // Port contract: create fails if a session with the same id exists.
+        assert!(
+            SessionRepository::create(&s, &sess).await.is_err(),
+            "duplicate session id must fail (PRIMARY KEY guard)"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_find_by_credential_and_device_matches_all_four() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u3");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let sess = make_session("sess-dev", &u.id, "cred-hash", 1_000, 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+
+        // Exact (user, credential, ip, user-agent) → found.
+        let found = SessionRepository::find_by_credential_and_device(
+            &s,
+            &u.id,
+            "cred-hash",
+            "127.0.0.1",
+            "gyre-test/1.0",
+        )
+        .await
+        .unwrap()
+        .expect("exact device tuple must match");
+        assert_eq!(found.id, Id::new("sess-dev"));
+
+        // Any differing component (different device) → not found; it is a
+        // new session, not the same one.
+        assert!(
+            SessionRepository::find_by_credential_and_device(
+                &s,
+                &u.id,
+                "cred-hash",
+                "10.0.0.1",
+                "gyre-test/1.0",
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "different ip must not match the session"
+        );
+        assert!(
+            SessionRepository::find_by_credential_and_device(
+                &s,
+                &u.id,
+                "cred-hash",
+                "127.0.0.1",
+                "other-agent/9",
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "different user-agent must not match the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_touch_slides_expiry() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u4b");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let sess = make_session("sess-slide", &u.id, "hash-slide", 1_000, 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+
+        // Throttled activity write slides the TTL: a daily-active device
+        // must never cross its expiry wall while still authenticating.
+        SessionRepository::touch(&s, &Id::new("sess-slide"), 1_500, 1_500 + 30 * 24 * 3600)
+            .await
+            .unwrap();
+        let after = SessionRepository::find_by_id(&s, &Id::new("sess-slide"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.last_active_at, 1_500,
+            "touch must persist last_active_at"
+        );
+        assert_eq!(
+            after.expires_at,
+            1_500 + 30 * 24 * 3600,
+            "touch must slide expires_at (session TTL restarts on use)"
+        );
+    }
+
+    /// Port contract: revoked rows are never deleted by retention cleanup —
+    /// a revoked row is the durable record keeping a signed-out credential
+    /// rejected; deleting it would re-authorize the API key.
+    #[tokio::test]
+    async fn session_retention_never_deletes_revoked_rows() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u9");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let old_expired_revoked = make_session("sess-rr", &u.id, "h-rr", 1_000, 1_000);
+        let old_expired_live = make_session("sess-rl", &u.id, "h-rl", 1_000, 2_000);
+        SessionRepository::create(&s, &old_expired_revoked)
+            .await
+            .unwrap();
+        SessionRepository::create(&s, &old_expired_live)
+            .await
+            .unwrap();
+        SessionRepository::revoke(&s, &Id::new("sess-rr"), &u.id)
+            .await
+            .unwrap();
+
+        // Cutoff well past both rows' expiry.
+        let deleted = SessionRepository::delete_expired_before(&s, 5_000)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "only the unrevoked expired row is deleted");
+        let revoked = SessionRepository::find_by_id(&s, &Id::new("sess-rr"))
+            .await
+            .unwrap()
+            .expect("revoked rows must survive retention cleanup forever");
+        assert!(revoked.revoked);
+        assert!(
+            SessionRepository::find_by_id(&s, &Id::new("sess-rl"))
+                .await
+                .unwrap()
+                .is_none(),
+            "expired live rows are removed by retention cleanup"
+        );
+    }
+
+    /// After a re-mint (device returning after idle expiry), both the stale
+    /// expired row and the fresh row match the (user, credential, ip,
+    /// user-agent) tuple; the find must return the newest row or the auth
+    /// path would re-mint on every request.
+    #[tokio::test]
+    async fn session_find_by_credential_and_device_returns_newest_match() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u10");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let stale = make_session("sess-old-dev", &u.id, "cred-x", 1_000, 2_000);
+        let fresh = make_session("sess-new-dev", &u.id, "cred-x", 8_000, 9_000);
+        SessionRepository::create(&s, &stale).await.unwrap();
+        SessionRepository::create(&s, &fresh).await.unwrap();
+
+        let found = SessionRepository::find_by_credential_and_device(
+            &s,
+            &u.id,
+            "cred-x",
+            "127.0.0.1",
+            "gyre-test/1.0",
+        )
+        .await
+        .unwrap()
+        .expect("a row must match the device tuple");
+        assert_eq!(
+            found.id,
+            Id::new("sess-new-dev"),
+            "the newest matching row must be returned after a re-mint"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_revoke_is_scoped_to_owner() {
+        let (_tmp, s) = setup();
+        let u1 = make_user("s-u5");
+        let u2 = make_user("s-u6");
+        UserRepository::create(&s, &u1).await.unwrap();
+        UserRepository::create(&s, &u2).await.unwrap();
+
+        let sess = make_session("sess-rev", &u1.id, "hash-rev", 1_000, 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+
+        // Wrong owner: revoke is a no-op (scoped), not an error.
+        SessionRepository::revoke(&s, &Id::new("sess-rev"), &u2.id)
+            .await
+            .unwrap();
+        let still = SessionRepository::find_by_id(&s, &Id::new("sess-rev"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!still.revoked, "wrong-owner revoke must not revoke");
+
+        // Right owner: revoked.
+        SessionRepository::revoke(&s, &Id::new("sess-rev"), &u1.id)
+            .await
+            .unwrap();
+        let revoked = SessionRepository::find_by_id(&s, &Id::new("sess-rev"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(revoked.revoked, "owner revoke must revoke");
+
+        // Idempotent: re-revoke succeeds.
+        SessionRepository::revoke(&s, &Id::new("sess-rev"), &u1.id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_revoke_all_and_delete_expired() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u7");
+        UserRepository::create(&s, &u).await.unwrap();
+        let other = make_user("s-u8");
+        UserRepository::create(&s, &other).await.unwrap();
+
+        let s1 = make_session("sess-a1", &u.id, "h-a1", 1_000, 2_000);
+        let s2 = make_session("sess-a2", &u.id, "h-a2", 1_000, 9_000);
+        let keep = make_session("sess-b1", &other.id, "h-b1", 1_000, 2_000);
+        SessionRepository::create(&s, &s1).await.unwrap();
+        SessionRepository::create(&s, &s2).await.unwrap();
+        SessionRepository::create(&s, &keep).await.unwrap();
+
+        // Revoke-all touches only the target user's sessions.
+        SessionRepository::revoke_all_for_user(&s, &u.id)
+            .await
+            .unwrap();
+        let mine = SessionRepository::list_for_user(&s, &u.id).await.unwrap();
+        assert!(
+            mine.iter().all(|x| x.revoked),
+            "revoke-all must revoke every session of the user"
+        );
+        let others = SessionRepository::list_for_user(&s, &other.id)
+            .await
+            .unwrap();
+        assert!(
+            others.iter().all(|x| !x.revoked),
+            "revoke-all must not touch other users' sessions"
+        );
+
+        // Retention cleanup deletes only UNREVOKED rows expired before the
+        // cutoff: sess-a1 (revoked, expired) survives as the durable
+        // sign-out record; sess-b1 (unrevoked, expired) is deleted;
+        // sess-a2 (revoked but unexpired) survives — expiry is what gates
+        // retention, and revocation only makes a row undeletable.
+        let deleted = SessionRepository::delete_expired_before(&s, 5_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted, 1,
+            "only the unrevoked expired row (sess-b1) is deleted; the revoked \
+             sess-a1 survives as the durable sign-out record"
+        );
+        let remaining: Vec<_> = SessionRepository::list_for_user(&s, &u.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .chain(
+                SessionRepository::list_for_user(&s, &other.id)
+                    .await
+                    .unwrap(),
+            )
+            .collect();
+        // sess-a2 (unexpired) and sess-a1 (revoked, expired) both survive;
+        // sess-b1 (unrevoked, expired) is gone.
+        assert_eq!(
+            remaining.len(),
+            2,
+            "unexpired session and revoked session survive; expired live row deleted"
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|x| x.id == Id::new("sess-a1") && x.revoked),
+            "the revoked row must survive retention cleanup"
+        );
+        assert!(
+            remaining.iter().any(|x| x.id == Id::new("sess-a2")),
+            "the unexpired row must survive (revoked by the test's own \
+             revoke-all, but not yet expired — expiry, not revocation, \
+             gates retention)"
         );
     }
 }

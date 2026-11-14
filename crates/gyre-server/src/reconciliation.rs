@@ -3375,15 +3375,15 @@ mod tests {
         task.repo_id = Id::new(repo_id);
         state.tasks.create(&task).await.unwrap();
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-auto"),
             Id::new(repo_id),
+            Id::new(ws_id),
             "Reconcile backend-developer v4",
             "reconcile/abc/spec",
             "main",
             now(),
         );
-        mr.workspace_id = Id::new(ws_id);
         state.merge_requests.create(&mr).await.unwrap();
         (mr, task)
     }
@@ -4719,12 +4719,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new(mr_id),
             repo.id.clone(),
+            Id::new(ws_id),
             format!("MR {mr_id}"),
             "feat/x",
             "main",
             now(),
         );
-        mr.workspace_id = Id::new(ws_id);
         mr.author_agent_id = Some(agent.id.clone());
         state.merge_requests.create(&mr).await.unwrap();
         mr
@@ -4794,15 +4794,15 @@ mod tests {
 
         // MR with no author agent and no attestation — the check must skip
         // without crashing (§9: "MRs without attestation skip the check").
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-drift-3"),
             repo.id.clone(),
+            Id::new("ws-drift-3"),
             "MR no attestation",
             "feat/y",
             "main",
             now(),
         );
-        mr.workspace_id = Id::new("ws-drift-3");
         state.merge_requests.create(&mr).await.unwrap();
 
         assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
