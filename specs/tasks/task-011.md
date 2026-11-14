@@ -99,6 +99,9 @@ When working on this task:
 - `9c708d69` — merge of assignment base `6f5a631c` (task-195 mainline head);
   no task-011 product-surface file was touched by the merge (merge commit,
   listed for visibility only — the product-surface commit is `3488a06bf`)
+- `132be8a4` — process(task-011): re-apply completion record after contract
+  restore (repair `d5237543`; doc-only — the product-surface commit is
+  `3488a06bf`)
 
 ## Shipped
 
