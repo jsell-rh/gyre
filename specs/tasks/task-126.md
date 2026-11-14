@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §CLI"
-commits: ["7d8f93d904e47303e5d17b20497e1b4b0191cedb", "dacb3b04"]
+commits: ["dacb3b049888016fdcce1df35dcbc0cf2fdeec7e", "7d8f93d904e47303e5d17b20497e1b4b0191cedb"]
 ---
 
 ## Spec Excerpt
