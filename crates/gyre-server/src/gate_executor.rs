@@ -2905,10 +2905,9 @@ mod tests {
             now_secs(),
         );
         state.repos.create(&repo).await.unwrap();
-        ensure_workspace_row(state, &Id::new("default")).await;
 
         let mr_id = make_mr_id();
-        let mr = gyre_domain::MergeRequest::new(
+        let mut mr = gyre_domain::MergeRequest::new(
             mr_id.clone(),
             repo_id.clone(),
             "Add feature",
@@ -2916,6 +2915,13 @@ mod tests {
             "main",
             now_secs(),
         );
+        // Production shape (the REST/MCP create paths): the MR carries the
+        // repo's workspace. The constructor's bootstrap `default` binding is
+        // only for legacy callers with no workspace at hand — leaving it
+        // here would scope the MR's gate-agent tokens and captured context
+        // windows to a workspace the repo does not belong to.
+        mr.workspace_id = Id::new("ws-test");
+        ensure_workspace_row(state, &Id::new("ws-test")).await;
         state.merge_requests.create(&mr).await.unwrap();
         (mr_id, repo_id)
     }
@@ -3664,21 +3670,38 @@ mod tests {
 
     #[tokio::test]
     async fn agent_review_context_capture_skips_without_workspace_tenant() {
-        // No workspace row → no scoperable tenant → capture is SKIPPED
-        // (logged), never stored under a fabricated tenant identity. The
-        // persona DOES resolve, so the gate reaches the capture point and
-        // runs — only the capture is skipped.
+        // No workspace row → no scoperable tenant. §1 token scoping is
+        // fail-closed: the gate cannot mint a tenant-scoped reviewer token,
+        // so it fails at context gathering — before any process is spawned
+        // and before any context is captured. The persona DOES resolve
+        // (workspace-scope personas need no row), so the gate reaches the
+        // identity-mint step that requires the tenant and fails there.
         let state = test_state();
         let (mr_id, _repo_id) = seed_mr_with_repo_and_persona(&state, "orphan-reviewer").await;
+        // Drop the workspace row: the MR's workspace now has no resolvable
+        // tenant.
+        state.workspaces.delete(&Id::new("ws-test")).await.unwrap();
 
         let mut gate = make_gate(GateType::AgentReview, Some("true".to_string()));
         gate.persona = Some("personas/orphan-reviewer.md".to_string());
         let (status, output) = run_agent_review_gate(&state, &gate, &mr_id, None).await;
         assert_eq!(status, GateStatus::Failed, "output: {output}");
         assert!(
-            output.contains("exited without submitting"),
-            "the reviewer ran (persona resolved); it just submitted no verdict: {output}"
+            output.contains("workspace ws-test not found"),
+            "unresolvable workspace fails closed instead of fabricating a tenant: {output}"
         );
+
+        // No gate token was minted — the reviewer identity is never created
+        // under a fabricated tenant (teardown invariant: fail before mint).
+        let gate_tokens: Vec<_> = state
+            .kv_store
+            .kv_list("agent_tokens")
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("gate-"))
+            .collect();
+        assert!(gate_tokens.is_empty(), "tokens: {gate_tokens:?}");
 
         let events = state
             .audit
