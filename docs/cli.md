@@ -210,6 +210,86 @@ Notes:
 
 ---
 
+## User Management (user-management.md §CLI)
+
+```bash
+# Identity
+
+gyre whoami                                   # Current user profile
+
+gyre profile set --display-name "Jordan Sell" --timezone "America/New_York"
+gyre profile set --locale en-US               # Omitted fields keep their values
+
+# Active sessions
+
+gyre sessions list
+gyre sessions revoke <session-id>
+gyre sessions revoke-all
+
+# Tenant invitations (TenantAdmin only)
+
+gyre tenant invite alice@example.com                              # Invite to tenant
+gyre tenant invite alice@example.com --workspace platform --role Developer  # With workspace pre-assignment
+gyre tenant invite --bulk users.csv                               # Bulk invite from CSV
+                                                 # (columns: email[,workspace][,role])
+gyre tenant invitations list
+gyre tenant invitations revoke <invitation-id>
+
+# Workspace membership
+
+gyre workspace members list
+gyre workspace invite @alice --role Developer                     # By username (already in tenant)
+gyre workspace invite alice@example.com --role Developer          # By email (sends tenant invite if needed)
+gyre workspace members set-role @asmith Admin
+gyre workspace members set-role @asmith Owner --transfer          # Transfer ownership
+                                                 # (--transfer requires role Owner; audited server-side)
+gyre workspace members remove @asmith
+gyre workspace invitations list
+gyre workspace invitations revoke <invitation-id>
+
+# Teams
+
+gyre team create "Platform Team" --lead @jsell
+gyre team add @asmith --team "Platform Team"
+gyre team list
+gyre team remove @asmith --team "Platform Team"
+
+# Notifications
+
+gyre notifications list                      # Recent notifications
+gyre notifications list --unread --priority high
+gyre notifications preferences set --email-digest hourly --email-min-priority high
+gyre notifications preferences set --slack-url https://hooks.slack.com/...
+```
+
+Notes:
+
+- Identity, workspace-membership, team, and notification commands call the
+  real user-management API (`GET/PUT /api/v1/users/me`,
+  `GET/PUT .../workspaces/:id/members[...]/role`, `POST .../invite`,
+  `GET/DELETE .../invitations[/:id]`, team endpoints under
+  `.../workspaces/:id/teams`, and `GET/PUT /api/v1/notifications[/...]`).
+- `@handle` arguments are resolved to user ids via `GET /api/v1/users/:username`
+  (the tenant-public profile); email arguments take the tenant-invitation
+  path with the workspace pre-assigned.
+- The target workspace of `gyre workspace`/`gyre team` commands is
+  `--workspace <slug>` or the one inferred from the gyre git remote (the
+  same inference `gyre budget` uses).
+- `gyre notifications list --unread` filters the read flag client-side
+  (the API's filter surface is workspace/priority/type/repo); `--priority`
+  takes the four-level names (low/medium/high/urgent) and is enforced by
+  the server.
+- `gyre notifications preferences set` performs a read-merge-write: only
+  the channels you touch change (setting `--email-*` enables the email
+  channel; `in_app` is always on per the spec).
+- `gyre sessions ...` calls the §API > User Management session endpoints
+  (`/api/v1/users/me/sessions[...]`, owned by task-111) and `gyre tenant
+  invite`/`gyre tenant invitations ...` call the §API > Tenant Invitations
+  endpoints (`/api/v1/tenant/...`, owned by task-110); those command groups
+  become fully functional when their server-side endpoints land.
+
+---
+
 ## Search
 
 ```bash
