@@ -3,7 +3,7 @@ title: "Implement spec enforcement validation tests for attack/drift prevention"
 spec_ref: "agent-gates.md §Part 2 What This Prevents"
 depends_on:
   - task-139
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §What This Prevents"
 commits: ["0d3c6a58147ae47ff616371d8db02b49c15883f2", "6128a39c8fa30617634c5ac192529ee469506ffb", "0c0529449e16bbb3ae93b099f5b5907fc2aa791b", "0de2f4e4cb9b591e951718aa7bba459e77479152", "f4b7f15195215cd8695e682404343ea4f1db325a"]
@@ -134,58 +134,57 @@ Merge-queue cycles run through `merge_processor::run_once` (the same
 `process_next` the spawned processor loop runs) for determinism; merges
 in control cases are real git merges through the git2 adapter.
 
-Unit tests in `merge_processor.rs` (commit `f4b7f151`) cover all five
-forge enforcement policies at the merge level:
+Unit tests in `merge_processor.rs` cover all five forge enforcement
+policies at the merge level:
 `require_spec_ref_blocks_mr_without_spec_ref`,
-`require_approved_spec_blocks_unapproved_spec` (new), mirroring the
-existing `warn_stale_spec_adds_advisory_comment_without_blocking`,
+`require_approved_spec_blocks_unapproved_spec`,
+`warn_stale_spec_adds_advisory_comment_without_blocking`,
 `require_current_spec_blocks_stale_spec_ref`, and
 `require_signed_approval_blocks_unsigned_spec_approval`: rejection with
 a clear reason, author notification, and a positive control that
 merges.
 
-Follow-up commits on this branch keep the suite green against merged
-upstream changes: `0de2f4e4` polls for the owner notification in the
-persona push test support (fixes a notification race observed once in a
-full-suite run), `0c052944` adapts to the repo-scoped notification-list
-port signature, and `6128a39c` supplies the four hierarchy scope
-arguments to `AgentSigningKey::mint` in the Row 7 rogue-JWT fixture
-(task-130's token-scoping API, merged via `b6892403`). The Row 7 denial
-under test is role-based — the immutable
-`builtin:require-human-spec-approval` Deny fires on
+Follow-up commits keep the suite green against merged upstream changes:
+`0de2f4e4` polls for the owner notification in the persona push test
+support (notification race), `0c052944` adapts to the repo-scoped
+notification-list port signature, and `6128a39c` supplies the four
+hierarchy scope arguments to `AgentSigningKey::mint` in the Row 7
+rogue-JWT fixture (task-130's token-scoping API; also attributed to
+task-130's frontmatter). The Row 7 denial under test is role-based —
+the immutable `builtin:require-human-spec-approval` Deny fires on
 `subject.type != "user"` — so the scoped claims neither widen nor
 narrow the condition.
 
-### Verification repair (this round)
+### Merge repair (this round)
 
-Durable finding: the verification round (attempt
-`9f427619fe5e4592819aa3020b0bb8f8`) exited 1 solely on
-`check-task-commit-attribution.sh`: commit `6128a39c`'s subject
-("supply task-130 scope args") references task-130, and every
-task-labeled product-surface commit must be recorded in each referenced
-task's `commits:` frontmatter. Repair: `6128a39c` is appended to
-`specs/tasks/task-130.md`'s commits frontmatter — the commit adapts a
-consumer of task-130's `AgentSigningKey::mint` signature, so it belongs
-in that task's review scope — and re-listed in this task's frontmatter
-after the round reset. No exemption entries were added.
-
-Earlier repair lineage (already in-branch): the E0061 mint-arity compile
-failure from attempt `9428944faefc42fe8635f3e009b4d12f` was fixed in
-`6128a39c`.
+The published candidate conflicted with the assignment base `32c4faef`
+(task-135's tip). Resolved as merge `f2f4c0ef`: the only textual
+conflict was `specs/coverage/system/agent-gates.md`, resolved as the
+union — rows 6–7 keep task-135's implemented markings, row 23 keeps
+task-145's implemented marking, coverage 3/25, audit note names both.
+The task-145 branch had already absorbed task-135's production logic
+in earlier reconcile rounds, so the remaining deltas (migration
+`000062_gate_chain_config`, `PUT/GET /repos/:id/gate-chain`, chain-config
+storage, docs) are additive to the surfaces this suite drives; the
+`agent_review` gate created in Row 5 defaults to `required: true`, so a
+failed gate still blocks the merge under task-135's two-pass decision
+logic.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --test spec_enforcement` on this round's
-  head: clean (evidence:
+- `cargo check -p gyre-server --test spec_enforcement` on merged head
+  `f2f4c0ef`: clean in 7m39s (evidence:
   `/tmp/stage/review-evidence/cargo-check-spec-enforcement.txt`). This
-  is the exact probe that failed with E0061 in the earlier round.
-- `bash scripts/check-task-commit-attribution.sh` on this round's head:
-  passes with the task-130 frontmatter repair (evidence:
-  `/tmp/stage/review-evidence/check-task-commit-attribution.txt`).
+  is the exact probe that caught the earlier E0061 mint-arity breakage.
+- `scripts/check-abac-route-registry.sh`,
+  `scripts/check-migration-versions.sh`, and
+  `scripts/check-migration-sql-portability.sh` on merged head `f2f4c0ef`:
+  all pass (the merge adds routes and a migration, so these were
+  re-run; evidence under `/tmp/stage/review-evidence/`).
 - Full `cargo test --all` on the earlier candidate `9b9954f1` (same test
-  tree): 1974/1975 passed, the single failure being the notification
-  race fixed in `0de2f4e4` — i.e. the spec-enforcement suite itself
-  passed in that run.
+tree): 1974/1975 passed, the single failure being the notification
+race fixed in `0de2f4e4` — i.e. the spec-enforcement suite itself
+passed in that run.
 - Server test execution is deferred to the independent verifier per the
   build-budget constraint. The verifier must execute:
   - `cargo test -p gyre-server --test spec_enforcement`
