@@ -7,8 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Merge Attestation Bundle"
   - "agent-gates.md §What Gets Signed and By Whom"
-commits:
-  - 331a6eafa838d290df79139e4e2697e3a83d19df
+commits: ["331a6eafa838d290df79139e4e2697e3a83d19df"]
 ---
 
 ## Spec Excerpt
