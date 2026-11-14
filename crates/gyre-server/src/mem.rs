@@ -1267,6 +1267,24 @@ impl UserRepository for MemUserRepository {
             .cloned())
     }
 
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        // Case-insensitive: invitation emails are normalized to lowercase,
+        // but SSO-provisioned accounts store the IdP's raw casing. Email
+        // is not unique (same person, multiple tenants), so every match is
+        // returned; callers scope by tenant. Ordered by creation for a
+        // deterministic pick.
+        let email = email.to_lowercase();
+        let store = self.store.lock().await;
+        let mut matches: Vec<User> = store
+            .values()
+            .filter(|u| u.email.as_ref().is_some_and(|e| e.to_lowercase() == email))
+            .cloned()
+            .collect();
+        drop(store);
+        matches.sort_by_key(|u| u.created_at);
+        Ok(matches)
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
@@ -1293,6 +1311,23 @@ impl UserRepository for MemUserRepository {
             anyhow::bail!("cannot update user {}: not found", user.id);
         }
         store.insert(user.id.to_string(), user.clone());
+        Ok(())
+    }
+
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if another user already owns the new
+        // external_id, or the target user does not exist.
+        if let Some(owner) = store
+            .values()
+            .find(|u| u.external_id == new_external_id && u.id != *user_id)
+        {
+            anyhow::bail!("external_id already owned by user {}", owner.id);
+        }
+        let user = store.get_mut(user_id.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("cannot claim external_id for user {user_id}: not found")
+        })?;
+        user.external_id = new_external_id.to_string();
         Ok(())
     }
 
@@ -5109,6 +5144,8 @@ fn test_state_inner(
         repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
+        tenant_invitations: Arc::new(MemTenantInvitationRepository::default()),
+        workspace_invitations: Arc::new(MemWorkspaceInvitationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
@@ -6497,6 +6534,213 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
             .lock()
             .await
             .retain(|(tid, a)| !(tid == tenant_id && a.id == anchor_id));
+        Ok(())
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Invitations (user-management.md §Tenant-Level User Onboarding, §Workspace
+// Invitation Flow, §Invitation Expiry — task-110)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::{InvitationStatus, TenantInvitation, WorkspaceInvitation};
+use gyre_ports::{TenantInvitationRepository, WorkspaceInvitationRepository};
+
+#[derive(Default)]
+pub struct MemTenantInvitationRepository {
+    store: Arc<Mutex<HashMap<String, TenantInvitation>>>,
+}
+
+#[async_trait]
+impl TenantInvitationRepository for MemTenantInvitationRepository {
+    async fn create(&self, inv: &TenantInvitation) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if a pending invitation for the same
+        // (tenant, email) already exists.
+        if store.values().any(|i| {
+            i.tenant_id == inv.tenant_id
+                && i.email == inv.email
+                && i.status == InvitationStatus::Pending
+        }) {
+            anyhow::bail!(
+                "a pending invitation for {} in tenant {} already exists",
+                inv.email,
+                inv.tenant_id
+            );
+        }
+        store.insert(inv.id.to_string(), inv.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<TenantInvitation>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<TenantInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|i| i.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn list_by_tenant(&self, tenant_id: &Id) -> Result<Vec<TenantInvitation>> {
+        let mut items: Vec<TenantInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.tenant_id == *tenant_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_status(&self, status: InvitationStatus) -> Result<Vec<TenantInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.status == status)
+            .cloned()
+            .collect())
+    }
+
+    async fn transition_status(
+        &self,
+        id: &Id,
+        from: InvitationStatus,
+        to: InvitationStatus,
+        accepted_at: Option<u64>,
+    ) -> Result<bool> {
+        // Check-and-set under the store lock: the mem adapter has no
+        // schema, so the `from` precondition is guarded in code — the
+        // guard and the write happen inside one critical section, which
+        // is the single-use acceptance contract (same as the adapters'
+        // conditional UPDATE).
+        let mut store = self.store.lock().await;
+        match store.get_mut(id.as_str()) {
+            Some(inv) if inv.status == from => {
+                inv.status = to;
+                inv.accepted_at = accepted_at;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemWorkspaceInvitationRepository {
+    store: Arc<Mutex<HashMap<String, WorkspaceInvitation>>>,
+}
+
+#[async_trait]
+impl WorkspaceInvitationRepository for MemWorkspaceInvitationRepository {
+    async fn create(&self, inv: &WorkspaceInvitation) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if a pending invitation for the same
+        // (workspace, user) already exists.
+        if store.values().any(|i| {
+            i.workspace_id == inv.workspace_id
+                && i.user_id == inv.user_id
+                && i.status == InvitationStatus::Pending
+        }) {
+            anyhow::bail!(
+                "a pending invitation for user {} in workspace {} already exists",
+                inv.user_id,
+                inv.workspace_id
+            );
+        }
+        store.insert(inv.id.to_string(), inv.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<WorkspaceInvitation>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<WorkspaceInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|i| i.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<WorkspaceInvitation>> {
+        let mut items: Vec<WorkspaceInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_user(&self, user_id: &Id) -> Result<Vec<WorkspaceInvitation>> {
+        let mut items: Vec<WorkspaceInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.user_id == *user_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_status(&self, status: InvitationStatus) -> Result<Vec<WorkspaceInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.status == status)
+            .cloned()
+            .collect())
+    }
+
+    async fn transition_status(
+        &self,
+        id: &Id,
+        from: InvitationStatus,
+        to: InvitationStatus,
+        accepted_at: Option<u64>,
+    ) -> Result<bool> {
+        // Check-and-set under the store lock: the mem adapter has no
+        // schema, so the `from` precondition is guarded in code — the
+        // guard and the write happen inside one critical section, which
+        // is the single-use acceptance contract (same as the adapters'
+        // conditional UPDATE).
+        let mut store = self.store.lock().await;
+        match store.get_mut(id.as_str()) {
+            Some(inv) if inv.status == from => {
+                inv.status = to;
+                inv.accepted_at = accepted_at;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
         Ok(())
     }
 }

@@ -553,34 +553,16 @@ impl ResourceResolver {
                     "workspace_member",
                     None,
                 ),
-                // Spec-named invite path (user-management.md §API > Workspace
-                // Membership: `POST /workspaces/{id}/invite`) — same
-                // resource/action as POST /members; Owner/Admin/TenantAdmin
-                // enforced in-handler.
-                RouteResourceMapping::api(
-                    "/api/v1/workspaces/:id/invite",
-                    "workspace_member",
-                    None,
-                ),
-                // Pending-invitation listing — Owner/Admin/TenantAdmin
-                // enforced in-handler.
-                RouteResourceMapping::api(
-                    "/api/v1/workspaces/:id/invitations",
-                    "workspace_member",
-                    None,
-                ),
-                // Invitation acceptance is per-handler authorized (the
-                // acceptor must be the invited user themselves, regardless
-                // of global role) — ABAC-exempt like the /users/me routes.
-                RouteResourceMapping::exempt("/api/v1/workspaces/:id/invite/accept"),
-                // Revoking a pending invitation — DELETE resolves to the
-                // "delete" action (same as member removal);
-                // Owner/Admin/TenantAdmin enforced in-handler.
-                RouteResourceMapping::api(
-                    "/api/v1/workspaces/:id/invitations/:invitation_id",
-                    "workspace_member",
-                    None,
-                ),
+                // NOTE (task-110 rebase onto base 5984177): the four
+                // workspace-invitation paths (POST /invite,
+                // GET /invitations, POST /invite/accept,
+                // DELETE /invitations/:id) are mapped by the task-110
+                // entries further below — resolve() is first-match, and
+                // the task-124 base had registered its membership-row
+                // handlers on the same paths; those routes and their
+                // mappings were removed in favor of task-110's
+                // WorkspaceInvitation model (superset: decline, expiry,
+                // per-tenant policy, cap, background expiry job).
                 // PUT (role change incl. ownership transfer) evaluates as the
                 // "transfer_ownership" action (user-management.md §Ownership
                 // Transfer & Reclamation); DELETE keeps "delete".
@@ -597,6 +579,52 @@ impl ResourceResolver {
                     "/api/v1/workspaces/:id/members/:user_id/role",
                     "workspace_member",
                     &[("PUT", "transfer_ownership")],
+                ),
+                // Tenant/workspace invitations (task-110). Management
+                // routes run ABAC (tenant resource); the TenantAdmin-only
+                // and Owner/Admin constraints are additionally enforced
+                // per-handler in api/invitations.rs because the dev/system
+                // token bypasses ABAC and workspace-role conditions are not
+                // expressible in the global policy set.
+                RouteResourceMapping::api("/api/v1/tenant/invite", "tenant", Some("write")),
+                RouteResourceMapping::api("/api/v1/tenant/invite/bulk", "tenant", Some("write")),
+                RouteResourceMapping::api("/api/v1/tenant/invitations", "tenant", None),
+                RouteResourceMapping::api("/api/v1/tenant/invitations/policy", "tenant", None),
+                RouteResourceMapping::api(
+                    "/api/v1/tenant/invitations/:id",
+                    "tenant",
+                    Some("delete"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invite",
+                    "workspace_member",
+                    Some("write"),
+                ),
+                // Invitee-facing accept/decline (task-110 repair): the
+                // invited user is not a workspace member yet, so the
+                // workspace_member resource mapping would never match a
+                // membership for them — per-handler authorization keys on
+                // the invitation's user_id instead (the caller must BE the
+                // invitee, same tenant).
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invite/accept",
+                    "workspace",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invite/decline",
+                    "workspace",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invitations",
+                    "workspace_member",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invitations/:id",
+                    "workspace_member",
+                    Some("delete"),
                 ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
@@ -699,6 +727,10 @@ impl ResourceResolver {
                 // is TenantAdmin-only, both enforced in-handler.
                 RouteResourceMapping::api("/api/v1/users", "user", None),
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
+                // My workspace invitations (task-110 repair) — implicitly
+                // scoped to the authenticated user like the other me-routes;
+                // the handler filters by caller identity only.
+                RouteResourceMapping::api("/api/v1/users/me/invitations", "user", None),
                 // Tenant-public profile by username (user-management.md
                 // §API > User Management); tenant containment in-handler.
                 RouteResourceMapping::api("/api/v1/users/:username", "user", None),
