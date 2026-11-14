@@ -106,9 +106,12 @@ pub struct AuthorAttestation {
     /// attestation record, when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack_attestation: Option<String>,
-    /// Identity-security.md attestation level of the author's compute
-    /// target (1=raw subprocess, 2=CLI-managed, 3=Gyre-managed container
-    /// with attestation), derived from the workload attestation record.
+    /// Identity-security.md / supply-chain.md §2 attestation level of the
+    /// author's workload, derived from the workload attestation record
+    /// with the canonical rule every provenance evaluation applies
+    /// (0 = no workload attestation record, 1 = raw push without a stack
+    /// fingerprint, 2 = CLI-attested stack, 3 = Gyre-managed container
+    /// with stack + container + image) — never a bundle-local invention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_level: Option<u32>,
     /// SHA-256 of the author's conversation blob (HSI §5 provenance),

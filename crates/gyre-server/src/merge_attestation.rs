@@ -153,29 +153,22 @@ async fn build_author_attestation(
     let id_str = agent_id.as_str().to_string();
 
     // Workload attestation record (G10): stack fingerprint + compute target.
-    let workload = state
-        .kv_store
-        .kv_get("workload_attestations", &id_str)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|json| {
-            serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json).ok()
-        });
+    let workload = fetch_workload_attestation(state, &id_str).await;
 
-    // identity-security.md attestation levels, derived from the recorded
-    // compute target the same way the spawn path assigns the JWT claim:
-    // container = 3 (Gyre-managed container with attestation), any other
-    // resolved (non-local) target = 2 (CLI-managed), local subprocess = 1.
-    let attestation_level = workload.as_ref().map(|w| {
-        if w.container_id.is_some() {
-            3
-        } else if w.compute_target != "local" && !w.compute_target.is_empty() {
-            2
-        } else {
-            1
-        }
-    });
+    // identity-security.md / supply-chain.md §2 attestation level, derived
+    // with the canonical workload-record rule
+    // (`constraint_check::derive_attestation_level`) — the same derivation
+    // spec-approval validation and the gate executor apply, so the bundle
+    // can never attest a level that contradicts the provenance evaluation
+    // of the same record: 0 = no workload attestation record, 1 = record
+    // without a stack fingerprint, 2 = stack fingerprint (CLI-attested),
+    // 3 = stack + container + image (Gyre-managed runtime). The spawn
+    // JWT's `attestation_level` claim is a separate, coarser spawn-time
+    // snapshot keyed on the resolved compute-target type; the bundle
+    // attests the workload record because that is the provenance source
+    // every evaluator reads.
+    let attestation_level =
+        crate::constraint_check::derive_attestation_level(workload.as_ref()) as u32;
 
     // Conversation SHA uploaded by the authoring agent (HSI §5).
     let conversation_sha = state
@@ -189,12 +182,42 @@ async fn build_author_attestation(
         oidc_sub: format!("agent:{id_str}"),
         agent_id: id_str,
         stack_attestation: workload
-            .as_ref()
-            .map(|w| w.stack_fingerprint.clone())
+            .map(|w| w.stack_fingerprint)
             .filter(|s| !s.is_empty()),
-        attestation_level,
+        attestation_level: Some(attestation_level),
         conversation_sha,
     })
+}
+
+/// Load an agent's workload attestation record (G10) from the
+/// `workload_attestations` KV namespace, when one exists. Returns `None`
+/// on a missing record or an unparsable value — provenance is attested
+/// only from a record that actually parses, never guessed.
+async fn fetch_workload_attestation(
+    state: &AppState,
+    agent_id: &str,
+) -> Option<crate::workload_attestation::WorkloadAttestation> {
+    state
+        .kv_store
+        .kv_get("workload_attestations", agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|json| {
+            serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json).ok()
+        })
+}
+
+/// The agent's non-empty stack attestation fingerprint from its workload
+/// attestation record, when one exists — the value the bundle records as
+/// `stack_attestation` (author) / `reviewer_stack_attestation` (gate
+/// agent). identity-security.md §Layer 2: the merge attestation records
+/// which stack produced each result.
+async fn agent_stack_attestation(state: &AppState, agent_id: &str) -> Option<String> {
+    fetch_workload_attestation(state, agent_id)
+        .await
+        .map(|w| w.stack_fingerprint)
+        .filter(|s| !s.is_empty())
 }
 
 /// Resolve the spec approval attestation for the MR's `spec_ref`
@@ -240,10 +263,14 @@ fn review_for_gate<'a>(reviews: &'a [Review], gate_id: &Id) -> Option<&'a Review
 }
 
 /// Build the unsigned gate attestation for one gate result.
+/// `reviewer_stack_attestation` is the reviewing gate agent's stack
+/// fingerprint (from its workload attestation record), when the gate is
+/// an agent gate with a resolvable review.
 fn build_gate_attestation(
     gate: Option<&QualityGate>,
     result: &gyre_domain::GateResult,
     review: Option<&Review>,
+    reviewer_stack_attestation: Option<String>,
 ) -> MergeGateAttestation {
     let name = gate
         .map(|g| g.name.clone())
@@ -273,6 +300,7 @@ fn build_gate_attestation(
         if let Some(review) = review {
             attestation.reviewer_agent_id = Some(review.reviewer_agent_id.clone());
             attestation.reviewer_oidc_sub = Some(format!("agent:{}", review.reviewer_agent_id));
+            attestation.reviewer_stack_attestation = reviewer_stack_attestation;
             attestation.review_decision = Some(match review.decision {
                 ReviewDecision::Approved => "Approved".to_string(),
                 ReviewDecision::ChangesRequested => "ChangesRequested".to_string(),
@@ -316,7 +344,15 @@ pub async fn generate_merge_attestation_bundle(
         let review = gate
             .as_ref()
             .and_then(|g| review_for_gate(&reviews, &g.id));
-        let mut attestation = build_gate_attestation(gate.as_ref(), result, review);
+        // The reviewing gate agent's stack fingerprint, from the same
+        // workload_attestations namespace the author's comes from
+        // (identity-security.md §Layer 2: record which stack produced
+        // each gate result).
+        let reviewer_stack = match review {
+            Some(r) => agent_stack_attestation(state, &r.reviewer_agent_id).await,
+            None => None,
+        };
+        let mut attestation = build_gate_attestation(gate.as_ref(), result, review, reviewer_stack);
 
         // Multi-party signing (§What Gets Signed and By Whom): the gate
         // agent signs its own AgentReview/AgentValidation result; the
@@ -656,6 +692,25 @@ mod tests {
             .await
             .unwrap();
 
+        // Reviewer provenance: the gate agent's own workload attestation
+        // (identity-security.md §Layer 2 — record which stack produced
+        // each gate result).
+        let reviewer_workload = crate::workload_attestation::attest_agent(
+            "security-gate-7",
+            Some(5252),
+            "local",
+            "sha256:reviewer-stack",
+        );
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                "security-gate-7",
+                serde_json::to_string(&reviewer_workload).unwrap(),
+            )
+            .await
+            .unwrap();
+
         mr
     }
 
@@ -686,7 +741,11 @@ mod tests {
         assert_eq!(author.agent_id, "agent-author");
         assert_eq!(author.oidc_sub, "agent:agent-author");
         assert_eq!(author.stack_attestation.as_deref(), Some("sha256:stack-fingerprint"));
-        assert_eq!(author.attestation_level, Some(1)); // local subprocess
+        // Canonical derivation (supply-chain.md §2): a workload record
+        // with a stack fingerprint but no container/image is level 2
+        // (CLI-attested stack) — the same rule spec-approval validation
+        // applies, not a bundle-local rule.
+        assert_eq!(author.attestation_level, Some(2));
         assert_eq!(author.conversation_sha.as_deref(), Some("sha256:conversation"));
 
         // Multi-party signing: forge signs command gates, the gate agent
@@ -704,6 +763,12 @@ mod tests {
         assert_eq!(sec.signed_by, "agent:security-gate-7");
         assert_eq!(sec.reviewer_agent_id.as_deref(), Some("security-gate-7"));
         assert_eq!(sec.reviewer_oidc_sub.as_deref(), Some("agent:security-gate-7"));
+        // The reviewer's stack is recorded from its workload attestation
+        // (identity-security.md §Layer 2).
+        assert_eq!(
+            sec.reviewer_stack_attestation.as_deref(),
+            Some("sha256:reviewer-stack")
+        );
         assert_eq!(sec.review_decision.as_deref(), Some("Approved"));
         assert_eq!(
             sec.review_body_hash.as_deref(),
@@ -796,6 +861,90 @@ mod tests {
             .unwrap();
         bundle2.gates[0].signature = None;
         assert!(!verify_merge_attestation_bundle(&bundle2, &state.agent_signing_key));
+    }
+
+    /// F1 regression: the bundle's `author.attestation_level` must equal
+    /// `constraint_check::derive_attestation_level` applied to the same
+    /// workload record — the canonical rule spec-approval validation and
+    /// the gate executor use — for every workload shape. A bundle-local
+    /// derivation rule (e.g. keying on `compute_target` strings) diverges
+    /// from the provenance evaluation of the same agent and fails this.
+    #[tokio::test]
+    async fn author_attestation_level_matches_canonical_derivation() {
+        let state = test_state();
+        let mr = make_mr();
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let set_workload = |w: Option<crate::workload_attestation::WorkloadAttestation>| {
+            let state = state.clone();
+            async move {
+                match w {
+                    Some(w) => {
+                        state
+                            .kv_store
+                            .kv_set(
+                                "workload_attestations",
+                                "agent-author",
+                                serde_json::to_string(&w).unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    None => {
+                        state
+                            .kv_store
+                            .kv_remove("workload_attestations", "agent-author")
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        };
+
+        let cases: Vec<Option<crate::workload_attestation::WorkloadAttestation>> = vec![
+            // No workload attestation record → canonical level 0.
+            None,
+            // Record without a stack fingerprint → canonical level 1.
+            Some(crate::workload_attestation::attest_agent(
+                "agent-author",
+                Some(4242),
+                "local",
+                "",
+            )),
+            // Stack fingerprint, no container → canonical level 2 — even
+            // though the compute target is "local" (the old divergent
+            // rule recorded 1 here, contradicting the canonical level 2
+            // that spec-approval validation derives for the same record).
+            Some(crate::workload_attestation::attest_agent(
+                "agent-author",
+                Some(4242),
+                "local",
+                "sha256:stack-fingerprint",
+            )),
+            // Stack + container + image → canonical level 3.
+            Some(crate::workload_attestation::attest_agent_with_container(
+                "agent-author",
+                Some(4242),
+                "ct-entity-9",
+                "sha256:stack-fingerprint",
+                Some("container-abc".to_string()),
+                Some("sha256:image-digest".to_string()),
+            )),
+        ];
+
+        for workload in cases {
+            set_workload(workload.clone()).await;
+            let expected = crate::constraint_check::derive_attestation_level(workload.as_ref());
+            let bundle = generate_merge_attestation_bundle(&state, &mr, "789abc", 1_774_000_000)
+                .await
+                .unwrap();
+            let author = bundle.author.as_ref().expect("author agent is set");
+            assert_eq!(
+                author.attestation_level,
+                Some(expected as u32),
+                "bundle level must equal the canonical derivation for workload {workload:?}"
+            );
+        }
     }
 
     #[tokio::test]
