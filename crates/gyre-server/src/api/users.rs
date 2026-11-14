@@ -1422,24 +1422,24 @@ pub async fn accept_invitation(
 }
 
 /// DELETE /api/v1/workspaces/:id/invitations/:invitation_id — revoke a
-/// pending invitation (Owner/Admin/TenantAdmin only).
+/// pending invitation (Owner/Admin/TenantAdmin only), or decline one's own
+/// pending invitation (the invitee themselves).
 ///
 /// Only pending invitations are revocable here (user-management.md
 /// §Invitation Expiry: "Admins can revoke pending invitations at any
 /// time"); removing an accepted member goes through
 /// `DELETE /workspaces/{id}/members/{user_id}` with its last-Owner guard.
+/// An invitee may decline their own pending invitation
+/// (§Workspace Invitation Flow step 4: "Invitee accepts or declines") —
+/// the same deletion as a revocation, scoped to the caller's own
+/// membership row so no other principal's invitation can be touched.
 pub async fn revoke_invitation(
     auth: AuthenticatedAgent,
     Path((workspace_id, invitation_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
     let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
-    if !can_manage_membership(&state, &auth, &ws).await? {
-        return Err(ApiError::Forbidden(
-            "workspace invitations can only be revoked by an Owner, Admin, or TenantAdmin"
-                .to_string(),
-        ));
-    }
+    let is_manager = can_manage_membership(&state, &auth, &ws).await?;
     let inv_id = Id::new(invitation_id);
     let membership = state
         .workspace_memberships
@@ -1456,13 +1456,28 @@ pub async fn revoke_invitation(
             "invitation already accepted; remove the member instead".to_string(),
         ));
     }
+    // Authorization: a membership manager (Owner/Admin/TenantAdmin) may
+    // revoke any pending invitation; the invitee may decline only their
+    // own. A non-manager's view of a foreign invitation is
+    // indistinguishable from a nonexistent one (404), mirroring the
+    // tenant-public profile containment — invitation ids must not become
+    // a probe surface.
+    let caller_id = auth.user_id.clone();
+    let self_decline = caller_id.as_ref() == Some(&membership.user_id);
+    if !is_manager && !self_decline {
+        return Err(ApiError::NotFound("Invitation not found".to_string()));
+    }
     state.workspace_memberships.delete(&membership.id).await?;
 
     emit_membership_audit(
         &state,
         &auth,
         &ws,
-        "workspace_invitation_revoked",
+        if self_decline {
+            "workspace_invitation_declined"
+        } else {
+            "workspace_invitation_revoked"
+        },
         serde_json::json!({
             "workspace_id": ws.id.to_string(),
             "revoked_user_id": membership.user_id.to_string(),
@@ -4880,6 +4895,105 @@ mod tests {
                         "/api/v1/workspaces/{ws_id}/invitations/{invitation2_id}"
                     ))
                     .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// An invitee may decline their own pending invitation (§Workspace
+    /// Invitation Flow step 4: "Invitee accepts or declines"): the decline
+    /// is the same deletion as a revocation, but scoped to the caller's
+    /// own membership row. A third party (non-manager, not the invitee)
+    /// sees foreign invitations as nonexistent (404), so invitation ids
+    /// are not a probe surface.
+    #[tokio::test]
+    async fn invitee_can_decline_own_pending_invitation() {
+        let state = test_state();
+        let (ws_id, _owner_id) = seed_workspace_with_owner(&state).await;
+        let (invitee_id, invitee_key) =
+            seed_keyed_user(&state, "decliner", vec![gyre_domain::UserRole::Developer]).await;
+        let (_, other_key) =
+            seed_keyed_user(&state, "decl-other", vec![gyre_domain::UserRole::Developer]).await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Owner invites the invitee.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/invite"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": invitee_id, "role": "Developer"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let invite = body_json(resp).await;
+        assert_eq!(invite["accepted"], false);
+        let invitation_id = invite["id"].as_str().unwrap().to_string();
+
+        // A third party (non-manager, not the invitee) cannot decline it —
+        // and cannot distinguish it from a nonexistent invitation (404).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/invitations/{invitation_id}"
+                    ))
+                    .header("Authorization", format!("Bearer {other_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // The invitee declines their own invitation.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/invitations/{invitation_id}"
+                    ))
+                    .header("Authorization", format!("Bearer {invitee_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The declined invitation's membership row is gone; the invitee
+        // has no membership and nothing left to accept.
+        let membership = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&Id::new(&invitee_id), &Id::new(&ws_id))
+            .await
+            .unwrap();
+        assert!(
+            membership.is_none(),
+            "decline must remove the membership row"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/invite/accept"))
+                    .header("Authorization", format!("Bearer {invitee_key}"))
                     .body(Body::empty())
                     .unwrap(),
             )
