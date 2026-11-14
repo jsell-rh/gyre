@@ -239,7 +239,10 @@ impl UserTokenRepository for SqliteStorage {
 /// Audit event types that carry judgment semantics (HSI §12 Judgment Ledger
 /// Sources). Written by the gate-override, trust-transition and meta-spec
 /// publish flows; human attribution via `audit_events.user_id`.
-const JUDGMENT_AUDIT_TYPES: [&str; 3] = ["gate_override", "trust_change", "meta_spec_publish"];
+/// `pub(crate)`: the postgres adapter's SQL-shape tests assert cross-backend
+/// parity of this list against the sqlite sibling (repo policy: the two
+/// adapters stay in parity).
+pub(crate) const JUDGMENT_AUDIT_TYPES: [&str; 3] = ["gate_override", "trust_change", "meta_spec_publish"];
 
 /// Judgment-ledger source-1 row: one `spec_approvals` row left-joined to its
 /// spec-ledger workspace attribution. Named struct rather than a positional

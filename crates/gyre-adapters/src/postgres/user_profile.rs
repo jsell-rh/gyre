@@ -258,6 +258,79 @@ struct SpecApprovalJudgmentRow {
     workspace_id: Option<String>,
 }
 
+/// Builds the source-1 (spec approvals & rejections) judgment query.
+/// Factored out of `list_for_user` so the generated PG statement shape is
+/// testable without a PG server (postgres/search.rs precedent): the sqlite
+/// sibling module carries the behavioral tests against a real SQLite file,
+/// and these builders pin the mirrored predicate shape — attribution keys,
+/// the workspace join filter (a real SQL filter, never a stamped param),
+/// the since predicates — where a PG-side drift would otherwise surface
+/// only in production deployments.
+fn spec_approval_judgment_query<
+    'a,
+>(
+    approver: &'a str,
+    workspace: Option<&'a str>,
+    since: i64,
+) -> impl diesel::query_dsl::LoadQuery<'a, diesel::pg::PgConnection, SpecApprovalJudgmentRow>
+   + diesel::query_builder::QueryFragment<diesel::pg::Pg> {
+    use crate::schema::{spec_approvals, spec_ledger_entries};
+    let mut query = spec_approvals::table
+        .left_join(
+            spec_ledger_entries::table
+                .on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
+        )
+        .filter(
+            spec_approvals::approver_id
+                .eq(approver)
+                .or(spec_approvals::rejected_by.eq(approver))
+                .or(spec_approvals::revoked_by.eq(approver)),
+        )
+        .filter(
+            spec_approvals::approved_at
+                .ge(since)
+                .or(spec_approvals::revoked_at.ge(since))
+                .or(spec_approvals::rejected_at.ge(since)),
+        )
+        .select((
+            spec_approvals::spec_path,
+            spec_approvals::approved_at,
+            spec_approvals::revoked_at,
+            spec_approvals::revoked_by,
+            spec_approvals::revocation_reason,
+            spec_approvals::rejected_at,
+            spec_approvals::rejected_by,
+            spec_approvals::rejected_reason,
+            spec_ledger_entries::workspace_id.nullable(),
+        ))
+        .into_boxed();
+    if let Some(w) = workspace {
+        query = query.filter(spec_ledger_entries::workspace_id.eq(w));
+    }
+    query
+}
+
+/// Builds the source-2 (audit-carried: gate / trust / meta-spec) judgment
+/// query. Same factoring rationale as [`spec_approval_judgment_query`].
+fn audit_judgment_query<'a>(
+    approver: &'a str,
+    workspace: Option<&'a str>,
+    since: i64,
+) -> impl diesel::query_dsl::LoadQuery<'a, diesel::pg::PgConnection, AuditEventRow>
+   + diesel::query_builder::QueryFragment<diesel::pg::Pg> {
+    use crate::schema::audit_events;
+    let mut query = audit_events::table
+        .filter(audit_events::user_id.eq(approver))
+        .filter(audit_events::event_type.eq_any(JUDGMENT_AUDIT_TYPES))
+        .filter(audit_events::timestamp.ge(since))
+        .select(AuditEventRow::as_select())
+        .into_boxed();
+    if let Some(w) = workspace {
+        query = query.filter(audit_events::workspace_id.eq(w));
+    }
+    query
+}
+
 #[async_trait]
 impl JudgmentLedgerRepository for PgStorage {
     async fn list_for_user(
@@ -269,7 +342,6 @@ impl JudgmentLedgerRepository for PgStorage {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<JudgmentEntry>> {
-        use crate::schema::{audit_events, spec_approvals, spec_ledger_entries};
         let pool = Arc::clone(&self.pool);
         let approver = approver_id.to_string();
         let ws = workspace_id.map(|id| id.as_str().to_string());
@@ -312,41 +384,10 @@ impl JudgmentLedgerRepository for PgStorage {
             // approver's — the WHERE matches any of the three keys and the
             // row loop below re-checks the right one per status.
             if want_approvals {
-                let mut query = spec_approvals::table
-                    .left_join(
-                        spec_ledger_entries::table
-                            .on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
-                    )
-                    .filter(
-                        spec_approvals::approver_id
-                            .eq(&approver)
-                            .or(spec_approvals::rejected_by.eq(&approver))
-                            .or(spec_approvals::revoked_by.eq(&approver)),
-                    )
-                    .filter(
-                        spec_approvals::approved_at
-                            .ge(since_i)
-                            .or(spec_approvals::revoked_at.ge(since_i))
-                            .or(spec_approvals::rejected_at.ge(since_i)),
-                    )
-                    .select((
-                        spec_approvals::spec_path,
-                        spec_approvals::approved_at,
-                        spec_approvals::revoked_at,
-                        spec_approvals::revoked_by,
-                        spec_approvals::revocation_reason,
-                        spec_approvals::rejected_at,
-                        spec_approvals::rejected_by,
-                        spec_approvals::rejected_reason,
-                        spec_ledger_entries::workspace_id.nullable(),
-                    ))
-                    .into_boxed();
-                if let Some(w) = &ws {
-                    query = query.filter(spec_ledger_entries::workspace_id.eq(w));
-                }
-                let rows: Vec<SpecApprovalJudgmentRow> = query
-                    .load(&mut *conn)
-                    .context("judgment ledger: spec_approvals")?;
+                let rows: Vec<SpecApprovalJudgmentRow> =
+                    spec_approval_judgment_query(&approver, ws.as_deref(), since_i)
+                        .load(&mut *conn)
+                        .context("judgment ledger: spec_approvals")?;
 
                 for SpecApprovalJudgmentRow {
                     spec_path: path,
@@ -411,16 +452,7 @@ impl JudgmentLedgerRepository for PgStorage {
             // transparently here too. Reading `detail` directly would
             // surface null details for every older judgment.
             if want_audit {
-                let mut query = audit_events::table
-                    .filter(audit_events::user_id.eq(&approver))
-                    .filter(audit_events::event_type.eq_any(JUDGMENT_AUDIT_TYPES))
-                    .filter(audit_events::timestamp.ge(since_i))
-                    .select(AuditEventRow::as_select())
-                    .into_boxed();
-                if let Some(w) = &ws {
-                    query = query.filter(audit_events::workspace_id.eq(w));
-                }
-                let rows: Vec<AuditEventRow> = query
+                let rows: Vec<AuditEventRow> = audit_judgment_query(&approver, ws.as_deref(), since_i)
                     .load(&mut *conn)
                     .context("judgment ledger: audit_events")?;
 
@@ -497,5 +529,147 @@ impl JudgmentLedgerRepository for PgStorage {
                 .collect())
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! SQL-shape regression tests for the judgment-ledger query builders.
+    //! The repo has no PG server harness (postgres/search.rs precedent), so
+    //! these capture the generated statement shape — the surface where a
+    //! PG-side drift from the sqlite sibling (which carries the behavioral
+    //! tests against a real SQLite file) would otherwise surface only in
+    //! production deployments. The behavioral semantics (union, sort,
+    //! attribution re-check, pagination) are exercised by the sqlite
+    //! module's suite; these pin the PG statement the mirror emits.
+
+    use super::*;
+
+    fn spec_approval_sql(approver: &str, workspace: Option<&str>) -> String {
+        diesel::debug_query::<diesel::pg::Pg, _>(
+            &spec_approval_judgment_query(approver, workspace, 0),
+        )
+        .to_string()
+    }
+
+    fn audit_sql(approver: &str, workspace: Option<&str>) -> String {
+        diesel::debug_query::<diesel::pg::Pg, _>(&audit_judgment_query(approver, workspace, 0))
+            .to_string()
+    }
+
+    fn where_clause(sql: &str) -> &str {
+        sql.split_once(" WHERE ").map(|(_, rest)| rest).unwrap_or("")
+    }
+
+    #[test]
+    fn spec_approval_query_filters_workspace_in_sql_not_by_stamping() {
+        // HSI §12: ?workspace_id= must FILTER (drop non-matching rows in the
+        // WHERE clause), never stamp the param onto returned entries. A
+        // stamp-only regression shows up here as a missing predicate.
+        let filtered_sql = spec_approval_sql("u1", Some("ws-1"));
+        let filtered = where_clause(&filtered_sql);
+        assert!(
+            filtered.contains("\"spec_ledger_entries\".\"workspace_id\" = $"),
+            "workspace filter missing from WHERE: {filtered}"
+        );
+        let unfiltered_sql = spec_approval_sql("u1", None);
+        let unfiltered = where_clause(&unfiltered_sql);
+        assert!(
+            !unfiltered.contains("workspace_id = $"),
+            "no workspace filter requested but WHERE carries one: {unfiltered}"
+        );
+    }
+
+    #[test]
+    fn spec_approval_query_joins_ledger_for_workspace_attribution() {
+        // Workspace attribution comes from the spec ledger entry — dropping
+        // the join makes every judgment workspace-less and the ?workspace_id=
+        // filter match nothing.
+        let sql = spec_approval_sql("u1", None);
+        assert!(
+            sql.contains("LEFT OUTER JOIN \"spec_ledger_entries\""),
+            "workspace attribution join missing: {sql}"
+        );
+        assert!(
+            sql.contains("\"spec_ledger_entries\".\"path\" = \"spec_approvals\".\"spec_path\""),
+            "join predicate missing: {sql}"
+        );
+    }
+
+    #[test]
+    fn spec_approval_query_matches_all_three_attribution_keys() {
+        // HSI §12 attribution: an approval is the approver's judgment; a
+        // rejection/revocation is the declining human's. The WHERE must
+        // match all three keys — dropping one hides that judgment class
+        // from its owner's ledger.
+        let sql = spec_approval_sql("u1", None);
+        let w = where_clause(&sql);
+        for col in [
+            "\"spec_approvals\".\"approver_id\" = $",
+            "\"spec_approvals\".\"rejected_by\" = $",
+            "\"spec_approvals\".\"revoked_by\" = $",
+        ] {
+            assert!(w.contains(col), "attribution key missing: {col} in {w}");
+        }
+    }
+
+    #[test]
+    fn spec_approval_query_applies_since_to_all_three_timestamps() {
+        // ?since= must bound whichever timestamp column fired (mutual
+        // exclusivity: exactly one is set per status).
+        let sql = spec_approval_sql("u1", None);
+        let w = where_clause(&sql);
+        for col in [
+            "\"spec_approvals\".\"approved_at\" >= $",
+            "\"spec_approvals\".\"revoked_at\" >= $",
+            "\"spec_approvals\".\"rejected_at\" >= $",
+        ] {
+            assert!(w.contains(col), "since predicate missing: {col} in {w}");
+        }
+    }
+
+    #[test]
+    fn audit_query_scopes_user_types_and_workspace() {
+        // Human attribution via audit_events.user_id; judgment semantics via
+        // the event_type allow-list; workspace filter in SQL.
+        let filtered_sql = audit_sql("u1", Some("ws-1"));
+        let filtered = where_clause(&filtered_sql);
+        assert!(
+            filtered.contains("\"audit_events\".\"user_id\" = $"),
+            "user attribution missing: {filtered}"
+        );
+        assert!(
+            filtered.contains("\"audit_events\".\"event_type\" = ANY("),
+            "judgment event-type allow-list missing: {filtered}"
+        );
+        assert!(
+            filtered.contains("\"audit_events\".\"timestamp\" >= $"),
+            "since predicate missing: {filtered}"
+        );
+        assert!(
+            filtered.contains("\"audit_events\".\"workspace_id\" = $"),
+            "workspace filter missing: {filtered}"
+        );
+
+        let unfiltered_sql = audit_sql("u1", None);
+        let unfiltered = where_clause(&unfiltered_sql);
+        assert!(
+            !unfiltered.contains("workspace_id = $"),
+            "no workspace filter requested but WHERE carries one: {unfiltered}"
+        );
+    }
+
+    #[test]
+    fn judgment_audit_type_list_matches_sqlite_sibling() {
+        // Repo policy: the sqlite and postgres adapters stay in parity. The
+        // sqlite module's behavioral tests exercise its own list; this pins
+        // that the PG mirror aggregates the SAME HSI §12 judgment sources —
+        // a list edited on one side only silently drops a judgment class
+        // from PG deployments.
+        assert_eq!(
+            JUDGMENT_AUDIT_TYPES,
+            crate::sqlite::user_profile::JUDGMENT_AUDIT_TYPES,
+            "postgres/sqlite judgment audit-type lists drifted"
+        );
     }
 }

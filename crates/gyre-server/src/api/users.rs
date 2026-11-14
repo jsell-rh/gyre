@@ -1780,10 +1780,18 @@ pub async fn get_judgments(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
-    let judgment_type = params
-        .judgment_type
-        .as_deref()
-        .and_then(JudgmentType::from_db_str);
+    // An unparseable ?type= must 400 (same contract as the sibling
+    // notification-preferences PUT / notifications priority param):
+    // silently treating it as "no filter" returns unfiltered results the
+    // caller did not ask for.
+    let judgment_type = match params.judgment_type.as_deref() {
+        Some(t) => Some(JudgmentType::from_db_str(t).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "unknown judgment type '{t}' (expected one of approval|rejection|gate|trust|meta-spec)"
+            ))
+        })?),
+        None => None,
+    };
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
 
@@ -4084,11 +4092,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::FORBIDDEN,
-            "a Developer member must not be able to create teams"
-        );
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN,
+            "a Developer member must not be able to create teams");
         assert_eq!(
             state
                 .teams
@@ -4098,5 +4103,46 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    /// GET /users/me/judgments?type=<unknown> must 400 — the same contract
+    /// as the sibling notification-preferences PUT and the notifications
+    /// priority param. Silently mapping an unparseable type to "no filter"
+    /// returns unfiltered results the caller did not ask for (review F5).
+    #[tokio::test]
+    async fn judgments_unknown_type_returns_400() {
+        let app = app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=bogus")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an unparseable ?type= must be rejected, not ignored"
+        );
+
+        // Every canonical JudgmentType string is accepted (no filter drop).
+        for t in ["approval", "rejection", "gate", "trust", "meta-spec"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/users/me/judgments?type={t}"))
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "type={t} must be valid");
+        }
     }
 }
