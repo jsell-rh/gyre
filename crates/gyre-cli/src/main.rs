@@ -229,6 +229,48 @@ enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
+    /// Show the current user's profile (user-management.md §CLI > Identity)
+    Whoami,
+    /// Profile operations (user-management.md §CLI > Identity)
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
+    /// Session operations (user-management.md §CLI > Identity).
+    ///
+    /// Calls the §API > User Management session endpoints
+    /// (`/api/v1/users/me/sessions[...`], owned server-side by task-111).
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommands,
+    },
+    /// Tenant invitation operations, TenantAdmin only
+    /// (user-management.md §CLI > Tenant Invitations). Calls the §API >
+    /// Tenant Invitations endpoints (`/api/v1/tenant/...`, owned
+    /// server-side by task-110).
+    Tenant {
+        #[command(subcommand)]
+        command: TenantCommands,
+    },
+    /// Workspace membership operations (user-management.md §CLI >
+    /// Workspace Membership). The target workspace is `--workspace <slug>`
+    /// or the one inferred from the git remote.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
+    },
+    /// Team operations (user-management.md §CLI > Teams). The target
+    /// workspace is `--workspace <slug>` or the one inferred from the git
+    /// remote; teams are referenced by slug or name.
+    Team {
+        #[command(subcommand)]
+        command: TeamCommands,
+    },
+    /// Notification operations (user-management.md §CLI > Notifications)
+    Notifications {
+        #[command(subcommand)]
+        command: NotificationCommands,
+    },
 }
 
 /// Scope selector shared by every `gyre secret` subcommand.
@@ -309,6 +351,277 @@ enum SecretCommands {
         /// New expiry as Unix epoch seconds (omit to keep the current expiry)
         #[arg(long)]
         expires_at: Option<u64>,
+    },
+}
+
+/// `gyre profile` subcommands (user-management.md §CLI > Identity).
+#[derive(Subcommand)]
+enum ProfileCommands {
+    /// Update your profile fields. Omitted fields keep their current
+    /// values (server-side partial update).
+    Set {
+        /// Display name (human-readable, editable)
+        #[arg(long)]
+        display_name: Option<String>,
+        /// IANA timezone, e.g. "America/New_York"
+        #[arg(long)]
+        timezone: Option<String>,
+        /// i18n locale, e.g. "en-US"
+        #[arg(long)]
+        locale: Option<String>,
+        /// Avatar URL
+        #[arg(long)]
+        avatar_url: Option<String>,
+    },
+}
+
+/// `gyre sessions` subcommands (user-management.md §CLI > Identity).
+#[derive(Subcommand)]
+enum SessionsCommands {
+    /// List your active sessions
+    List,
+    /// Revoke a single session
+    Revoke {
+        /// Session ID
+        id: String,
+    },
+    /// Revoke all sessions ("sign out everywhere")
+    RevokeAll,
+}
+
+/// `gyre tenant` subcommands (user-management.md §CLI > Tenant
+/// Invitations; TenantAdmin only server-side).
+#[derive(Subcommand)]
+enum TenantCommands {
+    /// Invite a user to the tenant by email, optionally pre-assigning a
+    /// workspace and role. With `--bulk`, reads invitees from a CSV file
+    /// (columns: email[,workspace][,role]) instead of the positional.
+    Invite {
+        /// Invitee email (omit when using --bulk)
+        #[arg(value_name = "EMAIL")]
+        email: Option<String>,
+        /// Workspace slug to pre-assign the invitee to
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Workspace role for the pre-assignment (default Developer;
+        /// requires --workspace)
+        #[arg(long)]
+        role: Option<String>,
+        /// Bulk invite from a CSV file (columns: email[,workspace][,role];
+        /// an "email" header row is recognized and skipped)
+        #[arg(long)]
+        bulk: Option<std::path::PathBuf>,
+    },
+    /// Invitation operations
+    Invitations {
+        #[command(subcommand)]
+        command: TenantInvitationCommands,
+    },
+}
+
+/// `gyre tenant invitations` subcommands.
+#[derive(Subcommand)]
+enum TenantInvitationCommands {
+    /// List the tenant's invitations
+    List,
+    /// Revoke a pending invitation
+    Revoke {
+        /// Invitation ID
+        id: String,
+    },
+}
+
+/// `gyre workspace` subcommands (user-management.md §CLI > Workspace
+/// Membership).
+#[derive(Subcommand)]
+enum WorkspaceCommands {
+    /// Member operations
+    Members {
+        #[command(subcommand)]
+        command: MemberCommands,
+    },
+    /// Invite a user to the workspace: `@username` (a tenant member) or an
+    /// email address (sends a tenant invitation with this workspace and
+    /// role pre-assigned).
+    Invite {
+        /// Invitee: @username or email address
+        user: String,
+        /// Workspace role to grant (default Developer)
+        #[arg(long)]
+        role: Option<String>,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Invitation operations
+    Invitations {
+        #[command(subcommand)]
+        command: WorkspaceInvitationCommands,
+    },
+}
+
+/// `gyre workspace members` subcommands.
+#[derive(Subcommand)]
+enum MemberCommands {
+    /// List workspace members
+    List {
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Change a member's workspace role
+    SetRole {
+        /// Member: @username or user ID
+        user: String,
+        /// New role: Owner, Admin, Developer, or Viewer
+        role: String,
+        /// Explicit ownership-transfer acknowledgment (requires role
+        /// Owner; the server audits the transfer)
+        #[arg(long)]
+        transfer: bool,
+        /// Reason recorded in the audit trail
+        #[arg(long)]
+        reason: Option<String>,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Remove a member from the workspace
+    Remove {
+        /// Member: @username or user ID
+        user: String,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+}
+
+/// `gyre workspace invitations` subcommands.
+#[derive(Subcommand)]
+enum WorkspaceInvitationCommands {
+    /// List the workspace's pending invitations
+    List {
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Revoke a pending invitation
+    Revoke {
+        /// Invitation ID
+        id: String,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+}
+
+/// `gyre team` subcommands (user-management.md §CLI > Teams).
+#[derive(Subcommand)]
+enum TeamCommands {
+    /// Create a team
+    Create {
+        /// Team name
+        name: String,
+        /// Team lead: @username or user ID (must be a workspace member)
+        #[arg(long)]
+        lead: Option<String>,
+        /// Team description
+        #[arg(long)]
+        description: Option<String>,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Add a user to a team
+    Add {
+        /// User: @username or user ID
+        user: String,
+        /// Team slug or name
+        #[arg(long)]
+        team: String,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// List the workspace's teams
+    List {
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Remove a user from a team
+    Remove {
+        /// User: @username or user ID
+        user: String,
+        /// Team slug or name
+        #[arg(long)]
+        team: String,
+        /// Workspace slug to target (default: inferred from the git remote)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+}
+
+/// `gyre notifications` subcommands (user-management.md §CLI >
+/// Notifications).
+#[derive(Subcommand)]
+enum NotificationCommands {
+    /// List your notifications
+    List {
+        /// Only unread notifications (client-side filter on the read flag)
+        #[arg(long)]
+        unread: bool,
+        /// Four-level priority filter: low, medium, high, or urgent
+        #[arg(long)]
+        priority: Option<String>,
+        /// Notification type filter (e.g. SpecApprovalRequested)
+        #[arg(long, value_name = "TYPE")]
+        r#type: Option<String>,
+        /// Workspace slug to filter by
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Maximum results (server caps at 200)
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
+    /// Preference operations
+    Preferences {
+        #[command(subcommand)]
+        command: NotificationPreferencesCommands,
+    },
+}
+
+/// `gyre notifications preferences` subcommands. `set` performs a
+/// read-merge-write against GET/PUT /api/v1/notifications/preferences so
+/// channels you do not touch keep their current configuration.
+#[derive(Subcommand)]
+enum NotificationPreferencesCommands {
+    /// Update delivery-channel preferences. Omitted channels keep their
+    /// current values.
+    Set {
+        /// Email digest frequency: immediate, hourly, daily, or off
+        /// (enables the email channel)
+        #[arg(long)]
+        email_digest: Option<String>,
+        /// Minimum priority for email delivery: low, medium, high, urgent
+        /// (enables the email channel)
+        #[arg(long)]
+        email_min_priority: Option<String>,
+        /// Slack incoming-webhook URL (configures the Slack channel)
+        #[arg(long)]
+        slack_url: Option<String>,
+        /// Minimum priority for Slack delivery: low, medium, high, urgent
+        #[arg(long)]
+        slack_min_priority: Option<String>,
+        /// Outbound webhook URL (configures the webhook channel)
+        #[arg(long)]
+        webhook_url: Option<String>,
+        /// HMAC secret signing outbound webhook payloads
+        #[arg(long)]
+        webhook_secret: Option<String>,
+        /// Minimum priority for webhook delivery: low, medium, high, urgent
+        #[arg(long)]
+        webhook_min_priority: Option<String>,
     },
 }
 
@@ -1955,6 +2268,228 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        // ── User management (user-management.md §CLI) ────────────────────
+        Commands::Whoami => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            let me = api.get_my_profile().await?;
+            print_my_profile(&me);
+        }
+
+        Commands::Profile { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            match command {
+                ProfileCommands::Set {
+                    display_name,
+                    timezone,
+                    locale,
+                    avatar_url,
+                } => {
+                    run_profile_set(&api, display_name, timezone, locale, avatar_url).await?;
+                }
+            }
+        }
+
+        Commands::Sessions { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            match command {
+                SessionsCommands::List => {
+                    let sessions = api.list_sessions().await?;
+                    print_session_list(&sessions);
+                }
+                SessionsCommands::Revoke { id } => {
+                    api.revoke_session(&id).await?;
+                    println!("Session {id} revoked.");
+                }
+                SessionsCommands::RevokeAll => {
+                    let result = api.revoke_all_sessions().await?;
+                    let revoked = result["revoked"].as_u64().unwrap_or(0);
+                    println!("Revoked {revoked} session(s).");
+                }
+            }
+        }
+
+        Commands::Tenant { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            match command {
+                TenantCommands::Invite {
+                    email,
+                    workspace,
+                    role,
+                    bulk,
+                } => {
+                    run_tenant_invite(&api, email, workspace, role, bulk).await?;
+                }
+                TenantCommands::Invitations { command } => match command {
+                    TenantInvitationCommands::List => {
+                        let result = api.list_tenant_invitations().await?;
+                        print_tenant_invitation_list(&result);
+                    }
+                    TenantInvitationCommands::Revoke { id } => {
+                        api.revoke_tenant_invitation(&id).await?;
+                        println!("Invitation {id} revoked.");
+                    }
+                },
+            }
+        }
+
+        Commands::Workspace { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            match command {
+                WorkspaceCommands::Members { command } => match command {
+                    MemberCommands::List { workspace } => {
+                        let ws_id = resolve_workspace_target(&api, workspace.as_deref()).await?;
+                        let result = api.list_workspace_members(&ws_id).await?;
+                        print_member_list(&result);
+                    }
+                    MemberCommands::SetRole {
+                        user,
+                        role,
+                        transfer,
+                        reason,
+                        workspace,
+                    } => {
+                        run_member_set_role(
+                            &api,
+                            workspace.as_deref(),
+                            &user,
+                            &role,
+                            transfer,
+                            reason.as_deref(),
+                        )
+                        .await?;
+                    }
+                    MemberCommands::Remove { user, workspace } => {
+                        let ws_id = resolve_workspace_target(&api, workspace.as_deref()).await?;
+                        let user_id = resolve_user_ref(&api, &user).await?;
+                        api.remove_workspace_member(&ws_id, &user_id).await?;
+                        println!("Member {user} removed from workspace.");
+                    }
+                },
+                WorkspaceCommands::Invite {
+                    user,
+                    role,
+                    workspace,
+                } => {
+                    run_workspace_invite(&api, workspace.as_deref(), &user, role.as_deref())
+                        .await?;
+                }
+                WorkspaceCommands::Invitations { command } => match command {
+                    WorkspaceInvitationCommands::List { workspace } => {
+                        let ws_id = resolve_workspace_target(&api, workspace.as_deref()).await?;
+                        let result = api.list_workspace_invitations(&ws_id).await?;
+                        print_invitation_list(&result);
+                    }
+                    WorkspaceInvitationCommands::Revoke { id, workspace } => {
+                        let ws_id = resolve_workspace_target(&api, workspace.as_deref()).await?;
+                        api.revoke_workspace_invitation(&ws_id, &id).await?;
+                        println!("Invitation {id} revoked.");
+                    }
+                },
+            }
+        }
+
+        Commands::Team { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            match command {
+                TeamCommands::Create {
+                    name,
+                    lead,
+                    description,
+                    workspace,
+                } => {
+                    run_team_create(
+                        &api,
+                        workspace.as_deref(),
+                        &name,
+                        lead.as_deref(),
+                        description.as_deref(),
+                    )
+                    .await?;
+                }
+                TeamCommands::Add {
+                    user,
+                    team,
+                    workspace,
+                } => {
+                    run_team_membership(&api, workspace.as_deref(), &user, &team, false).await?;
+                }
+                TeamCommands::List { workspace } => {
+                    let ws_id = resolve_workspace_target(&api, workspace.as_deref()).await?;
+                    let result = api.list_workspace_teams(&ws_id).await?;
+                    print_team_list(&result);
+                }
+                TeamCommands::Remove {
+                    user,
+                    team,
+                    workspace,
+                } => {
+                    run_team_membership(&api, workspace.as_deref(), &user, &team, true).await?;
+                }
+            }
+        }
+
+        Commands::Notifications { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            match command {
+                NotificationCommands::List {
+                    unread,
+                    priority,
+                    r#type,
+                    workspace,
+                    limit,
+                } => {
+                    run_notifications_list(
+                        &api,
+                        unread,
+                        priority.as_deref(),
+                        r#type.as_deref(),
+                        workspace.as_deref(),
+                        limit,
+                    )
+                    .await?;
+                }
+                NotificationCommands::Preferences { command } => match command {
+                    NotificationPreferencesCommands::Set {
+                        email_digest,
+                        email_min_priority,
+                        slack_url,
+                        slack_min_priority,
+                        webhook_url,
+                        webhook_secret,
+                        webhook_min_priority,
+                    } => {
+                        run_notification_preferences_set(
+                            &api,
+                            ChannelPrefsUpdate {
+                                email_digest: email_digest.as_deref(),
+                                email_min_priority: email_min_priority.as_deref(),
+                                slack_url: slack_url.as_deref(),
+                                slack_min_priority: slack_min_priority.as_deref(),
+                                webhook_url: webhook_url.as_deref(),
+                                webhook_secret: webhook_secret.as_deref(),
+                                webhook_min_priority: webhook_min_priority.as_deref(),
+                            },
+                        )
+                        .await?;
+                    }
+                },
+            }
+        }
     }
 
     Ok(())
@@ -2783,6 +3318,802 @@ async fn run_budget_set(
     let current = api.get_workspace_budget(&ws_id).await?;
     let merged = merge_budget_updates(&current.config, &updates);
     api.set_workspace_budget(&ws_id, &merged).await
+}
+
+// ── User management (user-management.md §CLI) ─────────────────────────────────
+
+/// Resolve the workspace *slug* a command targets: `--workspace <slug>`
+/// wins; otherwise the slug is inferred from the gyre git remote. Used
+/// where an API keys on the slug (tenant-invite workspace pre-assignment)
+/// rather than the id.
+fn resolve_workspace_slug_target(workspace: Option<&str>) -> Result<String> {
+    match workspace {
+        Some(slug) => Ok(slug.to_string()),
+        None => infer_repo_from_git_remote()
+            .map(|(ws, _)| ws)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer workspace from git remote; pass --workspace <slug>"
+                )
+            }),
+    }
+}
+
+/// Resolve the workspace a `gyre workspace`/`gyre team` command operates
+/// on: `--workspace <slug>` wins; otherwise the slug is inferred from the
+/// gyre git remote (the same inference `gyre budget`/`gyre explore` use).
+/// Returns the workspace id the membership/team APIs key on.
+async fn resolve_workspace_target(
+    api: &client::GyreClient,
+    workspace: Option<&str>,
+) -> Result<String> {
+    let slug = match workspace {
+        Some(slug) => slug.to_string(),
+        None => infer_repo_from_git_remote()
+            .map(|(ws, _)| ws)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer workspace from git remote; pass --workspace <slug>"
+                )
+            })?,
+    };
+    api.resolve_workspace_slug(&slug).await
+}
+
+/// Whether `s` is an email address rather than a username. Usernames are
+/// URL-safe `[a-z0-9_-]` (user-management.md §Username vs Display Name),
+/// so any `@` outside a leading handle marker means an email.
+fn looks_like_email(s: &str) -> bool {
+    !s.starts_with('@') && s.contains('@')
+}
+
+/// Resolve a user reference (`@username`, bare username, or raw user id)
+/// to the user id the membership/team APIs key on, via the tenant-public
+/// profile endpoint (GET /api/v1/users/:username). A `@handle` or bare
+/// username that does not resolve is a 404 from the server; a raw id that
+/// does not resolve likewise fails here with the server's error.
+async fn resolve_user_ref(api: &client::GyreClient, user: &str) -> Result<String> {
+    if looks_like_email(user) {
+        anyhow::bail!(
+            "'{user}' is an email address; invite email users with `gyre workspace invite` \
+             (email path) or `gyre tenant invite`"
+        );
+    }
+    let username = user.strip_prefix('@').unwrap_or(user);
+    let profile = api.get_public_profile(username).await?;
+    Ok(profile.id)
+}
+
+/// Validate a workspace role name against the server's accepted set
+/// (WorkspaceRole::parse_role: Owner/Admin/Developer/Viewer) before any
+/// request is sent.
+fn validate_workspace_role(role: &str) -> Result<()> {
+    const ROLES: [&str; 4] = ["Owner", "Admin", "Developer", "Viewer"];
+    if ROLES.iter().any(|r| r.eq_ignore_ascii_case(role)) {
+        Ok(())
+    } else {
+        anyhow::bail!("unknown role '{role}': expected one of Owner, Admin, Developer, Viewer");
+    }
+}
+
+/// Normalize a digest frequency flag value to the wire representation
+/// (Immediate/Hourly/Daily/Off — DigestFrequency variant names).
+fn normalize_digest(value: &str) -> Result<String> {
+    const DIGESTS: [&str; 4] = ["Immediate", "Hourly", "Daily", "Off"];
+    DIGESTS
+        .iter()
+        .find(|d| d.eq_ignore_ascii_case(value))
+        .map(|d| d.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid email digest '{value}': expected one of immediate, hourly, daily, off"
+            )
+        })
+}
+
+/// Normalize a priority level flag value to the wire representation
+/// (Low/Medium/High/Urgent — NotificationPriority variant names).
+fn normalize_priority_level(value: &str) -> Result<String> {
+    const LEVELS: [&str; 4] = ["Low", "Medium", "High", "Urgent"];
+    LEVELS
+        .iter()
+        .find(|l| l.eq_ignore_ascii_case(value))
+        .map(|l| l.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!("invalid priority '{value}': expected one of low, medium, high, urgent")
+        })
+}
+
+/// One parsed row of a bulk-invite CSV.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BulkInviteRow {
+    email: String,
+    workspace: Option<String>,
+    role: Option<String>,
+}
+
+/// Strip whitespace and surrounding double quotes from a CSV field.
+fn unquote(field: &str) -> String {
+    let f = field.trim();
+    f.strip_prefix('"')
+        .and_then(|f| f.strip_suffix('"'))
+        .unwrap_or(f)
+        .to_string()
+}
+
+/// Parse bulk-invite CSV content (user-management.md §CLI: `gyre tenant
+/// invite --bulk users.csv`). Rows are `email[,workspace][,role]`; an
+/// optional leading `email` header row is recognized and skipped, fields
+/// are trimmed, and surrounding double quotes are stripped. Every row
+/// must carry a non-empty email.
+fn parse_bulk_invitation_csv(content: &str) -> Result<Vec<BulkInviteRow>> {
+    let mut rows = Vec::new();
+    let mut lines = content.lines().filter(|l| !l.trim().is_empty());
+    // Skip a header row whose first field is "email".
+    if let Some(first) = lines.next() {
+        let mut fields = first.split(',');
+        if !unquote(fields.next().unwrap_or("")).eq_ignore_ascii_case("email") {
+            let row = parse_bulk_line(first)?;
+            rows.push(row);
+        }
+    }
+    for line in lines {
+        rows.push(parse_bulk_line(line)?);
+    }
+    if rows.is_empty() {
+        anyhow::bail!("bulk invite file contains no invitation rows");
+    }
+    Ok(rows)
+}
+
+fn parse_bulk_line(line: &str) -> Result<BulkInviteRow> {
+    let mut fields = line.split(',').map(unquote);
+    let email = fields.next().unwrap_or_default();
+    if email.is_empty() {
+        anyhow::bail!("bulk invite row '{line}' has no email address");
+    }
+    if !email.contains('@') {
+        anyhow::bail!("bulk invite row '{line}': '{email}' is not an email address");
+    }
+    Ok(BulkInviteRow {
+        email,
+        workspace: fields.next().filter(|w| !w.is_empty()),
+        role: fields.next().filter(|r| !r.is_empty()),
+    })
+}
+
+/// `gyre profile set` — partial update of the caller's profile via
+/// PUT /api/v1/users/me. At least one field is required; omitted fields
+/// keep their stored values.
+async fn run_profile_set(
+    api: &client::GyreClient,
+    display_name: Option<String>,
+    timezone: Option<String>,
+    locale: Option<String>,
+    avatar_url: Option<String>,
+) -> Result<()> {
+    let mut body = serde_json::Map::new();
+    if let Some(dn) = &display_name {
+        if dn.trim().is_empty() {
+            anyhow::bail!("--display-name must not be empty");
+        }
+        body.insert("display_name".into(), serde_json::json!(dn));
+    }
+    if let Some(tz) = &timezone {
+        if tz.trim().is_empty() {
+            anyhow::bail!("--timezone must not be empty");
+        }
+        body.insert("timezone".into(), serde_json::json!(tz));
+    }
+    if let Some(l) = &locale {
+        if l.trim().is_empty() {
+            anyhow::bail!("--locale must not be empty");
+        }
+        body.insert("locale".into(), serde_json::json!(l));
+    }
+    if let Some(a) = &avatar_url {
+        body.insert("avatar_url".into(), serde_json::json!(a));
+    }
+    if body.is_empty() {
+        anyhow::bail!("no fields given: use --display-name, --timezone, --locale, or --avatar-url");
+    }
+    let updated = api
+        .update_my_profile(&serde_json::Value::Object(body))
+        .await?;
+    println!("Profile updated.");
+    print_my_profile(&updated);
+    Ok(())
+}
+
+/// `gyre tenant invite` — single email invite (optionally with workspace
+/// pre-assignment) or `--bulk` CSV invite.
+async fn run_tenant_invite(
+    api: &client::GyreClient,
+    email: Option<String>,
+    workspace: Option<String>,
+    role: Option<String>,
+    bulk: Option<std::path::PathBuf>,
+) -> Result<()> {
+    if let Some(path) = bulk {
+        if email.is_some() {
+            anyhow::bail!("--bulk and a positional email are mutually exclusive");
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        let rows = parse_bulk_invitation_csv(&content)?;
+        let count = rows.len();
+        let invitations: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "email": r.email,
+                    "workspace": r.workspace,
+                    "role": r.role,
+                })
+            })
+            .collect();
+        let result = api
+            .tenant_invite_bulk(&serde_json::json!({ "invitations": invitations }))
+            .await?;
+        let invited = result["invited"]
+            .as_u64()
+            .or_else(|| result["created"].as_u64())
+            .unwrap_or(count as u64);
+        println!("Invited {invited} user(s) from {}.", path.display());
+        return Ok(());
+    }
+
+    let email = email
+        .ok_or_else(|| anyhow::anyhow!("no email given: pass an email or use --bulk <file.csv>"))?;
+    if !email.contains('@') {
+        anyhow::bail!("'{email}' is not an email address");
+    }
+    if role.is_some() && workspace.is_none() {
+        anyhow::bail!("--role pre-assigns a workspace role and requires --workspace");
+    }
+    let mut body = serde_json::Map::new();
+    body.insert("email".into(), serde_json::json!(email));
+    if let Some(ws) = &workspace {
+        body.insert("workspace".into(), serde_json::json!(ws));
+        body.insert(
+            "role".into(),
+            serde_json::json!(role.as_deref().unwrap_or("Developer")),
+        );
+    }
+    api.tenant_invite(&serde_json::Value::Object(body)).await?;
+    match workspace {
+        Some(ws) => println!("Invitation sent to {email} (workspace {ws} pre-assigned)."),
+        None => println!("Invitation sent to {email}."),
+    }
+    Ok(())
+}
+
+/// `gyre workspace invite` — `@username` (or bare username / user id)
+/// invites an existing tenant member via POST /workspaces/:id/invite; an
+/// email address takes the tenant-invitation path with this workspace and
+/// role pre-assigned (user-management.md §CLI: "By email (sends tenant
+/// invite if needed)").
+async fn run_workspace_invite(
+    api: &client::GyreClient,
+    workspace: Option<&str>,
+    user: &str,
+    role: Option<&str>,
+) -> Result<()> {
+    let ws_id = resolve_workspace_target(api, workspace).await?;
+    let role = role.unwrap_or("Developer");
+    validate_workspace_role(role)?;
+
+    if looks_like_email(user) {
+        // Email invite: the invitee may not be a tenant user yet, so the
+        // server sends a tenant invitation pre-assigned to this workspace
+        // (spec: "sends tenant invite if needed"). The pre-assignment
+        // names the workspace by the slug the caller targeted (explicit
+        // --workspace, or the one inferred from the git remote).
+        let slug = resolve_workspace_slug_target(workspace)?;
+        let body = serde_json::json!({
+            "email": user,
+            "workspace": slug,
+            "role": role,
+        });
+        api.tenant_invite(&body).await?;
+        println!("Tenant invitation sent to {user} (workspace pre-assigned, role {role}).");
+        return Ok(());
+    }
+
+    let username = user.strip_prefix('@').unwrap_or(user);
+    let profile = api.get_public_profile(username).await?;
+    api.invite_workspace_member(&ws_id, &profile.id, role)
+        .await?;
+    let who = if profile.display_name.is_empty() {
+        format!("@{}", profile.username)
+    } else {
+        format!("@{} ({})", profile.username, profile.display_name)
+    };
+    println!("Invited {who} to the workspace with role {role}.");
+    Ok(())
+}
+
+/// `gyre workspace members set-role` — change a member's role via
+/// PUT /workspaces/:id/members/:user_id/role. `--transfer` is the explicit
+/// ownership-transfer acknowledgment: it requires the Owner role (the
+/// server performs and audits the actual transfer).
+async fn run_member_set_role(
+    api: &client::GyreClient,
+    workspace: Option<&str>,
+    user: &str,
+    role: &str,
+    transfer: bool,
+    reason: Option<&str>,
+) -> Result<()> {
+    validate_workspace_role(role)?;
+    if transfer && !role.eq_ignore_ascii_case("Owner") {
+        anyhow::bail!("--transfer is only valid when setting the role to Owner");
+    }
+    let reason = match (transfer, reason) {
+        (_, Some(r)) => Some(r.to_string()),
+        (true, None) => Some("ownership transfer via CLI".to_string()),
+        (false, None) => None,
+    };
+    let ws_id = resolve_workspace_target(api, workspace).await?;
+    let user_id = resolve_user_ref(api, user).await?;
+    api.set_workspace_member_role(&ws_id, &user_id, role, reason.as_deref())
+        .await?;
+    if transfer {
+        println!("Ownership transferred to {user}.");
+    } else {
+        println!("Role of {user} set to {role}.");
+    }
+    Ok(())
+}
+
+/// `gyre team create` — resolve the lead handle, create the team via
+/// POST /workspaces/:id/teams.
+async fn run_team_create(
+    api: &client::GyreClient,
+    workspace: Option<&str>,
+    name: &str,
+    lead: Option<&str>,
+    description: Option<&str>,
+) -> Result<()> {
+    let ws_id = resolve_workspace_target(api, workspace).await?;
+    // Resolve the lead before creating anything: a lead that is not a
+    // tenant user should fail before the team exists, not after
+    // (the server additionally requires the lead to be a workspace
+    // member).
+    let lead_id = match lead {
+        Some(l) => resolve_user_ref(api, l).await?,
+        None => anyhow::bail!("--lead is required: pass --lead @username"),
+    };
+    let team = api
+        .create_workspace_team(&ws_id, name, &lead_id, description)
+        .await?;
+    let slug = team["slug"].as_str().unwrap_or("");
+    let id = team["id"].as_str().unwrap_or("");
+    println!("Team '{}' created.", team["name"].as_str().unwrap_or(name));
+    println!("  ID:    {id}");
+    if !slug.is_empty() {
+        println!("  Slug:  {slug}");
+    }
+    Ok(())
+}
+
+/// `gyre team add` / `gyre team remove` — resolve the user handle and the
+/// team (by slug or name) within the target workspace, then add/remove
+/// the membership.
+async fn run_team_membership(
+    api: &client::GyreClient,
+    workspace: Option<&str>,
+    user: &str,
+    team_ref: &str,
+    remove: bool,
+) -> Result<()> {
+    let ws_id = resolve_workspace_target(api, workspace).await?;
+    let user_id = resolve_user_ref(api, user).await?;
+    let team_id = resolve_team_ref(api, &ws_id, team_ref).await?;
+    if remove {
+        api.remove_team_member(&ws_id, &team_id, &user_id).await?;
+        println!("{user} removed from team '{team_ref}'.");
+    } else {
+        api.add_team_member(&ws_id, &team_id, &user_id).await?;
+        println!("{user} added to team '{team_ref}'.");
+    }
+    Ok(())
+}
+
+/// Resolve a team reference (slug or name) to the team id by listing the
+/// workspace's teams and matching slug first, then name.
+async fn resolve_team_ref(api: &client::GyreClient, ws_id: &str, team_ref: &str) -> Result<String> {
+    let teams = api.list_workspace_teams(ws_id).await?;
+    let items = teams["teams"].as_array().cloned().unwrap_or_default();
+    let by_slug = items.iter().find(|t| {
+        t["slug"]
+            .as_str()
+            .map(|s| s.eq_ignore_ascii_case(team_ref))
+            .unwrap_or(false)
+    });
+    let by_name = items.iter().find(|t| {
+        t["name"]
+            .as_str()
+            .map(|s| s.eq_ignore_ascii_case(team_ref))
+            .unwrap_or(false)
+    });
+    let team = by_slug
+        .or(by_name)
+        .ok_or_else(|| anyhow::anyhow!("no team '{team_ref}' in this workspace"))?;
+    Ok(team["id"].as_str().unwrap_or_default().to_string())
+}
+
+/// `gyre notifications list` — spec-path listing with filters. `--unread`
+/// filters on the response's read flag (the server's filter surface has
+/// no unread parameter); the fetch uses the server's maximum limit so the
+/// filter sees the same window the unfiltered list would.
+async fn run_notifications_list(
+    api: &client::GyreClient,
+    unread: bool,
+    priority: Option<&str>,
+    notification_type: Option<&str>,
+    workspace: Option<&str>,
+    limit: u32,
+) -> Result<()> {
+    if let Some(p) = priority {
+        normalize_priority_level(p)?;
+    }
+    let workspace_id = match workspace {
+        Some(slug) => Some(api.resolve_workspace_slug(slug).await?),
+        None => None,
+    };
+    let fetch_limit = if unread { 200 } else { limit };
+    let result = api
+        .list_notifications_filtered(
+            workspace_id.as_deref(),
+            priority,
+            notification_type,
+            Some(fetch_limit),
+        )
+        .await?;
+    let items = result["notifications"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let items: Vec<serde_json::Value> = if unread {
+        items
+            .into_iter()
+            .filter(|n| !n["read"].as_bool().unwrap_or(false))
+            .collect()
+    } else {
+        items
+    };
+    let items: Vec<serde_json::Value> = items.into_iter().take(limit as usize).collect();
+    print_notification_items(&items);
+    Ok(())
+}
+
+/// Requested delivery-channel updates for `gyre notifications preferences
+/// set`. Omitted fields keep their current values.
+#[derive(Default)]
+struct ChannelPrefsUpdate<'a> {
+    email_digest: Option<&'a str>,
+    email_min_priority: Option<&'a str>,
+    slack_url: Option<&'a str>,
+    slack_min_priority: Option<&'a str>,
+    webhook_url: Option<&'a str>,
+    webhook_secret: Option<&'a str>,
+    webhook_min_priority: Option<&'a str>,
+}
+
+/// `gyre notifications preferences set` — read-merge-write against
+/// GET/PUT /api/v1/notifications/preferences so untouched channels keep
+/// their current configuration.
+async fn run_notification_preferences_set(
+    api: &client::GyreClient,
+    update: ChannelPrefsUpdate<'_>,
+) -> Result<()> {
+    let current = api.get_notification_preferences().await?;
+    let merged = merge_channel_updates(current.get("channels"), &update)?;
+    api.update_notification_preferences(&serde_json::json!({ "channels": merged }))
+        .await?;
+    println!("Notification preferences updated.");
+    Ok(())
+}
+
+/// Pure merge of requested channel updates over the current channel
+/// configuration (user-management.md §Delivery Channels). Values are
+/// validated and normalized before merging; a missing/null current
+/// configuration starts from the default channel shape (in_app always
+/// true, email disabled). Any `--email-*` flag enables the email channel
+/// (setting a digest or threshold on a disabled channel would silently
+/// deliver nothing).
+fn merge_channel_updates(
+    current: Option<&serde_json::Value>,
+    update: &ChannelPrefsUpdate<'_>,
+) -> Result<serde_json::Value> {
+    let digest = update.email_digest.map(normalize_digest).transpose()?;
+    let email_min = update
+        .email_min_priority
+        .map(normalize_priority_level)
+        .transpose()?;
+    let slack_min = update
+        .slack_min_priority
+        .map(normalize_priority_level)
+        .transpose()?;
+    let webhook_min = update
+        .webhook_min_priority
+        .map(normalize_priority_level)
+        .transpose()?;
+
+    let mut channels = match current {
+        Some(v) if v.is_object() => v.clone(),
+        _ => serde_json::json!({
+            "in_app": true,
+            "email": { "enabled": false, "digest": "Off", "min_priority": "Medium" }
+        }),
+    };
+    // in_app is always true ("can't disable", §Delivery Channels) — a
+    // stored configuration claiming otherwise would fail the PUT.
+    channels["in_app"] = serde_json::json!(true);
+
+    if digest.is_some() || email_min.is_some() {
+        let email = channels.get("email").cloned().unwrap_or_else(
+            || serde_json::json!({"enabled": false, "digest": "Off", "min_priority": "Medium"}),
+        );
+        channels["email"] = email;
+        if let Some(d) = digest {
+            channels["email"]["digest"] = serde_json::json!(d);
+        }
+        if let Some(p) = email_min {
+            channels["email"]["min_priority"] = serde_json::json!(p);
+        }
+        channels["email"]["enabled"] = serde_json::json!(true);
+    }
+
+    if update.slack_url.is_some() || slack_min.is_some() {
+        let slack = channels
+            .get("slack")
+            .cloned()
+            .filter(|s| s.is_object())
+            .unwrap_or_else(|| serde_json::json!({"webhook_url": "", "channel": null, "min_priority": "Medium"}));
+        channels["slack"] = slack;
+        if let Some(u) = update.slack_url {
+            channels["slack"]["webhook_url"] = serde_json::json!(u);
+        }
+        if let Some(p) = slack_min {
+            channels["slack"]["min_priority"] = serde_json::json!(p);
+        }
+    }
+
+    if update.webhook_url.is_some() || update.webhook_secret.is_some() || webhook_min.is_some() {
+        let webhook = channels
+            .get("webhook")
+            .cloned()
+            .filter(|w| w.is_object())
+            .unwrap_or_else(
+                || serde_json::json!({"url": "", "secret": "", "min_priority": "Medium"}),
+            );
+        channels["webhook"] = webhook;
+        if let Some(u) = update.webhook_url {
+            channels["webhook"]["url"] = serde_json::json!(u);
+        }
+        if let Some(s) = update.webhook_secret {
+            channels["webhook"]["secret"] = serde_json::json!(s);
+        }
+        if let Some(p) = webhook_min {
+            channels["webhook"]["min_priority"] = serde_json::json!(p);
+        }
+    }
+
+    Ok(channels)
+}
+
+/// Print a profile block (`gyre whoami`, `gyre profile set`).
+fn print_my_profile(me: &client::MyProfile) {
+    println!("User Profile");
+    println!("  ID:           {}", me.id);
+    println!("  Username:     {}", me.username);
+    println!("  Display Name: {}", me.display_name);
+    if let Some(email) = &me.email {
+        println!("  Email:        {email}");
+    }
+    if let Some(avatar) = &me.avatar_url {
+        println!("  Avatar:       {avatar}");
+    }
+    println!("  Timezone:     {}", me.timezone);
+    println!("  Locale:       {}", me.locale);
+    println!("  Global Role:  {}", me.global_role);
+    if !me.roles.is_empty() {
+        println!("  Roles:        {}", me.roles.join(", "));
+    }
+    if let Some(login) = me.last_login_at {
+        println!("  Last Login:   {}", format_timestamp(login));
+    }
+    println!("  Created:      {}", format_timestamp(me.created_at));
+    println!("  Updated:      {}", format_timestamp(me.updated_at));
+}
+
+/// Print a session list (GET /users/me/sessions). Tolerant of the field
+/// set the session endpoint exposes: id plus any of device/user_agent,
+/// ip_address, created_at, last_active_at.
+fn print_session_list(result: &serde_json::Value) {
+    let items = result["sessions"].as_array();
+    match items {
+        Some(items) if !items.is_empty() => {
+            println!(
+                "{:<38} {:<18} {:<15} {:<20} {:<20}",
+                "ID", "DEVICE", "IP", "CREATED", "LAST ACTIVE"
+            );
+            println!("{}", "-".repeat(115));
+            for s in items {
+                let id = s["id"].as_str().unwrap_or("");
+                let device = s["device"]
+                    .as_str()
+                    .or_else(|| s["user_agent"].as_str())
+                    .unwrap_or("");
+                let device = truncate_for_table(device, 18);
+                let ip = s["ip_address"].as_str().unwrap_or("");
+                let created = s["created_at"]
+                    .as_u64()
+                    .map(format_timestamp)
+                    .unwrap_or_default();
+                let active = s["last_active_at"]
+                    .as_u64()
+                    .map(format_timestamp)
+                    .unwrap_or_default();
+                println!("{id:<38} {device:<18} {ip:<15} {created:<20} {active:<20}");
+            }
+        }
+        _ => println!("No active sessions."),
+    }
+}
+
+/// Truncate a string for a fixed-width table column, respecting char
+/// boundaries (never slice at a fixed byte index).
+fn truncate_for_table(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(width.saturating_sub(1)).collect();
+        format!("{truncated}\u{2026}")
+    }
+}
+
+/// Print a member list (GET /workspaces/:id/members).
+fn print_member_list(result: &serde_json::Value) {
+    let items = result["members"].as_array();
+    match items {
+        Some(items) if !items.is_empty() => {
+            println!(
+                "{:<38} {:<10} {:<9} {:<20} SINCE",
+                "USER ID", "ROLE", "ACCEPTED", "INVITED"
+            );
+            println!("{}", "-".repeat(100));
+            for m in items {
+                let id = m["user_id"].as_str().unwrap_or("");
+                let role = m["role"].as_str().unwrap_or("");
+                let accepted = if m["accepted"].as_bool().unwrap_or(false) {
+                    "yes"
+                } else {
+                    "no"
+                };
+                let invited = m["id"].as_str().unwrap_or("");
+                let since = m["created_at"]
+                    .as_u64()
+                    .map(format_timestamp)
+                    .unwrap_or_default();
+                println!("{id:<38} {role:<10} {accepted:<9} {invited:<20} {since}");
+            }
+        }
+        _ => println!("No members."),
+    }
+}
+
+/// Print a pending-invitation list (GET /workspaces/:id/invitations).
+fn print_invitation_list(result: &serde_json::Value) {
+    let items = result["invitations"].as_array();
+    match items {
+        Some(items) if !items.is_empty() => {
+            println!(
+                "{:<38} {:<38} {:<10} {:<9} CREATED",
+                "INVITATION ID", "USER ID", "ROLE", "ACCEPTED"
+            );
+            println!("{}", "-".repeat(130));
+            for inv in items {
+                let id = inv["id"].as_str().unwrap_or("");
+                let user = inv["user_id"].as_str().unwrap_or("");
+                let role = inv["role"].as_str().unwrap_or("");
+                let accepted = if inv["accepted"].as_bool().unwrap_or(false) {
+                    "yes"
+                } else {
+                    "no"
+                };
+                let created = inv["created_at"]
+                    .as_u64()
+                    .map(format_timestamp)
+                    .unwrap_or_default();
+                println!("{id:<38} {user:<38} {role:<10} {accepted:<9} {created}");
+            }
+        }
+        _ => println!("No pending invitations."),
+    }
+}
+
+/// Print a tenant invitation list (GET /api/v1/tenant/invitations).
+/// Tolerant of the field set the tenant-invitation endpoint exposes.
+fn print_tenant_invitation_list(result: &serde_json::Value) {
+    let items = result["invitations"]
+        .as_array()
+        .or_else(|| result.as_array());
+    match items {
+        Some(items) if !items.is_empty() => {
+            println!(
+                "{:<38} {:<30} {:<14} {:<10} CREATED",
+                "ID", "EMAIL", "ROLE", "STATUS"
+            );
+            println!("{}", "-".repeat(100));
+            for inv in items {
+                let id = inv["id"].as_str().unwrap_or("");
+                let email = inv["email"].as_str().unwrap_or("");
+                let role = inv["role"].as_str().unwrap_or("");
+                let status = inv["status"].as_str().unwrap_or("");
+                let created = inv["created_at"]
+                    .as_u64()
+                    .map(format_timestamp)
+                    .unwrap_or_default();
+                println!("{id:<38} {email:<30} {role:<14} {status:<10} {created}");
+            }
+        }
+        _ => println!("No invitations."),
+    }
+}
+
+/// Print a team list (GET /workspaces/:id/teams).
+fn print_team_list(result: &serde_json::Value) {
+    let items = result["teams"].as_array();
+    match items {
+        Some(items) if !items.is_empty() => {
+            println!(
+                "{:<38} {:<24} {:<24} {:<8} LEAD",
+                "ID", "SLUG", "NAME", "MEMBERS"
+            );
+            println!("{}", "-".repeat(120));
+            for t in items {
+                let id = t["id"].as_str().unwrap_or("");
+                let slug = t["slug"].as_str().unwrap_or("");
+                let name = t["name"].as_str().unwrap_or("");
+                let members = t["member_ids"].as_array().map(|m| m.len()).unwrap_or(0);
+                let lead = t["lead"].as_str().unwrap_or("");
+                println!("{id:<38} {slug:<24} {name:<24} {members:<8} {lead}");
+            }
+        }
+        _ => println!("No teams."),
+    }
+}
+
+/// Print notification rows in the same table shape `gyre inbox` uses,
+/// extended with the read state (the §CLI surface filters on it).
+fn print_notification_items(items: &[serde_json::Value]) {
+    if items.is_empty() {
+        println!("No notifications.");
+        return;
+    }
+    println!(
+        "{:<8} {:<38} {:<5} {:<7} {:<28} TITLE",
+        "PRI", "ID", "TYPE", "READ", "AGE"
+    );
+    println!("{}", "-".repeat(110));
+    for n in items {
+        let id = n["id"].as_str().unwrap_or("");
+        let pri = n["priority"].as_u64().unwrap_or(0);
+        let ntype = n["notification_type"].as_str().unwrap_or("");
+        let ntype = truncate_for_table(ntype, 28);
+        let read = if n["read"].as_bool().unwrap_or(false) {
+            "read"
+        } else {
+            "unread"
+        };
+        let title = n["title"].as_str().unwrap_or("");
+        let created = n["created_at"].as_u64().unwrap_or(0);
+        let age = format_age(created);
+        println!("P{pri:<7} {id:<38} {ntype:<5} {read:<7} {age:<28} {title}");
+    }
 }
 
 /// "123456 / 500000 (24.7%)" vs "123456 / none" — usage vs limit with
@@ -6171,5 +7502,998 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains(r#"a\"b.md"#));
         assert!(output.contains(r#"Test \"quotes\""#));
+    }
+
+    // ── User management CLI (user-management.md §CLI, task-126) ──────────
+
+    // Parse tests: every command line in the spec's §CLI block must parse
+    // into the intended command shape.
+
+    #[test]
+    fn cli_whoami_parses() {
+        let args = Cli::try_parse_from(["gyre", "whoami"]);
+        assert!(args.is_ok());
+        assert!(matches!(args.unwrap().command, Commands::Whoami));
+    }
+
+    #[test]
+    fn cli_profile_set_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "profile",
+            "set",
+            "--display-name",
+            "Jordan Sell",
+            "--timezone",
+            "America/New_York",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Profile {
+            command:
+                ProfileCommands::Set {
+                    display_name,
+                    timezone,
+                    locale,
+                    avatar_url,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(display_name.as_deref(), Some("Jordan Sell"));
+            assert_eq!(timezone.as_deref(), Some("America/New_York"));
+            assert_eq!(locale, None);
+            assert_eq!(avatar_url, None);
+        } else {
+            panic!("Expected Profile Set");
+        }
+    }
+
+    #[test]
+    fn cli_sessions_subcommands_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "sessions", "list"])
+                .unwrap()
+                .command,
+            Commands::Sessions {
+                command: SessionsCommands::List
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "sessions", "revoke", "s-1"]).unwrap().command,
+            Commands::Sessions { command: SessionsCommands::Revoke { id } } if id == "s-1"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "sessions", "revoke-all"])
+                .unwrap()
+                .command,
+            Commands::Sessions {
+                command: SessionsCommands::RevokeAll
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_tenant_invite_parses() {
+        // Bare email
+        let args = Cli::try_parse_from(["gyre", "tenant", "invite", "alice@example.com"]);
+        assert!(matches!(
+            args.unwrap().command,
+            Commands::Tenant { command: TenantCommands::Invite { ref email, workspace: None, role: None, bulk: None } }
+                if email.as_deref() == Some("alice@example.com")
+        ));
+        // With workspace pre-assignment + role
+        let args = Cli::try_parse_from([
+            "gyre",
+            "tenant",
+            "invite",
+            "alice@example.com",
+            "--workspace",
+            "platform",
+            "--role",
+            "Developer",
+        ]);
+        assert!(matches!(
+            args.unwrap().command,
+            Commands::Tenant { command: TenantCommands::Invite { ref email, ref workspace, ref role, bulk: None } }
+                if email.as_deref() == Some("alice@example.com")
+                    && workspace.as_deref() == Some("platform")
+                    && role.as_deref() == Some("Developer")
+        ));
+        // Bulk from CSV
+        let args = Cli::try_parse_from(["gyre", "tenant", "invite", "--bulk", "users.csv"]);
+        assert!(matches!(
+            args.unwrap().command,
+            Commands::Tenant { command: TenantCommands::Invite { email: None, bulk: Some(ref path), .. } }
+                if path == &std::path::PathBuf::from("users.csv")
+        ));
+    }
+
+    #[test]
+    fn cli_tenant_invitations_subcommands_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "tenant", "invitations", "list"])
+                .unwrap()
+                .command,
+            Commands::Tenant {
+                command: TenantCommands::Invitations {
+                    command: TenantInvitationCommands::List
+                }
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "tenant", "invitations", "revoke", "inv-1"]).unwrap().command,
+            Commands::Tenant { command: TenantCommands::Invitations { command: TenantInvitationCommands::Revoke { id } } } if id == "inv-1"
+        ));
+    }
+
+    #[test]
+    fn cli_workspace_subcommands_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "workspace", "members", "list"])
+                .unwrap()
+                .command,
+            Commands::Workspace {
+                command: WorkspaceCommands::Members {
+                    command: MemberCommands::List { workspace: None }
+                }
+            }
+        ));
+        // Invite by handle and by email, with a role
+        assert!(matches!(
+            Cli::try_parse_from([
+                "gyre", "workspace", "invite", "@alice", "--role", "Developer",
+            ])
+            .unwrap()
+            .command,
+            Commands::Workspace { command: WorkspaceCommands::Invite { ref user, ref role, workspace: None } }
+                if user == "@alice" && role.as_deref() == Some("Developer")
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "gyre", "workspace", "invite", "alice@example.com", "--role", "Developer",
+            ])
+            .unwrap()
+            .command,
+            Commands::Workspace { command: WorkspaceCommands::Invite { ref user, .. } } if user == "alice@example.com"
+        ));
+        // set-role, with and without --transfer
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "workspace", "members", "set-role", "@asmith", "Admin"])
+                .unwrap()
+                .command,
+            Commands::Workspace { command: WorkspaceCommands::Members { command: MemberCommands::SetRole { ref user, ref role, transfer: false, .. } } }
+                if user == "@asmith" && role == "Admin"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "gyre", "workspace", "members", "set-role", "@asmith", "Owner", "--transfer",
+            ])
+            .unwrap()
+            .command,
+            Commands::Workspace { command: WorkspaceCommands::Members { command: MemberCommands::SetRole { ref user, ref role, transfer: true, .. } } }
+                if user == "@asmith" && role == "Owner"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "workspace", "members", "remove", "@asmith"]).unwrap().command,
+            Commands::Workspace { command: WorkspaceCommands::Members { command: MemberCommands::Remove { ref user, .. } } } if user == "@asmith"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "workspace", "invitations", "list"])
+                .unwrap()
+                .command,
+            Commands::Workspace {
+                command: WorkspaceCommands::Invitations {
+                    command: WorkspaceInvitationCommands::List { workspace: None }
+                }
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "workspace", "invitations", "revoke", "inv-9"]).unwrap().command,
+            Commands::Workspace { command: WorkspaceCommands::Invitations { command: WorkspaceInvitationCommands::Revoke { ref id, .. } } } if id == "inv-9"
+        ));
+    }
+
+    #[test]
+    fn cli_team_subcommands_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "team", "create", "Platform Team", "--lead", "@jsell"])
+                .unwrap()
+                .command,
+            Commands::Team { command: TeamCommands::Create { ref name, ref lead, .. } }
+                if name == "Platform Team" && lead.as_deref() == Some("@jsell")
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "team", "add", "@asmith", "--team", "Platform Team"])
+                .unwrap()
+                .command,
+            Commands::Team { command: TeamCommands::Add { ref user, ref team, .. } }
+                if user == "@asmith" && team == "Platform Team"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "team", "list"])
+                .unwrap()
+                .command,
+            Commands::Team {
+                command: TeamCommands::List { workspace: None }
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "team", "remove", "@asmith", "--team", "Platform Team"])
+                .unwrap()
+                .command,
+            Commands::Team { command: TeamCommands::Remove { ref user, ref team, .. } }
+                if user == "@asmith" && team == "Platform Team"
+        ));
+    }
+
+    #[test]
+    fn cli_notifications_subcommands_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["gyre", "notifications", "list"])
+                .unwrap()
+                .command,
+            Commands::Notifications {
+                command: NotificationCommands::List {
+                    unread: false,
+                    priority: None,
+                    r#type: None,
+                    workspace: None,
+                    limit: 50
+                }
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "gyre", "notifications", "list", "--unread", "--priority", "high",
+            ])
+            .unwrap()
+            .command,
+            Commands::Notifications { command: NotificationCommands::List { unread: true, ref priority, .. } }
+                if priority.as_deref() == Some("high")
+        ));
+        let args = Cli::try_parse_from([
+            "gyre",
+            "notifications",
+            "preferences",
+            "set",
+            "--email-digest",
+            "hourly",
+            "--email-min-priority",
+            "high",
+        ]);
+        assert!(matches!(
+            args.unwrap().command,
+            Commands::Notifications { command: NotificationCommands::Preferences { command: NotificationPreferencesCommands::Set { ref email_digest, ref email_min_priority, slack_url: None, .. } } }
+                if email_digest.as_deref() == Some("hourly")
+                    && email_min_priority.as_deref() == Some("high")
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "gyre", "notifications", "preferences", "set", "--slack-url",
+                "https://hooks.slack.com/services/T000/B000/XYZ",
+            ])
+            .unwrap()
+            .command,
+            Commands::Notifications { command: NotificationCommands::Preferences { command: NotificationPreferencesCommands::Set { ref slack_url, email_digest: None, .. } } }
+                if slack_url.as_deref() == Some("https://hooks.slack.com/services/T000/B000/XYZ")
+        ));
+    }
+
+    // Pure-logic tests.
+
+    #[test]
+    fn looks_like_email_distinguishes_handles_and_addresses() {
+        assert!(looks_like_email("alice@example.com"));
+        assert!(!looks_like_email("@alice"));
+        assert!(!looks_like_email("alice"));
+        assert!(!looks_like_email("@alice@example.com")); // handle marker wins
+    }
+
+    #[test]
+    fn normalize_digest_accepts_case_insensitive_names() {
+        assert_eq!(normalize_digest("hourly").unwrap(), "Hourly");
+        assert_eq!(normalize_digest("HOURLY").unwrap(), "Hourly");
+        assert_eq!(normalize_digest("immediate").unwrap(), "Immediate");
+        assert_eq!(normalize_digest("daily").unwrap(), "Daily");
+        assert_eq!(normalize_digest("off").unwrap(), "Off");
+        assert!(normalize_digest("weekly").is_err());
+    }
+
+    #[test]
+    fn normalize_priority_level_accepts_case_insensitive_names() {
+        assert_eq!(normalize_priority_level("high").unwrap(), "High");
+        assert_eq!(normalize_priority_level("URGENT").unwrap(), "Urgent");
+        assert_eq!(normalize_priority_level("low").unwrap(), "Low");
+        assert_eq!(normalize_priority_level("medium").unwrap(), "Medium");
+        assert!(normalize_priority_level("critical").is_err());
+    }
+
+    #[test]
+    fn validate_workspace_role_matches_server_role_set() {
+        for role in ["Owner", "Admin", "Developer", "Viewer"] {
+            assert!(
+                validate_workspace_role(role).is_ok(),
+                "{role} should be valid"
+            );
+            assert!(validate_workspace_role(&role.to_uppercase()).is_ok());
+        }
+        assert!(validate_workspace_role("SuperAdmin").is_err());
+    }
+
+    #[test]
+    fn parse_bulk_csv_without_header() {
+        let rows =
+            parse_bulk_invitation_csv("alice@example.com\nbob@example.com,platform,Admin\n\n")
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                BulkInviteRow {
+                    email: "alice@example.com".into(),
+                    workspace: None,
+                    role: None
+                },
+                BulkInviteRow {
+                    email: "bob@example.com".into(),
+                    workspace: Some("platform".into()),
+                    role: Some("Admin".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bulk_csv_with_header_and_quotes() {
+        let rows = parse_bulk_invitation_csv(
+            "email,workspace,role\n\"carol@example.com\", \"platform\" ,Developer\n",
+        )
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![BulkInviteRow {
+                email: "carol@example.com".into(),
+                workspace: Some("platform".into()),
+                role: Some("Developer".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_bulk_csv_rejects_bad_rows() {
+        // Row without an email
+        let err = parse_bulk_invitation_csv(",platform,Developer").unwrap_err();
+        assert!(err.to_string().contains("no email"));
+        // Email column is not an address
+        let err = parse_bulk_invitation_csv("not-an-address").unwrap_err();
+        assert!(err.to_string().contains("not an email"));
+        // No rows at all
+        let err = parse_bulk_invitation_csv("email,workspace,role\n").unwrap_err();
+        assert!(err.to_string().contains("no invitation rows"));
+    }
+
+    #[test]
+    fn merge_channel_updates_enables_email_and_normalizes() {
+        let current = serde_json::json!({
+            "in_app": true,
+            "email": { "enabled": false, "digest": "Off", "min_priority": "Low" }
+        });
+        let merged = merge_channel_updates(
+            Some(&current),
+            &ChannelPrefsUpdate {
+                email_digest: Some("hourly"),
+                email_min_priority: Some("high"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(merged["email"]["enabled"], serde_json::json!(true));
+        assert_eq!(merged["email"]["digest"], serde_json::json!("Hourly"));
+        assert_eq!(merged["email"]["min_priority"], serde_json::json!("High"));
+        assert_eq!(merged["in_app"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn merge_channel_updates_preserves_untouched_channels() {
+        // Setting only email flags must not drop a configured Slack channel
+        // (read-merge-write, not replace).
+        let current = serde_json::json!({
+            "in_app": true,
+            "email": { "enabled": false, "digest": "Off", "min_priority": "Medium" },
+            "slack": { "webhook_url": "https://hooks.slack.com/x", "channel": null, "min_priority": "Low" }
+        });
+        let merged = merge_channel_updates(
+            Some(&current),
+            &ChannelPrefsUpdate {
+                email_digest: Some("daily"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            merged["slack"]["webhook_url"],
+            serde_json::json!("https://hooks.slack.com/x")
+        );
+        assert_eq!(merged["email"]["digest"], serde_json::json!("Daily"));
+    }
+
+    #[test]
+    fn merge_channel_updates_configures_slack_from_scratch() {
+        let merged = merge_channel_updates(
+            None,
+            &ChannelPrefsUpdate {
+                slack_url: Some("https://hooks.slack.com/services/T/B/X"),
+                slack_min_priority: Some("high"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            merged["slack"]["webhook_url"],
+            serde_json::json!("https://hooks.slack.com/services/T/B/X")
+        );
+        assert_eq!(merged["slack"]["min_priority"], serde_json::json!("High"));
+        // Default email shape is present and untouched.
+        assert_eq!(merged["email"]["enabled"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn merge_channel_updates_rejects_invalid_values_before_any_request() {
+        let err = merge_channel_updates(
+            None,
+            &ChannelPrefsUpdate {
+                email_digest: Some("weekly"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("email digest"));
+        let err = merge_channel_updates(
+            None,
+            &ChannelPrefsUpdate {
+                slack_min_priority: Some("critical"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("priority"));
+    }
+
+    #[test]
+    fn merge_channel_updates_forces_in_app_true() {
+        // A stored configuration claiming in_app=false would fail the
+        // server's PUT validation; the merge must repair it.
+        let current = serde_json::json!({ "in_app": false });
+        let merged = merge_channel_updates(
+            Some(&current),
+            &ChannelPrefsUpdate {
+                email_digest: Some("off"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(merged["in_app"], serde_json::json!(true));
+    }
+
+    // Command-flow tests against scripted HTTP servers: the exact request
+    // sequences and bodies the new commands emit.
+
+    /// Script GET /api/v1/workspaces?slug=platform → workspace ws-1.
+    const WORKSPACE_SLUG_JSON: &str = r#"[{"id":"ws-1","slug":"platform","name":"Platform"}]"#;
+
+    #[tokio::test]
+    async fn profile_set_puts_only_requested_fields() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"id":"u-1","username":"jsell","display_name":"Jordan Sell","timezone":"America/New_York","locale":"en-US","global_role":"Member","created_at":1,"updated_at":2}"#.to_string(),
+            ),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_profile_set(
+            &api,
+            Some("Jordan Sell".to_string()),
+            Some("America/New_York".to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+        assert!(req.request_line.starts_with("PUT /api/v1/users/me"));
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+        // Only the two requested fields — no locale/avatar_url keys, so the
+        // server keeps their stored values.
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "display_name": "Jordan Sell",
+                "timezone": "America/New_York",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_set_requires_a_field_before_any_request() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_profile_set(&api, None, None, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no fields given"));
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn member_set_role_transfer_requires_owner_role() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_member_set_role(
+            &api,
+            Some("platform"),
+            "@asmith",
+            "Admin",
+            true, // --transfer with a non-Owner role
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("--transfer"));
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn member_set_role_validates_role_before_any_request() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_member_set_role(&api, Some("platform"), "@asmith", "SuperAdmin", false, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown role"));
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn member_set_role_sends_role_and_transfer_reason() {
+        // Sequence: slug resolve → user lookup → role PUT.
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), WORKSPACE_SLUG_JSON.to_string()),
+            (
+                "200 OK".to_string(),
+                r#"{"id":"u-9","username":"asmith","display_name":"Alice Smith"}"#.to_string(),
+            ),
+            ("204 No Content".to_string(), String::new()),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_member_set_role(
+            &api,
+            Some("platform"),
+            "@asmith",
+            "Owner",
+            true,
+            Some("handover"),
+        )
+        .await
+        .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0]
+            .request_line
+            .starts_with("GET /api/v1/workspaces?"));
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /api/v1/users/asmith"));
+        assert!(requests[2]
+            .request_line
+            .starts_with("PUT /api/v1/workspaces/ws-1/members/u-9/role"));
+        let body: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "role": "Owner", "reason": "handover" })
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_invite_by_handle_resolves_user_then_posts_invite() {
+        // Sequence: slug resolve → user lookup → invite POST.
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), WORKSPACE_SLUG_JSON.to_string()),
+            (
+                "200 OK".to_string(),
+                r#"{"id":"u-2","username":"alice","display_name":"Alice Smith"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"m-1","user_id":"u-2","workspace_id":"ws-1","role":"Developer","accepted":false,"created_at":1}"#.to_string(),
+            ),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_workspace_invite(&api, Some("platform"), "@alice", Some("Developer"))
+            .await
+            .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2]
+            .request_line
+            .starts_with("POST /api/v1/workspaces/ws-1/invite"));
+        let body: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "user_id": "u-2", "role": "Developer" })
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_invite_defaults_to_developer_role() {
+        // Sequence: slug resolve → user lookup → invite POST.
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), WORKSPACE_SLUG_JSON.to_string()),
+            (
+                "200 OK".to_string(),
+                r#"{"id":"u-2","username":"alice","display_name":""}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"m-1","user_id":"u-2","workspace_id":"ws-1","role":"Developer","accepted":false,"created_at":1}"#.to_string(),
+            ),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_workspace_invite(&api, Some("platform"), "alice", None)
+            .await
+            .unwrap();
+
+        let requests = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+        assert_eq!(body["role"], serde_json::json!("Developer"));
+    }
+
+    #[tokio::test]
+    async fn workspace_invite_by_email_takes_tenant_invite_path() {
+        // Sequence: slug resolve (for scoping) → tenant invite POST.
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), WORKSPACE_SLUG_JSON.to_string()),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"inv-1","email":"alice@example.com","status":"Pending"}"#.to_string(),
+            ),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_workspace_invite(
+            &api,
+            Some("platform"),
+            "alice@example.com",
+            Some("Developer"),
+        )
+        .await
+        .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1]
+            .request_line
+            .starts_with("POST /api/v1/tenant/invite"));
+        let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "email": "alice@example.com",
+                "workspace": "platform",
+                "role": "Developer",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn team_create_resolves_lead_then_posts_team() {
+        // Sequence: slug resolve → lead lookup → team POST.
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), WORKSPACE_SLUG_JSON.to_string()),
+            (
+                "200 OK".to_string(),
+                r#"{"id":"u-1","username":"jsell","display_name":"Jordan Sell"}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"id":"t-1","workspace_id":"ws-1","name":"Platform Team","slug":"platform-team","lead":"u-1","member_ids":[],"created_at":1}"#.to_string(),
+            ),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_team_create(
+            &api,
+            Some("platform"),
+            "Platform Team",
+            Some("@jsell"),
+            Some("Owns the platform"),
+        )
+        .await
+        .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1]
+            .request_line
+            .starts_with("GET /api/v1/users/jsell"));
+        assert!(requests[2]
+            .request_line
+            .starts_with("POST /api/v1/workspaces/ws-1/teams"));
+        let body: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "name": "Platform Team",
+                "lead": "u-1",
+                "description": "Owns the platform",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn team_add_resolves_user_and_team_by_name_or_slug() {
+        // Sequence: slug resolve → user lookup → team list → member POST.
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), WORKSPACE_SLUG_JSON.to_string()),
+            (
+                "200 OK".to_string(),
+                r#"{"id":"u-9","username":"asmith","display_name":"Alice Smith"}"#.to_string(),
+            ),
+            (
+                "200 OK".to_string(),
+                r#"{"teams":[{"id":"t-2","name":"Other Team","slug":"other","lead":"u-1","member_ids":[]},{"id":"t-1","name":"Platform Team","slug":"platform-team","lead":"u-1","member_ids":[]}]}"#.to_string(),
+            ),
+            (
+                "201 Created".to_string(),
+                r#"{"team_id":"t-1","user_id":"u-9","added_at":1}"#.to_string(),
+            ),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_team_membership(&api, Some("platform"), "@asmith", "Platform Team", false)
+            .await
+            .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        // "Platform Team" matched by NAME (the slug is platform-team), and
+        // the membership POST went to that team's id.
+        assert!(requests[2]
+            .request_line
+            .starts_with("GET /api/v1/workspaces/ws-1/teams"));
+        assert!(requests[3]
+            .request_line
+            .starts_with("POST /api/v1/workspaces/ws-1/teams/t-1/members"));
+        let body: serde_json::Value = serde_json::from_str(&requests[3].body).unwrap();
+        assert_eq!(body, serde_json::json!({ "user_id": "u-9" }));
+    }
+
+    #[tokio::test]
+    async fn team_remove_targets_resolved_team_member() {
+        // Sequence: slug resolve → user lookup → team list → member DELETE.
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), WORKSPACE_SLUG_JSON.to_string()),
+            (
+                "200 OK".to_string(),
+                r#"{"id":"u-9","username":"asmith","display_name":""}"#.to_string(),
+            ),
+            (
+                "200 OK".to_string(),
+                r#"{"teams":[{"id":"t-1","name":"Platform Team","slug":"platform-team","lead":"u-1","member_ids":[]}]}"#.to_string(),
+            ),
+            ("204 No Content".to_string(), String::new()),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_team_membership(&api, Some("platform"), "@asmith", "platform-team", true)
+            .await
+            .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3]
+            .request_line
+            .starts_with("DELETE /api/v1/workspaces/ws-1/teams/t-1/members/u-9"));
+    }
+
+    #[tokio::test]
+    async fn tenant_invite_single_sends_preassignment() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![(
+            "201 Created".to_string(),
+            r#"{"id":"inv-1","email":"alice@example.com","status":"Pending"}"#.to_string(),
+        )]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_tenant_invite(
+            &api,
+            Some("alice@example.com".to_string()),
+            Some("platform".to_string()),
+            Some("Developer".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .request_line
+            .starts_with("POST /api/v1/tenant/invite"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "email": "alice@example.com",
+                "workspace": "platform",
+                "role": "Developer",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_invite_role_without_workspace_is_rejected() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_tenant_invite(
+            &api,
+            Some("alice@example.com".to_string()),
+            None,
+            Some("Developer".to_string()),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("requires --workspace"));
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tenant_invite_bulk_parses_csv_and_posts_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("users.csv");
+        std::fs::write(
+            &csv_path,
+            "email,workspace,role\nalice@example.com\nbob@example.com,platform,Admin\n",
+        )
+        .unwrap();
+
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![(
+            "201 Created".to_string(),
+            r#"{"invited":2}"#.to_string(),
+        )]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_tenant_invite(&api, None, None, None, Some(csv_path))
+            .await
+            .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .request_line
+            .starts_with("POST /api/v1/tenant/invite/bulk"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "invitations": [
+                    { "email": "alice@example.com", "workspace": null, "role": null },
+                    { "email": "bob@example.com", "workspace": "platform", "role": "Admin" },
+                ]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn notifications_preferences_set_gets_merges_then_puts() {
+        // Sequence: preferences GET → preferences PUT.
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"preferences":[],"channels":{"in_app":true,"email":{"enabled":false,"digest":"Off","min_priority":"Medium"},"slack":{"webhook_url":"https://hooks.slack.com/keep","channel":null,"min_priority":"Low"}}}"#.to_string(),
+            ),
+            (
+                "200 OK".to_string(),
+                r#"{"preferences":[],"channels":{}}"#.to_string(),
+            ),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        run_notification_preferences_set(
+            &api,
+            ChannelPrefsUpdate {
+                email_digest: Some("hourly"),
+                email_min_priority: Some("high"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0]
+            .request_line
+            .starts_with("GET /api/v1/notifications/preferences"));
+        assert!(requests[1]
+            .request_line
+            .starts_with("PUT /api/v1/notifications/preferences"));
+        let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        // Email updated + enabled; the untouched Slack channel survives.
+        assert_eq!(
+            body["channels"]["email"],
+            serde_json::json!({ "enabled": true, "digest": "Hourly", "min_priority": "High" })
+        );
+        assert_eq!(
+            body["channels"]["slack"]["webhook_url"],
+            serde_json::json!("https://hooks.slack.com/keep")
+        );
+    }
+
+    #[tokio::test]
+    async fn notifications_list_filters_unread_client_side() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![
+            (
+                "200 OK".to_string(),
+                r#"{"notifications":[
+                    {"id":"n-1","priority":3,"notification_type":"SpecApprovalRequested","title":"A","read":true,"created_at":1},
+                    {"id":"n-2","priority":2,"notification_type":"AgentEscalation","title":"B","read":false,"created_at":2}
+                ],"limit":200,"offset":0}"#
+                    .to_string(),
+            ),
+        ]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        // --unread --priority high: the priority filter goes to the server;
+        // the read flag is filtered client-side.
+        run_notifications_list(&api, true, Some("high"), None, None, 50)
+            .await
+            .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let line = &requests[0].request_line;
+        assert!(line.starts_with("GET /api/v1/notifications?"));
+        assert!(line.contains("priority=high"));
+        assert!(line.contains("limit=200"));
+        assert!(!line.contains("unread"));
+    }
+
+    #[tokio::test]
+    async fn notifications_list_rejects_unknown_priority_before_request() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let err = run_notifications_list(&api, false, Some("critical"), None, None, 50)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("priority"));
+        assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sessions_revoke_uses_spec_endpoint() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![(
+            "204 No Content".to_string(),
+            String::new(),
+        )]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        api.revoke_session("s-42").await.unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .request_line
+            .starts_with("DELETE /api/v1/users/me/sessions/s-42"));
+    }
+
+    #[tokio::test]
+    async fn sessions_revoke_all_uses_spec_endpoint() {
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![(
+            "200 OK".to_string(),
+            r#"{"revoked":3}"#.to_string(),
+        )]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let result = api.revoke_all_sessions().await.unwrap();
+        assert_eq!(result["revoked"], serde_json::json!(3));
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .request_line
+            .starts_with("POST /api/v1/users/me/sessions/revoke-all"));
     }
 }
