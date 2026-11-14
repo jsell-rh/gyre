@@ -3608,8 +3608,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("authorization", format!("Bearer {token}"))
                     .body(Body::from(
-                        serde_json::to_vec(&serde_json::json!({ "reason": "superseded" }))
-                            .unwrap(),
+                        serde_json::to_vec(&serde_json::json!({ "reason": "superseded" })).unwrap(),
                     ))
                     .unwrap(),
             )
@@ -3625,7 +3624,10 @@ mod tests {
             rows[0].status(),
             gyre_domain::spec_approval::ApprovalStatus::Revoked
         );
-        assert_eq!(rows[0].revoked_by.as_deref(), Some("agent:agt-self-revoke-1"));
+        assert_eq!(
+            rows[0].revoked_by.as_deref(),
+            Some("agent:agt-self-revoke-1")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
