@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -97,63 +97,3 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
-## Shipped
-
-**This round: rebase repair onto current main head 1ee52c43** (durable
-finding 08005f87, merge_state DIRTY — the published PR head 6594708e
-conflicted with main after task-112 notification delivery channels and
-task-125 API rows landed). No product code changed: the invitation flow
-is the independently approved implementation from prior rounds (domain
-entities, ports, SQLite/Postgres/mem adapters, migrations
-2026-11-13-000063/64/65, the five tenant endpoints, workspace
-invitation lifecycle, CSPRNG + SHA-256 tokens, per-tenant
-`InvitationPolicy`, bulk invite, background expiry job, ABAC mappings),
-now merged with main 1ee52c43 as merge commit 104fc5e3.
-
-### Conflicts resolved (source only)
-
-- `gyre-adapters/src/sqlite/mod.rs` — the `migration_000058_backfills_
-  unique_url_safe_usernames` test's exclusion set: both task-110's
-  `2026-11-13-000065_user_tenant_scope` (indexes 000058's tenant_id
-  column, so it cannot run pre-000058; runs in its deployed batch
-  position right after 000058) and task-112's
-  `2026-11-09-000060_user_preferences_channel_shape` (rewrites 000058's
-  flat backfill literal; runs after 000058 followed by the convergence
-  assert) are excluded from `pre` and run explicitly.
-- `specs/coverage/system/user-management.md` — header recomputed against
-  the auto-merged table: rows 5/6/7/25 (task-110) and 16/17/18
-  (task-112) are all implemented in the merged tree; counts 14/36
-  (11 n/a, 0 not-started, 11 task-assigned, 14 implemented, 0 verified).
-- `web/dist` took main's side verbatim (assignment-base state); no
-  rebuild — final integration regenerates and publishes those assets.
-
-### Merge-integrity and gate evidence (this head)
-
-- `cargo check --all` passes — the task-110 invitation/auth additions
-  and task-112's `NotificationDispatcher`/channel-preferences wiring
-  coexist type-safely.
-- `cargo fmt --all --check` clean; `cargo clippy -p gyre-adapters`
-  reports zero warnings in the hand-resolved file (remaining warnings
-  are pre-existing on both parents).
-- Mechanical checks pass: architecture lint, migration versions (no new
-  duplicate Diesel versions — 20261113000063/64/65 vs main's
-  20261109000060/61 are distinct), migration SQL portability, ABAC
-  route registry, ABAC exempt handlers.
-- Focused tests: `cargo test -p gyre-adapters` 524 passed / 0 failed —
-  includes the merged `migration_000058_backfills...` (pre + 000058 +
-  m65 + m60 ordering), `migration_000060_rewrites...`, the SQLite
-  invitation repositories, and the mem-port contract tests;
-  `-p gyre-domain -p gyre-ports -p gyre-common` 646 passed / 0 failed.
-- gyre-server test compilation is blocked by this sandbox's 4 GiB build
-  wrapper (environment restriction, not a defect): the independent
-  verifier must run `cargo nextest run --all` — in particular the 26
-  `api::invitations` tests (tenant lifecycle, revocation blocks accept,
-  expiry job marks expired, bulk invite, non-admin 403, local-mode accept
-  mints an authenticating API key, re-invite fresh key, SSO link,
-  workspace lifecycle, cross-tenant containment, `max_pending` cap,
-  `allow_re_invite`) and task-112's notification-dispatcher tests.
-
-Coverage rows 5, 6, 7, and 25 in
-`specs/coverage/system/user-management.md` remain `implemented` and
-describe the merged tree accurately.
