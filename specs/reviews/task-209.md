@@ -1,0 +1,39 @@
+# Review — task-209 (Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info)
+
+Spec: `specs/system/human-system-interface.md` §12 "What the Profile Is" (coverage row 53).
+Candidate under review: `25acd4f1` (branch `pipeline/task-209/6d12dae8c60b46228d387f442333fbb9-1`, base `b6892403`).
+Verdict: **approved** — all acceptance criteria verified against production code with in-sandbox probes; prior review findings F1–F5 all repaired with dedicated regression tests.
+
+## Scope of this round
+
+This candidate is the recovered task-209 checkpoint rebased onto base `b6892403` (task-056 abandoned-branch base) plus the repair commits for the 2026-11-04 review round (F1 spec-approval revoke/reject, F2 reject-after-approve attribution, F3 postgres test parity, F4 Profile ledger filters/pagination, F5 judgments unknown-type 400). Diff scoping verified: every mainline SHA merged in the branch history is an ancestor of the assigned base, so the base..candidate diff is purely task-209 work; cross-task file touches are limited to arity repairs for the new `exclude_types` port parameter (test-only call sites), each task-209-labeled and recorded in the frontmatter at HEAD.
+
+## Probes run (evidence: /tmp/stage/review-evidence/)
+
+- `cargo test -p gyre-adapters --lib user_profile` → **18 passed** (sqlite ledger merge/filter/pagination/rejection-attribution/compression-decompression, notification exclusion, record_login debounce; postgres SQL-shape parity tests).
+- `cargo test -p gyre-domain --lib` → **508 passed** (incl. `JudgmentType` gate round-trip, `AuditEventType` named-variant parse).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib --tests` → **clean** (cold run 5m48s).
+- `cd web && npm ci && npm test` → **2315 passed / 41 skipped, 0 failed** (113 files).
+- All repo lint scripts OK: arch, migration versions, notification-toggle-coverage (new), ABAC route registry, ABAC exempt handlers, mem port contracts, MCP write tools, dead message kinds, relative paths, byte slices, fail-open refs, lossy secrets, forged scopes, forwarded headers, scope literals, fabricated scopes, inert enforcement, in-memory state stores. `check-task-commit-attribution.sh` OK against the committed candidate (the dirty working-tree `specs/tasks/task-209.md` is the stage's own uncommitted reset, not candidate content). `check-tenant-filter.sh` has a pre-existing awk error at the base too — not a candidate defect.
+- **Mutation probes (test-inflation check), both killed and sources restored:**
+  1. Disabling the judgment-ledger SQL workspace filter (`sqlite/user_profile.rs:348`) → `judgment_ledger_workspace_filter_drops_unattributed` FAILS.
+  2. Disabling the notification `ne_all` exclusion (`sqlite/notification.rs:193,331`) → `notifications_exclude_types_applies_to_list_and_count` FAILS.
+
+## Acceptance-criteria verification
+
+- **Spec amendment (Part 1)** — HSI §12 Judgment Ledger now names the four concrete sources with attribution keys (`spec_approvals` joined to `spec_ledger_entries` for workspace; `audit_events` rows `event_type IN (gate_override, trust_change, meta_spec_publish)` with `user_id` attribution), and `?type=` values are `approval|rejection|gate|trust|meta-spec`, exactly `JudgmentType::as_str()`. The notification-preferences bullets were amended to canonical names + in-query filtering + the 400-on-unknown-type contract the code enforces. Auth-provider-info bullet specifies `oidc_issuer`/`last_login_at` read-only semantics.
+- **`JudgmentType::GateOverride`** — `as_str() = "gate"`, `from_db_str("gate")` parses; domain round-trip test green.
+- **Aggregation (Part 2)** — `list_for_user` unions spec_approvals (LEFT JOIN spec_ledger_entries; `?workspace_id=` filters in SQL, not stamps; rejection attributed to `rejected_by`/`revoked_by`, not the original approver) with the three audit-event categories read through the shared `AuditEventRow` materialization (compressed `detail_zstd` payloads decompress — dedicated test). Reverse-chron sort with deterministic tie-break; limit/offset after the merge. Postgres adapter mirrors the queries with SQL-shape tests; mem adapter aggregates the same shared stores. The `?workspace_id=` filter is load-bearing (mutation probe 1).
+- **Trust-change write path** — `PUT /workspaces/:id` writes a `trust_change` audit event (from/to/workspace_id, `user_id` = acting human) only on real transitions; failure propagates. Test asserts event + no-event on same-value PUT.
+- **Gate-override write path** — human (`user_id`-principal) approval review on an MR with failed gate results writes one `gate_override` event per failed gate (mr_id/gate_id/gate_type/failed→overridden); agent-token approvals excluded. Test asserts both the negative (agent token) and positive cases plus the `?type=gate` ledger shape end-to-end through the real router.
+- **Meta-spec publish attribution** — registry create/update write `meta_spec_publish` events (kind/name/version/content_hash, workspace from the meta-spec's own scope; Global/Tenant scopes deliberately carry no workspace attribution). Test asserts attribution + second event on version bump. Registry DELETE additionally gained per-handler scope-level authorization (Global→Admin, Tenant→scope-tenant Admin, Workspace→membership) — a genuine containment improvement on an ABAC-exempt route.
+- **Inbox filtering** — `NotificationRepository::list_for_user`/`count_unresolved` take `exclude_types`, applied in-query before pagination (badge cannot count hidden types); users.rs inbox/count and the MCP notifications tool load disabled types from `user_notification_preferences`; background de-dup callers pass `&[]`; PUT rejects unknown `notification_type` with 400 and normalizes legacy parse aliases to canonical names before storing (inert-toggle class). Mutation probe 2 proves the filter is load-bearing.
+- **Auth provider info** — migration `2026-10-07-000056_user_auth_provider_info` adds `users.oidc_issuer` (version-distinct from the other 000056s by date prefix — migration-version check green); JWT validation calls `UserRepository::record_login` (single-statement debounced UPDATE with issuer-change carve-out; sqlite/postgres/mem parity; `PUT /users/me` has no field for either). Tests assert recording, debounce, issuer-change bypass, and preservation across profile edits.
+- **Prior findings repaired**: F1 agent self-revoke (array-form scope check, `agent_can_revoke_its_own_approval_with_agent_jwt`); F2 reject transitions Approved rows so the declining human's `rejected_by` is recorded (`reject_approved_spec_records_declining_human`); F3 postgres SQL-shape tests incl. cross-backend `JUDGMENT_AUDIT_TYPES` parity assertion; F4 Profile ledger type filter + load-more pagination (`LEDGER_PAGE_SIZE`, `ledgerHasMore`); F5 `?type=<unknown>` → 400 (`judgments_unknown_type_returns_400`).
+- **Mechanical guards added**: `scripts/check-notification-toggle-coverage.sh` (enum ↔ toggle ids ↔ locale labels, wired into pre-commit + CI) — a real lint against the dead-toggle class found in review.
+
+## Notes for the independent verifier
+
+gyre-server test-binary compilation exceeds the review sandbox budget; `cargo check -p gyre-server --lib --tests` is clean at the exact candidate. Execute the server-side tests listed in `/tmp/stage/review-evidence/review-summary.md` (trust-change, gate-override, meta-spec publish, inbox/count exclusion, get_me auth-provider info, judgments 400, spec approve/reject/revoke ledger surfacing, meta-spec delete authorization), plus the full gates `cargo test --all` and `cd web && npm test` (web suite already green in-sandbox).
+
+Generated-output observation (non-blocking, verifier-owned): `web/dist/` is owned by the deterministic verifier and may match an earlier bundle at this checkpoint; authored frontend source and tests were reviewed instead.
