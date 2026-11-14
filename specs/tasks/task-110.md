@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["9f9be53014102d44e5e8c148d21b580448c226c7", "d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["9f9be53014102d44e5e8c148d21b580448c226c7", "d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb", "47bd64d034047a90e95ff40b0fb9a30c33a6472b", "01958bc011244ae4a4c06258baec597a00d8134d"]
 ---
 
 ## Spec Excerpt
@@ -83,16 +83,16 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 
 ## Acceptance Criteria
 
-- [ ] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
-- [ ] Port traits for both invitation types
-- [ ] SQLite adapter with migrations (check current migration number)
-- [ ] All 5 tenant invitation API endpoints functional
-- [ ] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
-- [ ] Token generation uses cryptographically random bytes, stored as SHA-256 hash
-- [ ] Invitation expiry background job marks expired invitations
-- [ ] Bulk invite endpoint accepts array of invitations
-- [ ] Routes registered in `api/mod.rs` with ABAC mappings
-- [ ] `cargo test --all` passes
+- [x] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
+- [x] Port traits for both invitation types
+- [x] SQLite adapter with migrations (check current migration number)
+- [x] All 5 tenant invitation API endpoints functional
+- [x] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
+- [x] Token generation uses cryptographically random bytes, stored as SHA-256 hash
+- [x] Invitation expiry background job marks expired invitations
+- [x] Bulk invite endpoint accepts array of invitations
+- [x] Routes registered in `api/mod.rs` with ABAC mappings
+- [ ] `cargo test --all` passes (server suite deferred to the independent verifier; see below)
 
 ## Agent Instructions
 
@@ -101,8 +101,9 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 ## Shipped
 
 Tenant & workspace invitation flow, implemented and carried through multiple
-review/repair rounds on this branch (assignment base 2824d9b1 merged at
-7d932e41):
+review/repair rounds on this branch; this round resolved the DIRTY merge
+state against current main head 9fb371ac (task-111 session management) with
+the retained implementation preserved (merge commit 47bd64d0):
 
 - **Domain entities** (`gyre-domain`): `TenantInvitation`, `WorkspaceInvitation`,
   `InvitationStatus` (Pending/Accepted/Declined/Expired/Revoked), per-tenant
@@ -135,20 +136,48 @@ review/repair rounds on this branch (assignment base 2824d9b1 merged at
   non-member invitee is still denied on a workspace-mapped route, then exercises
   accept (204 + membership) and decline (204 + no membership).
 
-### This round
+### This round: merge-conflict resolution (repair 145e1f10)
 
-Verification of candidate a309844 failed only on rustfmt: the two
-`let invitation =` / `authorize_my_pending_invitation(...)` bindings in the
-invitee accept/decline handlers were split across lines. Fixed by joining them
-(commit 9f9be530, whitespace-only — no behavior change).
+Resolved the merge of main head 9fb371ac (task-111 session management) into
+this branch; the implementation itself is unchanged. Four conflicted paths:
 
-### Verification evidence
+- `crates/gyre-server/src/api/mod.rs` — the `users::` import conflict taken as
+  the union of both sides minus `list_invitations`/`revoke_invitation`: main's
+  users.rs carried task-124's parallel workspace-invitation handlers, but the
+  merged users.rs is this branch's version (those handlers were removed at the
+  prior repair in favor of task-110's `WorkspaceInvitation` model, which
+  registers the same routes from `api/invitations.rs`), so importing them would
+  not compile and registering them would duplicate routes. Session imports
+  (`list_my_sessions`, `revoke_my_session`, `revoke_all_my_sessions`,
+  `list_user_sessions`, `revoke_user_session`, `revoke_all_user_sessions`)
+  are kept — those handlers exist in the merged users.rs.
+- `crates/gyre-server/src/main.rs` — kept both background spawns:
+  `gyre_server::api::invitations::spawn_invitation_expiry` (task-110) and
+  `spawn_session_cleanup` (task-111).
+- `specs/coverage/system/user-management.md` — merged recount: rows 5/6/7/25
+  (task-110) and 12/26 (task-111 sessions) implemented; row 30 (§CLI) now
+  implemented because both formerly-open command groups resolve against live
+  endpoints in this tree (sessions → task-111, tenant invitations → task-110).
+- `specs/coverage/SUMMARY.md` — regenerated mechanically via
+  `scripts/update-coverage-summary.sh` (also picks up main's auto-merged
+  abac-policy-engine/agent-gates row changes): user-management 36 rows,
+  11 n/a, 7 task-assigned, 18 implemented; TOTAL 802/220/0/186/233/163 = 68%.
 
-- `python3 scripts/check-rustfmt-diff.py 2824d9b186d5da08ae043772762246ee5b620e89`
-  — OK (changed lines clean, 22 Rust files). Evidence retained under
-  `/tmp/stage/review-evidence`.
-- Prior-round evidence (clippy changed-lines clean, architecture/ABAC/migration
-  checks, `cargo check -p gyre-server --tests`) carried over; this round's diff
-  is whitespace-only. Server test compilation is left to the independent
-  verifier per the 4 GiB budget rule; the relevant suite is
-  `cargo test -p gyre-server invitations`.
+### Verification evidence (this round)
+
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests` —
+  clean (exit 0, no errors).
+- `cargo test -p gyre-domain` — 539 + 8 passed.
+- `cargo test -p gyre-adapters` — 545 passed (includes the invitation and
+  session repository/migration adapter tests).
+- Mechanical invariant checks PASS: `check-arch`, `check-abac-route-registry`,
+  `check-migration-versions`, `check-abac-exempt-handlers`,
+  `check-dead-message-kinds`, `check-mem-port-contracts`,
+  `check-in-memory-state-stores`, `check-migration-sql-portability`,
+  `check-unbounded-external-http`.
+- Static duplicate-route scan of the merged `api/mod.rs`: 309 registrations,
+  no duplicate paths (axum panics on duplicates at router construction).
+- Server test compilation/run is left to the independent verifier per the
+  4 GiB budget rule; the suites to execute there:
+  `cargo test -p gyre-server invitations`, `cargo test -p gyre-server sessions`,
+  and `cargo test --all`.
