@@ -116,7 +116,9 @@ respected and guarded by a test).
   linking to the caller's own `/@{username}`; a `goToUserProfile` context
   is exposed for future @mention/activity-feed surfaces (no @mention
   rendering surface exists in the UI today — the context + URL route are
-  the integration point).
+  the integration point). The two e2e user-menu locators that matched
+  "Profile" by substring were tightened to exact-text matches
+  (`/^Profile$/`) because the menu now also offers "Public profile".
 
 ### Test evidence
 
