@@ -522,13 +522,10 @@ impl gyre_ports::AttestationVerifier for ForgeAttestationVerifier {
                 errors.push("gate attestation carries no signature".to_string());
                 false
             } else {
-                // `match` form (not a statement-position .verify_*() call):
-                // the result is consumed and the Err arm fails closed —
-                // identical to .unwrap_or(false).
-                match self.verify_gate_signature(gate).await {
-                    Ok(valid) => valid,
-                    Err(_) => false,
-                }
+                // `unwrap_or_default()`: bool's default is false, so a
+                // verification error fails closed (the gate signature is
+                // treated as NOT valid).
+                self.verify_gate_signature(gate).await.unwrap_or_default()
             };
             gate_results.push(GateVerificationResult {
                 name: gate.name.clone(),
