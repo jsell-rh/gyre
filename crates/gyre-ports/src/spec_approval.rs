@@ -39,7 +39,10 @@ pub trait SpecApprovalRepository: Send + Sync {
         now: u64,
     ) -> Result<Option<()>, ApprovalTransitionError>;
 
-    /// Transition an entry to Rejected (Pending → Rejected).
+    /// Transition an entry to Rejected (Pending → Rejected, or
+    /// Approved → Rejected — the decline-after-approval path: a human
+    /// rejecting an already-approved spec records their judgment in
+    /// `rejected_by`).
     async fn reject(
         &self,
         id: &Id,
