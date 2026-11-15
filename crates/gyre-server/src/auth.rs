@@ -1119,6 +1119,10 @@ struct JwtClaims {
     /// use-site fallback.
     #[serde(default = "default_tenant_claim")]
     tenant_id: String,
+    /// Email verification flag (OIDC standard). Required to claim an
+    /// invitation-created account by email — see find_or_create_user_tenant.
+    #[serde(default)]
+    email_verified: Option<bool>,
 }
 
 /// Serde default for [`JwtClaims::tenant_id`]: an absent tenant claim maps
@@ -1999,15 +2003,18 @@ async fn validate_jwt(
     let tenant_id = claims.tenant_id;
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
-    // Find or auto-create user. The validated tenant claim binds the user
-    // at creation (F1): an OIDC user must not exist as tenant-less.
-    let user = find_or_create_user(
+    // Find or auto-create user. The tenant scope enables the invitation
+    // email-link (an invitation accepted in local mode is claimed by the
+    // SSO subject on first login when the emails match in the same
+    // tenant and the IdP has verified the email).
+    let user = find_or_create_user_tenant(
         state,
         &claims.sub,
+        Some(&tenant_id),
         &preferred_username,
         claims.email.as_deref(),
+        claims.email_verified.unwrap_or(false),
         &roles,
-        &tenant_id,
     )
     .await
     .map_err(|e| format!("user resolution: {e}"))?;
@@ -2051,22 +2058,45 @@ async fn validate_jwt(
     })
 }
 
-/// Find or auto-provision a user from a verified SSO identity.
+/// Find or auto-provision the user for a verified JWT, linking a
+/// previously accepted invitation (user-management.md §Tenant-Level
+/// User Onboarding, task-110 F2).
 ///
-/// - First login: the username is derived from the SSO `preferred_username`
-///   claim (sanitized to the URL-safe handle contract; falls back to the
-///   subject when sanitization yields nothing), display name starts as the
-///   raw preferred_username (user-management.md §Username vs Display Name).
-/// - Every authentication: `last_login_at` is stamped and persisted.
-/// - The username is immutable after creation: later logins never rewrite
-///   it, even if the IdP later changes `preferred_username`.
-async fn find_or_create_user(
+/// Resolution order:
+/// 1. `external_id` — the Keycloak subject. `last_login_at` is stamped
+///    on every authentication (Spec §User Entity); the username is
+///    immutable after creation, so later logins never rewrite it even
+///    if the IdP later changes `preferred_username`.
+/// 2. Email link within the tenant: an invitation accepted in local
+///    mode has external_id `tenant:{tenant}:email:{email}`. When the
+///    SSO subject's email matches that account in the same tenant, the
+///    account is CLAIMED: its external_id is re-pointed to the SSO
+///    subject via the port's sanctioned claim transition
+///    (`claim_external_id`; plain `update()` rejects external_id
+///    changes per §Username vs Display Name) so the pre-assigned
+///    memberships and invited GlobalRole attach to the SSO identity
+///    instead of a duplicate account. Requires `email_verified=true` on
+///    the token — an attacker who controls an unverified email in the
+///    IdP must not gain a tenant account by choosing the invitee's
+///    address. The namespace lookup is tenant/email-scoped (review
+///    f36e46e1 F1): a record on the namespace whose stored tenant or
+///    email does not match the claim is foreign (e.g. a planted SCIM
+///    externalId) and is never claimed.
+/// 3. Otherwise auto-provision a new user (tenant-scoped when the JWT
+///    carries a tenant claim): the username is derived from the SSO
+///    `preferred_username` claim (sanitized to the URL-safe handle
+///    contract, with a generated unique handle when sanitization
+///    yields nothing), display name starts as the raw
+///    preferred_username (user-management.md §Username vs Display
+///    Name).
+async fn find_or_create_user_tenant(
     state: &Arc<AppState>,
     external_id: &str,
+    tenant_id: Option<&str>,
     preferred_username: &str,
     email: Option<&str>,
+    email_verified: bool,
     roles: &[UserRole],
-    tenant_id: &str,
 ) -> anyhow::Result<User> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2111,7 +2141,9 @@ async fn find_or_create_user(
     // `system-full-access` (priority 1000) matches the reserved system
     // identity. The claim content is caller-chosen, so provisioning under
     // the reserved handle must fail closed (401) rather than create a
-    // user that can spoof the system principal.
+    // user that can spoof the system principal. Checked before the
+    // invitation email-link so a spoofed reserved handle can never drive
+    // any account linkage either.
     if preferred_username == gyre_domain::SYSTEM_ABAC_IDENTITY {
         tracing::warn!(
             external_id,
@@ -2119,6 +2151,78 @@ async fn find_or_create_user(
              preferred_username; rejecting"
         );
         anyhow::bail!("preferred_username is the reserved system ABAC identity");
+    }
+
+    // Email link (only meaningful with a tenant scope, a verified email,
+    // and a matching invitation-created account).
+    if let (Some(tenant), Some(email), true) = (tenant_id, email, email_verified) {
+        let local_ns = format!("tenant:{tenant}:email:{}", email.to_lowercase());
+        // F1 sibling (review f36e46e1): find_by_external_id is a GLOBAL
+        // lookup, and the SCIM surface persists caller-chosen externalId
+        // verbatim — so a namespace hit is only the invitation-created
+        // account when the record's tenant and email match this claim.
+        // A foreign record planted on the namespace (e.g. a SCIM user
+        // with externalId "tenant:acme:email:bob@acme.com") must not be
+        // claimed and re-pointed at this SSO subject; fall through to
+        // provisioning instead.
+        let ns_hit = state.users.find_by_external_id(&local_ns).await?;
+        let invited = match ns_hit {
+            Some(u)
+                if u.tenant_id.as_ref().is_some_and(|t| t.as_str() == tenant)
+                    && u.email
+                        .as_deref()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(email)) =>
+            {
+                Some(u)
+            }
+            Some(foreign) => {
+                tracing::warn!(
+                    user_id = %foreign.id,
+                    claim_tenant = tenant,
+                    external_id = %local_ns,
+                    "invitation identity namespace held by a record outside the \
+                     claim scope; not linking"
+                );
+                None
+            }
+            None => None,
+        };
+        if let Some(mut invited) = invited {
+            // Deactivated accounts cannot be claimed back into service
+            // via the SSO email link (same contract as the direct
+            // external_id branch above: deactivation is
+            // TenantAdmin-initiated and outlives the user's IdP session —
+            // a verified-email match for a deactivated invitation
+            // account is still that deactivated account, not a fresh
+            // one to link).
+            if invited.is_deactivated() {
+                anyhow::bail!("user account is deactivated; contact a tenant administrator");
+            }
+            // Claim: same email in the same tenant. Re-point the
+            // external_id at the SSO subject via the port's sanctioned
+            // claim transition — update() rejects external_id changes
+            // (user-management.md §Username vs Display Name) — so the
+            // pre-assigned memberships and invited GlobalRole resolve to
+            // this one account instead of a duplicate.
+            state
+                .users
+                .claim_external_id(&invited.id, external_id)
+                .await?;
+            invited.external_id = external_id.to_string();
+            if !roles.is_empty() {
+                invited.roles = roles.to_vec();
+            }
+            // The claim is the invited account's first SSO authentication:
+            // stamp it like any other login.
+            invited.record_login(now);
+            state.users.update(&invited).await?;
+            tracing::info!(
+                user_id = %invited.id,
+                tenant_id = %tenant,
+                "linked invitation-created account to SSO subject"
+            );
+            return Ok(invited);
+        }
     }
 
     // Derive the URL-safe username from the SSO preferred_username. When
@@ -2169,12 +2273,16 @@ async fn find_or_create_user(
         now,
     );
     user.email = email.map(|e| e.to_string());
+    // F1: bind the user to the validated tenant claim so later API-key or
+    // JWT auth for this user resolves a real scope. The JWT path always
+    // supplies the claim (the serde schema default maps an absent claim
+    // to the bootstrapped tenant), so the Option is Some on every call.
+    if let Some(t) = tenant_id {
+        user.tenant_id = Some(Id::new(t.to_string()));
+    }
     if !roles.is_empty() {
         user.roles = roles.to_vec();
     }
-    // F1: bind the user to the validated tenant claim so later API-key or
-    // JWT auth for this user resolves a real scope.
-    user.tenant_id = Some(Id::new(tenant_id));
     user.last_login_at = Some(now);
 
     // create() can still fail on the unique index if another user was
@@ -2191,7 +2299,10 @@ async fn find_or_create_user(
 /// handle, later colliding users get deterministic numeric suffixes
 /// (base-2, base-3, ...). An exhausted suffix space bails and the caller
 /// assigns a generated `u-<id>` handle (unique by the fresh primary key).
-async fn resolve_unique_username(state: &Arc<AppState>, base: &str) -> anyhow::Result<String> {
+pub(crate) async fn resolve_unique_username(
+    state: &Arc<AppState>,
+    base: &str,
+) -> anyhow::Result<String> {
     let mut candidate = base.to_string();
     // Bounded at 2..=10_000 so a pathological store cannot pin this loop
     // open; an exhausted space bails to the generated-handle fallback.
@@ -2713,6 +2824,12 @@ mod tests {
     #[allow(dead_code)]
     fn app_with_jwt() -> Router {
         let state = make_test_state_with_jwt();
+        Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state)
+    }
+
+    fn app_with_jwt_state(state: Arc<crate::AppState>) -> Router {
         Router::new()
             .route("/protected", get(authenticated_handler))
             .with_state(state)
@@ -4242,6 +4359,257 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -- task-110 F2: invitation → SSO email link --------------------------------
+
+    /// A JWT login with a verified email matching an invitation-created
+    /// account (tenant-namespaced external_id) claims that account: the
+    /// external_id is re-pointed at the Keycloak subject, so the
+    /// pre-assigned memberships and invited GlobalRole ride the SSO
+    /// identity instead of a duplicate account.
+    #[tokio::test]
+    async fn jwt_email_link_claims_invitation_account() {
+        let state = make_test_state_with_jwt();
+
+        // Invitation-created local account (as accept_tenant_invitation
+        // would create it).
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-1"),
+            "tenant:acme:email:alice@example.com",
+            "alice",
+            1000,
+        );
+        invited.email = Some("alice@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+
+        // First SSO login: sub differs, email matches, verified.
+        let claims = serde_json::json!({
+            "sub": "keycloak-sub-alice",
+            "preferred_username": "alice",
+            "email": "alice@example.com",
+            "email_verified": true,
+            "tenant_id": "acme"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The account was claimed: resolved by the SSO subject, no
+        // duplicate user created, and the tenant scope is preserved.
+        let claimed = state
+            .users
+            .find_by_external_id("keycloak-sub-alice")
+            .await
+            .unwrap()
+            .expect("account re-pointed to SSO subject");
+        assert_eq!(claimed.id, invited.id, "same account, not a duplicate");
+        assert_eq!(claimed.tenant_id, Some(gyre_common::Id::new("acme")));
+
+        // The old namespaced id no longer resolves (single account).
+        assert!(state
+            .users
+            .find_by_external_id("tenant:acme:email:alice@example.com")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Review 4cf9e027 F1 (deactivation contract): the SSO email-link
+    /// claim branch must not claim a DEACTIVATED invitation-created
+    /// account. Deactivation is TenantAdmin-initiated and outlives the
+    /// user's IdP session (the contract enforced by the API-key, WS, and
+    /// direct external_id paths) — a verified-email match for a
+    /// deactivated account must not mint a live session for it.
+    #[tokio::test]
+    async fn jwt_email_link_does_not_claim_deactivated_account() {
+        let state = make_test_state_with_jwt();
+
+        // Invitation-created local account, then deactivated by a
+        // TenantAdmin (PUT /api/v1/users/{id}/deactivate cascade).
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-deact"),
+            "tenant:acme:email:dave@example.com",
+            "dave",
+            1000,
+        );
+        invited.email = Some("dave@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+        let mut stored = state
+            .users
+            .find_by_id(&gyre_common::Id::new("invited-user-deact"))
+            .await
+            .unwrap()
+            .unwrap();
+        stored.deactivate(2000);
+        state.users.update(&stored).await.unwrap();
+
+        // SSO login with matching verified email in the same tenant.
+        let claims = serde_json::json!({
+            "sub": "keycloak-sub-dave",
+            "preferred_username": "dave",
+            "email": "dave@example.com",
+            "email_verified": true,
+            "tenant_id": "acme"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a deactivated account must not re-authenticate via the email-link claim"
+        );
+
+        // The deactivated account was NOT claimed: it keeps its
+        // namespaced external_id, and no session-bearing account was
+        // created for the SSO subject.
+        let untouched = state
+            .users
+            .find_by_external_id("tenant:acme:email:dave@example.com")
+            .await
+            .unwrap()
+            .expect("deactivated invitation account was not claimed");
+        assert_eq!(untouched.id, gyre_common::Id::new("invited-user-deact"));
+        assert!(untouched.is_deactivated());
+        assert!(
+            state
+                .users
+                .find_by_external_id("keycloak-sub-dave")
+                .await
+                .unwrap()
+                .is_none(),
+            "no account exists under the SSO subject — the login failed closed"
+        );
+    }
+
+    /// An UNVERIFIED email must not claim the invitation account — an
+    /// attacker who can set an arbitrary unverified email in the IdP
+    /// must not inherit the invitee's tenant memberships.
+    #[tokio::test]
+    async fn jwt_unverified_email_does_not_claim_invitation_account() {
+        let state = make_test_state_with_jwt();
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-2"),
+            "tenant:acme:email:bob@example.com",
+            "bob",
+            1000,
+        );
+        invited.email = Some("bob@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+
+        let claims = serde_json::json!({
+            "sub": "attacker-sub",
+            "preferred_username": "mallory",
+            "email": "bob@example.com",
+            "email_verified": false,
+            "tenant_id": "acme"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A new account was provisioned; the invitation account is
+        // untouched (still resolvable by its namespaced id).
+        let fresh = state
+            .users
+            .find_by_external_id("attacker-sub")
+            .await
+            .unwrap()
+            .expect("auto-provisioned new account");
+        assert_ne!(fresh.id, invited.id);
+        let still_there = state
+            .users
+            .find_by_external_id("tenant:acme:email:bob@example.com")
+            .await
+            .unwrap()
+            .expect("invitation account was NOT claimed");
+        assert_eq!(still_there.id, invited.id);
+    }
+
+    /// Cross-tenant emails do not link: same email in a different
+    /// tenant must not claim the account (tenants are isolation
+    /// boundaries).
+    #[tokio::test]
+    async fn jwt_email_link_does_not_cross_tenants() {
+        let state = make_test_state_with_jwt();
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-3"),
+            "tenant:acme:email:carol@example.com",
+            "carol",
+            1000,
+        );
+        invited.email = Some("carol@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+
+        // Same email, but the JWT tenant is "other".
+        let claims = serde_json::json!({
+            "sub": "other-tenant-sub",
+            "preferred_username": "carol",
+            "email": "carol@example.com",
+            "email_verified": true,
+            "tenant_id": "other"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // New account in the other tenant; acme account untouched.
+        let fresh = state
+            .users
+            .find_by_external_id("other-tenant-sub")
+            .await
+            .unwrap()
+            .expect("auto-provisioned new account");
+        assert_ne!(fresh.id, invited.id);
+        assert!(
+            state
+                .users
+                .find_by_external_id("tenant:acme:email:carol@example.com")
+                .await
+                .unwrap()
+                .is_some(),
+            "acme account was NOT claimed by another tenant's login"
+        );
     }
 
     // -- G11-A SSRF guard tests -----------------------------------------------

@@ -162,6 +162,7 @@ async fn main() -> Result<()> {
     audit_simulator::spawn_audit_simulator(state.clone());
     spawn_budget_daily_reset(state.clone());
     spawn_llm_rate_limiter_cleanup(state.clone());
+    gyre_server::api::invitations::spawn_invitation_expiry(state.clone());
     spawn_session_cleanup(state.clone());
 
     let app = build_router(state);

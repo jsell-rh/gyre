@@ -23,6 +23,7 @@ pub mod conversation;
 pub mod dependency;
 pub mod dependency_policy;
 pub mod graph;
+pub mod invitation;
 pub mod key_binding;
 pub mod kv_store;
 pub mod llm_config;
@@ -393,20 +394,39 @@ mod tests {
         // (000056 here is task-180's spec_assertion_results and 000057 is
         // task-193's spec_approval_attestation — different migrations that
         // legitimately own those versions on main.)
+        // 2026-11-13-000065_user_tenant_scope (task-110) is excluded too:
+        // after the rebase onto c5deca801 it only creates the tenant-scope
+        // index and depends on 000058's tenant_id column, so it cannot run
+        // in the pre-000058 set. It runs right after the target batch (in
+        // version order, after 000058) — index creation only, so the
+        // backfill assertions below are unaffected. (Renumbered from
+        // 20261009000057 to 20261108000060 when upstream landed
+        // agent_persona_id under the same version, then to 20261113000065
+        // when the task-110 rebase onto main head f764bc00 collided with
+        // upstream's 2026-11-08 numbering; see its up.sql.)
         let all = MIGRATIONS.migrations().unwrap();
-        // 000060 (user_preferences_channel_shape) must also be excluded from
-        // `pre`: it rewrites 000058's flat backfill literal into the current
-        // nested notification_channels shape, so it is run explicitly after
-        // 000058 below (the same order a deployed database sees them).
-        let (pre, channels): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
+        // 000060 (user_preferences_channel_shape, task-112) must also be
+        // excluded from `pre`: it rewrites 000058's flat backfill literal
+        // into the current nested notification_channels shape, so it is run
+        // explicitly after 000058 below (the same order a deployed database
+        // sees them).
+        let (pre, deferred): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
             let v = m.name().version().to_string();
-            v != "20261008000058" && v != "20261109000060"
+            v != "20261008000058" && v != "20261109000060" && v != "20261113000065"
         });
-        let (target, m60): (Vec<_>, Vec<_>) = channels
+        let (target, rest): (Vec<_>, Vec<_>) = deferred
             .into_iter()
             .partition(|m| m.name().version().to_string() == "20261008000058");
         assert_eq!(target.len(), 1, "000058 not found in embedded migrations");
+        let (m60, m65): (Vec<_>, Vec<_>) = rest
+            .into_iter()
+            .partition(|m| m.name().version().to_string() == "20261109000060");
         assert_eq!(m60.len(), 1, "000060 not found in embedded migrations");
+        assert_eq!(
+            m65.len(),
+            1,
+            "tenant-scope index migration not found in embedded migrations"
+        );
         use diesel::migration::MigrationConnection;
         // run_migrations is the raw harness method — unlike
         // run_pending_migrations (used by SqliteStorage::new) it does not
@@ -441,6 +461,11 @@ mod tests {
         // Run 000058 alone. Panics here on the original parser-overflow
         // version and on a dedup collision aborting at CREATE UNIQUE INDEX.
         conn.run_migrations(&target).unwrap();
+        // The tenant-scope index migration (2026-11-13-000065) runs in the
+        // same batch position a deployed database sees it: after 000058
+        // (whose tenant_id column it indexes). Index creation only — the
+        // backfill assertions below are unaffected.
+        conn.run_migrations(&m65).unwrap();
 
         // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
         // `Self { field: field, … }` with spans mapped onto the field
