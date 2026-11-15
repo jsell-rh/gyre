@@ -16,9 +16,16 @@ fn ids_to_json(ids: &[Id]) -> String {
         .unwrap_or_else(|_| "[]".to_string())
 }
 
-fn json_to_ids(s: &str) -> Vec<Id> {
-    let strs: Vec<String> = serde_json::from_str(s).unwrap_or_default();
-    strs.into_iter().map(Id::new).collect()
+fn json_to_ids(s: &str) -> Result<Vec<Id>> {
+    // Fail closed on corrupt stored state (task-110 review F2): a
+    // truncated/garbled workspace_ids column must surface as an error,
+    // not silently map to "no pre-assigned workspaces" — the invitee
+    // would lose every pre-assigned grant with no signal (the repo's
+    // documented fail-open class: "cannot determine state" must not
+    // become "state is fine").
+    let strs: Vec<String> =
+        serde_json::from_str(s).with_context(|| format!("corrupt workspace_ids column: {s:?}"))?;
+    Ok(strs.into_iter().map(Id::new).collect())
 }
 
 fn roles_to_json(roles: &[WorkspaceRole]) -> String {
@@ -27,7 +34,11 @@ fn roles_to_json(roles: &[WorkspaceRole]) -> String {
 }
 
 fn json_to_ws_roles(s: &str) -> Result<Vec<WorkspaceRole>> {
-    let strs: Vec<String> = serde_json::from_str(s).unwrap_or_default();
+    // Same fail-closed contract as json_to_ids: the two columns are
+    // parsed independently, so a corrupt one must error rather than
+    // default to empty.
+    let strs: Vec<String> = serde_json::from_str(s)
+        .with_context(|| format!("corrupt workspace_roles column: {s:?}"))?;
     strs.iter()
         .map(|r| {
             WorkspaceRole::parse_role(r)
@@ -103,14 +114,29 @@ struct TenantInvitationRow {
 
 impl TenantInvitationRow {
     fn into_invitation(self) -> Result<TenantInvitation> {
+        let workspace_ids = json_to_ids(&self.workspace_ids)?;
+        let workspace_roles = json_to_ws_roles(&self.workspace_roles)?;
+        // Parallel-array contract (task-110 review F2): workspace_roles
+        // is either empty (each pre-assigned workspace defaults to
+        // Developer at acceptance) or exactly one role per workspace id.
+        // A mismatched pair of independently stored columns is corrupt
+        // state, not a silently-truncated grant list.
+        if !workspace_roles.is_empty() && workspace_roles.len() != workspace_ids.len() {
+            anyhow::bail!(
+                "invitation {} has {} workspace_roles for {} workspace_ids",
+                self.id,
+                workspace_roles.len(),
+                workspace_ids.len()
+            );
+        }
         Ok(TenantInvitation {
             id: Id::new(self.id),
             tenant_id: Id::new(self.tenant_id),
             email: self.email,
             invited_by: Id::new(self.invited_by),
             role: parse_global_role(&self.role)?,
-            workspace_ids: json_to_ids(&self.workspace_ids),
-            workspace_roles: json_to_ws_roles(&self.workspace_roles)?,
+            workspace_ids,
+            workspace_roles,
             status: parse_invitation_status(&self.status)?,
             token_hash: self.token_hash,
             expires_at: self.expires_at as u64,
@@ -1025,5 +1051,106 @@ mod tests {
             is_tenant_pending_scope_violation(&err),
             "index not enforced after migration: {err}"
         );
+    }
+
+    /// Task-110 review F2 (fail-open on corrupt stored state): a corrupt
+    /// or truncated workspace_ids/workspace_roles column, and a
+    /// parallel-array length mismatch between the two independently
+    /// stored columns, must surface as an ERROR on load — never as an
+    /// invitation that silently lost its pre-assigned workspace grants
+    /// (the repo's documented "cannot determine state must not become
+    /// state is fine" fail-open class).
+    #[tokio::test]
+    async fn corrupt_preassigned_columns_fail_closed() {
+        use diesel::RunQueryDsl;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = SqliteStorage::new(dir.path().join("test.db").to_str().unwrap()).unwrap();
+        let inv = TenantInvitation {
+            id: Id::new("ti-c"),
+            tenant_id: Id::new("t1"),
+            email: "corrupt@example.com".to_string(),
+            invited_by: Id::new("u1"),
+            role: GlobalRole::Member,
+            workspace_ids: vec![Id::new("ws1"), Id::new("ws2")],
+            workspace_roles: vec![WorkspaceRole::Developer, WorkspaceRole::Admin],
+            status: InvitationStatus::Pending,
+            token_hash: "hash-c".to_string(),
+            expires_at: 2000,
+            created_at: 1000,
+            accepted_at: None,
+        };
+        TiRepo::create(&db, &inv).await.unwrap();
+        // Sanity: the intact row loads.
+        assert!(TiRepo::find_by_id(&db, &Id::new("ti-c"))
+            .await
+            .unwrap()
+            .is_some());
+
+        let update = |sql: &str| {
+            let mut conn = db.pool.get().unwrap();
+            diesel::sql_query(sql).execute(&mut conn).unwrap();
+        };
+
+        // Corrupt (truncated JSON) workspace_ids.
+        update(
+            "UPDATE tenant_invitations SET workspace_ids = '{truncated' \
+             WHERE id = 'ti-c'",
+        );
+        let res = TiRepo::find_by_id(&db, &Id::new("ti-c")).await;
+        assert!(
+            res.is_err(),
+            "corrupt workspace_ids must fail closed, got {res:?}"
+        );
+
+        // Corrupt workspace_roles (valid ids restored, broken roles JSON).
+        update(
+            "UPDATE tenant_invitations SET workspace_ids = '[\"ws1\",\"ws2\"]', \
+             workspace_roles = '[\"Admin' WHERE id = 'ti-c'",
+        );
+        let res = TiRepo::find_by_id(&db, &Id::new("ti-c")).await;
+        assert!(
+            res.is_err(),
+            "corrupt workspace_roles must fail closed, got {res:?}"
+        );
+
+        // Valid JSON in both columns but mismatched parallel arrays —
+        // one role for two workspaces is corrupt state, not a silently
+        // truncated grant list.
+        update(
+            "UPDATE tenant_invitations SET workspace_roles = '[\"Admin\"]' \
+             WHERE id = 'ti-c'",
+        );
+        let res = TiRepo::find_by_id(&db, &Id::new("ti-c")).await;
+        assert!(
+            res.is_err(),
+            "parallel-array length mismatch must fail closed, got {res:?}"
+        );
+
+        // An empty roles column with non-empty ids is VALID (each
+        // pre-assigned workspace defaults to Developer at acceptance) —
+        // the fail-closed contract must not over-reject it.
+        update(
+            "UPDATE tenant_invitations SET workspace_roles = '[]' \
+             WHERE id = 'ti-c'",
+        );
+        let ok = TiRepo::find_by_id(&db, &Id::new("ti-c"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ok.workspace_ids.len(), 2);
+        assert!(ok.workspace_roles.is_empty());
+
+        // A fully valid row still round-trips.
+        update(
+            "UPDATE tenant_invitations SET workspace_roles = '[\"Admin\",\"Viewer\"]' \
+             WHERE id = 'ti-c'",
+        );
+        let ok = TiRepo::find_by_id(&db, &Id::new("ti-c"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ok.workspace_ids.len(), 2);
+        assert_eq!(ok.workspace_roles.len(), 2);
     }
 }

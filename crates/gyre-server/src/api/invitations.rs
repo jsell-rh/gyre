@@ -789,7 +789,11 @@ pub async fn accept_tenant_invitation(
         Err(e) => {
             // Best-effort rollback: the side effects failed, so the
             // invitation must not stay Accepted with nothing delivered.
-            let _ = state
+            // F4 (review f36e46e1): if the compensation write itself
+            // fails, the invitation is stranded Accepted — single-use
+            // burned, invitee locked out — so the failure is logged
+            // loudly with the row id for an operator to reset.
+            if let Err(rollback) = state
                 .tenant_invitations
                 .transition_status(
                     &invitation.id,
@@ -797,7 +801,16 @@ pub async fn accept_tenant_invitation(
                     InvitationStatus::Pending,
                     None,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(
+                    invitation_id = %invitation.id,
+                    error = %rollback,
+                    "failed to roll back invitation to Pending after failed \
+                     acceptance side effects; invitation is stranded Accepted — \
+                     an operator must reset it to Pending"
+                );
+            }
             Err(e)
         }
     }
@@ -821,6 +834,9 @@ async fn accept_tenant_invitation_claimed(
     //
     // 1. Local-mode retry dedupe: a prior accept (whose membership
     //    activation later failed) already created this account — reuse it.
+    //    The namespace lookup is tenant/email-scoped (review f36e46e1
+    //    F1): a record that does not match the invitation's tenant and
+    //    email is NOT this account and is never linked.
     // 2. SSO-provisioned account with the invitation email in this tenant
     //    (external_id = Keycloak subject, the normal state in SSO-mode
     //    tenants): LINK it — the pre-assigned memberships and invited
@@ -844,8 +860,42 @@ async fn accept_tenant_invitation_claimed(
     // those accounts authenticate through their existing factor, and a
     // key minted from token possession would bypass it.
     let mut mint_credential = false;
-    let (user, mode) = match state.users.find_by_external_id(&tenant_ns).await? {
-        Some(existing) => {
+    // F1 (review f36e46e1): find_by_external_id is a GLOBAL lookup with
+    // no tenant scope, and the SCIM surface persists caller-chosen
+    // externalId verbatim — so a namespace hit is only the invitation's
+    // own account when the record's tenant AND email actually match
+    // the invitation. A foreign record planted on this namespace (e.g.
+    // a SCIM user with externalId "tenant:{tid}:email:{email}") must
+    // not be linked, credentialed, or granted the invitation's
+    // pre-assigned memberships — it falls through to the scoped lookup
+    // and create arms below instead.
+    let ns_lookup = state.users.find_by_external_id(&tenant_ns).await?;
+    let mut ns_held_by_foreign = false;
+    let ns_user = match ns_lookup {
+        Some(u)
+            if u.tenant_id.as_ref() == Some(&invitation.tenant_id)
+                && u.email
+                    .as_deref()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(&email)) =>
+        {
+            Some(u)
+        }
+        Some(foreign) => {
+            tracing::warn!(
+                user_id = %foreign.id,
+                record_tenant = ?foreign.tenant_id,
+                invitation_tenant = %invitation.tenant_id,
+                external_id = %tenant_ns,
+                "invitation identity namespace held by a record outside the \
+                 invitation scope; not linking"
+            );
+            ns_held_by_foreign = true;
+            None
+        }
+        None => None,
+    };
+    let (user, mode) = match ns_user {
+        Some(mut existing) => {
             // Deactivated accounts cannot accept invitations (the
             // deactivation contract enforced on every auth path —
             // auth.rs API-key/WS/SSO extractors): the TenantAdmin who
@@ -858,6 +908,17 @@ async fn accept_tenant_invitation_claimed(
                     "user account is deactivated; contact a tenant administrator",
                 ));
             }
+            // F3 (review f36e46e1): apply the invited role exactly as
+            // the SSO-link and fresh-create arms do. Case 1 also covers
+            // a re-invite after the prior invitation reached a terminal
+            // state — a promotion Member→TenantAdmin or demotion must
+            // take effect, not silently no-op behind mode:"linked".
+            existing.global_role = invitation.role.clone();
+            existing.roles = match invitation.role {
+                GlobalRole::TenantAdmin => vec![UserRole::Admin],
+                GlobalRole::Member => vec![UserRole::Developer],
+            };
+            state.users.update(&existing).await?;
             mint_credential = true;
             (existing, "linked")
         }
@@ -888,6 +949,21 @@ async fn accept_tenant_invitation_claimed(
                 (sso_user, "linked")
             }
             None => {
+                // F1 (review f36e46e1): the namespace is held by a foreign
+                // record (checked above), and external_id is UNIQUE —
+                // creating this account would fail with an opaque unique
+                // violation. Fail closed with a message an operator can
+                // act on; the invitation rolls back to Pending and stays
+                // retryable after the foreign record is fixed. Checked
+                // before the username work so the namespace conflict is
+                // not masked by a username-taken 409.
+                if ns_held_by_foreign {
+                    return Err(ApiError::Conflict(
+                        "invitation identity namespace is held by another account; \
+                         ask a tenant administrator to resolve it"
+                            .to_string(),
+                    ));
+                }
                 let id = new_id();
                 // Username: an explicit handle must satisfy the URL-safe
                 // handle contract (user-management.md §Username vs Display
@@ -1632,7 +1708,10 @@ pub async fn accept_workspace_invitation(
     match activate_membership(&state, &invitation, now).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
-            let _ = state
+            // F4 (review f36e46e1): a failed compensation write strands
+            // the invitation Accepted with nothing delivered — logged
+            // loudly with the row id so an operator can reset it.
+            if let Err(rollback) = state
                 .workspace_invitations
                 .transition_status(
                     &invitation.id,
@@ -1640,7 +1719,16 @@ pub async fn accept_workspace_invitation(
                     InvitationStatus::Pending,
                     None,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(
+                    invitation_id = %invitation.id,
+                    error = %rollback,
+                    "failed to roll back workspace invitation to Pending after \
+                     failed membership activation; invitation is stranded Accepted — \
+                     an operator must reset it to Pending"
+                );
+            }
             Err(e)
         }
     }
@@ -1827,7 +1915,10 @@ pub async fn accept_my_workspace_invitation(
     match activate_membership(&state, &invitation, now).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) => {
-            let _ = state
+            // F4 (review f36e46e1): a failed compensation write strands
+            // the invitation Accepted with nothing delivered — logged
+            // loudly with the row id so an operator can reset it.
+            if let Err(rollback) = state
                 .workspace_invitations
                 .transition_status(
                     &invitation.id,
@@ -1835,7 +1926,16 @@ pub async fn accept_my_workspace_invitation(
                     InvitationStatus::Pending,
                     None,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(
+                    invitation_id = %invitation.id,
+                    error = %rollback,
+                    "failed to roll back workspace invitation to Pending after \
+                     failed membership activation; invitation is stranded Accepted — \
+                     an operator must reset it to Pending"
+                );
+            }
             Err(e)
         }
     }
@@ -4634,6 +4734,226 @@ mod tests {
         );
         // The link must not have disturbed the SSO identity binding.
         assert_eq!(linked.external_id, "keycloak-subj-sso-alice");
+    }
+
+    /// Review f36e46e1 F1: the tenant:email namespace lookup
+    /// (find_by_external_id) is GLOBAL, and the SCIM surface persists
+    /// caller-chosen externalId verbatim — so a record planted on this
+    /// tenant's invitation namespace from another tenant (or with a
+    /// different email) must NOT be linked, credentialed, or granted the
+    /// invitation's pre-assigned memberships when the real invitee
+    /// accepts. Acceptance fails closed instead of handing the foreign
+    /// record an API key.
+    #[tokio::test]
+    async fn accept_does_not_link_foreign_record_on_invitation_namespace() {
+        let state = test_state();
+        // A "planted" record: it squats on this tenant's invitation
+        // namespace but belongs to another tenant — exactly what a
+        // mis-provisioned or attacker-created SCIM user with a chosen
+        // externalId looks like.
+        let mut planted = User::new(
+            Id::new("planted-1"),
+            "tenant:default:email:victim@example.com",
+            "planted",
+            now_secs(),
+        );
+        planted.email = Some("victim@example.com".to_string());
+        planted.tenant_id = Some(Id::new("other-tenant"));
+        state.users.create(&planted).await.unwrap();
+        let planted_roles = planted.roles.clone();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .with_state(state.clone());
+
+        let (status, json) = http_invite(&app, "victim@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let invitation_id = json["id"].as_str().unwrap().to_string();
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let (status, json) = http_accept(&app, &token, serde_json::Value::Null).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a foreign record on the namespace must not be linked; got {json}"
+        );
+        assert!(
+            json["api_key"].is_null(),
+            "no credential minted for the planted record"
+        );
+        assert!(
+            json["user_id"].is_null(),
+            "no account id is returned for a failed accept; got {json}"
+        );
+        // The planted record is untouched — no role grant, no tenant
+        // move, no membership.
+        let record = state
+            .users
+            .find_by_id(&Id::new("planted-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.global_role, GlobalRole::Member);
+        assert_eq!(record.roles, planted_roles);
+        assert_eq!(record.tenant_id, Some(Id::new("other-tenant")));
+
+        // The invitation was rolled back to Pending (compensation) so it
+        // stays retryable once the namespace conflict is resolved.
+        let inv = state
+            .tenant_invitations
+            .find_by_id(&Id::new(invitation_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inv.status, InvitationStatus::Pending);
+
+        // Second variant: matching tenant but a DIFFERENT stored email —
+        // the namespace embeds the email, so a record whose stored email
+        // disagrees with the namespace is not the invited account
+        // either. (Without the email guard this record WOULD be linked:
+        // same tenant, namespace hit.)
+        let mut squatter = User::new(
+            Id::new("planted-2"),
+            "tenant:default:email:eve@example.com",
+            "squatter",
+            now_secs(),
+        );
+        squatter.email = Some("someone-else@example.com".to_string());
+        squatter.tenant_id = Some(Id::new("default"));
+        state.users.create(&squatter).await.unwrap();
+
+        let (status, json) = http_invite(&app, "eve@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, json) = http_accept(&app, &token, serde_json::Value::Null).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a namespace hit with a mismatched stored email must not be linked; got {json}"
+        );
+        let squatter_after = state
+            .users
+            .find_by_id(&Id::new("planted-2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            squatter_after.external_id, "tenant:default:email:eve@example.com",
+            "the squatter record is not re-pointed or adopted"
+        );
+    }
+
+    /// Review f36e46e1 F3: a re-invite after the prior invitation
+    /// reached a terminal state must apply the newly invited role on
+    /// acceptance — the namespace-dedupe arm previously returned the
+    /// existing account untouched, silently no-opping a promotion or
+    /// demotion behind mode:"linked".
+    #[tokio::test]
+    async fn reinvite_acceptance_applies_new_role() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .with_state(state.clone());
+
+        // First invitation: Member, accepted → local-mode account created.
+        let (status, json) = http_invite(&app, "carol@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, json) = http_accept(&app, &token, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["mode"], "created");
+        let user_id = json["user_id"].as_str().unwrap().to_string();
+        let user = state
+            .users
+            .find_by_id(&Id::new(user_id.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.global_role, GlobalRole::Member);
+
+        // The first invitation is terminal (Accepted), so a re-invite is
+        // allowed — this time promoting the invitee to TenantAdmin.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "carol@example.com",
+                            "role": "TenantAdmin"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Second acceptance links the existing account (namespace dedupe)
+        // — and must APPLY the newly invited role, not silently keep the
+        // old one.
+        let (status, json) = http_accept(&app, &token, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "got {json}");
+        assert_eq!(json["mode"], "linked");
+        assert_eq!(json["user_id"], user_id);
+        let promoted = state
+            .users
+            .find_by_id(&Id::new(user_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            promoted.global_role,
+            GlobalRole::TenantAdmin,
+            "re-invite acceptance must apply the newly invited role"
+        );
+        assert_eq!(
+            promoted.roles,
+            vec![UserRole::Admin],
+            "the mapped platform role follows the invited TenantAdmin role"
+        );
     }
 
     /// Review d6b8a97: local-mode acceptance must deliver a credential —

@@ -2078,7 +2078,10 @@ async fn validate_jwt(
 ///    instead of a duplicate account. Requires `email_verified=true` on
 ///    the token — an attacker who controls an unverified email in the
 ///    IdP must not gain a tenant account by choosing the invitee's
-///    address.
+///    address. The namespace lookup is tenant/email-scoped (review
+///    f36e46e1 F1): a record on the namespace whose stored tenant or
+///    email does not match the claim is foreign (e.g. a planted SCIM
+///    externalId) and is never claimed.
 /// 3. Otherwise auto-provision a new user (tenant-scoped when the JWT
 ///    carries a tenant claim): the username is derived from the SSO
 ///    `preferred_username` claim (sanitized to the URL-safe handle
@@ -2154,7 +2157,37 @@ async fn find_or_create_user_tenant(
     // and a matching invitation-created account).
     if let (Some(tenant), Some(email), true) = (tenant_id, email, email_verified) {
         let local_ns = format!("tenant:{tenant}:email:{}", email.to_lowercase());
-        if let Some(mut invited) = state.users.find_by_external_id(&local_ns).await? {
+        // F1 sibling (review f36e46e1): find_by_external_id is a GLOBAL
+        // lookup, and the SCIM surface persists caller-chosen externalId
+        // verbatim — so a namespace hit is only the invitation-created
+        // account when the record's tenant and email match this claim.
+        // A foreign record planted on the namespace (e.g. a SCIM user
+        // with externalId "tenant:acme:email:bob@acme.com") must not be
+        // claimed and re-pointed at this SSO subject; fall through to
+        // provisioning instead.
+        let ns_hit = state.users.find_by_external_id(&local_ns).await?;
+        let invited = match ns_hit {
+            Some(u)
+                if u.tenant_id.as_ref().is_some_and(|t| t.as_str() == tenant)
+                    && u.email
+                        .as_deref()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(email)) =>
+            {
+                Some(u)
+            }
+            Some(foreign) => {
+                tracing::warn!(
+                    user_id = %foreign.id,
+                    claim_tenant = tenant,
+                    external_id = %local_ns,
+                    "invitation identity namespace held by a record outside the \
+                     claim scope; not linking"
+                );
+                None
+            }
+            None => None,
+        };
+        if let Some(mut invited) = invited {
             // Deactivated accounts cannot be claimed back into service
             // via the SSO email link (same contract as the direct
             // external_id branch above: deactivation is

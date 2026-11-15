@@ -16,9 +16,16 @@ fn ids_to_json(ids: &[Id]) -> String {
         .unwrap_or_else(|_| "[]".to_string())
 }
 
-fn json_to_ids(s: &str) -> Vec<Id> {
-    let strs: Vec<String> = serde_json::from_str(s).unwrap_or_default();
-    strs.into_iter().map(Id::new).collect()
+fn json_to_ids(s: &str) -> Result<Vec<Id>> {
+    // Fail closed on corrupt stored state (task-110 review F2): a
+    // truncated/garbled workspace_ids column must surface as an error,
+    // not silently map to "no pre-assigned workspaces" — the invitee
+    // would lose every pre-assigned grant with no signal (the repo's
+    // documented fail-open class: "cannot determine state" must not
+    // become "state is fine").
+    let strs: Vec<String> =
+        serde_json::from_str(s).with_context(|| format!("corrupt workspace_ids column: {s:?}"))?;
+    Ok(strs.into_iter().map(Id::new).collect())
 }
 
 fn roles_to_json(roles: &[WorkspaceRole]) -> String {
@@ -27,7 +34,11 @@ fn roles_to_json(roles: &[WorkspaceRole]) -> String {
 }
 
 fn json_to_ws_roles(s: &str) -> Result<Vec<WorkspaceRole>> {
-    let strs: Vec<String> = serde_json::from_str(s).unwrap_or_default();
+    // Same fail-closed contract as json_to_ids: the two columns are
+    // parsed independently, so a corrupt one must error rather than
+    // default to empty.
+    let strs: Vec<String> = serde_json::from_str(s)
+        .with_context(|| format!("corrupt workspace_roles column: {s:?}"))?;
     strs.iter()
         .map(|r| {
             WorkspaceRole::parse_role(r)
@@ -101,14 +112,29 @@ struct TenantInvitationRow {
 
 impl TenantInvitationRow {
     fn into_invitation(self) -> Result<TenantInvitation> {
+        let workspace_ids = json_to_ids(&self.workspace_ids)?;
+        let workspace_roles = json_to_ws_roles(&self.workspace_roles)?;
+        // Parallel-array contract (task-110 review F2): workspace_roles
+        // is either empty (each pre-assigned workspace defaults to
+        // Developer at acceptance) or exactly one role per workspace id.
+        // A mismatched pair of independently stored columns is corrupt
+        // state, not a silently-truncated grant list.
+        if !workspace_roles.is_empty() && workspace_roles.len() != workspace_ids.len() {
+            anyhow::bail!(
+                "invitation {} has {} workspace_roles for {} workspace_ids",
+                self.id,
+                workspace_roles.len(),
+                workspace_ids.len()
+            );
+        }
         Ok(TenantInvitation {
             id: Id::new(self.id),
             tenant_id: Id::new(self.tenant_id),
             email: self.email,
             invited_by: Id::new(self.invited_by),
             role: parse_global_role(&self.role)?,
-            workspace_ids: json_to_ids(&self.workspace_ids),
-            workspace_roles: json_to_ws_roles(&self.workspace_roles)?,
+            workspace_ids,
+            workspace_roles,
             status: parse_invitation_status(&self.status)?,
             token_hash: self.token_hash,
             expires_at: self.expires_at as u64,
