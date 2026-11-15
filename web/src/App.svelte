@@ -11,6 +11,8 @@
   import AnalyticsView from './components/AnalyticsView.svelte';
   import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
+  import PublicUserProfile from './components/PublicUserProfile.svelte';
+  import InvitationAccept from './components/InvitationAccept.svelte';
   import NotificationBell from './components/NotificationBell.svelte';
   import NotificationSettings from './components/NotificationSettings.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
@@ -26,8 +28,18 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' | 'notification_settings'
+  // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' |
+  // 'public_profile' (@username) | 'invite_accept' (/invite/:id) | 'notification_settings'
   let mode = $state('workspace_home');
+
+  // ── Public profile / invitation accept state ────────────────────────
+  // /@username — tenant-public profile (user-management.md §UI Pages)
+  let publicUsername = $state('');
+  // /invite/:id — pending workspace invitation accept page. The path
+  // segment is the workspace id (task-124 models a pending invitation as
+  // a membership row keyed by workspace; the token form belongs to the
+  // tenant-invitation flow, task-110).
+  let inviteWorkspaceId = $state(null);
 
   // ── Workspace / repo state ───────────────────────────────────────────
   let workspaces = $state([]);
@@ -209,6 +221,13 @@
     } catch { /* ignore */ }
   }
 
+  // ── Notification bell (user-management.md §In-App Notification UI) ─────
+  // The bell + drawer are the NotificationBell component (single top-bar
+  // notification surface per the amended ui-navigation.md §1): its badge is
+  // the UNREAD notification count (GET /notifications/unread-count), kept
+  // live by the NotificationPush realtime stream wired above and a 60s
+  // resync — see components/NotificationBell.svelte.
+
   // ── Slug helpers ──────────────────────────────────────────────────────
   /** Get URL slug for a workspace. Uses ws.slug if present, else ws.id. */
   function wsSlug(ws) {
@@ -231,7 +250,9 @@
   // /workspaces/:slug/r/:repo/tasks/:id        → task detail page
   // /workspaces/:slug/r/:repo/agents/:id       → agent detail page
   // /workspaces/:slug/r/:repo/specs/*path      → spec detail page
-  // /profile                                   → user profile
+  // /profile                                   → user profile (self)
+  // /@username                                 → tenant-public profile (user-management.md §UI Pages)
+  // /invite/:workspaceId                       → pending invitation accept page (§UI Pages)
 
   const REPO_TABS = ['specs', 'tasks', 'mrs', 'agents', 'architecture', 'decisions', 'code', 'settings'];
   const ENTITY_TABS = ['mrs', 'tasks', 'agents'];
@@ -256,6 +277,18 @@
     // /profile
     if (raw.length === 1 && raw[0] === 'profile') {
       return { mode: 'profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
+    }
+
+    // /@username — tenant-public profile (user-management.md §UI Pages >
+    // User Profile). The handle is URL-decoded with the rest of the path.
+    if (raw.length === 1 && raw[0].startsWith('@') && raw[0].length > 1) {
+      return { mode: 'public_profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null, username: raw[0].slice(1) };
+    }
+
+    // /invite/:workspaceId — pending invitation accept page
+    // (user-management.md §UI Pages > Pending Invitation Accept Page).
+    if (raw[0] === 'invite' && raw.length === 2) {
+      return { mode: 'invite_accept', slug: null, repoName: null, tab: null, entityType: null, entityId: null, inviteId: raw[1] };
     }
 
     // /settings/notifications (user-management.md §In-App Notification UI:
@@ -321,8 +354,10 @@
 
   export function urlFor(parsed) {
     if (!parsed) return '/';
-    const { mode: m, slug, repoName, tab, entityType, entityId } = parsed;
+    const { mode: m, slug, repoName, tab, entityType, entityId, username, inviteId } = parsed;
     if (m === 'profile') return '/profile';
+    if (m === 'public_profile') return `/@${encodeURIComponent(username ?? '')}`;
+    if (m === 'invite_accept') return `/invite/${encodeURIComponent(inviteId ?? '')}`;
     if (m === 'notification_settings') return '/settings/notifications';
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
@@ -587,6 +622,92 @@
     fadeContent();
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
   }
+
+  function goToPublicProfile(username) {
+    mode = 'public_profile';
+    publicUsername = username;
+    currentRepo = null;
+    fadeContent();
+    window.history.pushState(
+      { mode: 'public_profile', username },
+      '',
+      `/@${encodeURIComponent(username)}`,
+    );
+  }
+
+  function goToInviteAccept(workspaceId) {
+    mode = 'invite_accept';
+    inviteWorkspaceId = workspaceId;
+    currentRepo = null;
+    fadeContent();
+    window.history.pushState(
+      { mode: 'invite_accept', inviteId: workspaceId },
+      '',
+      `/invite/${encodeURIComponent(workspaceId)}`,
+    );
+  }
+
+  /** Apply a parsed URL to the app state. Used by drawer deep links
+   *  (action_url paths) — the same transitions the popstate handler
+   *  performs, without duplicating its history handling. */
+  function applyParsed(p) {
+    if (!p) return;
+    currentRepo = null;
+    entityDetail = null;
+    if (p.mode === 'public_profile') {
+      mode = 'public_profile';
+      publicUsername = p.username;
+    } else if (p.mode === 'invite_accept') {
+      mode = 'invite_accept';
+      inviteWorkspaceId = p.inviteId;
+    } else if (p.mode === 'profile') {
+      mode = 'profile';
+    } else if (p.mode === 'notification_settings') {
+      mode = 'notification_settings';
+    } else if (p.mode === 'cross_workspace') {
+      mode = 'cross_workspace';
+      crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
+    } else if (p.slug) {
+      const ws = findWorkspaceBySlug(p.slug);
+      if (ws) {
+        currentWorkspace = ws;
+        try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
+        loadWorkspaceData(ws.id);
+        if (p.mode === 'workspace_settings') mode = 'workspace_settings';
+        else if (p.mode === 'agent_rules') mode = 'agent_rules';
+        else if (p.mode === 'repo' && p.repoName) {
+          mode = 'repo';
+          repoTab = p.tab ?? 'specs';
+          currentRepo = { id: null, name: p.repoName };
+          if (p.entityType && p.entityId) {
+            entityDetail = { type: p.entityType, id: p.entityId, data: {} };
+          }
+          api.repos({ workspaceId: ws.id }).then(repos => {
+            const found = (Array.isArray(repos) ? repos : []).find(r => r.name === p.repoName);
+            if (found && currentRepo?.name === p.repoName) {
+              currentRepo = { id: found.id, name: found.name };
+              repoIdCache.set(`${ws.id}:${found.name}`, found.id);
+            }
+          }).catch(() => { /* keep name-only ref */ });
+        } else mode = 'workspace_home';
+      } else {
+        mode = 'workspace_home';
+      }
+    } else {
+      mode = 'workspace_home';
+    }
+    loadDecisionsCount();
+  }
+
+  /** Navigate to an SPA path (notification action_url deep links). */
+  function navigateToPath(path) {
+    const parsed = parseUrl(path);
+    if (!parsed) return;
+    window.history.pushState({ ...window.history.state, path }, '', path);
+    applyParsed(parsed);
+    fadeContent();
+  }
+
   function goToNotificationSettings() {
     mode = 'notification_settings';
     fadeContent();
@@ -667,6 +788,10 @@
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
+  setContext('goToCrossWorkspace', () => goToCrossWorkspace());
+  setContext('goToPublicProfile', (username) => goToPublicProfile(username));
+  setContext('goToInviteAccept', (workspaceId) => goToInviteAccept(workspaceId));
+  setContext('navigateToPath', (path) => navigateToPath(path));
   setContext('goToNotificationSettings', () => goToNotificationSettings());
   setContext('goToRepo', (repo, tab) => goToRepo(repo, tab));
   setContext('goToRepoTab', (tab, params) => {
@@ -1027,6 +1152,10 @@
     const repoName = currentRepo?.name ?? '';
     if (mode === 'profile') {
       document.title = 'Profile | Gyre';
+    } else if (mode === 'public_profile') {
+      document.title = publicUsername ? `@${publicUsername} | Gyre` : 'Profile | Gyre';
+    } else if (mode === 'invite_accept') {
+      document.title = 'Workspace Invitation | Gyre';
     } else if (mode === 'notification_settings') {
       document.title = 'Notification Settings | Gyre';
     } else if (mode === 'cross_workspace') {
@@ -1086,6 +1215,12 @@
 
     if (parsed?.mode === 'profile') {
       mode = 'profile';
+    } else if (parsed?.mode === 'public_profile') {
+      mode = 'public_profile';
+      publicUsername = parsed.username ?? '';
+    } else if (parsed?.mode === 'invite_accept') {
+      mode = 'invite_accept';
+      inviteWorkspaceId = parsed.inviteId ?? null;
     } else if (parsed?.mode === 'notification_settings') {
       mode = 'notification_settings';
     } else if (parsed?.mode === 'cross_workspace') {
@@ -1176,6 +1311,11 @@
       tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
       entityType: entityDetail?.type ?? null,
       entityId: entityDetail?.id ?? null,
+      // Path-parameterized modes: keep the route parameter in the canonical
+      // URL, or a page load at /invite/{ws} / /@{username} rewrites the URL
+      // to /invite/ / /@ and a later refresh loses the deep link entirely.
+      username: mode === 'public_profile' ? publicUsername : null,
+      inviteId: mode === 'invite_accept' ? inviteWorkspaceId : null,
     });
     window.history.replaceState(
       { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab, entityType: entityDetail?.type ?? null, entityId: entityDetail?.id ?? null },
@@ -1190,7 +1330,9 @@
       selfUserId = me?.id ?? null;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
-    const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
+    const decisionsInterval = setInterval(() => {
+      loadDecisionsCount();
+    }, 60_000);
 
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
@@ -1213,9 +1355,11 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: pUsername, inviteId: pInviteId } = e.state;
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'public_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
           ? m : 'workspace_home';
+        if (m === 'public_profile') publicUsername = pUsername ?? parseUrl(window.location.pathname)?.username ?? '';
+        if (m === 'invite_accept') inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
         // Restore entity detail state from history with repo_id for data loading
@@ -1225,7 +1369,7 @@
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'notification_settings') {
+        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'public_profile' && m !== 'invite_accept' && m !== 'notification_settings') {
           // Try to recover workspace from URL slug if state doesn't have wsId
           const p2 = parseUrl(window.location.pathname);
           if (p2?.slug) {
@@ -1261,6 +1405,12 @@
       if (p) {
         if (p.mode === 'profile') {
           mode = 'profile';
+        } else if (p.mode === 'public_profile') {
+          mode = 'public_profile';
+          publicUsername = p.username ?? '';
+        } else if (p.mode === 'invite_accept') {
+          mode = 'invite_accept';
+          inviteWorkspaceId = p.inviteId ?? null;
         } else if (p.mode === 'notification_settings') {
           mode = 'notification_settings';
         } else if (p.mode === 'cross_workspace') {
@@ -1269,7 +1419,7 @@
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'analytics')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'public_profile' || p.mode === 'invite_accept' || p.mode === 'analytics')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -1628,44 +1778,13 @@
         </button>
       </div>
 
-      <!-- Right: decisions badge + user avatar -->
+      <!-- Right: notification bell + user avatar -->
       <div class="topbar-right">
-        <!-- Decisions badge (🔔) -->
-        <button
-          class="decisions-badge-btn"
-          onclick={async () => {
-            if (mode === 'repo') {
-              goToRepoTab('decisions');
-            } else {
-              // Ensure workspace home is rendered before attempting scroll
-              if (mode !== 'workspace_home') {
-                goToWorkspaceHome(currentWorkspace);
-                await tick();
-              }
-              document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
-          }}
-          aria-label={decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : $t('topbar.no_decisions')}
-          title={$t('workspace_home.sections.decisions')}
-          data-testid="decisions-badge"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
-            <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-            <path d="M13.73 21a2 2 0 01-3.46 0"/>
-          </svg>
-          {#if decisionsCount > 0}
-            <span class="decisions-count" aria-hidden="true">{decisionsCount > 99 ? '99+' : decisionsCount}</span>
-          {/if}
-        </button>
-        <span class="sr-only" aria-live="polite" aria-atomic="true">
-          {decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : ''}
-        </span>
-
-        <!-- Notification bell (user-management.md §In-App Notification UI):
-            unread count badge + slide-out drawer. Distinct from the Decisions
-            badge (HSI §1.1): that one tracks unresolved items needing judgment
-            and navigates to the Decisions section; this one tracks read state
-            across ALL notifications. -->
+        <!-- Notification bell (user-management.md §In-App Notification UI;
+            amended ui-navigation.md §1 — the single top-bar notification
+            surface, superseding the old decisions-count badge click):
+            unread count badge + slide-out drawer (§UI Pages > Notification
+            Drawer — active-only, grouped by priority). -->
         <NotificationBell {workspaces} currentWorkspaceId={currentWorkspace?.id ?? null} />
 
         <!-- User avatar dropdown -->
@@ -1847,6 +1966,10 @@
           {/if}
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
+        {:else if mode === 'public_profile'}
+          <PublicUserProfile username={publicUsername} />
+        {:else if mode === 'invite_accept'}
+          <InvitationAccept inviteId={inviteWorkspaceId} />
         {:else if mode === 'notification_settings'}
           <NotificationSettings />
         {/if}
@@ -1945,6 +2068,8 @@
   else if (v === 'specs') { workspaceActiveSection = 'specs'; tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
   else goToWorkspaceHome(currentWorkspace);
 }} />
+<!-- Notification drawer (user-management.md §UI Pages): slide-out panel
+    from the bell with priority grouping, deep links, and read/unread. -->
 <Toast />
 
 <!-- Keyboard shortcut overlay -->
@@ -2396,49 +2521,6 @@
     align-items: center;
     gap: var(--space-2);
     flex-shrink: 0;
-  }
-
-  .decisions-badge-btn {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    background: transparent;
-    border: none;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    border-radius: var(--radius);
-    transition: color var(--transition-fast), background var(--transition-fast);
-  }
-
-  .decisions-badge-btn:hover {
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-  }
-
-  .decisions-badge-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .decisions-count {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    min-width: 14px;
-    height: 14px;
-    padding: 0 3px;
-    background: var(--color-danger);
-    color: var(--color-text-inverse);
-    border-radius: var(--radius-full);
-    font-size: var(--text-xs);
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
   }
 
   .user-btn {
@@ -2901,7 +2983,6 @@
   @media (prefers-reduced-motion: reduce) {
     .content-inner,
     .search-trigger,
-    .decisions-badge-btn,
     .user-btn,
     .auth-dot,
     .user-dropdown-item,
