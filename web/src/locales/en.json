@@ -31,8 +31,6 @@
   "topbar": {
     "search": "Search",
     "search_shortcut": "⌘K",
-    "unread_notifications": "{count} unread notifications",
-    "no_unread_notifications": "No unread notifications",
     "user_menu": "User menu",
     "profile": "Profile",
     "api_token": "API Token",
