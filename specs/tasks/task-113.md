@@ -3,7 +3,7 @@ title: "Implement in-app notification UI & email templates"
 spec_ref: "user-management.md §In-App Notification UI"
 depends_on:
   - task-112
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §In-App Notification UI"
   - "user-management.md §Email Notifications"
