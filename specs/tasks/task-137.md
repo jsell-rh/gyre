@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Failure Feedback"
-commits: ["0e6ab6ad0a862ac91f322ec9c174933a245f21ea", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "fdb0a05cabef6adb1c6801c996561dee454408a3", "f03a3c830c382d4f063244889f3a31ecfdad711b", "32b47d85c80162c526b324bfe9709b20b53853e3"]
+commits: ["f03a3c830c382d4f063244889f3a31ecfdad711b", "fdb0a05cabef6adb1c6801c996561dee454408a3", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "0e6ab6ad0a862ac91f322ec9c174933a245f21ea"]
 ---
 
 ## Spec Excerpt
