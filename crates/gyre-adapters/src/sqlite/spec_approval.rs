@@ -244,6 +244,24 @@ impl SpecApprovalRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_by_approver(&self, approver_id: &str) -> Result<Vec<SpecApproval>> {
+        let pool = Arc::clone(&self.pool);
+        let approver = approver_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<SpecApproval>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = spec_approvals::table
+                .filter(spec_approvals::approver_id.eq(&approver))
+                .order(spec_approvals::id.desc())
+                .load::<SpecApprovalRow>(&mut *conn)
+                .context("list spec approvals by approver")?;
+            Ok(rows
+                .into_iter()
+                .map(SpecApprovalRow::into_approval)
+                .collect())
+        })
+        .await?
+    }
+
     async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
         self.transition(id, move |a| a.approve(now)).await
     }
@@ -352,6 +370,47 @@ mod tests {
 
         let missing = storage.find_by_id(&Id::new("nope")).await.unwrap();
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_by_approver_returns_only_that_approver() {
+        // Public-profile stats/activity attribution (user-management.md
+        // §User Profile Page).
+        let (_tmp, storage) = tmp_storage();
+        storage
+            .create(&SpecApproval::new(
+                Id::new("apr-1"),
+                "system/design.md",
+                sha('a'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+        storage
+            .create(&SpecApproval::new(
+                Id::new("apr-2"),
+                "system/other.md",
+                sha('b'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+        storage
+            .create(&SpecApproval::new(
+                Id::new("apr-3"),
+                "system/design.md",
+                sha('c'),
+                "user:bob",
+            ))
+            .await
+            .unwrap();
+
+        let mine = storage.list_by_approver("user:alice").await.unwrap();
+        assert_eq!(mine.len(), 2);
+        assert!(mine.iter().all(|a| a.approver_id == "user:alice"));
+
+        let none = storage.list_by_approver("user:nobody").await.unwrap();
+        assert!(none.is_empty());
     }
 
     #[tokio::test]

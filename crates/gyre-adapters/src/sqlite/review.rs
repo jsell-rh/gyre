@@ -188,6 +188,21 @@ impl ReviewRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_by_reviewer(&self, reviewer_agent_id: &str) -> Result<Vec<Review>> {
+        let pool = Arc::clone(&self.pool);
+        let reviewer = reviewer_agent_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Review>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = reviews::table
+                .filter(reviews::reviewer_agent_id.eq(reviewer))
+                .order(reviews::created_at.desc())
+                .load::<ReviewRow>(&mut *conn)
+                .context("list reviews by reviewer")?;
+            rows.into_iter().map(|r| r.into_review()).collect()
+        })
+        .await?
+    }
+
     async fn is_approved(&self, mr_id: &Id) -> Result<bool> {
         let reviews = self.list_reviews(mr_id).await?;
         if reviews.is_empty() {
@@ -287,6 +302,30 @@ mod tests {
         assert_eq!(reviews.len(), 1);
         assert!(reviews[0].reviewer_persona.is_none());
         assert!(reviews[0].gate_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_by_reviewer_filters_and_orders_newest_first() {
+        // Public-profile stats/activity attribution (user-management.md
+        // §User Profile Page): only the named reviewer's rows come back,
+        // newest first.
+        let (_tmp, s) = setup();
+        seed_mr(&s, "mr1").await;
+        for (id, ts) in [("r-old", 1000u64), ("r-new", 2000)] {
+            let mut r = make_review(id, "mr1", ReviewDecision::Approved);
+            r.created_at = ts;
+            ReviewRepository::submit_review(&s, &r).await.unwrap();
+        }
+        let mut other = make_review("r-other", "mr1", ReviewDecision::Approved);
+        other.reviewer_agent_id = "agent-2".to_string();
+        ReviewRepository::submit_review(&s, &other).await.unwrap();
+
+        let mine = ReviewRepository::list_by_reviewer(&s, "agent-1")
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].id.as_str(), "r-new");
+        assert_eq!(mine[1].id.as_str(), "r-old");
     }
 
     #[tokio::test]
