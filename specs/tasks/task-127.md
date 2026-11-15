@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["237f9a5b8ec9a98e619fc44e5533968d809dc154", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
 ---
 
 ## Spec Excerpt
@@ -98,33 +98,66 @@ Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `
 ## Shipped
 
 All acceptance-criterion pages ship as real Svelte 5 (runes) components
-against the task-124/125 endpoints across the recorded commits (see
+against the task-124/125/111 endpoints across the recorded commits (see
 `commits:` frontmatter and git history for per-round details).
 
-### This round (verification repair `50f338e9`)
+### This round (rebase repair `237f9a5b`)
 
-- The prior verification run (`bash /tmp/stage/checks.sh`, exit 1) failed on
-  exactly one gate: the changed-lines rustfmt check flagged two test-code
-  lines — the `assert_eq!` argument list in
-  `sqlite::notification::tests::list_active_for_user_excludes_resolved_and_dismissed`
-  and the `create_notification(...)` chain in the users.rs active-filter
-  handler test. Both reformatted to rustfmt canonical form; no semantic
-  change. All other gates in that run were already clean (clippy changed
-  lines, arch/hierarchy lints, ABAC registry, all check-* scripts, web
-  build).
+The assignment was a rebase repair: main's task-113 head `b8d63b0`
+(in-app notification UI & email templates) had to be integrated into this
+branch, and both sides had independently built a notification bell +
+drawer (add/add conflicts on `NotificationDrawer.svelte` and its test;
+content conflicts in `App.svelte`, `api.js`, `en.json`, and the two
+coverage files). The merge reconciles them into one surface preserving
+both feature sets:
+
+- **Bell:** task-113's `NotificationBell` component (shared
+  `notificationState` store, realtime `NotificationPush` bumps on the
+  app's single `/ws` connection, unread-count endpoint badge) is the
+  single top-bar bell, per this task's spec-lifecycle amendment to
+  `ui-navigation.md` §1 (the old decisions-count badge click is
+  superseded; the duplicate inline bell this branch had added to
+  `App.svelte` is removed). The candidate's 60s full-resync interval was
+  kept (drift guard alongside the realtime pushes).
+- **Drawer:** one `NotificationDrawer` merging task-113's filter bar
+  (type/priority/workspace/repo driving the task-125 list filters),
+  realtime reload on push, live-connection dot and preferences link with
+  task-127's active-only listing (`?active=true` → `list_active_for_user`,
+  server-enforced), unread pill, `InvitationReceived` → `/invite/{ws}`
+  deep link, and no-fabricated-target disable. Deep links route through
+  the app's `navigateToPath` when rendered in the app, falling back to
+  pushState + popstate replay.
+- **API client:** `markNotificationRead` uses the spec PUT method (POST
+  remains a server-side legacy alias); task-113's spec-path preferences
+  client (`notificationChannels`/`updateNotificationChannels`) kept.
+- **Routes:** `App.svelte` keeps both sides' modes — `/@username`,
+  `/invite/:id` (task-127) and `/settings/notifications` (task-113) —
+  through parseUrl/urlFor/pushState/popstate/title handling.
+- **Coverage:** `specs/coverage/system/user-management.md` header and
+  rows 19/31 carry a dated merge-reconciliation note; `SUMMARY.md`
+  regenerated mechanically via `scripts/update-coverage-summary.sh`
+  (user-management now 10 task-assigned / 15 implemented — rows 19/20
+  are task-113's, landed via this merge).
 
 ### Test evidence (this round)
 
-- `python3 scripts/check-rustfmt-diff.py 103d665e` — changed lines clean
-  (6 Rust files checked); was failing on the two lines above before the fix.
-- `/tmp/stage/bin/cargo test -p gyre-adapters
-  list_active_for_user` — passes (the reformatted adapters test).
+- `cd web && npm ci && npm test` — **2418 passed**, 41 skipped, 122 files
+  (includes the merged NotificationDrawer suite covering both sides'
+  assertions: active-only request shape, priority grouping, unread pill,
+  read/unread/bulk endpoints, action_url + InvitationReceived deep links,
+  disabled no-target items, filter pass-through; plus NotificationBell,
+  notifications-store, NotificationSettings, and the AppShell bell tests
+  re-pinned to the unread-count endpoint via the store's fetch).
+- `/tmp/stage/bin/cargo check -p gyre-server` — clean.
 - `/tmp/stage/bin/cargo check -p gyre-server --tests` — clean (covers the
-  reformatted users.rs handler test compilation).
+  auto-merged `users.rs`/`notifications.rs` test code).
+- `/tmp/stage/bin/cargo test -p gyre-adapters list_active_for_user` —
+  passes (`list_active_for_user_excludes_resolved_and_dismissed`, real
+  SQLite storage).
 - Deferred to the independent verifier (gyre-server test binary exceeds
   the in-sandbox 4 GiB wrapper budget):
   `cargo test -p gyre-server spec_path_notifications_active_filter_excludes_resolved_and_dismissed`,
-  plus the usual full `cargo test --all`, `cd web && npm test`, and web e2e.
+  plus the usual full `cargo test --all` and web e2e.
 
 ### Still open (owned elsewhere, not this task's pages)
 
