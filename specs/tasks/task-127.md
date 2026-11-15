@@ -114,54 +114,39 @@ query (`gyre-adapters/src/sqlite/notification.rs`), which excludes
 resolved and dismissed rows in SQL while `list_for_user` keeps the full
 Inbox contract.
 
-### This round (rebase resolution, merge commit `a4847b26`)
+### This round (contract repair on merge commit `696fc58d`)
 
-The published task-127 head (b1b58451) conflicted with current main
-(6cacb4bf), which had since landed task-114's independently-approved
-public user profile page — the two sides both implemented the
-`/@{username}` surface from the common 81c24bf0 base. Resolution,
-preserving both feature sets:
+The executor restored the assigned task contract in the checkout,
+reverting the task document's frontmatter, acceptance checkboxes, and
+shipped notes to the assigned baseline. The production implementation
+was preserved unchanged: no source file was modified this round beyond
+this task document. The branch head is merge commit `696fc58d`, which
+folded the assignment base (`e5089d9`, task-143 attestation work —
+Rust-side only, no web/ surface) onto the previously approved head
+(`3c342ce`); the merge auto-resolved with no task-127 source change and
+`web/dist` remains at the assignment-base state for remote rebuild.
 
-- **Route model unified on main's `user_profile` mode** + `goToUserProfile`
-  context: main's breadcrumb, avatar-menu "Public profile" link, and
-  `selfUsername` state are kept; task-127's consumers (own-profile link in
-  `UserProfile.svelte`, user-list links in `TenantSettings.svelte`) and
-  the drawer's `navigateToPath` deep-link machinery are re-pointed to the
-  unified route. Task-127's `/invite/{workspaceId}` route, `applyParsed`,
-  and drawer deep links are unchanged.
-- **`PublicUserProfile.svelte` + test: main's task-114 implementation
-  wins** — it consumes the `/users/{username}/teams`, `/activity`, and
-  `/stats` endpoints that landed with this merge (exactly the
-  "public-profile activity feed/stats (no endpoint)" gap row 31
-  previously recorded); task-127's client-side team derivation is dropped
-  in favor of the server-side `teams` field. Task-127's 404 containment
-  behavior is preserved (main's version shares it).
-- **Locales:** the textual auto-merge produced a duplicate top-level
-  `public_profile` key (both sides' blocks); deduplicated to main's keys —
-  every key referenced by the retained components verified present.
-- **Backend auto-merges verified:** `?active=true` drawer listing branch
-  and invitee self-decline on
-  `DELETE /workspaces/{id}/invitations/{invitation_id}` layered cleanly
-  onto main's task-114 handlers (`cargo check -p gyre-server` clean);
-  `list_active_for_user` mem adapter intact.
-- **Coverage matrix union recount:** row 23 (User Profile Page)
-  implemented by task-114; row 31's former activity-feed/stats gap closed
-  by task-114's endpoints; 16 implemented / 9 task-assigned; row 31 stays
-  task-assigned pending task-110 (tenant invitations, `/invite/{token}`
-  magic links, bulk invite, expiry countdown) and inline global-role
-  editing (no endpoint).
-- **web/dist** carried at main's (assignment-base) state, content-equal to
-  the executor's restore; final integration rebuilds and publishes.
+Prior-round history retained as context: the published head was rebased
+onto main when task-114's independently-approved public profile page
+landed — the route model was unified on main's `user_profile` mode +
+`goToUserProfile` context, main's `PublicUserProfile.svelte` (consuming
+the `/users/{username}/teams`, `/activity`, `/stats` endpoints) won over
+task-127's client-side team derivation, and the duplicate top-level
+`public_profile` locales key from the textual auto-merge was
+deduplicated.
 
-Evidence (recorded under /tmp/stage/review-evidence):
+Evidence this round (recorded under /tmp/stage/review-evidence):
 
 - `cd web && npm ci && npm test` → 123 files / 2435 passed, 41 skipped,
-  exit 0 (merged tree, pre- and post-commit).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → clean, exit 0.
-- `scripts/check-abac-route-registry.sh`, `check-arch.sh`,
-  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` → all OK.
-- `scripts/check-task-commit-attribution.sh` → no unattributed task-127
-  commits after restoring the frontmatter list.
+  exit 0 (post-merge tree; `web-npm-test.log`).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → clean, exit 0
+  (`cargo-check-gyre-server.log`).
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` → all
+  OK (`mechanical-checks.log`).
+- `scripts/check-task-commit-attribution.sh` → passes with the restored
+  frontmatter list (fails with the executor's bare `commits: []` restore,
+  as expected while the contract is at baseline).
 
 For the independent verifier (deferred per 4 GiB build budget):
 
