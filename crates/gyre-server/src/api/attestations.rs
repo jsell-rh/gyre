@@ -63,14 +63,17 @@ mod tests {
     use gyre_ports::AttestationSigner;
     use tower::ServiceExt;
 
-    fn app() -> Router {
+    fn app(state: &Arc<AppState>) -> Router {
+        // The router must serve with the SAME state that signed the
+        // bundle: `build_state` generates a fresh Ed25519 issuer key per
+        // call in tests (no DB), and verification is an evaluation of the
+        // bundle against the *issuer's* key — a second, independent
+        // state would reject every legitimately-signed bundle (and make
+        // the tamper tests pass vacuously on key mismatch instead of on
+        // the tamper).
         Router::new()
             .route("/api/v1/attestations/verify", post(verify_bundle))
-            .with_state(crate::build_state(
-                "gyre-test-token",
-                "http://localhost:0",
-                None,
-            ))
+            .with_state(state.clone())
     }
 
     /// A minimal well-formed bundle: one forge-signed gate and a forge
@@ -133,7 +136,7 @@ mod tests {
     async fn valid_bundle_verifies_over_http() {
         let state = crate::build_state("gyre-test-token", "http://localhost:0", None);
         let bundle = signed_bundle(&state).await;
-        let response = app()
+        let response = app(&state)
             .oneshot(post_json(serde_json::to_value(&bundle).unwrap()))
             .await
             .unwrap();
@@ -156,7 +159,7 @@ mod tests {
         let mut bundle = signed_bundle(&state).await;
         // Tamper after signing: the bundle signature must fail.
         bundle.merged_at += 1;
-        let response = app()
+        let response = app(&state)
             .oneshot(post_json(serde_json::to_value(&bundle).unwrap()))
             .await
             .unwrap();
@@ -179,7 +182,7 @@ mod tests {
         let state = crate::build_state("gyre-test-token", "http://localhost:0", None);
         let mut bundle = signed_bundle(&state).await;
         bundle.bundle_signature = None;
-        let response = app()
+        let response = app(&state)
             .oneshot(post_json(serde_json::to_value(&bundle).unwrap()))
             .await
             .unwrap();
@@ -194,7 +197,8 @@ mod tests {
 
     #[tokio::test]
     async fn body_that_is_not_a_bundle_is_rejected_400() {
-        let response = app()
+        let state = crate::build_state("gyre-test-token", "http://localhost:0", None);
+        let response = app(&state)
             .oneshot(post_json(serde_json::json!({"not": "a bundle"})))
             .await
             .unwrap();
