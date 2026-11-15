@@ -9,7 +9,7 @@ coverage_sections:
   - "user-management.md §User Profile Page (`/@{username}`)"
 commits:
   - fc06e371
-  - d6f0928b
+  - 978faf1a
 ---
 
 ## Spec Excerpt
@@ -133,7 +133,8 @@ respected and guarded by a test).
   tests `public_profile_includes_teams` and `public_profile_activity_and_
   stats` (stats correctness — another reviewer's rows excluded, rejected
   approval not counted; newest-first ordering; `?limit=` pagination +
-  total; cross-tenant 404 on both endpoints) plus the pre-existing
+  total; same-tenant peer gets 200 on the feed; cross-tenant 404 on both
+  endpoints) plus the pre-existing
   `get_user_by_username_is_tenant_scoped` regression.
 
 Coverage row 23 (`user-management.md` §User Profile Page) is marked
