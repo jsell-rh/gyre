@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Profile Page (`/@{username}`)"
-commits: ["23ebbb9c7aa80a3405ca92c7b33d868650958ea9", "b25f1060558b2e557a329efbda7eb9efcae231e8", "d813d79b46ef04732ccd88ffb83039a9e606293f", "978faf1a180b555eab24b739a2b5653f21bdcad3", "fc06e3713988b2ec3647e87e077da00b23ad52c1", "c60e741e10695fda2884e7fc03a9e7aa88cd9d85"]
+commits: ["c60e741e10695fda2884e7fc03a9e7aa88cd9d85", "23ebbb9c7aa80a3405ca92c7b33d868650958ea9", "b25f1060558b2e557a329efbda7eb9efcae231e8", "d813d79b46ef04732ccd88ffb83039a9e606293f", "978faf1a180b555eab24b739a2b5653f21bdcad3", "fc06e3713988b2ec3647e87e077da00b23ad52c1"]
 ---
 
 ## Spec Excerpt
