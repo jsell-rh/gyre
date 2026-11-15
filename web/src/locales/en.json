@@ -33,6 +33,7 @@
     "search_shortcut": "⌘K",
     "user_menu": "User menu",
     "profile": "Profile",
+    "public_profile": "Public profile",
     "api_token": "API Token",
     "sign_out": "Sign out",
     "select_workspace": "Select workspace",
@@ -710,6 +711,33 @@
     "loaded": "code view loaded",
     "sub_tabs_label": "Code sub-tabs",
     "view_queue_entry": "View queue entry"
+  },
+  "public_profile": {
+    "not_found_title": "User not found",
+    "not_found_description": "This user does not exist or is not visible in your tenant.",
+    "timezone": "Timezone",
+    "joined": "Joined",
+    "memberships": "Workspace Memberships",
+    "no_memberships": "No workspace memberships",
+    "teams": "Teams",
+    "no_teams": "No team memberships",
+    "no_activity": "No recent public activity",
+    "stats": {
+      "label": "Activity stats",
+      "mrs_reviewed": "MRs reviewed",
+      "specs_approved": "Specs approved",
+      "agents_spawned": "Agents spawned"
+    },
+    "activity": {
+      "label": "Recent Activity",
+      "view_entity": "View detail",
+      "approved_mr": "Approved MR “{title}”",
+      "requested_changes": "Requested changes on MR “{title}”",
+      "approved_spec": "Approved spec {path}",
+      "rejected_spec": "Rejected spec {path}",
+      "revoked_spec": "Revoked approval of spec {path}",
+      "spawned_agent": "Spawned agent {name}"
+    }
   },
   "user_profile": {
     "title": "My Profile",
@@ -2222,18 +2250,6 @@
     "prediction_applied_toast": "{count} predicted changes shown as ghost overlays.",
     "highlighted_nodes": "Highlighted {count} nodes from the answer on the canvas.",
     "spec_needs_repo": "Open a repo first to view specs inline."
-  },
-  "public_profile": {
-    "not_found_title": "User not found",
-    "not_found_desc": "No user with this handle exists in your tenant.",
-    "load_error_title": "Could not load profile",
-    "timezone": "Timezone",
-    "member_since": "Member since",
-    "workspace_memberships": "Workspace memberships",
-    "no_memberships": "No workspace memberships.",
-    "team_memberships": "Team memberships",
-    "no_teams": "No team memberships.",
-    "lead_badge": "Lead"
   },
   "invite_accept": {
     "title": "Workspace invitation",

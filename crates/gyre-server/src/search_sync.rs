@@ -195,6 +195,10 @@ impl AgentRepository for IndexingAgentRepository {
         Ok(())
     }
 
+    async fn list_by_spawner(&self, spawned_by: &str) -> Result<Vec<Agent>> {
+        self.inner.list_by_spawner(spawned_by).await
+    }
+
     async fn record_usage(&self, usage: &gyre_domain::AgentUsage) -> Result<()> {
         // Usage fields are not part of the agent search document.
         self.inner.record_usage(usage).await
@@ -349,6 +353,10 @@ impl ReviewRepository for IndexingReviewRepository {
 
     async fn list_reviews(&self, mr_id: &Id) -> Result<Vec<Review>> {
         self.inner.list_reviews(mr_id).await
+    }
+
+    async fn list_by_reviewer(&self, reviewer_agent_id: &str) -> Result<Vec<Review>> {
+        self.inner.list_by_reviewer(reviewer_agent_id).await
     }
 
     async fn is_approved(&self, mr_id: &Id) -> Result<bool> {

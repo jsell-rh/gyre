@@ -12,7 +12,7 @@
 
   const navigate = getContext('navigate');
   const goToWorkspaceHome = getContext('goToWorkspaceHome');
-  const goToPublicProfile = getContext('goToPublicProfile');
+  const goToUserProfile = getContext('goToUserProfile');
 
   // ── State ──────────────────────────────────────────────────────────────────
   let me = $state(null);
@@ -582,7 +582,7 @@
     <div class="profile-meta">
       <h1 class="page-title">{me?.display_name ?? me?.username ?? $t('user_profile.title')}</h1>
       {#if me?.username}
-        <button class="username username-link" onclick={() => goToPublicProfile?.(me.username)} title={$t('user_profile.view_public_profile')} data-testid="public-profile-link">@{me.username}</button>
+        <button class="username username-link" onclick={() => goToUserProfile?.(me.username)} title={$t('user_profile.view_public_profile')} data-testid="public-profile-link">@{me.username}</button>
       {/if}
       {#if me?.global_role}
         <Badge variant="info" value={me.global_role} />

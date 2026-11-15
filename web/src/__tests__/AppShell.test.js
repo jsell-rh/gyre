@@ -35,9 +35,10 @@ function parseUrl(pathname) {
     return { mode: 'profile', slug: null, repoName: null, tab: null };
   }
 
-  // /@username — tenant-public profile (user-management.md §UI Pages)
-  if (raw.length === 1 && raw[0].startsWith('@') && raw[0].length > 1) {
-    return { mode: 'public_profile', slug: null, repoName: null, tab: null, username: raw[0].slice(1) };
+  // /@{username} — tenant-scoped public user profile
+  // (user-management.md §User Profile Page)
+  if (raw[0]?.startsWith('@') && raw[0].length > 1) {
+    return { mode: 'user_profile', slug: null, repoName: null, tab: null, username: raw[0].slice(1) };
   }
 
   // /invite/:workspaceId — pending invitation accept page (§UI Pages)
@@ -70,7 +71,7 @@ function urlFor(parsed) {
   if (!parsed) return '/';
   const { mode: m, slug, repoName, tab, username, inviteId } = parsed;
   if (m === 'profile') return '/profile';
-  if (m === 'public_profile') return `/@${encodeURIComponent(username ?? '')}`;
+  if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
   if (m === 'invite_accept') return `/invite/${encodeURIComponent(inviteId ?? '')}`;
   if (m === 'cross_workspace') {
     return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
@@ -98,6 +99,19 @@ describe('parseUrl', () => {
 
   it('parses profile route', () => {
     expect(parseUrl('/profile')).toEqual({ mode: 'profile', slug: null, repoName: null, tab: null });
+  });
+
+  it('parses /@username as the public profile route', () => {
+    expect(parseUrl('/@jsell')).toEqual({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jsell' });
+  });
+
+  it('decodes URL-encoded handles in /@username', () => {
+    expect(parseUrl('/@j%C3%B8rgen')).toEqual({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jørgen' });
+  });
+
+  it('does not treat a bare @ or non-@ path as a profile', () => {
+    expect(parseUrl('/@')).toBeNull();
+    expect(parseUrl('/dashboard')).toBeNull();
   });
 
   it('parses workspace home', () => {
@@ -203,9 +217,9 @@ describe('urlFor', () => {
     expect(urlFor({ mode: 'profile', slug: null, repoName: null, tab: null })).toBe('/profile');
   });
 
-  it('parses /@username as public_profile', () => {
+  it('parses /@username as user_profile', () => {
     expect(parseUrl('/@asmith')).toEqual({
-      mode: 'public_profile', slug: null, repoName: null, tab: null, username: 'asmith',
+      mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'asmith',
     });
   });
 
@@ -216,8 +230,17 @@ describe('urlFor', () => {
   });
 
   it('generates /@username and /invite/:id URLs', () => {
-    expect(urlFor({ mode: 'public_profile', username: 'asmith' })).toBe('/@asmith');
+    expect(urlFor({ mode: 'user_profile', username: 'asmith' })).toBe('/@asmith');
     expect(urlFor({ mode: 'invite_accept', inviteId: 'ws-9' })).toBe('/invite/ws-9');
+  });
+
+  it('URL-encodes handles in /@username', () => {
+    expect(urlFor({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jørgen' })).toBe('/@j%C3%B8rgen');
+  });
+
+  it('round-trips /@username through parseUrl → urlFor', () => {
+    const parsed = parseUrl('/@jsell');
+    expect(urlFor(parsed)).toBe('/@jsell');
   });
 
   it('returns / when no slug', () => {

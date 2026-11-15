@@ -29,12 +29,12 @@
 
   // ── Navigation mode ──────────────────────────────────────────────────
   // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' |
-  // 'public_profile' (@username) | 'invite_accept' (/invite/:id) | 'notification_settings'
+  // 'user_profile' (@username) | 'invite_accept' (/invite/:id) | 'notification_settings'
   let mode = $state('workspace_home');
 
   // ── Public profile / invitation accept state ────────────────────────
-  // /@username — tenant-public profile (user-management.md §UI Pages)
-  let publicUsername = $state('');
+  // /@username — tenant-public profile (user-management.md §User Profile
+  // Page); the shared route state also serves the drawer's deep links.
   // /invite/:id — pending workspace invitation accept page. The path
   // segment is the workspace id (task-124 models a pending invitation as
   // a membership row keyed by workspace; the token form belongs to the
@@ -279,10 +279,19 @@
       return { mode: 'profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
     }
 
-    // /@username — tenant-public profile (user-management.md §UI Pages >
-    // User Profile). The handle is URL-decoded with the rest of the path.
-    if (raw.length === 1 && raw[0].startsWith('@') && raw[0].length > 1) {
-      return { mode: 'public_profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null, username: raw[0].slice(1) };
+    // /@{username} — tenant-scoped public user profile
+    // (user-management.md §User Profile Page). The handle is the URL-decoded
+    // first segment minus its leading '@'.
+    if (raw[0]?.startsWith('@') && raw[0].length > 1) {
+      return {
+        mode: 'user_profile',
+        slug: null,
+        repoName: null,
+        tab: null,
+        entityType: null,
+        entityId: null,
+        username: raw[0].slice(1),
+      };
     }
 
     // /invite/:workspaceId — pending invitation accept page
@@ -356,7 +365,7 @@
     if (!parsed) return '/';
     const { mode: m, slug, repoName, tab, entityType, entityId, username, inviteId } = parsed;
     if (m === 'profile') return '/profile';
-    if (m === 'public_profile') return `/@${encodeURIComponent(username ?? '')}`;
+    if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
     if (m === 'invite_accept') return `/invite/${encodeURIComponent(inviteId ?? '')}`;
     if (m === 'notification_settings') return '/settings/notifications';
     if (m === 'cross_workspace') {
@@ -391,6 +400,7 @@
       repoTab: parsed.tab ?? 'specs',
       entityType: parsed.entityType ?? null,
       entityId: parsed.entityId ?? null,
+      username: parsed.username ?? null,
     };
     window.history.pushState(stateObj, '', urlFor(parsed));
   }
@@ -623,16 +633,18 @@
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
   }
 
-  function goToPublicProfile(username) {
-    mode = 'public_profile';
-    publicUsername = username;
+  // /@{username} — tenant-scoped public profile (user-management.md
+  // §User Profile Page). Exposed as a context so any surface rendering a
+  // user reference (@mentions, activity feeds, reviewer attribution) can
+  // link to the profile.
+  function goToUserProfile(username) {
+    if (!username) return;
+    mode = 'user_profile';
+    userProfileUsername = username;
     currentRepo = null;
+    entityDetail = null;
     fadeContent();
-    window.history.pushState(
-      { mode: 'public_profile', username },
-      '',
-      `/@${encodeURIComponent(username)}`,
-    );
+    pushState({ mode: 'user_profile', slug: null, repoName: null, tab: null, username });
   }
 
   function goToInviteAccept(workspaceId) {
@@ -654,9 +666,9 @@
     if (!p) return;
     currentRepo = null;
     entityDetail = null;
-    if (p.mode === 'public_profile') {
-      mode = 'public_profile';
-      publicUsername = p.username;
+    if (p.mode === 'user_profile') {
+      mode = 'user_profile';
+      userProfileUsername = p.username;
     } else if (p.mode === 'invite_accept') {
       mode = 'invite_accept';
       inviteWorkspaceId = p.inviteId;
@@ -789,7 +801,7 @@
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
   setContext('goToCrossWorkspace', () => goToCrossWorkspace());
-  setContext('goToPublicProfile', (username) => goToPublicProfile(username));
+  setContext('goToUserProfile', (username) => goToUserProfile(username));
   setContext('goToInviteAccept', (workspaceId) => goToInviteAccept(workspaceId));
   setContext('navigateToPath', (path) => navigateToPath(path));
   setContext('goToNotificationSettings', () => goToNotificationSettings());
@@ -986,6 +998,11 @@
   // Current user id — threaded into presence-aware components (ConcurrentEditBanner)
   // so a user's own other tabs are excluded from the concurrent-edit warning (HSI §7).
   let selfUserId = $state(null);
+  // Own handle for the top-nav avatar's public-profile link
+  // (user-management.md §User Profile Page navigation integration).
+  let selfUsername = $state(null);
+  // Routed /@{username} public-profile subject.
+  let userProfileUsername = $state(null);
 
   // ── Token modal ───────────────────────────────────────────────────────
   const TOKEN_KIND_LABELS = {
@@ -1152,8 +1169,8 @@
     const repoName = currentRepo?.name ?? '';
     if (mode === 'profile') {
       document.title = 'Profile | Gyre';
-    } else if (mode === 'public_profile') {
-      document.title = publicUsername ? `@${publicUsername} | Gyre` : 'Profile | Gyre';
+    } else if (mode === 'user_profile') {
+      document.title = userProfileUsername ? `@${userProfileUsername} | Gyre` : 'User | Gyre';
     } else if (mode === 'invite_accept') {
       document.title = 'Workspace Invitation | Gyre';
     } else if (mode === 'notification_settings') {
@@ -1215,9 +1232,9 @@
 
     if (parsed?.mode === 'profile') {
       mode = 'profile';
-    } else if (parsed?.mode === 'public_profile') {
-      mode = 'public_profile';
-      publicUsername = parsed.username ?? '';
+    } else if (parsed?.mode === 'user_profile') {
+      mode = 'user_profile';
+      userProfileUsername = parsed.username ?? null;
     } else if (parsed?.mode === 'invite_accept') {
       mode = 'invite_accept';
       inviteWorkspaceId = parsed.inviteId ?? null;
@@ -1314,7 +1331,7 @@
       // Path-parameterized modes: keep the route parameter in the canonical
       // URL, or a page load at /invite/{ws} / /@{username} rewrites the URL
       // to /invite/ / /@ and a later refresh loses the deep link entirely.
-      username: mode === 'public_profile' ? publicUsername : null,
+      username: mode === 'user_profile' ? userProfileUsername : null,
       inviteId: mode === 'invite_accept' ? inviteWorkspaceId : null,
     });
     window.history.replaceState(
@@ -1328,6 +1345,7 @@
       const me = await api.me();
       userIsAdmin = me?.global_role === 'Admin' || me?.role === 'Admin' || me?.is_admin === true;
       selfUserId = me?.id ?? null;
+      selfUsername = me?.username ?? null;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
     const decisionsInterval = setInterval(() => {
@@ -1355,10 +1373,12 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: pUsername, inviteId: pInviteId } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'public_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: histUsername, inviteId: pInviteId } = e.state;
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'user_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
           ? m : 'workspace_home';
-        if (m === 'public_profile') publicUsername = pUsername ?? parseUrl(window.location.pathname)?.username ?? '';
+        if (m === 'user_profile') {
+          userProfileUsername = histUsername ?? parseUrl(window.location.pathname)?.username ?? null;
+        }
         if (m === 'invite_accept') inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
@@ -1369,7 +1389,7 @@
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'public_profile' && m !== 'invite_accept' && m !== 'notification_settings') {
+        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'user_profile' && m !== 'invite_accept' && m !== 'notification_settings') {
           // Try to recover workspace from URL slug if state doesn't have wsId
           const p2 = parseUrl(window.location.pathname);
           if (p2?.slug) {
@@ -1405,9 +1425,9 @@
       if (p) {
         if (p.mode === 'profile') {
           mode = 'profile';
-        } else if (p.mode === 'public_profile') {
-          mode = 'public_profile';
-          publicUsername = p.username ?? '';
+        } else if (p.mode === 'user_profile') {
+          mode = 'user_profile';
+          userProfileUsername = p.username ?? null;
         } else if (p.mode === 'invite_accept') {
           mode = 'invite_accept';
           inviteWorkspaceId = p.inviteId ?? null;
@@ -1419,7 +1439,7 @@
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'public_profile' || p.mode === 'invite_accept' || p.mode === 'analytics')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'user_profile' || p.mode === 'invite_accept' || p.mode === 'analytics')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -1686,6 +1706,24 @@
                 </button>
               {/if}
             </div>
+          {:else if mode === 'user_profile'}
+            <!-- Public profile page: back arrow + @username breadcrumb
+                (user-management.md §User Profile Page). -->
+            <div class="ws-name-wrap">
+              <button
+                class="back-btn"
+                onclick={() => window.history.back()}
+                aria-label={$t('topbar.back_to_workspace')}
+                data-testid="back-btn"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                  <path d="M19 12H5M12 5l-7 7 7 7"/>
+                </svg>
+              </button>
+              <nav class="breadcrumb" aria-label={$t('topbar.location')}>
+                <span class="breadcrumb-repo" aria-current="page" data-testid="user-profile-breadcrumb">&#64;{userProfileUsername}</span>
+              </nav>
+            </div>
           {:else}
             <button
               class="ws-name-btn ws-name-empty"
@@ -1819,6 +1857,19 @@
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToProfile(); userMenuOpen = false; }}>
                 {$t('topbar.profile')}
               </button>
+              <!-- Own public profile (user-management.md §User Profile Page
+                  navigation integration: the avatar menu links to /@{username}). -->
+              {#if selfUsername}
+                <button
+                  class="user-dropdown-item"
+                  role="menuitem"
+                  tabindex="-1"
+                  data-testid="user-menu-public-profile"
+                  onclick={() => { goToUserProfile(selfUsername); userMenuOpen = false; }}
+                >
+                  {$t('topbar.public_profile')}
+                </button>
+              {/if}
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToNotificationSettings(); userMenuOpen = false; }} data-testid="user-menu-notification-settings">
                 {$t('topbar.notification_settings')}
               </button>
@@ -1966,8 +2017,8 @@
           {/if}
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
-        {:else if mode === 'public_profile'}
-          <PublicUserProfile username={publicUsername} />
+        {:else if mode === 'user_profile'}
+          <PublicUserProfile username={userProfileUsername} workspaces={workspaces} />
         {:else if mode === 'invite_accept'}
           <InvitationAccept inviteId={inviteWorkspaceId} />
         {:else if mode === 'notification_settings'}

@@ -173,6 +173,8 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 | `moldable/Moldable{Type,Trait,Endpoint,Spec}View.svelte` | Moldable views — tailored detail views per entity type; shared computation in `moldable/model.js` |
 | `InlineChat.svelte` | SSE-driven LLM chat widget |
 | `PresenceAvatars.svelte` | Live presence avatars in status bar |
+| `UserProfile.svelte` | Private profile/settings surface (`/profile`) — info, tokens, memberships, judgment ledger, notification preferences (HSI §12) |
+| `PublicUserProfile.svelte` | Tenant-scoped public user profile (`/@{username}`) — identity header (avatar, display name, handle, timezone), workspace memberships with roles, teams, public-action activity feed, and stats (MRs reviewed / specs approved / agents spawned) (user-management.md §User Profile Page) |
 | `ScopeBreadcrumb.svelte` | Top bar workspace/repo context breadcrumb |
 
 ---

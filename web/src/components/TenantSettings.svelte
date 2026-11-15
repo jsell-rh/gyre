@@ -18,7 +18,7 @@
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
-  const goToPublicProfile = getContext('goToPublicProfile') ?? null;
+  const goToUserProfile = getContext('goToUserProfile') ?? null;
   function nav(type, id, data) {
     if (goToEntityDetail) goToEntityDetail(type, id, data ?? {});
     else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
@@ -820,8 +820,8 @@
                 {#each filteredTenantUsers as user (user.id)}
                   <tr data-testid="tenant-user-row" class:user-deactivated={!!user.deactivated_at}>
                     <td>
-                      {#if goToPublicProfile && user.username}
-                        <button class="user-link" onclick={() => goToPublicProfile(user.username)} title={$t('tenant_settings.users.view_profile')} data-testid={`user-profile-link-${user.id}`}>@{user.username}</button>
+                      {#if goToUserProfile && user.username}
+                        <button class="user-link" onclick={() => goToUserProfile(user.username)} title={$t('tenant_settings.users.view_profile')} data-testid={`user-profile-link-${user.id}`}>@{user.username}</button>
                       {:else}
                         <span>@{user.username ?? shortId(user.id)}</span>
                       {/if}

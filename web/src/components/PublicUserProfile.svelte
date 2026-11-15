@@ -1,245 +1,507 @@
 <script>
   /**
-   * PublicUserProfile.svelte — tenant-public profile page (`/@username`)
-   * (user-management.md §UI Pages > User Profile).
+   * PublicUserProfile.svelte — tenant-scoped public user profile
+   * (user-management.md §User Profile Page, route /@{username}).
    *
-   * Public within the tenant: display name, username, avatar, timezone,
-   * workspace memberships and roles, team memberships. Backed by
-   * GET /api/v1/users/{username} (task-124) — the endpoint 404s both
-   * nonexistent and cross-tenant handles, so the not-found state here is
-   * honest for both.
+   * Surface: display name, username, avatar, timezone, workspace
+   * memberships with roles, team memberships, recent public-action
+   * activity feed, and aggregate stats (MRs reviewed, specs approved,
+   * agents spawned). This is NOT the private /profile settings surface
+   * (HSI §12 "What the Profile Is NOT") — no tasks/MRs/agents hubs, no
+   * notification or token management.
    */
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import Badge from '../lib/Badge.svelte';
-  import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
-  import { toast as showToast } from '../lib/toast.svelte.js';
+  import EmptyState from '../lib/EmptyState.svelte';
+  import { relativeTime, formatDate } from '../lib/timeFormat.js';
   import { getContext } from 'svelte';
 
-  const goToWorkspaceHome = getContext('goToWorkspaceHome');
+  let { username = '', workspaces = [] } = $props();
 
-  let { username = '' } = $props();
+  const goToEntityDetail = getContext('goToEntityDetail');
 
-  let user = $state(null);
-  let workspaces = $state([]);
-  let teamsByWorkspace = $state({});
+  let profile = $state(null);
+  let stats = $state(null);
+  let activity = $state([]);
   let loading = $state(true);
   let notFound = $state(false);
-  let loadError = $state(null);
+  let activityLoading = $state(true);
 
-  // A workspace membership row: { id, user_id, workspace_id, role, accepted,
-  // accepted_at, created_at }. Only accepted memberships are public profile
-  // surface — a pending invitation is not a membership.
-  let memberships = $derived(
-    (user?.memberships ?? []).filter(m => m.accepted)
-  );
-
-  // Distinct workspaces the user is an accepted member of.
-  let memberWorkspaceIds = $derived([
-    ...new Set(memberships.map(m => m.workspace_id)),
-  ]);
-
-  // Team memberships: teams whose member_ids include the user. Teams are
-  // listed per workspace (GET /workspaces/{id}/teams) and filtered
-  // client-side — there is no per-user team listing endpoint.
-  let teamMemberships = $derived.by(() => {
-    const out = [];
-    for (const wsId of memberWorkspaceIds) {
-      for (const team of teamsByWorkspace[wsId] ?? []) {
-        if ((team.member_ids ?? []).includes(user?.id)) {
-          out.push({ ...team, workspace_id: wsId });
-        }
-      }
+  // Reload whenever the routed username changes.
+  $effect(() => {
+    const name = username;
+    if (name) {
+      untrackedLoad(name);
     }
-    return out;
   });
 
-  function workspaceName(wsId) {
-    const ws = workspaces.find(w => w.id === wsId);
-    return ws?.name ?? ws?.slug ?? wsId;
-  }
-
-  function fmtDate(ts) {
-    if (!ts) return '—';
-    try { return new Date(ts * 1000).toLocaleDateString(); } catch { return '—'; }
-  }
-
-  async function load() {
+  async function untrackedLoad(name) {
     loading = true;
     notFound = false;
-    loadError = null;
+    profile = null;
+    stats = null;
+    activity = [];
+    activityLoading = true;
     try {
-      user = await api.userByUsername(username);
+      profile = await api.publicUserProfile(name);
     } catch (e) {
-      // 404 covers both nonexistent and cross-tenant handles (tenant
-      // containment) — the same message for both.
-      if (e?.status === 404) notFound = true;
-      else loadError = e?.message ?? String(e);
-      user = null;
+      // Cross-tenant and unknown handles are indistinguishable (404).
+      notFound = true;
+      profile = null;
     }
-    // Workspace list for name resolution (tenant-scoped listing).
-    try { workspaces = await api.workspaces() ?? []; } catch { workspaces = []; }
-    // Teams for each member workspace (best-effort: a workspace the caller
-    // cannot list teams for simply contributes no team memberships).
-    const next = {};
-    await Promise.all(memberWorkspaceIds.map(async wsId => {
-      try {
-        const raw = await api.workspaceTeams(wsId);
-        next[wsId] = Array.isArray(raw?.teams) ? raw.teams : Array.isArray(raw) ? raw : [];
-      } catch { next[wsId] = []; }
-    }));
-    teamsByWorkspace = next;
     loading = false;
+    if (!profile) return;
+    // Stats and the activity feed load after the header so a slow feed
+    // never blocks the identity block.
+    api.publicUserStats(name)
+      .then(s => { stats = s; })
+      .catch(() => { stats = null; });
+    try {
+      const feed = await api.publicUserActivity(name, { limit: 30 });
+      activity = feed?.activity ?? [];
+    } catch {
+      activity = [];
+    }
+    activityLoading = false;
   }
 
-  $effect(() => {
-    if (username) load();
-  });
+  function workspaceName(id) {
+    return workspaces.find(w => w.id === id)?.name ?? null;
+  }
+
+  function membershipLabel(m) {
+    const name = workspaceName(m.workspace_id);
+    return name ?? m.workspace_id;
+  }
+
+  const ACTIVITY_ICONS = {
+    mr_review: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true"><path d="M12 3v18M3 12h18"/></svg>',
+    spec_approved: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>',
+    spec_rejected: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>',
+    spec_revoked: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>',
+    agent_spawned: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>',
+  };
+
+  function activityIcon(ev) {
+    return ACTIVITY_ICONS[ev.event_type] ?? ACTIVITY_ICONS.agent_spawned;
+  }
+
+  function activityText(ev) {
+    switch (ev.event_type) {
+      case 'mr_review':
+        return ev.decision === 'changes_requested'
+          ? $t('public_profile.activity.requested_changes', { values: { title: ev.mr_title ?? ev.mr_id } })
+          : $t('public_profile.activity.approved_mr', { values: { title: ev.mr_title ?? ev.mr_id } });
+      case 'spec_approved':
+        return $t('public_profile.activity.approved_spec', { values: { path: ev.spec_path } });
+      case 'spec_rejected':
+        return $t('public_profile.activity.rejected_spec', { values: { path: ev.spec_path } });
+      case 'spec_revoked':
+        return $t('public_profile.activity.revoked_spec', { values: { path: ev.spec_path } });
+      case 'agent_spawned':
+        return $t('public_profile.activity.spawned_agent', { values: { name: ev.agent_name ?? ev.agent_id } });
+      default:
+        return ev.event_type;
+    }
+  }
+
+  /** Activity entries that reference an entity navigate to its detail. */
+  function openActivityEntity(ev) {
+    if (!goToEntityDetail) return;
+    if (ev.event_type === 'mr_review' && ev.mr_id) {
+      goToEntityDetail('mr', ev.mr_id, { repo_id: ev.repo_id, workspace_id: ev.workspace_id, name: ev.mr_title });
+    } else if (ev.event_type === 'agent_spawned' && ev.agent_id) {
+      goToEntityDetail('agent', ev.agent_id, { workspace_id: ev.workspace_id, name: ev.agent_name });
+    }
+  }
+
+  function activityClickable(ev) {
+    return (ev.event_type === 'mr_review' && ev.mr_id) ||
+      (ev.event_type === 'agent_spawned' && ev.agent_id);
+  }
+
+  let avatarInitial = $derived(
+    (profile?.display_name || profile?.username || '?').trim().charAt(0).toUpperCase() || '?'
+  );
 </script>
 
 <div class="public-profile" data-testid="public-profile">
   {#if loading}
     <div class="profile-header">
-      <Skeleton width="72px" height="72px" radius="50%" />
-      <div class="skeleton-col">
-        <Skeleton height="24px" width="220px" />
-        <Skeleton height="16px" width="140px" />
+      <Skeleton width="72px" height="72px" />
+      <div class="profile-header-text">
+        <Skeleton width="220px" height="1.75rem" />
+        <Skeleton width="140px" height="1rem" />
       </div>
     </div>
   {:else if notFound}
     <EmptyState
       title={$t('public_profile.not_found_title')}
-      description={$t('public_profile.not_found_desc')}
+      description={$t('public_profile.not_found_description')}
     />
-  {:else if loadError}
-    <EmptyState
-      title={$t('public_profile.load_error_title')}
-      description={loadError}
-    />
-  {:else if user}
+  {:else if profile}
+    <!-- Header: avatar, display name, @username, timezone -->
     <header class="profile-header" data-testid="public-profile-header">
-      <div class="avatar" aria-hidden="true">
-        {#if user.avatar_url}
-          <img src={user.avatar_url} alt="" class="avatar-img" />
+      <div class="profile-avatar" aria-hidden="true">
+        {#if profile.avatar_url}
+          <img src={profile.avatar_url} alt="" loading="lazy" />
         {:else}
-          <span class="avatar-initial">{(user.display_name ?? user.username ?? '?').slice(0, 1).toUpperCase()}</span>
+          <span class="avatar-initial">{avatarInitial}</span>
         {/if}
       </div>
-      <div class="identity">
-        <h1 class="display-name">{user.display_name ?? user.username}</h1>
-        <p class="username">{'@'}{user.username}</p>
-        <div class="meta-row">
-          <span class="meta-item">
-            <span class="meta-label">{$t('public_profile.timezone')}</span>
-            <span>{user.timezone ?? '—'}</span>
+      <div class="profile-header-text">
+        <h1 class="profile-display-name">{profile.display_name}</h1>
+        <p class="profile-username mono">&#64;{profile.username}</p>
+        <p class="profile-meta">
+          <span class="meta-item" title={$t('public_profile.timezone')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+            {profile.timezone}
           </span>
-          <span class="meta-item">
-            <span class="meta-label">{$t('public_profile.member_since')}</span>
-            <span>{fmtDate(user.created_at)}</span>
+          <span class="meta-item" title={$t('public_profile.joined')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
+            {$t('public_profile.joined')} {formatDate(profile.created_at)}
           </span>
-        </div>
+        </p>
       </div>
     </header>
 
-    <section class="profile-section" data-testid="public-profile-memberships">
-      <h2>{$t('public_profile.workspace_memberships')}</h2>
-      {#if memberships.length === 0}
-        <p class="empty-text">{$t('public_profile.no_memberships')}</p>
-      {:else}
-        <ul class="membership-list" role="list">
-          {#each memberships as m (m.id)}
-            <li class="membership-row">
-              <button
-                class="ws-link"
-                onclick={() => {
-                  const ws = workspaces.find(w => w.id === m.workspace_id);
-                  if (ws && goToWorkspaceHome) goToWorkspaceHome(ws);
-                }}
-              >{workspaceName(m.workspace_id)}</button>
-              <Badge variant={m.role === 'Owner' ? 'success' : m.role === 'Admin' ? 'info' : 'default'} value={m.role} />
-            </li>
-          {/each}
-        </ul>
-      {/if}
+    <!-- Stats bar: MRs reviewed, specs approved, agents spawned -->
+    <section class="stats-bar" aria-label={$t('public_profile.stats.label')} data-testid="public-profile-stats">
+      <div class="stat-card">
+        <span class="stat-value">{stats ? stats.mrs_reviewed : '—'}</span>
+        <span class="stat-label">{$t('public_profile.stats.mrs_reviewed')}</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{stats ? stats.specs_approved : '—'}</span>
+        <span class="stat-label">{$t('public_profile.stats.specs_approved')}</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{stats ? stats.agents_spawned : '—'}</span>
+        <span class="stat-label">{$t('public_profile.stats.agents_spawned')}</span>
+      </div>
     </section>
 
-    <section class="profile-section" data-testid="public-profile-teams">
-      <h2>{$t('public_profile.team_memberships')}</h2>
-      {#if teamMemberships.length === 0}
-        <p class="empty-text">{$t('public_profile.no_teams')}</p>
-      {:else}
-        <ul class="membership-list" role="list">
-          {#each teamMemberships as team (team.id)}
-            <li class="membership-row">
-              <span class="team-name">{team.name}</span>
-              {#if team.lead === user.id}
-                <Badge variant="info" value={$t('public_profile.lead_badge')} />
-              {/if}
-              <span class="team-slug mono">{team.slug}</span>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </section>
+    <div class="profile-grid">
+      <div class="profile-column">
+        <!-- Workspace memberships and roles -->
+        <section class="profile-section" aria-label={$t('public_profile.memberships')} data-testid="public-profile-memberships">
+          <h2>{$t('public_profile.memberships')}</h2>
+          {#if profile.memberships?.length}
+            <ul class="membership-list">
+              {#each profile.memberships as m (m.id)}
+                <li class="membership-item">
+                  <span class="membership-name">{membershipLabel(m)}</span>
+                  <Badge value={m.role} />
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="muted">{$t('public_profile.no_memberships')}</p>
+          {/if}
+        </section>
+
+        <!-- Team memberships -->
+        <section class="profile-section" aria-label={$t('public_profile.teams')} data-testid="public-profile-teams">
+          <h2>{$t('public_profile.teams')}</h2>
+          {#if profile.teams?.length}
+            <ul class="team-list">
+              {#each profile.teams as team (team.id)}
+                <li class="team-item">
+                  <span class="team-name">{team.name}</span>
+                  <span class="team-slug mono" title={team.slug}>team:{team.slug}</span>
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="muted">{$t('public_profile.no_teams')}</p>
+          {/if}
+        </section>
+      </div>
+
+      <!-- Recent activity feed (public actions only) -->
+      <section class="profile-section activity-section" aria-label={$t('public_profile.activity.label')} data-testid="public-profile-activity">
+        <h2>{$t('public_profile.activity.label')}</h2>
+        {#if activityLoading}
+          <div class="activity-skeleton">
+            {#each Array(4) as _}
+              <Skeleton width="100%" height="2.25rem" />
+            {/each}
+          </div>
+        {:else if activity.length}
+          <ul class="activity-list">
+            {#each activity as ev (ev.event_type + ':' + ev.timestamp + ':' + (ev.mr_id ?? ev.spec_path ?? ev.agent_id ?? ''))}
+              <li class="activity-item">
+                <span class="activity-icon" aria-hidden="true">{@html activityIcon(ev)}</span>
+                {#if activityClickable(ev)}
+                  <button
+                    class="activity-text activity-link"
+                    onclick={() => openActivityEntity(ev)}
+                    title={$t('public_profile.activity.view_entity')}
+                  >{activityText(ev)}</button>
+                {:else}
+                  <span class="activity-text">{activityText(ev)}</span>
+                {/if}
+                <span class="activity-time" title={formatDate(ev.timestamp)}>{relativeTime(ev.timestamp)}</span>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <p class="muted">{$t('public_profile.no_activity')}</p>
+        {/if}
+      </section>
+    </div>
   {/if}
 </div>
 
 <style>
   .public-profile {
-    max-width: 720px;
+    max-width: 960px;
     margin: 0 auto;
-    padding: 24px 16px;
+    padding: 1.5rem 1rem 3rem;
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 1.5rem;
   }
+
+  /* ── Header ─────────────────────────────────────────────────────── */
   .profile-header {
     display: flex;
-    gap: 16px;
     align-items: center;
+    gap: 1.25rem;
+    flex-wrap: wrap;
   }
-  .skeleton-col { display: flex; flex-direction: column; gap: 8px; }
-  .avatar {
+  .profile-avatar {
     width: 72px;
     height: 72px;
     border-radius: 50%;
-    background: var(--color-bg-secondary, #eee);
+    background: var(--color-primary-muted, #dbeafe);
+    color: var(--color-primary, #2563eb);
     display: flex;
     align-items: center;
     justify-content: center;
-    flex-shrink: 0;
     overflow: hidden;
+    flex-shrink: 0;
   }
-  .avatar-img { width: 100%; height: 100%; object-fit: cover; }
-  .avatar-initial { font-size: 28px; font-weight: 600; }
-  .identity { display: flex; flex-direction: column; gap: 4px; }
-  .display-name { margin: 0; font-size: 22px; }
-  .username { margin: 0; color: var(--color-text-secondary, #666); }
-  .meta-row { display: flex; gap: 24px; margin-top: 8px; flex-wrap: wrap; }
-  .meta-item { display: flex; gap: 6px; font-size: 13px; }
-  .meta-label { color: var(--color-text-secondary, #666); }
-  .profile-section h2 { font-size: 15px; margin: 0 0 10px; }
-  .membership-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  .membership-row {
+  .profile-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .avatar-initial {
+    font-size: 1.75rem;
+    font-weight: 600;
+  }
+  .profile-header-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+  .profile-display-name {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .profile-username {
+    margin: 0;
+    color: var(--color-text-muted, #6b7280);
+  }
+  .profile-meta {
+    margin: 0.25rem 0 0;
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    color: var(--color-text-muted, #6b7280);
+    font-size: 0.85rem;
+  }
+  .meta-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  /* ── Stats bar ──────────────────────────────────────────────────── */
+  .stats-bar {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.75rem;
+  }
+  .stat-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 1rem 0.5rem;
+    border: 1px solid var(--color-border, #e5e7eb);
+    border-radius: 8px;
+    background: var(--color-surface, #fff);
+  }
+  .stat-value {
+    font-size: 1.5rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-label {
+    font-size: 0.8rem;
+    color: var(--color-text-muted, #6b7280);
+    text-align: center;
+  }
+
+  /* ── Two-column layout, collapsing on small screens ─────────────── */
+  .profile-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    align-items: start;
+  }
+  .profile-column {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    min-width: 0;
+  }
+
+  .profile-section {
+    border: 1px solid var(--color-border, #e5e7eb);
+    border-radius: 8px;
+    background: var(--color-surface, #fff);
+    padding: 1rem 1.25rem;
+    min-width: 0;
+  }
+  .profile-section h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .membership-list,
+  .team-list,
+  .activity-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .membership-item {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
-    border: 1px solid var(--color-border, #ddd);
-    border-radius: 8px;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--color-border, #f3f4f6);
   }
-  .ws-link {
+  .membership-item:last-child {
+    border-bottom: none;
+  }
+  .membership-name {
+    overflow-wrap: anywhere;
+  }
+
+  .team-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--color-border, #f3f4f6);
+  }
+  .team-item:last-child {
+    border-bottom: none;
+  }
+  .team-slug {
+    font-size: 0.8rem;
+    color: var(--color-text-muted, #6b7280);
+    overflow-wrap: anywhere;
+  }
+
+  /* ── Activity feed ──────────────────────────────────────────────── */
+  .activity-section {
+    min-height: 200px;
+  }
+  .activity-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--color-border, #f3f4f6);
+  }
+  .activity-item:last-child {
+    border-bottom: none;
+  }
+  .activity-icon {
+    display: inline-flex;
+    margin-top: 0.15rem;
+    color: var(--color-text-muted, #6b7280);
+    flex-shrink: 0;
+  }
+  .activity-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 0.9rem;
+  }
+  .activity-link {
     background: none;
     border: none;
     padding: 0;
-    font: inherit;
-    color: var(--color-primary, #4a6cf7);
+    text-align: left;
+    color: var(--color-primary, #2563eb);
     cursor: pointer;
+    font: inherit;
   }
-  .ws-link:hover { text-decoration: underline; }
-  .team-name { font-weight: 500; }
-  .team-slug { margin-left: auto; font-size: 12px; color: var(--color-text-secondary, #666); }
-  .empty-text { color: var(--color-text-secondary, #666); font-size: 13px; margin: 0; }
-  .mono { font-family: var(--font-mono, monospace); }
+  .activity-link:hover {
+    text-decoration: underline;
+  }
+  .activity-time {
+    flex-shrink: 0;
+    font-size: 0.8rem;
+    color: var(--color-text-muted, #6b7280);
+    font-variant-numeric: tabular-nums;
+  }
+  .activity-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .muted {
+    color: var(--color-text-muted, #6b7280);
+    margin: 0;
+  }
+  .mono {
+    font-family: var(--font-mono, monospace);
+  }
+
+  /* ── Responsive: single column below 720px ──────────────────────── */
+  @media (max-width: 720px) {
+    .profile-grid {
+      grid-template-columns: 1fr;
+    }
+    .stats-bar {
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.5rem;
+    }
+    .stat-card {
+      padding: 0.75rem 0.25rem;
+    }
+    .stat-value {
+      font-size: 1.25rem;
+    }
+    .profile-header {
+      gap: 1rem;
+    }
+    .profile-avatar {
+      width: 56px;
+      height: 56px;
+    }
+  }
+  @media (max-width: 420px) {
+    .stats-bar {
+      grid-template-columns: 1fr;
+    }
+  }
 </style>
