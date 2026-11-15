@@ -1299,17 +1299,47 @@ mod tests {
 
         let owner_notifs = state
             .notifications
-            .list_for_user(&Id::new("owner-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("owner-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         let spawner_notifs = state
             .notifications
-            .list_for_user(&Id::new("spawner-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("spawner-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("admin-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1348,12 +1378,32 @@ mod tests {
 
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("admin-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         let spawner_notifs = state
             .notifications
-            .list_for_user(&Id::new("spawner-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("spawner-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(admin_notifs.len(), 1);
@@ -1400,6 +1450,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1426,6 +1477,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1454,7 +1506,17 @@ mod tests {
         notify_persona_approval_requested(&state, &persona).await;
         let all = state
             .notifications
-            .list_for_user(&Id::new("reviewer"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("reviewer"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -1488,7 +1550,17 @@ mod tests {
         for user in ["admin-1", "admin-2", "owner-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1508,7 +1580,17 @@ mod tests {
         for user in ["dev-1", "viewer-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert!(
@@ -1548,7 +1630,17 @@ mod tests {
         for user in ["spawner-1", "admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1570,6 +1662,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1622,6 +1715,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1641,6 +1735,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1661,6 +1756,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1693,7 +1789,17 @@ mod tests {
         for user in ["spawner-1", "admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1724,7 +1830,17 @@ mod tests {
         for user in ["spawner-1", "owner-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1746,6 +1862,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1790,7 +1907,17 @@ mod tests {
         for user in ["owner-1", "tenant-admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1813,7 +1940,17 @@ mod tests {
         for user in ["admin-1", "dev-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert!(
