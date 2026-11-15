@@ -4,10 +4,10 @@ spec_ref: "user-management.md §UI Pages"
 depends_on:
   - task-124
   - task-125
-progress: not-started
+progress: complete
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: []
+commits: ["8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
 ---
 
 ## Spec Excerpt
@@ -94,3 +94,45 @@ From `user-management.md` §UI Pages:
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `web/src/lib/` — check for existing user-related components. Route structure: `web/src/routes/` or `web/src/App.svelte`. Existing settings pages: grep for `WorkspaceSettings\|TenantSettings\|UserSettings` in `web/src/`. Notification components: grep for `Notification\|Inbox\|notification` in `web/src/`. The frontend uses Svelte 5 with runes ($state, $derived, $effect). Check `docs/ui.md` for component conventions and navigation model.
+
+## Shipped
+
+All acceptance-criterion pages shipped in earlier rounds as real Svelte 5
+(runes) components against the task-124/125/111 endpoints — see the
+`commits:` frontmatter history in git (earlier rounds recorded their commit
+lists before this round's reset) and the per-round notes in
+`specs/coverage/system/user-management.md` §UI Pages. This round is a
+review repair on top of that work.
+
+### This round (review repair `8d72ffec`)
+
+The assigned review finding (attempt `431b1a77`, on candidate `e71b2e1a`):
+merge commit `237f9a5b` deleted the scoped style rules for the topbar
+user-avatar button — `.user-btn`, `.user-btn:hover`, `.user-btn:focus-visible`,
+`.auth-dot`, and `.user-btn.auth-active .auth-dot` — from `App.svelte`'s
+`<style>` block, while the markup still used them (`class="user-btn"`,
+`class:auth-active`, `<span class="auth-dot">`, the Escape handler focusing
+`.user-btn`, and the reduced-motion media query listing both selectors).
+
+- **Fix:** restored the rule block byte-identical to base `b8d63b0d`
+  (diff-verified) at its original position before `.user-menu-wrap`.
+  User-visible consequences repaired: the primary user-menu button regains
+  its 32px circular elevated design, hover, and focus-visible outline
+  (keyboard a11y), and the auth-status dot renders as a positioned
+  logged-in (green) / logged-out (red) indicator again.
+- **Sweep:** diffed every top-level class selector in the `<style>` block
+  against branch parent `62ed1272`; the only other absences
+  (`.decisions-badge-btn`, `.decisions-count`) are the intentional removal
+  superseded by `NotificationBell` — no markup references remain.
+- **Prior repair verified present:** the round-1 `goToCrossWorkspace`
+  context fix (`4aa5a87a`) survived the merge (`setContext` at
+  App.svelte:791).
+- **Test evidence:** `cd web && npm ci && npm test` (locked deps) — 123
+  test files, 2419 passed / 41 skipped, 0 failures. App.svelte compiles
+  with no unused-selector warnings for the restored rules (only the
+  pre-existing `.sr-only` warning, present in the candidate before this
+  repair). Evidence: `/tmp/stage/review-evidence/user-btn-styles-restored.txt`,
+  `/tmp/stage/review-evidence/web-tests-pass.txt`.
+- **Rust:** no Rust code touched this round (CSS-only repair);
+  `cargo test --all` is owned by the independent verifier per assignment
+  constraints.

@@ -31,8 +31,6 @@
   "topbar": {
     "search": "Search",
     "search_shortcut": "⌘K",
-    "decisions_pending": "{count} decisions pending",
-    "no_decisions": "No decisions pending",
     "user_menu": "User menu",
     "profile": "Profile",
     "api_token": "API Token",
@@ -721,7 +719,9 @@
       "memberships": "Workspaces",
       "ledger": "Judgment Ledger",
       "notif_prefs": "Notification Preferences",
-      "notifications": "Notifications"
+      "notifications": "Notifications",
+      "invitations": "Invitations",
+      "sessions": "Sessions"
     },
     "fields": {
       "display_name": "Display Name",
@@ -768,7 +768,54 @@
     "switch_workspace": "Switch to {name} workspace",
     "enable_notification": "Enable {label} notifications",
     "mark_as_read": "Mark as read",
-    "view_in_inbox_label": "View in Inbox"
+    "view_in_inbox_label": "View in Inbox",
+    "view_public_profile": "View public profile",
+    "prefs_section_title": "Preferences",
+    "no_invitations": "No pending invitations",
+    "no_invitations_desc": "Workspace invitations you receive will appear here.",
+    "invitation_accepted": "Invitation accepted",
+    "invitation_declined": "Invitation declined",
+    "accept_invitation": "Accept",
+    "decline_invitation": "Decline",
+    "sessions_desc": "Devices with an active session for your account. Revoking a session signs that device out immediately.",
+    "sessions_revoke_all": "Sign out everywhere",
+    "sessions_revoke_all_title": "Revoke every active session; when all sessions are revoked the API key itself is rejected",
+    "sessions_signing_out": "Signing out…",
+    "sessions_signed_out": "Signed out of all sessions",
+    "no_sessions": "No active sessions.",
+    "session_last_active": "last active",
+    "session_started": "started",
+    "session_expires": "expires",
+    "session_ws_device": "WebSocket / terminal session",
+    "session_revoke": "Revoke",
+    "session_revoking": "Revoking…",
+    "session_revoked": "Session revoked",
+    "session_revoke_failed": "Failed to revoke session",
+    "session_revoke_title": "Revoke this session",
+    "save_prefs_only": "Save preferences",
+    "channels_title": "Delivery channels",
+    "channels_desc": "How notifications reach you. In-app delivery is always on.",
+    "channel_in_app": "In-app",
+    "channel_in_app_locked": "In-app notifications cannot be disabled",
+    "channel_email": "Email",
+    "channel_digest": "Digest frequency",
+    "channel_min_priority": "Minimum priority",
+    "channel_webhook": "Webhook",
+    "channel_slack": "Slack",
+    "channel_slack_channel": "Channel",
+    "channel_url": "URL",
+    "channel_secret": "Signing secret",
+    "channel_configured": "Configured",
+    "channel_not_configured": "Not configured",
+    "prefs": {
+      "theme": "Theme",
+      "ui_density": "UI density",
+      "diff_view": "Diff view",
+      "feed_scope": "Activity feed scope",
+      "code_font_size": "Code font size (px)",
+      "diff_side_by_side": "Side by side",
+      "diff_unified": "Unified"
+    }
   },
   "agent_card": {
     "title": "Agent Card",
@@ -1663,7 +1710,8 @@
       "compute": "Compute",
       "repos": "Repos",
       "secrets": "Secrets",
-      "audit": "Audit"
+      "audit": "Audit",
+      "members": "Members"
     },
     "tab_bar_label": "Workspace settings sections",
     "secrets_need_entity": "A workspace must be loaded before managing its secrets.",
@@ -1733,7 +1781,24 @@
       "empty": "No members found in this workspace.",
       "col_name": "Name",
       "col_email": "Email",
-      "col_role": "Role"
+      "col_role": "Role",
+      "create": "Create team",
+      "create_title": "Create team",
+      "edit_title": "Edit team: {name}",
+      "no_teams": "No teams yet.",
+      "col_slug": "Slug",
+      "col_lead": "Lead",
+      "col_members": "Members",
+      "col_description": "Description",
+      "manage_members": "Members",
+      "members_title": "Team members: {name}",
+      "add_member": "Add member",
+      "no_members": "No members yet.",
+      "lead_badge": "Lead",
+      "lead_required": "A team lead (@username) is required.",
+      "delete_confirm": "Delete team \"{name}\"?",
+      "delete_failed": "Failed to delete team: {error}",
+      "remove_member_failed": "Failed to remove member: {error}"
     },
     "budget": {
       "title": "Budget",
@@ -1805,7 +1870,28 @@
     "save_failed_settings": "Failed to save settings",
     "save_failed_trust": "Failed to save trust level",
     "save_failed_drift": "Failed to save drift policy",
-    "budget_used_label": "Budget {pct}% used"
+    "budget_used_label": "Budget {pct}% used",
+    "members": {
+      "title": "Members",
+      "invite": "Invite member",
+      "invite_username": "Username (tenant member)",
+      "col_status": "Status",
+      "col_since": "Since",
+      "col_invitee": "Invitee",
+      "col_invited": "Invited",
+      "invitations_title": "Pending invitations",
+      "no_invitations": "No pending invitations.",
+      "status_active": "Active",
+      "status_pending": "Pending",
+      "role_updated": "Member role updated",
+      "role_update_failed": "Failed to change role: {error}",
+      "remove_confirm": "Remove {name} from this workspace?",
+      "remove_failed": "Failed to remove member: {error}",
+      "revoke": "Revoke",
+      "revoke_failed": "Failed to revoke invitation: {error}",
+      "change_role_for": "Change role for {name}",
+      "transfer_reason_prompt": "Reason for the ownership transfer (recorded in the audit trail):"
+    }
   },
   "tenant_settings": {
     "title": "Tenant Administration",
@@ -1829,7 +1915,24 @@
       "role": "Role",
       "tenant_id": "Tenant ID",
       "provisioning_note": "User provisioning is managed via your OIDC identity provider. Add users through your IdP to grant access. Roles: Admin (full access), Member (workspace access), Viewer (read-only).",
-      "no_user_info": "No user information available."
+      "no_user_info": "No user information available.",
+      "not_admin_note": "User management requires the TenantAdmin role.",
+      "search_placeholder": "Search users…",
+      "provision": "Provision user",
+      "provisioned_key_note": "User created. Copy the API key now — it will not be shown again.",
+      "provision_no_tenant": "Your tenant could not be determined; cannot provision a user.",
+      "no_users": "No users.",
+      "col_user": "User",
+      "col_role": "Role",
+      "col_status": "Status",
+      "col_created": "Created",
+      "count_note": "Showing {shown} of {total} users.",
+      "view_profile": "View public profile",
+      "status_active": "Active",
+      "status_deactivated": "Deactivated",
+      "deactivate": "Deactivate",
+      "deactivate_reason_prompt": "Reason for deactivating {name} (recorded in the audit trail):",
+      "deactivate_confirm": "Deactivate {name}? Their sessions are revoked and they can no longer authenticate."
     },
     "compute": {
       "title": "Compute Targets",
@@ -1977,7 +2080,8 @@
       "open": "Open",
       "merged": "Merged",
       "closed": "Closed"
-    }
+    },
+    "remove": "Remove"
   },
   "inline_chat": {
     "ask_about": "Ask about {recipient} ▸",
@@ -2087,6 +2191,41 @@
     "highlighted_nodes": "Highlighted {count} nodes from the answer on the canvas.",
     "spec_needs_repo": "Open a repo first to view specs inline."
   },
+  "public_profile": {
+    "not_found_title": "User not found",
+    "not_found_desc": "No user with this handle exists in your tenant.",
+    "load_error_title": "Could not load profile",
+    "timezone": "Timezone",
+    "member_since": "Member since",
+    "workspace_memberships": "Workspace memberships",
+    "no_memberships": "No workspace memberships.",
+    "team_memberships": "Team memberships",
+    "no_teams": "No team memberships.",
+    "lead_badge": "Lead"
+  },
+  "invite_accept": {
+    "title": "Workspace invitation",
+    "subtitle": "You have been invited to join this workspace.",
+    "not_found_title": "Workspace not found",
+    "not_found_desc": "This invitation link points to a workspace that does not exist or is outside your tenant.",
+    "load_error_title": "Could not load invitation",
+    "none_title": "No pending invitation",
+    "none_desc": "You have no pending invitation for this workspace.",
+    "accepted_title": "Invitation accepted",
+    "accepted_desc": "You are now a member of this workspace.",
+    "accepted_toast": "Invitation to {name} accepted",
+    "declined_title": "Invitation declined",
+    "declined_desc": "The pending invitation was removed.",
+    "declined_toast": "Invitation declined",
+    "accept_failed": "Failed to accept invitation",
+    "decline_failed": "Failed to decline invitation",
+    "go_to_workspace": "Go to workspace",
+    "go_to_all": "All workspaces",
+    "invited_role": "Invited as",
+    "invited_on": "Invited on",
+    "accept": "Accept",
+    "decline": "Decline"
+  },
   "notifications": {
     "bell": {
       "unread": "{count} unread notifications",
@@ -2108,7 +2247,9 @@
       "filter_workspace": "Workspace",
       "filter_repo": "Repo",
       "all": "All",
-      "preferences": "Notification preferences"
+      "preferences": "Notification preferences",
+      "unread_count": "{n} unread",
+      "no_link": "No deep link for this notification"
     },
     "settings": {
       "title": "Notification settings",

@@ -34,6 +34,26 @@ pub trait NotificationRepository: Send + Sync {
         offset: u32,
     ) -> Result<Vec<Notification>>;
 
+    /// List **active** (not resolved, not dismissed) notifications for a
+    /// user — the notification drawer's "recent notifications" surface
+    /// (user-management.md §In-App Notification UI). Same filters and
+    /// pagination as `list_for_user`, but rows the user has already acted on
+    /// (resolved in the Inbox/Decisions surface) or dismissed are excluded in
+    /// the query itself, so pagination windows contain only renderable items
+    /// and the drawer can never re-list a card the user dismissed elsewhere.
+    #[allow(clippy::too_many_arguments)] // same filter + pagination surface as list_for_user
+    async fn list_active_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_type: Option<&str>,
+        repo_id: Option<&Id>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>>;
+
     /// Replace the body of unresolved notifications of the given type whose
     /// `entity_ref` matches. Returns the number of rows updated. Used by
     /// save_spec's append-to-existing-MR path to keep the SpecPendingApproval

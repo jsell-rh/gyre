@@ -531,6 +531,11 @@ pub struct NotificationParams {
     /// Four-level priority name (Low/Medium/High/Urgent), case-insensitive —
     /// widens to the HSI §8 rank band it covers.
     pub priority: Option<String>,
+    /// Active-only listing (user-management.md §In-App Notification UI:
+    /// the notification drawer shows recent notifications; rows the user
+    /// has resolved or dismissed elsewhere are excluded by the query).
+    /// `?active=true`.
+    pub active: Option<bool>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
@@ -649,19 +654,38 @@ async fn list_my_notifications_impl(
     let max_priority = params.max_priority.or(band_max);
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
-    let notifications = state
-        .notifications
-        .list_for_user(
-            &user_id,
-            workspace_id.as_ref(),
-            min_priority,
-            max_priority,
-            params.notification_type.as_deref(),
-            repo_id.as_ref(),
-            limit,
-            offset,
-        )
-        .await?;
+    // `?active=true` routes to the active-only listing (drawer surface);
+    // the default keeps the full listing the Inbox depends on (its
+    // show-dismissed toggle needs resolved/dismissed rows client-side).
+    let notifications = if params.active.unwrap_or(false) {
+        state
+            .notifications
+            .list_active_for_user(
+                &user_id,
+                workspace_id.as_ref(),
+                min_priority,
+                max_priority,
+                params.notification_type.as_deref(),
+                repo_id.as_ref(),
+                limit,
+                offset,
+            )
+            .await?
+    } else {
+        state
+            .notifications
+            .list_for_user(
+                &user_id,
+                workspace_id.as_ref(),
+                min_priority,
+                max_priority,
+                params.notification_type.as_deref(),
+                repo_id.as_ref(),
+                limit,
+                offset,
+            )
+            .await?
+    };
     let items: Vec<NotificationResponse> = notifications.into_iter().map(Into::into).collect();
     Ok(Json(serde_json::json!({
         "notifications": items,
@@ -1432,24 +1456,24 @@ pub async fn accept_invitation(
 }
 
 /// DELETE /api/v1/workspaces/:id/invitations/:invitation_id — revoke a
-/// pending invitation (Owner/Admin/TenantAdmin only).
+/// pending invitation (Owner/Admin/TenantAdmin only), or decline one's own
+/// pending invitation (the invitee themselves).
 ///
 /// Only pending invitations are revocable here (user-management.md
 /// §Invitation Expiry: "Admins can revoke pending invitations at any
 /// time"); removing an accepted member goes through
 /// `DELETE /workspaces/{id}/members/{user_id}` with its last-Owner guard.
+/// An invitee may decline their own pending invitation
+/// (§Workspace Invitation Flow step 4: "Invitee accepts or declines") —
+/// the same deletion as a revocation, scoped to the caller's own
+/// membership row so no other principal's invitation can be touched.
 pub async fn revoke_invitation(
     auth: AuthenticatedAgent,
     Path((workspace_id, invitation_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
     let ws = load_workspace_scoped(&state, &auth, &workspace_id).await?;
-    if !can_manage_membership(&state, &auth, &ws).await? {
-        return Err(ApiError::Forbidden(
-            "workspace invitations can only be revoked by an Owner, Admin, or TenantAdmin"
-                .to_string(),
-        ));
-    }
+    let is_manager = can_manage_membership(&state, &auth, &ws).await?;
     let inv_id = Id::new(invitation_id);
     let membership = state
         .workspace_memberships
@@ -1466,13 +1490,28 @@ pub async fn revoke_invitation(
             "invitation already accepted; remove the member instead".to_string(),
         ));
     }
+    // Authorization: a membership manager (Owner/Admin/TenantAdmin) may
+    // revoke any pending invitation; the invitee may decline only their
+    // own. A non-manager's view of a foreign invitation is
+    // indistinguishable from a nonexistent one (404), mirroring the
+    // tenant-public profile containment — invitation ids must not become
+    // a probe surface.
+    let caller_id = auth.user_id.clone();
+    let self_decline = caller_id.as_ref() == Some(&membership.user_id);
+    if !is_manager && !self_decline {
+        return Err(ApiError::NotFound("Invitation not found".to_string()));
+    }
     state.workspace_memberships.delete(&membership.id).await?;
 
     emit_membership_audit(
         &state,
         &auth,
         &ws,
-        "workspace_invitation_revoked",
+        if self_decline {
+            "workspace_invitation_declined"
+        } else {
+            "workspace_invitation_revoked"
+        },
         serde_json::json!({
             "workspace_id": ws.id.to_string(),
             "revoked_user_id": membership.user_id.to_string(),
@@ -2921,6 +2960,83 @@ mod tests {
         assert_eq!(notifs.len(), 1);
         assert_eq!(json["limit"], 1);
         assert_eq!(json["offset"], 1);
+    }
+
+    /// `?active=true` (user-management.md §In-App Notification UI): the
+    /// notification drawer's listing excludes rows the user has already
+    /// resolved or dismissed, while the default listing still returns them
+    /// (the Inbox's show-dismissed toggle depends on the full listing).
+    #[tokio::test]
+    async fn spec_path_notifications_active_filter_excludes_resolved_and_dismissed() {
+        let state = test_state();
+        let seed = |id: &str| {
+            Notification::new(
+                Id::new(id),
+                Id::new("ws-default"),
+                Id::new("system"),
+                NotificationType::GatePassed,
+                id,
+                "default",
+                1_700_000_000,
+            )
+        };
+        state
+            .create_notification(&seed("notif-active"))
+            .await
+            .unwrap();
+        let resolved = seed("notif-resolved");
+        state.create_notification(&resolved).await.unwrap();
+        state
+            .notifications
+            .resolve(&Id::new("notif-resolved"), &Id::new("system"), None)
+            .await
+            .unwrap();
+        let dismissed = seed("notif-dismissed");
+        state.create_notification(&dismissed).await.unwrap();
+        state
+            .notifications
+            .dismiss(&Id::new("notif-dismissed"), &Id::new("system"))
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        // Default listing: all three (Inbox surface contract unchanged).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            3,
+            "default listing still returns resolved and dismissed rows"
+        );
+
+        // Active-only listing: just the untouched row.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications?active=true")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "resolved and dismissed rows are excluded");
+        assert_eq!(notifs[0]["id"], "notif-active");
     }
 
     /// Spec path (user-management.md §API > Notifications): unread-count
@@ -6243,6 +6359,105 @@ mod tests {
                         "/api/v1/workspaces/{ws_id}/invitations/{invitation2_id}"
                     ))
                     .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// An invitee may decline their own pending invitation (§Workspace
+    /// Invitation Flow step 4: "Invitee accepts or declines"): the decline
+    /// is the same deletion as a revocation, but scoped to the caller's
+    /// own membership row. A third party (non-manager, not the invitee)
+    /// sees foreign invitations as nonexistent (404), so invitation ids
+    /// are not a probe surface.
+    #[tokio::test]
+    async fn invitee_can_decline_own_pending_invitation() {
+        let state = test_state();
+        let (ws_id, _owner_id) = seed_workspace_with_owner(&state).await;
+        let (invitee_id, invitee_key) =
+            seed_keyed_user(&state, "decliner", vec![gyre_domain::UserRole::Developer]).await;
+        let (_, other_key) =
+            seed_keyed_user(&state, "decl-other", vec![gyre_domain::UserRole::Developer]).await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Owner invites the invitee.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/invite"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": invitee_id, "role": "Developer"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let invite = body_json(resp).await;
+        assert_eq!(invite["accepted"], false);
+        let invitation_id = invite["id"].as_str().unwrap().to_string();
+
+        // A third party (non-manager, not the invitee) cannot decline it —
+        // and cannot distinguish it from a nonexistent invitation (404).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/invitations/{invitation_id}"
+                    ))
+                    .header("Authorization", format!("Bearer {other_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // The invitee declines their own invitation.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/invitations/{invitation_id}"
+                    ))
+                    .header("Authorization", format!("Bearer {invitee_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The declined invitation's membership row is gone; the invitee
+        // has no membership and nothing left to accept.
+        let membership = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&Id::new(&invitee_id), &Id::new(&ws_id))
+            .await
+            .unwrap();
+        assert!(
+            membership.is_none(),
+            "decline must remove the membership row"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/invite/accept"))
+                    .header("Authorization", format!("Bearer {invitee_key}"))
                     .body(Body::empty())
                     .unwrap(),
             )

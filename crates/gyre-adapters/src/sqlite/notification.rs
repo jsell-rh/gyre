@@ -197,6 +197,60 @@ impl NotificationRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_active_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_type: Option<&str>,
+        repo_id: Option<&Id>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let ws_id = workspace_id.cloned();
+        let ntype = notification_type.map(|s| s.to_string());
+        let rid = repo_id.cloned();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Same surface as list_for_user plus the active guard
+            // (resolved_at/dismissed_at IS NULL) — the drawer's listing.
+            let mut query = notifications::table
+                .filter(notifications::user_id.eq(uid.as_str()))
+                .filter(notifications::resolved_at.is_null())
+                .filter(notifications::dismissed_at.is_null())
+                .order(notifications::priority.asc())
+                .then_order_by(notifications::created_at.desc())
+                .into_boxed();
+            if let Some(ref ws) = ws_id {
+                query = query.filter(notifications::workspace_id.eq(ws.as_str()));
+            }
+            if let Some(min_p) = min_priority {
+                query = query.filter(notifications::priority.ge(min_p as i32));
+            }
+            if let Some(max_p) = max_priority {
+                query = query.filter(notifications::priority.le(max_p as i32));
+            }
+            if let Some(ref nt) = ntype {
+                query = query.filter(notifications::notification_type.eq(nt));
+            }
+            if let Some(ref r) = rid {
+                query = query.filter(notifications::repo_id.eq(r.as_str()));
+            }
+            let rows = query
+                .limit(limit as i64)
+                .offset(offset as i64)
+                .load::<NotificationRow>(&mut *conn)
+                .context("list active notifications")?;
+            rows.into_iter()
+                .map(NotificationRow::into_notification)
+                .collect()
+        })
+        .await?
+    }
+
     async fn update_body_by_entity_ref(
         &self,
         entity_ref: &str,
@@ -883,6 +937,58 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(all.len(), 2, "no repo filter returns both");
+    }
+
+    /// user-management.md §In-App Notification UI (drawer): the active-only
+    /// listing excludes resolved and dismissed rows in the query itself,
+    /// while list_for_user keeps returning them (the Inbox's show-dismissed
+    /// toggle depends on the full listing).
+    #[tokio::test]
+    async fn list_active_for_user_excludes_resolved_and_dismissed() {
+        let (_tmp, s) = setup();
+        let user1 = Id::new("user-1");
+        // One untouched row, one resolved, one dismissed, one marked-read
+        // (read state must NOT exclude a row — only resolved/dismissed do).
+        NotificationRepository::create(&s, &make("n-active", 1000, false))
+            .await
+            .unwrap();
+        NotificationRepository::create(&s, &make("n-resolved", 1001, false))
+            .await
+            .unwrap();
+        NotificationRepository::resolve(&s, &Id::new("n-resolved"), &user1, None)
+            .await
+            .unwrap();
+        NotificationRepository::create(&s, &make("n-dismissed", 1002, false))
+            .await
+            .unwrap();
+        NotificationRepository::dismiss(&s, &Id::new("n-dismissed"), &user1)
+            .await
+            .unwrap();
+        NotificationRepository::create(&s, &make("n-read", 1003, false))
+            .await
+            .unwrap();
+        NotificationRepository::mark_read(&s, &Id::new("n-read"), &user1, true)
+            .await
+            .unwrap();
+
+        let active = NotificationRepository::list_active_for_user(
+            &s, &user1, None, None, None, None, None, 50, 0,
+        )
+        .await
+        .unwrap();
+        let ids: Vec<&str> = active.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["n-read", "n-active"],
+            "resolved and dismissed rows are excluded; a read-but-active row is kept"
+        );
+
+        // The full listing still returns all four rows.
+        let all =
+            NotificationRepository::list_for_user(&s, &user1, None, None, None, None, None, 50, 0)
+                .await
+                .unwrap();
+        assert_eq!(all.len(), 4, "list_for_user keeps the Inbox contract");
     }
 
     #[tokio::test]
