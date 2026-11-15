@@ -1,5 +1,6 @@
 use gyre_common::{Id, NotificationType};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserRole {
@@ -185,6 +186,8 @@ impl<'de> Deserialize<'de> for NotificationChannels {
                 enabled: raw.email_enabled.unwrap_or(false),
                 digest: raw.email_digest.unwrap_or(DigestFrequency::Off),
                 min_priority: NotificationPriority::Medium,
+                // The flat shape predates per-type unsubscribe: no overrides.
+                type_overrides: HashMap::new(),
             },
         };
         Ok(Self {
@@ -214,6 +217,14 @@ pub struct EmailConfig {
     pub digest: DigestFrequency,
     /// Only email notifications at or above this priority.
     pub min_priority: NotificationPriority,
+    /// Per-notification-type email opt-outs (user-management.md §Email
+    /// Notifications: "Unsubscribe link per notification type"). Key: the
+    /// notification type string as stored/emitted (`as_str()`); `true` =
+    /// the user unsubscribed from email for that type — the dispatcher
+    /// must not queue it. Absent/`false` = subscribed. Absent by default
+    /// so pre-task-113 stored rows deserialize unchanged.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub type_overrides: HashMap<String, bool>,
 }
 
 impl Default for EmailConfig {
@@ -222,6 +233,7 @@ impl Default for EmailConfig {
             enabled: false,
             digest: DigestFrequency::Off,
             min_priority: NotificationPriority::Medium,
+            type_overrides: HashMap::new(),
         }
     }
 }
@@ -774,6 +786,7 @@ mod tests {
                 enabled: true,
                 digest: DigestFrequency::Hourly,
                 min_priority: NotificationPriority::High,
+                type_overrides: std::collections::HashMap::new(),
             },
             webhook: Some(WebhookConfig {
                 url: "https://hooks.example/gyre".to_string(),

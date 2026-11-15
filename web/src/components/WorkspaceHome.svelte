@@ -690,7 +690,7 @@
   async function handleDismiss(n) {
     actionStates = { ...actionStates, [n.id]: { loading: true } };
     try {
-      await api.markNotificationRead(n.id);
+      await api.dismissNotification(n.id);
       actionStates = { ...actionStates, [n.id]: { loading: false, success: true, message: $t('decisions.dismissed') } };
       setTimeout(() => { notifications = notifications.filter(item => item.id !== n.id); }, 600);
     } catch {
