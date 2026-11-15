@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f", "4de47315cc28796662ba04fb99cc36403390979a", "0f127bc0e111c65ace292e45231ab585242aad99", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "b696609378236716366ce85ef42a9b9a2c65d92c", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "50f338e93383f6a4d59c408a3676d63aac85b45b"]
 ---
 
 ## Spec Excerpt
@@ -98,59 +98,37 @@ Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `
 ## Shipped
 
 All acceptance-criterion pages ship as real Svelte 5 (runes) components
-against the task-124/125 endpoints (prior rounds; see git history), and this
-repair round (`1deff0b5`) closes both review findings on the Notification
-Drawer page.
+against the task-124/125 endpoints across the recorded commits (see
+`commits:` frontmatter and git history for per-round details).
 
-### This round (review repair `1deff0b5`)
+### This round (verification repair `50f338e9`)
 
-- **Bell unread badge** — the top-nav bell badge now shows the unread count
-  from `GET /api/v1/notifications/unread-count` (`api.unreadNotificationCount`,
-  previously defined but consumed by no component) instead of the legacy
-  active-decisions count; it refreshes on init, workspace change, the 60s
-  interval, and on drawer close (an `$effect` cleanup on the open→false
-  transition) so read-state changes made inside the drawer are reflected.
-  `decisionsCount` remains only as the workspace home Decisions section prop.
-  i18n keys moved to `topbar.unread_notifications`/`no_unread_notifications`;
-  the bell testid is `notification-bell` (e2e locator updated).
-- **Bell-click spec reconciliation** — `user-management.md` §In-App
-  Notification UI / §UI Pages (drawer slides out from the bell, unread badge)
-  supersedes `ui-navigation.md` §1's old navigate-to-Decisions click; recorded
-  as a dated spec-lifecycle amendment in `ui-navigation.md` (principle 4, Top
-  Bar bullet + amendment note, repo-mode bullet, Daily/Exception flows), and
-  `docs/ui.md` matches. No unamended contradiction remains.
-- **Active-only drawer listing** — new `list_active_for_user` port method
-  (same filters/pagination as `list_for_user` plus `resolved_at IS NULL AND
-  dismissed_at IS NULL`), implemented by the SQLite and PostgreSQL adapters,
-  the mem adapter (code guard), and the `BroadcastingNotificationRepo`
-  wrapper; `GET /api/v1/notifications?active=true` routes to it and the
-  drawer requests it — a notification dismissed or resolved in the Inbox
-  never reappears in the drawer. The default listing keeps the full row set
-  the Inbox's show-dismissed toggle depends on.
+- The prior verification run (`bash /tmp/stage/checks.sh`, exit 1) failed on
+  exactly one gate: the changed-lines rustfmt check flagged two test-code
+  lines — the `assert_eq!` argument list in
+  `sqlite::notification::tests::list_active_for_user_excludes_resolved_and_dismissed`
+  and the `create_notification(...)` chain in the users.rs active-filter
+  handler test. Both reformatted to rustfmt canonical form; no semantic
+  change. All other gates in that run were already clean (clippy changed
+  lines, arch/hierarchy lints, ABAC registry, all check-* scripts, web
+  build).
 
-### Test evidence
+### Test evidence (this round)
 
-- `cd web && npm test`: 119 files / 2403 passed, 41 skipped (pre-existing) —
-  includes three new AppShell bell tests (unread badge uses the unread-count
-  endpoint and not the decisions count; bell click opens the drawer; badge
-  refreshes on drawer close) and the drawer active-filter request-shape test.
-- `cargo test -p gyre-adapters list_active_for_user`: passes
-  (`list_active_for_user_excludes_resolved_and_dismissed` — resolved,
-  dismissed excluded; read-but-active kept; `list_for_user` unchanged).
-- `cargo check -p gyre-server --lib` and `--tests`: clean (covers the port,
-  adapters, mem, broadcasting wrapper, handler dispatch, and the new handler
-  test).
-- Deferred to the independent verifier (gyre-server test binary exceeds the
-  in-sandbox 4 GiB wrapper budget):
-  `cargo test -p gyre-server spec_path_notifications_active_filter_excludes_resolved_and_dismissed`
-  (new handler test for `?active=true`), plus the usual full
-  `cargo test --all` and web e2e. Evidence:
-  `/tmp/stage/review-evidence/task-127-repair-probes.md`.
+- `python3 scripts/check-rustfmt-diff.py 103d665e` — changed lines clean
+  (6 Rust files checked); was failing on the two lines above before the fix.
+- `/tmp/stage/bin/cargo test -p gyre-adapters
+  list_active_for_user` — passes (the reformatted adapters test).
+- `/tmp/stage/bin/cargo check -p gyre-server --tests` — clean (covers the
+  reformatted users.rs handler test compilation).
+- Deferred to the independent verifier (gyre-server test binary exceeds
+  the in-sandbox 4 GiB wrapper budget):
+  `cargo test -p gyre-server spec_path_notifications_active_filter_excludes_resolved_and_dismissed`,
+  plus the usual full `cargo test --all`, `cd web && npm test`, and web e2e.
 
-### Still open (section stays task-assigned)
+### Still open (owned elsewhere, not this task's pages)
 
 - Tenant Invitation Management incl. `/invite/{token}` magic links, bulk
   invite, and invitation expiry countdown — task-110 (not-started) owns the
   backend; no expiry field exists on WorkspaceMembership yet.
 - Public-profile activity feed/stats — no per-user endpoints exist.
-- Inline global-role editing — no endpoint.
