@@ -3,10 +3,10 @@ title: "Implement attestation bundle verification protocol"
 spec_ref: "agent-gates.md §Part 3 Verification"
 depends_on:
   - task-142
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "agent-gates.md §Verification"
-commits: ["795ce919c6ff6c49c3ea234c459a435d0ee19afc", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "c880471aebf2b922d0aa3e48187e8b9aa07e4b3c"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -87,25 +87,3 @@ This can be done offline, after the fact, by auditors, compliance teams, or othe
 - Read `docs/api-reference.md` and `crates/gyre-server/src/api/mod.rs` for route registration
 - The verification logic should be a pure domain function — no I/O in the consistency checks
 - Cryptographic verification delegates to the port trait (infrastructure concern)
-
-## Shipped
-
-### Behavior
-
-- **Port** (`gyre-ports/src/attestation_verifier.rs`): `AttestationVerifier` trait — `verify_bundle` (full protocol → `VerificationResult`), `verify_gate_signature`, `verify_spec_approval` — the seam where external/OIDC key resolution plugs in for federation verification without changing the bundle format.
-- **Domain types** (`gyre-domain/src/attestation_verification.rs`): `VerificationResult` (`valid`, `bundle_signature_valid`, `gate_results[]`, `spec_approval_valid: Option<bool>`, `consistency_check`, `errors[]`) and `GateVerificationResult`; `check_bundle_consistency` is the pure, I/O-free spec step 5 — non-empty `mr_id`/`merge_commit_sha`, well-formed `path@sha` `spec_ref`, `spec_approval` only with a `spec_ref`, per-gate signature presence, and a `signed_by` that matches the gate type's signing party **in both directions** (a command gate signed by an agent is rejected, and an AgentReview/AgentValidation gate signed by the forge is rejected — the multi-party property of agent-gates.md §What Gets Signed and By Whom), plus the reviewer-identity binding (`agent:<id>`/`reviewer_agent_id`/`reviewer_oidc_sub`) and the author `oidc_sub`/`agent_id` binding; `assemble_verification_result` is the shared scoring rule.
-- **Verifier** (`gyre-server/src/merge_attestation.rs`): `ForgeAttestationVerifier` implements the port with the task-142 key scheme — the forge's real Ed25519 server key (public half at `/.well-known/jwks.json`) verifies bundle signatures and forge-signed gate results; gate-agent signatures verify against per-agent re-derived keys. Wired into `AppState.attestation_verifier`.
-- **REST** (`gyre-server/src/api/attestations.rs`): `POST /api/v1/attestations/verify` — caller-supplied `MergeAttestationBundle`, per-component `VerificationResult`; failed verification is 200 with `valid: false` plus findings. ABAC `attestation`/`read`, registered in the resolver.
-- **CLI**: `gyre verify-attestation <commit-sha>` — reads the bundle from the merge commit's git note, POSTs it to the verify endpoint, prints the per-component result, exits 1 on failure.
-- **Spec approval signatures (honest tri-state)**: absent → `None` + explicit finding, never silently passed; present signatures really verified (agent approvers against the per-agent key scheme; other identities reported not platform-verifiable pending the Sigstore/OIDC integration — task-142's reviewed deferral).
-- **Spec step 4 (Rekor)** stays with task-144's storage scope: the bundle format carries no author commit SHAs to check.
-- **Review repair (c2df4d71)**: the consistency check's forge arm previously never checked the gate type, so a forge self-attested AgentReview passed and verified against the forge key (`valid: true`). The forge arm now errors on agent gate types; a domain consistency test and a server-side full-protocol test (forge key genuinely signs the AgentReview gate, bundle re-signed — still `valid: false` on the step-5 rule) pin the fix.
-- **Verification-failure repair (795ce919, durable finding 78251ec4)**: the verification gate runs the frozen **base** copy of `scripts/check-inert-enforcement.sh` against the candidate tree; that base copy references `BOUND` in its METH_CALL branch but never defines it, and the branch first became reachable with this task's statement-position `self.verify_gate_signature(gate).await.unwrap_or(false)` — crashing the gate with `NameError: name 'BOUND' is not defined` (exit 1). The repo's own script copy was already fixed by c880471a, but the frozen copy still crashed. The triggering line is restructured into a `match` with the receiver off statement position — identical semantics (result consumed, Err arm fails closed) — so both the frozen base script and the fixed repo script now pass over the tree. Evidence: `/tmp/stage/review-evidence/task-143-inert-enforcement-repair.txt`.
-
-### Test evidence
-
-- `cargo test -p gyre-domain` — 550 passed, 0 failed (11 `attestation_verification` tests incl. the forge-signed-agent-gate case).
-- `cargo test -p gyre-cli` — 221 passed, 0 failed (command parsing, mock-server verify POST + result parsing, human-readable rendering, git-note reading).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — 0 errors; `cargo fmt --check` clean; clippy clean for `merge_attestation.rs`.
-- Frozen-base and fixed-repo `check-inert-enforcement.sh` both pass over the repaired tree (reproduction of the crash and both passes recorded in the evidence file).
-- Verifier must run (wrapper refuses gyre-server test compilation in-sandbox, 4 GiB budget): `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` (incl. `forge_signed_agent_review_gate_fails_verification` and the end-to-end merge-processor bundle verification), `--lib api::attestations`.
