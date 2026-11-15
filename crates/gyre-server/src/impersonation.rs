@@ -31,7 +31,7 @@
 //! - Max one active impersonation session per admin at a time.
 //! - TTL defaults to 15 minutes, configurable via `GYRE_IMPERSONATION_TTL`.
 
-use gyre_common::{Id, Notification, NotificationType, WsMessage};
+use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome, User, UserRole};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -861,10 +861,11 @@ async fn deliver_approval_code(
     if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation request notification");
     } else {
-        // Channel fan-out per user-management.md §Delivery Channels.
+        // Channel fan-out per user-management.md §Delivery Channels. The WS
+        // push to the target's live connections is part of the centralized
+        // create fan-out (BroadcastingNotificationRepo).
         crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
     }
-    push_notification_to_user(state, &target.id, &notif).await;
 }
 
 /// Notify the target user that impersonation has begun.
@@ -913,41 +914,10 @@ async fn notify_impersonation_alert(
     if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation alert notification");
     } else {
-        // Channel fan-out per user-management.md §Delivery Channels.
+        // Channel fan-out per user-management.md §Delivery Channels. The WS
+        // push to the target's live connections is part of the centralized
+        // create fan-out (BroadcastingNotificationRepo).
         crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
-    }
-    push_notification_to_user(state, &target_id, &notif).await;
-}
-
-/// Push a notification to every live WebSocket connection authenticated as
-/// `user_id` (identity-security.md §Impersonation: notify the impersonated
-/// user when online). Connections are matched by the server-verified user
-/// identity recorded at connection time, never by client-supplied ids.
-pub async fn push_notification_to_user(state: &AppState, user_id: &Id, notif: &Notification) {
-    let payload = match serde_json::to_string(&WsMessage::NotificationPush {
-        notification: notif.clone(),
-    }) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
-    let conns = state.ws_connections.read().await;
-    let users = state.ws_connection_users.read().await;
-    let mut sent = 0usize;
-    for (conn_id, tx) in conns.iter() {
-        let matches = users
-            .get(conn_id)
-            .map(|uid| uid == user_id.as_str())
-            .unwrap_or(false);
-        if matches && tx.try_send(payload.clone()).is_ok() {
-            sent += 1;
-        }
-    }
-    if sent == 0 {
-        tracing::debug!(
-            user_id = %user_id,
-            "notification WS push: user not online, Inbox notification only"
-        );
     }
 }
 
@@ -1024,6 +994,7 @@ mod tests {
                         enabled: true,
                         digest: gyre_domain::DigestFrequency::Immediate,
                         min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
                     },
                     webhook: None,
                     slack: None,
