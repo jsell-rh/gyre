@@ -114,17 +114,29 @@ query (`gyre-adapters/src/sqlite/notification.rs`), which excludes
 resolved and dismissed rows in SQL while `list_for_user` keeps the full
 Inbox contract.
 
-### This round (contract repair on merge commit `696fc58d`)
+### This round (contract repair on head `f5d66cea`)
 
-The executor restored the assigned task contract in the checkout,
-reverting the task document's frontmatter, acceptance checkboxes, and
-shipped notes to the assigned baseline. The production implementation
-was preserved unchanged: no source file was modified this round beyond
-this task document. The branch head is merge commit `696fc58d`, which
-folded the assignment base (`e5089d9`, task-143 attestation work —
-Rust-side only, no web/ surface) onto the previously approved head
-(`3c342ce`); the merge auto-resolved with no task-127 source change and
-`web/dist` remains at the assignment-base state for remote rebuild.
+The executor restored the assigned task contract in the checkout again
+(same contract-repair finding), reverting the task document's frontmatter,
+acceptance checkboxes, and shipped notes to the assigned baseline. The
+production implementation was preserved unchanged: no source file was
+modified this round beyond this task document. The branch head is
+`f5d66cea`, whose tree is byte-identical to the independently exercised
+state from the previous round (merge commit `696fc58d` plus the prior
+contract-restoration commit; `e5089d9`, the assignment base, is task-143
+attestation work — Rust-side only, no web/ surface).
+
+Evidence this round (recorded under /tmp/stage/review-evidence):
+
+- `cd web && npm ci && /tmp/stage/bin/npm test` → 123 files / 2435
+  passed, 41 skipped, exit 0 on the current head
+  (`web-npm-test-round3.log`).
+- Rust sources are unchanged since the prior round's verified state
+  (`SKIP_WEB_BUILD=1 cargo check -p gyre-server` clean, mechanical
+  checks OK); `scripts/check-task-commit-attribution.sh` passes with
+  the restored frontmatter list (it fails with the executor's bare
+  `commits: []` restore, as expected while the contract is at
+  baseline).
 
 Prior-round history retained as context: the published head was rebased
 onto main when task-114's independently-approved public profile page
@@ -133,20 +145,9 @@ landed — the route model was unified on main's `user_profile` mode +
 the `/users/{username}/teams`, `/activity`, `/stats` endpoints) won over
 task-127's client-side team derivation, and the duplicate top-level
 `public_profile` locales key from the textual auto-merge was
-deduplicated.
-
-Evidence this round (recorded under /tmp/stage/review-evidence):
-
-- `cd web && npm ci && npm test` → 123 files / 2435 passed, 41 skipped,
-  exit 0 (post-merge tree; `web-npm-test.log`).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → clean, exit 0
-  (`cargo-check-gyre-server.log`).
-- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` → all
-  OK (`mechanical-checks.log`).
-- `scripts/check-task-commit-attribution.sh` → passes with the restored
-  frontmatter list (fails with the executor's bare `commits: []` restore,
-  as expected while the contract is at baseline).
+deduplicated; the assignment base was then folded in via merge commit
+`696fc58d`, which auto-resolved with no task-127 source change and left
+`web/dist` at the assignment-base state for remote rebuild.
 
 For the independent verifier (deferred per 4 GiB build budget):
 
