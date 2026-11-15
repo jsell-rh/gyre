@@ -920,18 +920,33 @@ mod tests {
         );
 
         // Tamper with a gate status: exactly that gate's signature must
-        // fail, the others must stay valid.
-        bundle.gates[0].status = "Failed".to_string();
+        // fail, the others must stay valid. Address the gate by name —
+        // `list_by_mr_id` has no ordering contract (neither the mem
+        // adapter nor the SQL adapters ORDER BY), so `gates[0]` is not
+        // deterministically the "tests" gate.
+        let tests_idx = bundle
+            .gates
+            .iter()
+            .position(|g| g.name == "tests")
+            .expect("seed produces the tests gate");
+        bundle.gates[tests_idx].status = "Failed".to_string();
         let result = state
             .attestation_verifier
             .verify_bundle(&bundle)
             .await
             .unwrap();
         assert!(!result.valid, "tampered gate status must fail verification");
-        assert!(!result.gate_results[0].signature_valid);
-        assert!(result.gate_results[1].signature_valid);
-        assert!(result.gate_results[2].signature_valid);
-        assert!(result.bundle_signature_valid, "gate tampering must not break the bundle signature (it covers the tampered bytes) — it fails because the gate signature no longer matches");
+        assert!(!result.gate_results[tests_idx].signature_valid);
+        for (i, g) in result.gate_results.iter().enumerate() {
+            if i != tests_idx {
+                assert!(
+                    g.signature_valid,
+                    "untampered gate {:?} must stay valid",
+                    g.name
+                );
+            }
+        }
+        assert!(!result.bundle_signature_valid, "gate tampering breaks the bundle signature too: unsigned_canonical_json nulls only bundle_signature, so the gates array is covered by the bundle-level signature");
         assert!(
             result.errors.iter().any(|e| e.contains("tests")),
             "the failed gate must be named in the errors: {:?}",
