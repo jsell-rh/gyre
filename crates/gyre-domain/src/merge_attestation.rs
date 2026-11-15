@@ -106,6 +106,19 @@ pub struct SpecRefAttestation {
     pub signature: Option<String>,
 }
 
+impl SpecRefAttestation {
+    /// Canonical JSON of the unsigned spec approval attestation — the
+    /// exact bytes a spec approval signature covers (the approver field
+    /// and approval time, with the signature field excluded from its own
+    /// payload), mirroring the bundle/gate canonical-form helpers so
+    /// sign and verify share one payload definition.
+    pub fn unsigned_spec_approval_json(&self) -> String {
+        let mut unsigned = self.clone();
+        unsigned.signature = None;
+        serde_json::to_string(&unsigned).expect("spec approval serialization must not fail")
+    }
+}
+
 /// The MR author's agent identity and provenance (agent-gates.md: the
 /// "author" object — agent identity, stack attestation, conversation SHA).
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -364,6 +364,17 @@ impl ResourceResolver {
                 // ── Specs ──────────────────────────────────────────────────
                 // NOTE: /api/v1/specs/approve and /api/v1/specs/revoke removed in M34 Slice 5
                 RouteResourceMapping::api("/api/v1/specs/approvals", "spec", None),
+                // Merge attestation bundle verification (agent-gates.md
+                // §Part 3 Verification). Action override "read": the
+                // endpoint is a pure evaluation of the caller-supplied
+                // bundle against the issuer's key — no platform state is
+                // read or mutated — so it sits with the read actions
+                // (auditors/compliance verify bundles offline).
+                RouteResourceMapping::api(
+                    "/api/v1/attestations/verify",
+                    "attestation",
+                    Some("read"),
+                ),
                 RouteResourceMapping::api(SPECS_ROUTE, "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/pending", "spec", None),
                 RouteResourceMapping::api("/api/v1/specs/drifted", "spec", None),

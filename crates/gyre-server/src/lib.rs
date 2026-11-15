@@ -241,6 +241,9 @@ pub struct AppState {
     /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
     /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
     pub agent_signing_key: Arc<auth::AgentSigningKey>,
+    /// Merge attestation bundle verification (agent-gates.md §Part 3
+    /// Verification). Stateless — holds only the forge key handle.
+    pub attestation_verifier: Arc<dyn gyre_ports::AttestationVerifier>,
     /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 300, M27.5).
     pub agent_jwt_ttl_secs: u64,
     /// User repository for JWT/SSO user management.
@@ -1330,6 +1333,11 @@ pub fn build_state(
     let spec_links_store: spec_registry::SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
     load_spec_links_into_store(&spec_link_repo, &spec_links_store);
 
+    // Load or persist the forge's Ed25519 signing key first: both the
+    // AppState field and the attestation verifier (which re-derives the
+    // gate agents' keys from the same material) share it.
+    let agent_signing_key = load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -1355,7 +1363,13 @@ pub fn build_state(
         telemetry_buffer,
         message_broadcast_tx,
         kv_store: store!(dyn KvJsonStore, mem::MemKvStore::default()),
-        agent_signing_key: load_or_persist_agent_signing_key(&sqlite_db, &pg_db),
+        agent_signing_key: agent_signing_key.clone(),
+        // Attestation bundle verification protocol (agent-gates.md §Part 3
+        // Verification): the forge-key verifier backing
+        // POST /api/v1/attestations/verify and `gyre verify-attestation`.
+        attestation_verifier: Arc::new(crate::merge_attestation::ForgeAttestationVerifier::new(
+            agent_signing_key.clone(),
+        )),
         // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
         agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
             .ok()

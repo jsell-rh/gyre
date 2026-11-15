@@ -103,6 +103,29 @@ gyre mr create --title "Fix bug" --repo-id <repo-uuid> \
   --source fix/my-bug --target main
 ```
 
+### Verify a merge attestation (agent-gates.md §Part 3)
+
+```bash
+# Verify the merge attestation bundle attached to a merge commit:
+# reads the bundle from the commit's git note
+# (refs/notes/merge-attestations), runs the verification protocol
+# (bundle signature, per-gate signatures, spec approval signature,
+# consistency) via POST /api/v1/attestations/verify, and prints the
+# per-component result. Exits 1 when the bundle fails verification.
+gyre verify-attestation <commit-sha>
+
+# From a different checkout / notes ref
+gyre verify-attestation <commit-sha> --repo /path/to/clone \
+  --notes-ref refs/notes/merge-attestations
+
+# Explicit server/token (default: ~/.gyre/config)
+gyre verify-attestation <commit-sha> --server http://localhost:3000 --token <token>
+```
+
+Notes live in a separate git ref; fetch them into a clone with
+`git fetch origin refs/notes/merge-attestations:refs/notes/merge-attestations`
+before verifying a merge made on the server.
+
 ---
 
 ## Spec Operations
