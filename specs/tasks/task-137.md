@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Failure Feedback"
-commits: ["f03a3c830c382d4f063244889f3a31ecfdad711b", "fdb0a05cabef6adb1c6801c996561dee454408a3", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "0e6ab6ad0a862ac91f322ec9c174933a245f21ea"]
+commits: ["0e6ab6ad0a862ac91f322ec9c174933a245f21ea", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "fdb0a05cabef6adb1c6801c996561dee454408a3", "f03a3c830c382d4f063244889f3a31ecfdad711b", "7d319cabfb3f5eb7321b0d90dca3aac94a8ab615"]
 ---
 
 ## Spec Excerpt
@@ -95,20 +95,22 @@ Read `specs/system/agent-gates.md` §Gate Failure Feedback (all three subsection
 
 All of §Gate Failure Feedback runs as real production code in the gate
 executor (`crates/gyre-server/src/gate_executor.rs`), the single point
-where required-gate failures are decided. Earlier rounds additionally
-repaired review ff8f761e (F1 blocking, F2/F3 minor) and the retained
-verification findings (rustfmt changed lines, trailing whitespace in
-the all-gates-failed description strings, clippy
-redundant_pattern_matching in `ws.rs`) — see commit f03a3c83.
+where required-gate failures are decided. Earlier rounds implemented the
+full feature (0e6ab6ad), repaired review ff8f761e (attempt-scoped
+delivery marker, deterministic task id, severity labels — fdb0a05c,
+a8c4e4e9) and verification findings (rustfmt, trailing whitespace,
+clippy — f03a3c83), and resolved base merges (32b47d85, 61f541e2).
 
-This round was a rebase repair (finding 4534be0a): main advanced to
-706bc7bd (task-142/144/145 coverage rows), conflicting with this
-branch's row-9 marking in `specs/coverage/system/agent-gates.md`.
-Resolved by taking the union — row 9 (task-137) stays implemented, rows
-12–13 (task-142) implemented and row 15 (task-144) in-progress from
-main are kept, header recomputed from the merged table (7/25, 9 n/a)
-and `specs/coverage/SUMMARY.md` regenerated via
-`scripts/update-coverage-summary.sh` (merge commit 32b47d85).
+This round repaired the retained verification finding f41250c0
+(`bash /tmp/stage/checks.sh` exit 1): base merge c9cc1536 (task-209 HSI
+§12 profile) added the `exclude_types: &[&str]` parameter to
+`NotificationRepository::list_for_user`, and the merge updated every
+production call site but missed one test call site — the Overseer
+notification assertion in
+`security_gate_failure_notifies_persona_and_escalates_critical`
+passed 8 of 9 arguments (E0061 at gate_executor.rs:7952). Fix 7d319cab
+passes `&[]` (the exclusion the test needs: it must observe
+SecurityFinding notifications regardless of recipient toggles).
 
 ### GateResult message + inbox delivery
 
@@ -120,12 +122,11 @@ and `specs/coverage/SUMMARY.md` regenerated via
 - Every required-gate failure delivers a GateResult to the author agent's
   inbox with the gate's real recorded output. Delivery is marked in the
   port-backed KV store (`gate_result_delivered`), and the marker key is
-  **attempt-scoped** (`{mr}:{gate}:{author}:{attempt}` — F1 repair): the
-  executor and the Ralph loop's `on_gates_failed` fallback pass the same
-  per-(MR, gate) attempt counter, so the two paths stay mutually
-  de-duplicated within an attempt while every re-enqueued attempt's
-  failure reaches the author (the spec's example is `attempt: 2`; the old
-  (MR, gate)-only marker suppressed all deliveries after the first).
+  attempt-scoped (`{mr}:{gate}:{author}:{attempt}`): the executor and the
+  Ralph loop's `on_gates_failed` fallback pass the same per-(MR, gate)
+  attempt counter, so the two paths stay mutually de-duplicated within
+  an attempt while every re-enqueued attempt's failure reaches the author
+  (the spec's example is `attempt: 2`).
 
 ### WebSocket broadcast for live sessions
 
@@ -141,8 +142,7 @@ and `specs/coverage/SUMMARY.md` regenerated via
   advances across re-enqueues.
 - Per-(MR, gate) consecutive-failure streak (KV `gate_failure_streak`):
   incremented on each required-gate failure, reset on pass (a new MR is a
-  new key). The escalation threshold signal — a pass between failures
-  breaks the 3-consecutive chain.
+  new key) — a pass between failures breaks the 3-consecutive chain.
 
 ### Deferred task creation (3+ failures, session ended)
 
@@ -152,8 +152,8 @@ and `specs/coverage/SUMMARY.md` regenerated via
   Backlog, High, labels `["gate-failure", "auto-created"]`, description
   with gate output, spec_ref, attempt count, author agent id).
   De-duplicated among non-terminal tasks by title prefix; the
-  deterministic id is scoped to **(MR, gate, attempt)** (F2 repair), so a
-  later 3+ streak on the same (MR, gate) after the prior task reached
+  deterministic id is scoped to (MR, gate, attempt), so a later 3+
+  streak on the same (MR, gate) after the prior task reached
   Done/Cancelled creates its own task instead of dying on a duplicate PK.
 
 ### Escalation protocol
@@ -164,11 +164,11 @@ and `specs/coverage/SUMMARY.md` regenerated via
 - Critical security findings escalate to the Overseer (human): the gate
   output is parsed against the security persona's report format (a
   "Critical Findings" section that carries content); unstructured output
-  escalates only on an **explicit severity label** (`severity: critical`
-  / `severity=critical`, or a line-leading `critical:` classification,
-  word-boundary checked — F3 repair: a coincidental "critical" word in a
-  failing command's echoed output no longer pages a human). A critical
-  finding produces an `Escalation` bus message plus `SecurityFinding`
+  escalates only on an explicit severity label (`severity: critical` /
+  `severity=critical`, or a line-leading `critical:` classification,
+  word-boundary checked — a coincidental "critical" word in a failing
+  command's echoed output does not page a human). A critical finding
+  produces an `Escalation` bus message plus `SecurityFinding`
   notifications to workspace Owners and tenant Admins.
 - 3+ consecutive failures on the same gate: the repo orchestrator is
   notified directly (Directed `Escalation`, spawn-on-demand with
@@ -181,39 +181,24 @@ and `specs/coverage/SUMMARY.md` regenerated via
 
 Focused tests in `gate_executor.rs` / `ws.rs`:
 `gate_failure_delivers_gate_result_to_author_inbox` (asserts attempt 2
-delivers its own GateResult after re-enqueue — the F1 regression),
+delivers its own GateResult after re-enqueue),
 `gate_failure_streak_escalates_and_creates_deferred_task` (asserts NO
 task/escalation at 2 failures),
 `security_gate_failure_notifies_persona_and_escalates_critical`,
 `all_gates_failed_removes_mr_from_queue_and_creates_reassessment_task`,
-`gate_pass_resets_failure_streak`,
-`critical_finding_detection` (includes the F3 false-positive case — a
-path containing "critical" must not escalate — and the explicit-label
-positive cases),
+`gate_pass_resets_failure_streak`, `critical_finding_detection`,
 `failing_gate_notifies_author_with_gate_result_payload`,
 `ws_agent_directed_message_reaches_own_live_session_only`.
 
 This sandbox cannot run gyre-server test compilation (hard 4 GiB
-budget), so the verifier must execute the server suite — at minimum:
-`cargo test -p gyre-server gate_failure -- --nocapture`,
-`cargo test -p gyre-server critical_finding`,
-`cargo test -p gyre-server all_gates_failed`,
-`cargo test -p gyre-server ws_agent_directed`, plus
-`scripts/check-rustfmt-diff.py` and `scripts/check-clippy-diff.py`
-against the merge base. Earlier-round probes (evidence retained under
-`/tmp/stage/review-evidence/`): `cargo check -p gyre-server --tests`
-exit 0; `cargo clippy -p gyre-server --tests -W clippy::all` filtered
-to changed lines — 0 findings (512 pre-existing warnings outside the
-change set, unchanged); `scripts/check-rustfmt-diff.py` clean; no
-trailing whitespace in the touched files. The ws.rs assertion rewrite
-was verified case-equivalent (pass on timeout or clean close, fail iff
-a message arrived), and the reassessment-description string edit was
-checked against the test's `contains("lint")` /
-`contains("unit tests")` assertions.
-
-This round on the merged tree: `cargo check -p gyre-server` exit 0
-(7m09s, no errors — the auto-merged `merge_processor.rs` combining
-task-137 gate feedback with task-144 attestation storage type-checks);
-`scripts/check-dead-message-kinds.sh` and `scripts/check-arch.sh`
-pass; `scripts/update-coverage-summary.sh` output committed.
-`cargo test --all` remains for the independent verifier.
+budget; the build wrapper refuses it), so the verifier must execute:
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server gate_failure`,
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server critical_finding`,
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server all_gates_failed`,
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server ws_agent_directed`, and
+`SKIP_WEB_BUILD=1 cargo test --all` (the acceptance criterion; the
+previous verification run failed at compile time on the E0061 repaired
+by 7d319cab). This round's local probes (evidence retained under
+`/tmp/stage/review-evidence/task-137-repair.md`): `SKIP_WEB_BUILD=1
+cargo check -p gyre-server --all-targets` exit 0 in 8m17s, no errors;
+`rustfmt --check` on the touched file clean.
