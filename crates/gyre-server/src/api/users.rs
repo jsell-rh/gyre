@@ -281,22 +281,37 @@ pub struct PublicUserProfileResponse {
     /// Page: "Workspace memberships and roles" is part of the tenant-public
     /// profile surface).
     pub memberships: Vec<MembershipResponse>,
+    /// Team memberships across the user's workspaces (user-management.md
+    /// §User Profile Page: "Team memberships"). Only accepted workspace
+    /// memberships contribute — a pending invitation is not yet a
+    /// membership, so it must not reveal team rosters.
+    pub teams: Vec<ProfileTeamResponse>,
 }
 
-/// GET /api/v1/users/:username — user profile, public within the tenant
-/// (user-management.md §API > User Management; §User Profile Page).
-///
-/// Tenants are hard isolation boundaries (§Workspace Membership): a user
-/// of another tenant is indistinguishable from a nonexistent one (404), so
-/// the endpoint cannot be used to probe foreign tenants' handles.
-pub async fn get_user_by_username(
-    auth: AuthenticatedAgent,
-    Path(username): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<PublicUserProfileResponse>, ApiError> {
+/// A team the profile subject belongs to (tenant-public subset of
+/// `TeamResponse`: no member roster — that surface is workspace-scoped).
+#[derive(Serialize)]
+pub struct ProfileTeamResponse {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+/// Resolve the tenant-public-profile subject shared by the profile,
+/// activity, and stats handlers: look the user up by username and enforce
+/// tenant containment. Tenants are hard isolation boundaries
+/// (§Workspace Membership): a user of another tenant is indistinguishable
+/// from a nonexistent one (404), so the endpoints cannot be used to probe
+/// foreign tenants' handles.
+async fn resolve_public_user(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    username: &str,
+) -> Result<User, ApiError> {
     let user = state
         .users
-        .find_by_username(&username)
+        .find_by_username(username)
         .await?
         .ok_or(ApiError::NotFound("User not found".to_string()))?;
     // Tenant containment: the profile is tenant-public, not global-public.
@@ -308,7 +323,32 @@ pub async fn get_user_by_username(
             _ => return Err(ApiError::NotFound("User not found".to_string())),
         }
     }
+    Ok(user)
+}
+
+/// GET /api/v1/users/:username — user profile, public within the tenant
+/// (user-management.md §API > User Management; §User Profile Page).
+pub async fn get_user_by_username(
+    auth: AuthenticatedAgent,
+    Path(username): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<PublicUserProfileResponse>, ApiError> {
+    let user = resolve_public_user(&state, &auth, &username).await?;
     let memberships = state.workspace_memberships.list_by_user(&user.id).await?;
+    let mut teams = Vec::new();
+    for m in &memberships {
+        if !m.accepted {
+            continue;
+        }
+        for team in state.teams.list_for_user(&m.workspace_id, &user.id).await? {
+            teams.push(ProfileTeamResponse {
+                id: team.id.to_string(),
+                workspace_id: team.workspace_id.to_string(),
+                name: team.name,
+                slug: team.slug,
+            });
+        }
+    }
     Ok(Json(PublicUserProfileResponse {
         id: user.id.to_string(),
         username: user.username,
@@ -317,6 +357,7 @@ pub async fn get_user_by_username(
         timezone: user.timezone,
         created_at: user.created_at,
         memberships: memberships.into_iter().map(Into::into).collect(),
+        teams,
     }))
 }
 
@@ -324,6 +365,227 @@ pub async fn get_user_by_username(
 pub struct ListUsersParams {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
+}
+
+// ─── Public profile activity & stats (user-management.md §User Profile
+//     Page — /@{username} surface) ───────────────────────────────────────
+
+/// The `approver_id` strings a user's spec-approval records can carry.
+/// The approval path (specs.rs `approve_spec`) derives the approver from
+/// the verified principal and records `user:{agent_id}`; for user
+/// principals `agent_id` is the display name. Both name forms are matched
+/// so records written under the username (the default display name at
+/// provisioning) still attribute after a display-name change.
+fn approval_identity_forms(user: &User) -> Vec<String> {
+    let mut forms = vec![format!("user:{}", user.display_name)];
+    if user.username != user.display_name {
+        forms.push(format!("user:{}", user.username));
+    }
+    forms
+}
+
+/// The `spawned_by` strings a user's agent spawns can carry: the spawn
+/// path records the raw principal id (`auth.agent_id`), which is the
+/// display name for user principals.
+fn spawner_identity_forms(user: &User) -> Vec<String> {
+    let mut forms = vec![user.display_name.clone()];
+    if user.username != user.display_name {
+        forms.push(user.username.clone());
+    }
+    forms
+}
+
+#[derive(Deserialize)]
+pub struct PublicActivityParams {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// GET /api/v1/users/:username/activity — tenant-public activity feed
+/// (user-management.md §User Profile Page: "Recent activity feed (public
+/// actions only)"). Public actions are the user's recorded judgments and
+/// spawns: MR reviews (reviewer identity is the user id, enforced at
+/// submission), spec approvals/rejections/revocations, and agent spawns.
+/// Private state (notifications, sessions, tokens) is never part of the
+/// feed. Same tenant containment as the profile itself (404 across
+/// tenants).
+pub async fn get_user_activity(
+    auth: AuthenticatedAgent,
+    Path(username): Path<String>,
+    Query(params): Query<PublicActivityParams>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = resolve_public_user(&state, &auth, &username).await?;
+    let limit = params.limit.unwrap_or(30).min(100) as usize;
+    let offset = params.offset.unwrap_or(0) as usize;
+
+    // (timestamp, event) pairs so the merge sorts on the raw integer.
+    let mut events: Vec<(u64, serde_json::Value)> = Vec::new();
+
+    // MR reviews — reviewer_agent_id is the user id (merge_requests.rs
+    // rejects a human review recorded under any other identity).
+    for review in state.reviews.list_by_reviewer(user.id.as_str()).await? {
+        let (mr_title, repo_id, workspace_id) = match state
+            .merge_requests
+            .find_by_id(&review.merge_request_id)
+            .await
+        {
+            Ok(Some(mr)) => (
+                Some(mr.title),
+                Some(mr.repository_id.to_string()),
+                Some(mr.workspace_id.to_string()),
+            ),
+            _ => (None, None, None),
+        };
+        events.push((
+            review.created_at,
+            serde_json::json!({
+                "event_type": "mr_review",
+                "timestamp": review.created_at,
+                "mr_id": review.merge_request_id.to_string(),
+                "mr_title": mr_title,
+                "repo_id": repo_id,
+                "workspace_id": workspace_id,
+                "decision": match review.decision {
+                    gyre_domain::ReviewDecision::Approved => "approved",
+                    gyre_domain::ReviewDecision::ChangesRequested => "changes_requested",
+                },
+            }),
+        ));
+    }
+
+    // Spec approvals / rejections / revocations from the durable ledger.
+    let mut seen_approvals = std::collections::HashSet::new();
+    for form in approval_identity_forms(&user) {
+        for approval in state.spec_approvals.list_by_approver(&form).await? {
+            if !seen_approvals.insert(approval.id.to_string()) {
+                continue; // same ledger row matched under both name forms
+            }
+            if let Some(ts) = approval
+                .approved_at
+                .filter(|_| approval.revoked_at.is_none() && approval.rejected_at.is_none())
+            {
+                events.push((
+                    ts,
+                    serde_json::json!({
+                        "event_type": "spec_approved",
+                        "timestamp": ts,
+                        "spec_path": approval.spec_path,
+                        "spec_sha": approval.spec_sha,
+                    }),
+                ));
+            }
+            if let Some(ts) = approval.rejected_at {
+                events.push((
+                    ts,
+                    serde_json::json!({
+                        "event_type": "spec_rejected",
+                        "timestamp": ts,
+                        "spec_path": approval.spec_path,
+                        "spec_sha": approval.spec_sha,
+                        "reason": approval.rejected_reason,
+                    }),
+                ));
+            }
+            if let Some(ts) = approval.revoked_at {
+                events.push((
+                    ts,
+                    serde_json::json!({
+                        "event_type": "spec_revoked",
+                        "timestamp": ts,
+                        "spec_path": approval.spec_path,
+                        "spec_sha": approval.spec_sha,
+                        "reason": approval.revocation_reason,
+                    }),
+                ));
+            }
+        }
+    }
+
+    // Agent spawns.
+    let mut seen_agents = std::collections::HashSet::new();
+    for form in spawner_identity_forms(&user) {
+        for agent in state.agents.list_by_spawner(&form).await? {
+            if !seen_agents.insert(agent.id.to_string()) {
+                continue;
+            }
+            events.push((
+                agent.spawned_at,
+                serde_json::json!({
+                    "event_type": "agent_spawned",
+                    "timestamp": agent.spawned_at,
+                    "agent_id": agent.id.to_string(),
+                    "agent_name": agent.name,
+                    "workspace_id": agent.workspace_id.to_string(),
+                }),
+            ));
+        }
+    }
+
+    // Newest first, then paginate.
+    events.sort_by_key(|&(ts, _)| std::cmp::Reverse(ts));
+    let total = events.len();
+    let page: Vec<serde_json::Value> = events
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(_, ev)| ev)
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "activity": page,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+    })))
+}
+
+/// GET /api/v1/users/:username/stats — aggregate public-action counts
+/// (user-management.md §User Profile Page: "Stats: MRs reviewed, specs
+/// approved, agents spawned"). Computed from the same stores the activity
+/// feed reads; same tenant containment (404 across tenants).
+pub async fn get_user_stats(
+    auth: AuthenticatedAgent,
+    Path(username): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = resolve_public_user(&state, &auth, &username).await?;
+
+    // MRs reviewed: human reviews are recorded under the user id, so this
+    // is an exact (globally unique id) attribution.
+    let mrs_reviewed = state
+        .reviews
+        .list_by_reviewer(user.id.as_str())
+        .await?
+        .len() as u64;
+
+    // Specs approved: ledger rows with approved_at set that were neither
+    // revoked nor rejected. Deduped across the caller's identity forms.
+    let mut approved = std::collections::HashSet::new();
+    for form in approval_identity_forms(&user) {
+        for approval in state.spec_approvals.list_by_approver(&form).await? {
+            if approval.approved_at.is_some()
+                && approval.revoked_at.is_none()
+                && approval.rejected_at.is_none()
+            {
+                approved.insert(approval.id.to_string());
+            }
+        }
+    }
+
+    // Agents spawned: deduped across the caller's identity forms.
+    let mut spawned = std::collections::HashSet::new();
+    for form in spawner_identity_forms(&user) {
+        for agent in state.agents.list_by_spawner(&form).await? {
+            spawned.insert(agent.id.to_string());
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "mrs_reviewed": mrs_reviewed,
+        "specs_approved": approved.len(),
+        "agents_spawned": spawned.len(),
+    })))
 }
 
 /// Whether the caller may perform TenantAdmin user-management operations
@@ -5525,7 +5787,7 @@ mod tests {
     // ── Workspace membership endpoints (user-management.md §Workspace
     // Membership, §Ownership Transfer & Reclamation) ─────────────────────
 
-    use gyre_domain::{User, Workspace, WorkspaceMembership, WorkspaceRole};
+    use gyre_domain::{Team, TeamMembership, User, Workspace, WorkspaceMembership, WorkspaceRole};
 
     /// Seed a workspace in tenant t-1 with one accepted Owner membership
     /// whose user record exists. Returns (workspace_id, owner_user_id).
@@ -5968,6 +6230,276 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// GET /api/v1/users/:username includes team memberships drawn from
+    /// the subject's accepted workspace memberships (user-management.md
+    /// §User Profile Page: "Team memberships").
+    #[tokio::test]
+    async fn public_profile_includes_teams() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let owner = state
+            .users
+            .find_by_id(&Id::new(&owner_id))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let team = Team::new(
+            Id::new("team-1"),
+            Id::new(ws_id.clone()),
+            "Platform",
+            "platform",
+            owner.id.clone(),
+            1_700_000_000u64,
+        );
+        state.teams.create(&team).await.unwrap();
+        state
+            .teams
+            .add_member(&TeamMembership::new(
+                team.id.clone(),
+                owner.id.clone(),
+                1_700_000_001,
+            ))
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let teams = json["teams"].as_array().unwrap();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0]["slug"], "platform");
+        assert_eq!(teams[0]["name"], "Platform");
+        assert_eq!(teams[0]["workspace_id"], ws_id);
+    }
+
+    /// GET /api/v1/users/:username/activity and /stats: real aggregates
+    /// over the subject's recorded public actions (MR reviews under the
+    /// user id, spec approvals under `user:{display_name}`, agent spawns
+    /// under the display name), newest-first ordering, pagination, and the
+    /// same tenant containment as the profile itself (404 cross-tenant —
+    /// existence must not leak).
+    #[tokio::test]
+    async fn public_profile_activity_and_stats() {
+        let state = test_state();
+        let (ws_id, owner_id) = seed_workspace_with_owner(&state).await;
+        let owner = state
+            .users
+            .find_by_id(&Id::new(&owner_id))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // ── Seed the subject's public actions ──────────────────────────
+        // 1. One MR review (human reviews record the user id).
+        let mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-1"),
+            Id::new("repo-1"),
+            Id::new(ws_id.clone()),
+            "Add feature",
+            "feature",
+            "main",
+            1_700_000_010u64,
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+        state
+            .reviews
+            .submit_review(&gyre_domain::Review::new(
+                Id::new("review-1"),
+                mr.id.clone(),
+                owner.id.to_string(),
+                gyre_domain::ReviewDecision::Approved,
+                1_700_000_100u64,
+            ))
+            .await
+            .unwrap();
+
+        // 2. One approved spec ledger entry + one rejected entry, recorded
+        //    under `user:{display_name}` (the identity approve_spec writes).
+        let mut approved = gyre_domain::SpecApproval::new(
+            Id::new("approval-1"),
+            "specs/system/vision.md",
+            "a".repeat(40),
+            format!("user:{}", owner.display_name),
+        );
+        approved.approve(1_700_000_200).unwrap();
+        state.spec_approvals.create(&approved).await.unwrap();
+        let mut rejected = gyre_domain::SpecApproval::new(
+            Id::new("approval-2"),
+            "specs/system/old.md",
+            "b".repeat(40),
+            format!("user:{}", owner.display_name),
+        );
+        rejected
+            .reject(&owner.display_name, "superseded", 1_700_000_050)
+            .unwrap();
+        state.spec_approvals.create(&rejected).await.unwrap();
+
+        // 3. One agent spawn (spawn paths record the raw principal id —
+        //    the display name for user principals).
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("agent-1"), "implementer-1", 1_700_000_300u64);
+        agent.workspace_id = Id::new(ws_id.clone());
+        agent.spawned_by = Some(owner.display_name.clone());
+        state.agents.create(&agent).await.unwrap();
+
+        // A control row that must NOT attribute to the owner: another
+        // reviewer's review.
+        state
+            .reviews
+            .submit_review(&gyre_domain::Review::new(
+                Id::new("review-other"),
+                mr.id.clone(),
+                "someone-else".to_string(),
+                gyre_domain::ReviewDecision::ChangesRequested,
+                1_700_000_400u64,
+            ))
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // ── Stats ──────────────────────────────────────────────────────
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/stats", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let stats = body_json(resp).await;
+        assert_eq!(stats["mrs_reviewed"], 1, "only the owner's review counts");
+        assert_eq!(
+            stats["specs_approved"], 1,
+            "the rejected entry is not an approval"
+        );
+        assert_eq!(stats["agents_spawned"], 1);
+
+        // ── Activity feed ─────────────────────────────────────────────
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/activity", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let feed = body_json(resp).await;
+        let events = feed["activity"].as_array().unwrap();
+        assert_eq!(events.len(), 4, "review + approval + rejection + spawn");
+        // Newest first: agent spawn (300) > approval (200) > review (100) > rejection (50).
+        let types: Vec<&str> = events
+            .iter()
+            .map(|e| e["event_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "agent_spawned",
+                "spec_approved",
+                "mr_review",
+                "spec_rejected"
+            ]
+        );
+        // The review event joins the MR for navigation.
+        assert_eq!(events[2]["mr_id"], "mr-1");
+        assert_eq!(events[2]["mr_title"], "Add feature");
+        assert_eq!(events[2]["repo_id"], "repo-1");
+        // The other reviewer's review is absent.
+        assert!(events
+            .iter()
+            .all(|e| e["event_type"] != "mr_review" || e["mr_id"] == "mr-1"));
+
+        // Pagination: limit=2 returns the two newest events.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/activity?limit=2", owner.username))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let feed = body_json(resp).await;
+        assert_eq!(feed["activity"].as_array().unwrap().len(), 2);
+        assert_eq!(feed["total"], 4);
+
+        // ── A same-tenant peer can read the feed (same ABAC "user" read
+        //    mapping as the profile itself; containment is the only gate). ──
+        let (_, peer_key) = seed_keyed_user(
+            &state,
+            "peer-viewer",
+            vec![gyre_domain::UserRole::Developer],
+        )
+        .await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/activity", owner.username))
+                    .header("Authorization", format!("Bearer {peer_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // ── Tenant containment: a cross-tenant caller gets 404 on both
+        //    endpoints (indistinguishable from a nonexistent handle). ──
+        let (_, key) =
+            seed_keyed_user(&state, "t2-viewer", vec![gyre_domain::UserRole::Developer]).await;
+        // Re-bind the seeded viewer to t-2 for the cross-tenant case
+        // (seed_keyed_user always binds to t-1).
+        let mut t2 = state
+            .users
+            .find_by_username("t2-viewer")
+            .await
+            .unwrap()
+            .unwrap();
+        t2.tenant_id = Some(Id::new("t-2"));
+        state.users.update(&t2).await.unwrap();
+        for path in ["activity", "stats"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/users/{}/{}", owner.username, path))
+                        .header("Authorization", format!("Bearer {key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must 404 cross-tenant"
+            );
+        }
     }
 
     /// GET /api/v1/users is TenantAdmin-only and tenant-scoped, with

@@ -301,6 +301,23 @@ impl AgentRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_by_spawner(&self, spawned_by: &str) -> Result<Vec<Agent>> {
+        let pool = Arc::clone(&self.pool);
+        let spawner = spawned_by.to_string();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Agent>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agents::table
+                .filter(agents::tenant_id.eq(&tenant))
+                .filter(agents::spawned_by.eq(&spawner))
+                .order(agents::spawned_at.desc())
+                .load::<AgentRow>(&mut *conn)
+                .context("list agents by spawner")?;
+            rows.into_iter().map(|r| r.into_agent()).collect()
+        })
+        .await?
+    }
+
     async fn update_status(&self, agent_id: &Id, status: AgentStatus) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
@@ -409,6 +426,28 @@ mod tests {
     async fn find_by_name_missing() {
         let (_tmp, s) = setup();
         assert!(s.find_by_name("ghost").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_by_spawner_filters_and_orders_newest_first() {
+        // Public-profile stats/activity attribution (user-management.md
+        // §User Profile Page): only the named spawner's agents come back,
+        // newest first.
+        let (_tmp, s) = setup();
+        for (id, ts) in [("a-old", 1000u64), ("a-new", 2000)] {
+            let mut a = make_agent(id, "worker");
+            a.spawned_at = ts;
+            a.spawned_by = Some("alice".to_string());
+            s.create(&a).await.unwrap();
+        }
+        let mut other = make_agent("a-other", "worker");
+        other.spawned_by = Some("bob".to_string());
+        s.create(&other).await.unwrap();
+
+        let mine = s.list_by_spawner("alice").await.unwrap();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].id.as_str(), "a-new");
+        assert_eq!(mine[1].id.as_str(), "a-old");
     }
 
     #[tokio::test]

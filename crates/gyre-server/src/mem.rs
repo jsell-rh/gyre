@@ -877,6 +877,19 @@ impl AgentRepository for MemAgentRepository {
             .collect())
     }
 
+    async fn list_by_spawner(&self, spawned_by: &str) -> Result<Vec<Agent>> {
+        let mut out: Vec<Agent> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.spawned_by.as_deref() == Some(spawned_by))
+            .cloned()
+            .collect();
+        out.sort_by_key(|a| std::cmp::Reverse(a.spawned_at));
+        Ok(out)
+    }
+
     async fn update_status(&self, agent_id: &Id, status: AgentStatus) -> Result<()> {
         let mut store = self.store.lock().await;
         if let Some(agent) = store.get_mut(agent_id.as_str()) {
@@ -1127,6 +1140,19 @@ impl ReviewRepository for MemReviewRepository {
             .cloned()
             .collect();
         reviews.sort_by_key(|r| r.created_at);
+        Ok(reviews)
+    }
+
+    async fn list_by_reviewer(&self, reviewer_agent_id: &str) -> Result<Vec<Review>> {
+        let mut reviews: Vec<Review> = self
+            .reviews
+            .lock()
+            .await
+            .values()
+            .filter(|r| r.reviewer_agent_id == reviewer_agent_id)
+            .cloned()
+            .collect();
+        reviews.sort_by_key(|r| std::cmp::Reverse(r.created_at));
         Ok(reviews)
     }
 
@@ -3782,6 +3808,19 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
     }
     async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.values().cloned().collect())
+    }
+
+    async fn list_by_approver(&self, approver_id: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
+        let mut out: Vec<_> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.approver_id == approver_id)
+            .cloned()
+            .collect();
+        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        Ok(out)
     }
 
     async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
