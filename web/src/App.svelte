@@ -788,6 +788,7 @@
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
+  setContext('goToCrossWorkspace', () => goToCrossWorkspace());
   setContext('goToPublicProfile', (username) => goToPublicProfile(username));
   setContext('goToInviteAccept', (workspaceId) => goToInviteAccept(workspaceId));
   setContext('navigateToPath', (path) => navigateToPath(path));
@@ -1310,6 +1311,11 @@
       tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
       entityType: entityDetail?.type ?? null,
       entityId: entityDetail?.id ?? null,
+      // Path-parameterized modes: keep the route parameter in the canonical
+      // URL, or a page load at /invite/{ws} / /@{username} rewrites the URL
+      // to /invite/ / /@ and a later refresh loses the deep link entirely.
+      username: mode === 'public_profile' ? publicUsername : null,
+      inviteId: mode === 'invite_accept' ? inviteWorkspaceId : null,
     });
     window.history.replaceState(
       { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab, entityType: entityDetail?.type ?? null, entityId: entityDetail?.id ?? null },
