@@ -138,6 +138,15 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Email digest drain (user-management.md §Email Notifications) — every
+    // 60 s, per user's configured digest frequency. Registered in the job
+    // registry (manual trigger + status); spawn_job is the executing loop.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "email_digest".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     // Task-115 (agent-runtime.md §1 Phase 3): detect Delegation/Coordination
     // tasks and run repo orchestrators under per-repo registry locks.

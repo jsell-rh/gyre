@@ -661,6 +661,27 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register the email digest drain (user-management.md §Email
+    // Notifications): every 60 s it drains the durable email outbox at
+    // each user's configured digest frequency — Immediate sends
+    // individually, Hourly/Daily aggregate once per window. With no SMTP
+    // relay configured (GYRE_SMTP_HOST) it holds the queue untouched.
+    registry
+        .register(
+            JobDefinition {
+                name: "email_digest".to_string(),
+                description: "Drains the durable email outbox: renders per-type \
+                     templates + digest aggregates in the user's locale and delivers \
+                     via the configured SMTP relay (user-management.md §Email Notifications)"
+                    .to_string(),
+                interval_secs: 60,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::email::run_digest_once(&state).await },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.

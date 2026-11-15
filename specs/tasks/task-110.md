@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["8833f8d99ccd1536a06ad81e364f80efc5c3f330", "01958bc011244ae4a4c06258baec597a00d8134d", "9f9be53014102d44e5e8c148d21b580448c226c7", "d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -97,74 +97,3 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
-## Shipped
-
-Tenant & workspace invitation flow, fully implemented and carried through
-multiple review/repair rounds on this branch (latest: review 4cf9e027
-repair at 8833f8d9, then merged with assignment base 103d665e / task-142
-merge attestation at 3e31e890 — merge touched only task-142 files, no
-invitation-surface conflicts):
-
-- **Domain entities** (`gyre-domain`): `TenantInvitation`, `WorkspaceInvitation`,
-  `InvitationStatus` (Pending/Accepted/Declined/Expired/Revoked), per-tenant
-  `InvitationPolicy` (`tenant_invite_expiry_days` / `workspace_invite_expiry_days`
-  default 7, `max_pending_invitations` default 50, `allow_re_invite`).
-- **Ports + adapters**: `TenantInvitationRepository` and
-  `WorkspaceInvitationRepository` port traits implemented by the SQLite,
-  Postgres, and mem adapters (mem guards the port-documented duplicate
-  constraints in code); shared portable migrations for both tables plus
-  DB-level pending-scope uniqueness (migration 000064 partial unique
-  indexes, with raced-duplicate dedup before index creation).
-- **API** (`gyre-server/src/api/invitations.rs`): the five tenant endpoints
-  (`POST /tenant/invite`, `POST /tenant/invite/bulk`, `GET /tenant/invitations`,
-  `DELETE /tenant/invitations/{id}`, `POST /invite/{token}/accept`) plus the
-  workspace invitation lifecycle (`POST /workspaces/{id}/invite`, invitee
-  accept/decline via token and via authenticated identity) and per-tenant
-  policy endpoints. Tokens are 32 CSPRNG bytes, hex-encoded, stored only as
-  SHA-256 hashes; acceptance is single-use and transactional (membership
-  activation rolls the status back on failure). Local-mode acceptance creates
-  the user and mints a first API key; SSO-mode acceptance links the existing
-  account. Routes registered in `api/mod.rs` with ABAC mappings; the two
-  invitee-facing accept/decline routes are ABAC-exempt with per-handler
-  authorization (`authorize_my_pending_invitation`: tenant containment +
-  caller-must-be-the-invitee), because the seeded membership builtin would
-  otherwise deny the non-member invitee before the handler runs.
-- **Deactivation contract (review 4cf9e027)**: the SSO email-link claim
-  branch in `auth.rs find_or_create_user_tenant` bails on a deactivated
-  invitation-created account (mirroring the API-key, WS, and direct
-  external_id paths); tenant acceptance (local-mode and SSO-link arms) and
-  the token-based workspace accept route reject deactivated accounts with
-  403 before any side effect, rolling the single-use claim back to Pending.
-- **PostgreSQL int4 repair (review 4cf9e027)**: migration 000063's six
-  invitation timestamp columns are BIGINT (matching schema.rs BigInt and
-  the adapters' i64 row structs); PG databases that already ran the INTEGER
-  variant are repaired in place by the PG-only post-migration hook
-  `postgres/repair.rs::ensure_invitation_timestamps_bigint`
-  (information_schema check + `ALTER COLUMN ... TYPE BIGINT`, idempotent).
-- **Background expiry job** marks `Pending` invitations past `expires_at` as
-  `Expired`; handlers also lazy-expire on touch.
-- **Tests** include a production-chain regression
-  (`invitee_accepts_and_declines_through_abac_middleware`) that layers the real
-  `api_router` with `abac_middleware` and seeded builtin policies, proves the
-  non-member invitee is still denied on a workspace-mapped route, then exercises
-  the exempt invitee routes end-to-end; deactivation-contract regressions
-  (`jwt_email_link_does_not_claim_deactivated_account`,
-  `deactivated_local_account_cannot_accept_invitation`,
-  `deactivated_sso_account_cannot_accept_invitation`,
-  `deactivated_invitee_cannot_accept_workspace_invitation_by_token`); and
-  local-mode accept, re-invite, username-collision, expiry, cap, and
-  cross-tenant-guard coverage.
-
-### Test evidence
-
-Executed on the merged tree (base 103d665e) in this round (exit 0):
-`cargo check -p gyre-server`, `cargo test -p gyre-adapters --lib invitation`
-(5 passed), `cargo test -p gyre-domain invitation` (4 passed),
-`scripts/check-migration-sql-portability.sh`, `scripts/check-migration-versions.sh`,
-`scripts/check-arch.sh`, `scripts/check-abac-route-registry.sh`,
-`scripts/check-abac-exempt-handlers.sh`, `scripts/check-mem-port-contracts.sh`,
-`scripts/check-dead-message-kinds.sh`; no conflict markers post-merge.
-Evidence: `/tmp/stage/review-evidence/`. Full `cargo test -p gyre-server` and
-`cargo test --all` remain recorded for the independent verifier (sandbox
-4 GiB build-wrapper limit).

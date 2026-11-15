@@ -1,13 +1,13 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-11-14
+**Last updated:** 2026-11-15
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
 | abac-policy-engine.md | 19 | 2 | 0 | 0 | 17 | 0 | 100% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| agent-gates.md | 25 | 9 | 0 | 12 | 4 | 0 | 25% |
+| agent-gates.md | 25 | 9 | 0 | 10 | 6 | 0 | 37% |
 | agent-runtime.md | 33 | 1 | 0 | 10 | 22 | 0 | 68% |
 | analytics.md | 12 | 0 | 0 | 0 | 12 | 0 | 100% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |
@@ -41,7 +41,7 @@
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
 | ui-layout.md | 42 | 4 | 0 | 31 | 7 | 0 | 18% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
-| user-management.md | 36 | 11 | 0 | 7 | 18 | 0 | 72% |
+| user-management.md | 36 | 11 | 0 | 5 | 20 | 0 | 80% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **220** | **0** | **186** | **233** | **163** | **68%** |
+| **TOTAL** | **802** | **220** | **0** | **182** | **237** | **163** | **68%** |
