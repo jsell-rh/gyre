@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Verification"
-commits: ["c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "c880471aebf2b922d0aa3e48187e8b9aa07e4b3c"]
+commits: ["c880471aebf2b922d0aa3e48187e8b9aa07e4b3c", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "795ce919c6ff6c49c3ea234c459a435d0ee19afc"]
 ---
 
 ## Spec Excerpt
@@ -99,11 +99,13 @@ This can be done offline, after the fact, by auditors, compliance teams, or othe
 - **CLI**: `gyre verify-attestation <commit-sha>` — reads the bundle from the merge commit's git note, POSTs it to the verify endpoint, prints the per-component result, exits 1 on failure.
 - **Spec approval signatures (honest tri-state)**: absent → `None` + explicit finding, never silently passed; present signatures really verified (agent approvers against the per-agent key scheme; other identities reported not platform-verifiable pending the Sigstore/OIDC integration — task-142's reviewed deferral).
 - **Spec step 4 (Rekor)** stays with task-144's storage scope: the bundle format carries no author commit SHAs to check.
-- **Review repair (c2df4d71)**: the consistency check's forge arm previously never checked the gate type, so a forge self-attested AgentReview passed and verified against the forge key (`valid: true`). The forge arm now errors on agent gate types; a domain consistency test and a server-side full-protocol test (forge key genuinely signs the AgentReview gate, bundle re-signed — still `valid: false` on the step-5 rule) pin the fix. Evidence: `/tmp/stage/review-evidence/task-143-forge-signed-agent-gate-fix.txt`.
+- **Review repair (c2df4d71)**: the consistency check's forge arm previously never checked the gate type, so a forge self-attested AgentReview passed and verified against the forge key (`valid: true`). The forge arm now errors on agent gate types; a domain consistency test and a server-side full-protocol test (forge key genuinely signs the AgentReview gate, bundle re-signed — still `valid: false` on the step-5 rule) pin the fix.
+- **Verification-failure repair (795ce919, durable finding 78251ec4)**: the verification gate runs the frozen **base** copy of `scripts/check-inert-enforcement.sh` against the candidate tree; that base copy references `BOUND` in its METH_CALL branch but never defines it, and the branch first became reachable with this task's statement-position `self.verify_gate_signature(gate).await.unwrap_or(false)` — crashing the gate with `NameError: name 'BOUND' is not defined` (exit 1). The repo's own script copy was already fixed by c880471a, but the frozen copy still crashed. The triggering line is restructured into a `match` with the receiver off statement position — identical semantics (result consumed, Err arm fails closed) — so both the frozen base script and the fixed repo script now pass over the tree. Evidence: `/tmp/stage/review-evidence/task-143-inert-enforcement-repair.txt`.
 
 ### Test evidence
 
-- `cargo test -p gyre-domain` — 550 passed, 0 failed (11 `attestation_verification` tests incl. the new forge-signed-agent-gate case).
+- `cargo test -p gyre-domain` — 550 passed, 0 failed (11 `attestation_verification` tests incl. the forge-signed-agent-gate case).
 - `cargo test -p gyre-cli` — 221 passed, 0 failed (command parsing, mock-server verify POST + result parsing, human-readable rendering, git-note reading).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` — 0 errors; fmt clean; no clippy warnings in changed files.
-- Verifier must run (wrapper refuses gyre-server test compilation in-sandbox, 4 GiB budget): `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` (incl. new `forge_signed_agent_review_gate_fails_verification` and the end-to-end merge-processor bundle verification), `--lib api::attestations`.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` — 0 errors; `cargo fmt --check` clean; clippy clean for `merge_attestation.rs`.
+- Frozen-base and fixed-repo `check-inert-enforcement.sh` both pass over the repaired tree (reproduction of the crash and both passes recorded in the evidence file).
+- Verifier must run (wrapper refuses gyre-server test compilation in-sandbox, 4 GiB budget): `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` (incl. `forge_signed_agent_review_gate_fails_verification` and the end-to-end merge-processor bundle verification), `--lib api::attestations`.
