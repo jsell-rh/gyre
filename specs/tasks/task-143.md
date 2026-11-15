@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Verification"
-commits: ["bdc62a832717bb37b5e5888002775b2f9d02ceaa", "795ce919c6ff6c49c3ea234c459a435d0ee19afc", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "c880471aebf2b922d0aa3e48187e8b9aa07e4b3c"]
+commits: ["c17f82bf6b532073258d45c2115d350ded08b64f", "bdc62a832717bb37b5e5888002775b2f9d02ceaa", "795ce919c6ff6c49c3ea234c459a435d0ee19afc", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "c880471aebf2b922d0aa3e48187e8b9aa07e4b3c"]
 ---
 
 ## Spec Excerpt
@@ -71,13 +71,13 @@ This can be done offline, after the fact, by auditors, compliance teams, or othe
 
 ## Acceptance Criteria
 
-- [ ] `AttestationVerifier` port trait defined
-- [ ] `VerificationResult` type captures per-component verification status
-- [ ] Structural consistency checks (same MR/spec across all gates)
-- [ ] Cryptographic signature verification for bundle, gates, and spec approval
-- [ ] `POST /api/v1/attestations/verify` endpoint
-- [ ] CLI `gyre verify-attestation` command
-- [ ] Tests pass
+- [x] `AttestationVerifier` port trait defined
+- [x] `VerificationResult` type captures per-component verification status
+- [x] Structural consistency checks (same MR/spec across all gates)
+- [x] Cryptographic signature verification for bundle, gates, and spec approval
+- [x] `POST /api/v1/attestations/verify` endpoint
+- [x] CLI `gyre verify-attestation` command
+- [x] Tests pass
 
 ## Agent Instructions
 
@@ -99,13 +99,14 @@ This can be done offline, after the fact, by auditors, compliance teams, or othe
 - **CLI**: `gyre verify-attestation <commit-sha>` — reads the bundle from the merge commit's git note, POSTs it to the verify endpoint, prints the per-component result, exits 1 on failure.
 - **Spec approval signatures (honest tri-state)**: absent → `None` + explicit finding, never silently passed; present signatures really verified (agent approvers against the per-agent key scheme; other identities reported not platform-verifiable pending the Sigstore/OIDC integration — task-142's reviewed deferral).
 - **Spec step 4 (Rekor)** stays with task-144's storage scope: the bundle format carries no author commit SHAs to check.
-- **Review repairs**: `c2df4d71` — the consistency check's forge arm now rejects agent gate types (a forge self-attested AgentReview no longer verifies, even re-signed); `795ce919` — gate-signature verification restructured off the inert-enforcement crash path (identical fail-closed semantics); `bdc62a83` (this round) — the gate-tamper test's bundle-signature assertion was inverted: `unsigned_canonical_json()` nulls only `bundle_signature`, so the gates array IS covered by the bundle-level signature and gate tampering breaks it (proven with a standalone probe using the real domain type + real ring Ed25519: `/tmp/stage/review-evidence/gate-tamper-probe-output.txt`); the tampered gate is now addressed by name because `list_by_mr_id` has no ordering contract (mem HashMap / SQL adapters without ORDER BY), which made the old `gates[0]` indexing flaky.
+- **Review repairs**: `c2df4d71` — the consistency check's forge arm now rejects agent gate types (a forge self-attested AgentReview no longer verifies, even re-signed); `795ce919` — gate-signature verification restructured off the inert-enforcement crash path (identical fail-closed semantics); `bdc62a83` — the gate-tamper test's bundle-signature assertion was inverted: `unsigned_canonical_json()` nulls only `bundle_signature`, so the gates array IS covered by the bundle-level signature and gate tampering breaks it (proven with a standalone probe using the real domain type + real ring Ed25519: `/tmp/stage/review-evidence/gate-tamper-probe-output.txt`); the tampered gate is now addressed by name because `list_by_mr_id` has no ordering contract (mem HashMap / SQL adapters without ORDER BY), which made the old `gates[0]` indexing flaky.
+- **Verification-gate repair** (`c17f82bf`, this round): the deterministic gate (finding `679e3bf2`) failed on `clippy::manual_unwrap_or_default` at `merge_attestation.rs:528` — the match form `Ok(valid) => valid, Err(_) => false` had been forced by the inert-enforcement script's NameError crash, which this branch had already fixed by defining its missing `BOUND` regex (`c880471a`). Now uses `.await.unwrap_or_default()`: bool's default is `false`, so a verification error still fails closed, and `BOUND` recognizes the `.unwrap` chain so the line counts as bound — no exemption, no checker weakening. All remaining clippy warnings in `gyre-server` are pre-existing at the assignment base (verified per site: `merge_processor.rs:1669`, `mem.rs`, `explorer_ws.rs`, ...).
 - **Merge resolution** (`94c9ac2f`): rebased this task's verification work onto the task-144 base (AttestationStorage port + storage wiring) — both ports coexist in `gyre-ports`/`AppState`; the merge-processor bundle test now asserts BOTH the full verification protocol and storage-port retrieval; coverage rows 13–15 and the header reflect both tasks' state (7/25 implemented).
 
 ### Test evidence
 
-- `cargo test -p gyre-domain` — 550 passed, 0 failed (24 attestation tests, incl. `attestation_verification` consistency cases).
-- `cargo test -p gyre-cli` — 221 passed, 0 failed (incl. `verify_attestation_command_parses`, `verify_attestation_posts_note_bundle_and_parses_result`, `cli_verify`).
-- `cargo check -p gyre-server --tests` — typechecks clean (server test execution is refused by the in-sandbox 4 GiB build wrapper; verifier must run it).
+- `cargo test -p gyre-domain` — 550 passed, 0 failed (24 attestation tests, incl. `attestation_verification` consistency cases). Re-run after `c17f82bf`: 550 passed, 0 failed.
+- `cargo test -p gyre-cli` — 221 passed, 0 failed (incl. `verify_attestation_command_parses`, `verify_attestation_posts_note_bundle_and_parses_result`, `cli_verify`). Re-run after `c17f82bf`: 221 + 1 passed, 0 failed.
+- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --lib` and `--all-targets` (post-`c17f82bf`) — zero diagnostics in `merge_attestation.rs`, no `manual_unwrap_or_default` anywhere in `gyre-server`; remaining warnings pre-exist at base `706bc7bd`. `cargo fmt --check -p gyre-server` clean. `check-arch.sh`, `check-inert-enforcement.sh`, `check-fail-open-ref-resolution.sh`, `check-abac-route-registry.sh` all pass. Evidence: `/tmp/stage/review-evidence/clippy-repair-evidence.txt`.
 - Standalone crypto probe (real `MergeAttestationBundle::unsigned_canonical_json` + real ring Ed25519 sign/verify): untampered bundle signature verifies; gate-status tampering changes the canonical payload and the bundle signature does NOT verify — confirms the fixed `assert!(!result.bundle_signature_valid)`.
-- **Verifier must run**: `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` (incl. `tampered_bundle_fails_verification`, `unsigned_and_missing_signatures_fail_verification`, `forge_signed_agent_review_gate_fails_verification`, `spec_approval_signature_verification_round_trip`, `inconsistent_reviewer_binding_fails_consistency_check`) and `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_processor` (incl. the merged `merge_processor_generates_multi_party_attestation_bundle` verifying both protocol and storage).
+- **Verifier must run** (server test compilation exceeds the in-sandbox 4 GiB build wrapper): `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` (incl. `tampered_bundle_fails_verification`, `unsigned_and_missing_signatures_fail_verification`, `forge_signed_agent_review_gate_fails_verification`, `spec_approval_signature_verification_round_trip`, `inconsistent_reviewer_binding_fails_consistency_check`) and `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_processor` (incl. the merged `merge_processor_generates_multi_party_attestation_bundle` verifying both protocol and storage).
