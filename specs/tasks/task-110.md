@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["7bc33fe44d2805273a98e37ec5cc5a91663a6f41", "b445900d4f72e5c324cb61c4b2e55c72f6ebed8a", "6af1d71c51cf1f763c0a1c07ec3f14b272edc523", "758462f45d6b162bc273c4a676e6bb33442e5dde", "43b15db3df88aed619f631a209e0cce124594100", "8833f8d99ccd1536a06ad81e364f80efc5c3f330", "01958bc011244ae4a4c06258baec597a00d8134d", "9f9be53014102d44e5e8c148d21b580448c226c7", "d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -97,69 +97,3 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
-## Shipped
-
-Tenant & workspace invitation flow, complete and reviewed across earlier
-rounds on this branch; this round resolved the assigned rebase onto base
-`81c24bf0` and re-verified the merged tree.
-
-### Feature surface (cumulative)
-
-- **Domain/ports/adapters:** `TenantInvitation` + `WorkspaceInvitation`
-  entities (`gyre-domain/src/invitation.rs`), `TenantInvitationRepository` +
-  `WorkspaceInvitationRepository` ports, SQLite/Postgres/mem adapters,
-  migrations `2026-11-13-000063_invitations` and
-  `2026-11-13-000064_invitation_pending_unique` (pending-scope partial unique
-  index).
-- **All five tenant endpoints** in `api/invitations.rs`, registered in
-  `api/mod.rs` with ABAC mappings and per-handler tenant containment:
-  `POST /tenant/invite`, `POST /tenant/invite/bulk` (array of invitations,
-  per-entry error indexes), `GET /tenant/invitations` (status filter),
-  `DELETE /tenant/invitations/{id}` (revoke), `POST /invite/{token}/accept`.
-- **Workspace invitation lifecycle:** invite → Pending → accept/decline/
-  expire/revoke; invitee surface `GET /users/me/invitations`,
-  `POST /workspaces/{id}/invite/accept|decline`; `max_pending_invitations`
-  cap (429); cross-tenant access 403.
-- **Token security:** 32-byte CSPRNG tokens (ring `SystemRandom`), stored
-  only as SHA-256 hashes; single-use acceptance via conditional
-  `transition_status` claims across all three adapters; tokens redacted
-  from observability.
-- **Both onboarding modes:** SSO accept links the existing
-  auto-provisioned account; Local-mode accept mints a first-class user
-  plus their first API key (hash-persisted) so the invitee can
-  authenticate immediately.
-- **Expiry:** per-tenant `InvitationPolicy`
-  (tenant/workspace expiry days, pending cap, `allow_re_invite`) via
-  `GET/PUT /tenant/invitations/policy`, fail-closed on corrupt rows;
-  background job `spawn_invitation_expiry` (main.rs) marks past-due
-  Pending invitations Expired using the same conditional claim so a
-  racing accept is never overwritten; expired tokens rejected on accept.
-
-### This round (rebase repair 353823da)
-
-- Resolved the `specs/coverage/SUMMARY.md` merge conflict by regenerating
-  the file from the merged coverage files via
-  `scripts/update-coverage-summary.sh` (mechanical resolution, no
-  hand-edited counts; user-management.md stays 80% implemented, all four
-  task-110 coverage sections `implemented`).
-- Restored the `commits:` frontmatter list (reset by the assignment
-  baseline) and added the rebase merge commit `9608aa35` —
-  `check-task-commit-attribution.sh` failed with the empty list and
-  passes with it restored.
-
-### Test evidence (this round, post-rebase merged head)
-
-- `cargo check -p gyre-server --tests` — exit 0 (build wrapper, 9m13s).
-- `cargo test -p gyre-domain invitation` — 4 passed.
-- `cargo test -p gyre-adapters invitation --lib` — 5 passed
-  (SQLite roundtrips, transition-status guard).
-- Mechanical gates exit 0: `check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-migration-versions.sh`, `check-mem-port-contracts.sh`,
-  `check-migration-sql-portability.sh`,
-  `check-task-commit-attribution.sh` (after frontmatter restore).
-  Logs under `/tmp/stage/review-evidence/`.
-- Verifier must still run: `cargo test -p gyre-server --lib
-  api::invitations::` (26 tests incl. the six review-96521ecf hardening
-  tests), full `cargo test --all`, and all-target clippy — server test
-  compilation exceeds this sandbox's 4 GiB build budget.
