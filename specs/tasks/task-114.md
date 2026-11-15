@@ -48,21 +48,20 @@ Public within the tenant:
 
 ## Acceptance Criteria
 
-- [x] User profile page at `/@{username}`
-- [x] Profile shows workspace memberships, teams, activity, stats
-- [x] Profile is tenant-scoped (only visible to same-tenant users)
-- [x] Responsive layout
-- [x] `cargo test --all` and `npm test` pass (npm test: full vitest suite
-  2398 passed in-sandbox; server tests deferred to the independent verifier
-  per the 4 GiB build wrapper — `cargo check -p gyre-server --lib --tests`
-  passes, required probe list in /tmp/stage/review-evidence/verifier-tests.md)
+- [ ] User profile page at `/@{username}`
+- [ ] Profile shows workspace memberships, teams, activity, stats
+- [ ] Profile is tenant-scoped (only visible to same-tenant users)
+- [ ] Responsive layout
+- [ ] `cargo test --all` and `npm test` pass
 
 ## Shipped
 
 The public user profile page (`/@{username}`) is implemented end-to-end,
 scoped to the rescope note above (public profile only — no My Dashboard
- scope, nothing added to the private `/profile` surface, HSI §12 NOT-list
-respected and guarded by a test).
+scope, nothing added to the private `/profile` surface, HSI §12 NOT-list
+respected and guarded by a test). The acceptance-criteria boxes above are
+left as assigned (protected contract text); the evidence that each is
+satisfied is below.
 
 ### Backend
 
@@ -120,25 +119,33 @@ respected and guarded by a test).
 
 ### Test evidence
 
-- In-sandbox: full vitest suite 121 files / 2398 passed (41 skipped);
-  focused `PublicUserProfile.test.js` (8 tests: header, memberships +
-  teams, stats, activity + MR navigation, empty feed, 404 handling, HSI
-  §12 NOT-list guard) and `AppShell.test.js` routing tests for
-  `/@{username}`; `cargo test -p gyre-adapters --lib list_by` (27 passed,
-  incl. the three new adapter tests); `cargo check -p gyre-server --lib
-  --tests`; check-abac-route-registry / check-arch / check-mem-port-
-  contracts all pass.
+- In-sandbox (implementation round): full vitest suite 121 files / 2398
+  passed (41 skipped); focused `PublicUserProfile.test.js` (8 tests:
+  header, memberships + teams, stats, activity + MR navigation, empty
+  feed, 404 handling, HSI §12 NOT-list guard) and `AppShell.test.js`
+  routing tests for `/@{username}`; `cargo test -p gyre-adapters --lib
+  list_by` (27 passed, incl. the three new adapter tests); `cargo check -p
+  gyre-server --lib --tests`; check-abac-route-registry / check-arch /
+  check-mem-port-contracts all pass.
 - Deferred to the independent verifier (4 GiB build wrapper):
   `cargo test -p gyre-server --lib api::users::tests` — new mem-backed
-  tests `public_profile_includes_teams` and `public_profile_activity_and_
-  stats` (stats correctness — another reviewer's rows excluded, rejected
-  approval not counted; newest-first ordering; `?limit=` pagination +
-  total; same-tenant peer gets 200 on the feed; cross-tenant 404 on both
-  endpoints) plus the pre-existing
-  `get_user_by_username_is_tenant_scoped` regression.
+  tests `public_profile_includes_teams` and
+  `public_profile_activity_and_stats` (stats correctness — another
+  reviewer's rows excluded, rejected approval not counted; newest-first
+  ordering; `?limit=` pagination + total; same-tenant peer gets 200 on the
+  feed; cross-tenant 404 on both endpoints) plus the pre-existing
+  `get_user_by_username_is_tenant_scoped` regression. Required probe list
+  in /tmp/stage/review-evidence/verifier-tests.md.
 
-Coverage row 23 (`user-management.md` §User Profile Page) is marked
-implemented with the evidence above.
+### Contract repair round (no code change)
+
+The executor restored the assigned task document after the previous
+checkpoint edited protected task text (acceptance-criteria lines). This
+round changes no product code — the branch head still carries the
+implementation commits listed in the frontmatter — and re-records progress
+as assigned: frontmatter only, plus this Shipped section. The
+verifier-tests.md evidence file was recreated under /tmp/stage/
+review-evidence.
 
 ## Agent Instructions
 
