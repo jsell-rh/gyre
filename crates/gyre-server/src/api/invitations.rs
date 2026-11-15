@@ -2173,7 +2173,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.token_hash, hash_token(&token));
-        assert_ne!(stored.token_hash, token, "token must not be stored verbatim");
+        assert_ne!(
+            stored.token_hash, token,
+            "token must not be stored verbatim"
+        );
 
         // List.
         let resp = app
@@ -2636,9 +2639,7 @@ mod tests {
             "bulk invite must persist exactly the two valid entries"
         );
         assert!(
-            stored
-                .iter()
-                .all(|i| i.status == InvitationStatus::Pending),
+            stored.iter().all(|i| i.status == InvitationStatus::Pending),
             "freshly created bulk invitations must be Pending"
         );
     }
@@ -2739,10 +2740,7 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/tenant/invite/bulk", post(bulk_invite_to_tenant))
-            .route(
-                "/api/v1/tenant/invitations",
-                get(list_tenant_invitations),
-            )
+            .route("/api/v1/tenant/invitations", get(list_tenant_invitations))
             .route(
                 "/api/v1/tenant/invitations/:id",
                 delete(revoke_tenant_invitation),
@@ -2879,8 +2877,14 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["tenant_invite_expiry_days"], 7, "policy PUT must not persist");
-        assert_eq!(json["max_pending_invitations"], 50, "policy PUT must not persist");
+        assert_eq!(
+            json["tenant_invite_expiry_days"], 7,
+            "policy PUT must not persist"
+        );
+        assert_eq!(
+            json["max_pending_invitations"], 50,
+            "policy PUT must not persist"
+        );
     }
 
     /// Task-110 identity guard: a Bearer-authenticated caller whose email
