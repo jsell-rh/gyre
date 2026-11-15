@@ -114,21 +114,21 @@ query (`gyre-adapters/src/sqlite/notification.rs`), which excludes
 resolved and dismissed rows in SQL while `list_for_user` keeps the full
 Inbox contract.
 
-### This round (contract repair on head `c73451ab`)
+### This round (contract repair on head `377a14af`)
 
 The executor restored the assigned task contract in the checkout again
-(same contract-repair finding, third repetition), reverting the task
+(same contract-repair finding, fourth repetition), reverting the task
 document's frontmatter, acceptance checkboxes, and shipped notes to the
 assigned baseline. The production implementation was preserved unchanged:
 no source file was modified this round beyond this task document. The
 source tree (everything except `specs/tasks/task-127.md`) is
 byte-identical to the round-3 independently exercised state —
-`git diff f5d66cea c73451ab -- . ':!specs/tasks/task-127.md'` is empty,
+`git diff f5d66cea 377a14af -- . ':!specs/tasks/task-127.md'` is empty,
 and the working tree matched HEAD for all files before this restore.
 
 Evidence this round (recorded under /tmp/stage/review-evidence):
 
-- Tree-identity check: `git diff f5d66cea c73451ab -- .
+- Tree-identity check: `git diff f5d66cea 377a14af -- .
   ':!specs/tasks/task-127.md'` → empty (source unchanged since the
   round-3 full-suite verification).
 - Focused vitest on the task-127 surfaces
@@ -136,7 +136,7 @@ Evidence this round (recorded under /tmp/stage/review-evidence):
   `InvitationAccept`, `InvitationDeclineNavigate`, `NotificationBell`,
   `NotificationDrawer`, `NotificationSettings`, `notifications-store`)
   after `npm ci` → 9 files / 120 tests passed, exit 0
-  (`web-focused-vitest-round4.log`).
+  (`web-focused-vitest-round5.log`).
 - The full 2435-test web suite was not repeated: the source tree is
   byte-identical to the round-3 verified state, where it passed
   (123 files / 2435 passed, 41 skipped, exit 0 —
