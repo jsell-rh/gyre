@@ -348,6 +348,8 @@ mod tests {
             ws_tickets: base.ws_tickets.clone(),
             meta_specs: base.meta_specs.clone(),
             meta_spec_bindings: base.meta_spec_bindings.clone(),
+            attestation_storage: base.attestation_storage.clone(),
+            rekor: base.rekor.clone(),
         });
         crate::build_router(state)
     }

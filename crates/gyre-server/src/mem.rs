@@ -5033,6 +5033,13 @@ fn test_state_inner(
         Arc::new(MemAuditRepository::default()),
         Arc::clone(&search),
     );
+    // Mirror production wiring (lib.rs): attestation bundles are stored
+    // through the AttestationStorage port over the same audit repository,
+    // and Rekor is the no-op client.
+    let attestation_storage: Arc<dyn gyre_ports::AttestationStorage> = Arc::new(
+        gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
+    );
+    let rekor: Arc<dyn gyre_ports::RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
 
     let forge_key = Arc::new(crate::auth::AgentSigningKey::generate());
 
@@ -5076,6 +5083,8 @@ fn test_state_inner(
         analytics,
         costs: Arc::new(MemCostRepository::default()),
         audit,
+        attestation_storage,
+        rekor,
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
         notification_broadcast_tx: broadcast::channel(64).0,
