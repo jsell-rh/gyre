@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["758462f45d6b162bc273c4a676e6bb33442e5dde", "43b15db3df88aed619f631a209e0cce124594100", "8833f8d99ccd1536a06ad81e364f80efc5c3f330", "01958bc011244ae4a4c06258baec597a00d8134d", "9f9be53014102d44e5e8c148d21b580448c226c7", "d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["758462f45d6b162bc273c4a676e6bb33442e5dde", "43b15db3df88aed619f631a209e0cce124594100", "8833f8d99ccd1536a06ad81e364f80efc5c3f330", "01958bc011244ae4a4c06258baec597a00d8134d", "9f9be53014102d44e5e8c148d21b580448c226c7", "d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb", "6af1d71c51cf1f763c0a1c07ec3f14b272edc523"]
 ---
 
 ## Spec Excerpt
@@ -100,91 +100,63 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-Tenant & workspace invitation flow, fully implemented and carried through
-multiple review/repair rounds on this branch. Latest round: rebase onto
-assignment base 706bc7bd — task-144 attestation bundle storage targets —
-merged at cd0f85ff (auto-merge, no conflicts; the base touches only additive
-task-144 files — attestation_storage.rs, rekor.rs, merge_attestation.rs,
-mem.rs, merge_processor.rs, middleware.rs — and `git diff 706bc7bd HEAD` is
-empty for every invitation-surface file), plus repair of the retained
-verification finding 4b40530b (clippy) in commit 758462f4:
+Tenant & workspace invitation flow, implemented across multiple
+review/repair rounds on this branch. The task-110 feature surface
+(domains, ports, SQLite/PG/mem adapters, migrations, all five tenant
+endpoints, workspace invitation lifecycle, CSPRNG tokens stored as
+SHA-256 hashes, single-use transactional acceptance, per-tenant expiry
+policy, background expiry job, ABAC route mappings) shipped in the
+earlier rounds recorded in `commits:` above and summarized in prior
+review rounds; this round repairs the two findings of review 2cff1e20
+on top of the merged tree (base 706bc7bd):
 
-- **Domain entities** (`gyre-domain`): `TenantInvitation`, `WorkspaceInvitation`,
-  `InvitationStatus` (Pending/Accepted/Declined/Expired/Revoked), per-tenant
-  `InvitationPolicy` (`tenant_invite_expiry_days` / `workspace_invite_expiry_days`
-  default 7, `max_pending_invitations` default 50, `allow_re_invite`).
-- **Ports + adapters**: `TenantInvitationRepository` and
-  `WorkspaceInvitationRepository` port traits implemented by the SQLite,
-  Postgres, and mem adapters (mem guards the port-documented duplicate
-  constraints in code); shared portable migrations for both tables plus
-  DB-level pending-scope uniqueness (migration 000064 partial unique
-  indexes, with raced-duplicate dedup before index creation).
-- **API** (`gyre-server/src/api/invitations.rs`): the five tenant endpoints
-  (`POST /tenant/invite`, `POST /tenant/invite/bulk`, `GET /tenant/invitations`,
-  `DELETE /tenant/invitations/{id}`, `POST /invite/{token}/accept`) plus the
-  workspace invitation lifecycle (`POST /workspaces/{id}/invite`, invitee
-  accept/decline via token and via authenticated identity) and per-tenant
-  policy endpoints. Tokens are 32 CSPRNG bytes, hex-encoded, stored only as
-  SHA-256 hashes; acceptance is single-use and transactional (membership
-  activation rolls the status back on failure). Local-mode acceptance creates
-  the user and mints a first API key; SSO-mode acceptance links the existing
-  account. Routes registered in `api/mod.rs` with ABAC mappings; the two
-  invitee-facing accept/decline routes are ABAC-exempt with per-handler
-  authorization (`authorize_my_pending_invitation`: tenant containment +
-  caller-must-be-the-invitee), because the seeded membership builtin would
-  otherwise deny the non-member invitee before the handler runs.
-- **Deactivation contract (review 4cf9e027)**: the SSO email-link claim
-  branch in `auth.rs find_or_create_user_tenant` bails on a deactivated
-  invitation-created account (mirroring the API-key, WS, and direct
-  external_id paths); tenant acceptance (local-mode and SSO-link arms) and
-  the token-based workspace accept route reject deactivated accounts with
-  403 before any side effect, rolling the single-use claim back to Pending.
-- **PostgreSQL int4 repair (review 4cf9e027)**: migration 000063's six
-  invitation timestamp columns are BIGINT (matching schema.rs BigInt and
-  the adapters' i64 row structs); PG databases that already ran the INTEGER
-  variant are repaired in place by the PG-only post-migration hook
-  `postgres/repair.rs::ensure_invitation_timestamps_bigint`
-  (information_schema check + `ALTER COLUMN ... TYPE BIGINT`, idempotent).
-  Verification 4b40530b flagged `clippy::redundant_field_names` at
-  `postgres/repair.rs:41` — the diesel_derives 2.3.7 `QueryableByName`
-  derive expands to `Self { field: field }` with spans mapped onto the
-  `ColumnRow` declaration, the same known false positive already allowed in
-  `postgres/search.rs`, `postgres/analytics.rs`, `sqlite/search.rs`, and
-  `sqlite/analytics.rs`; 758462f4 scopes the lint off at module level in
-  `postgres/repair.rs` with the sibling explanatory comment (no hand-written
-  `field: field` initializations exist in the file).
-- **Background expiry job** marks `Pending` invitations past `expires_at` as
-  `Expired`; handlers also lazy-expire on touch.
-- **Tests** include a production-chain regression
-  (`invitee_accepts_and_declines_through_abac_middleware`) that layers the real
-  `api_router` with `abac_middleware` and seeded builtin policies, proves the
-  non-member invitee is still denied on a workspace-mapped route, then exercises
-  the exempt invitee routes end-to-end; deactivation-contract regressions
-  (`jwt_email_link_does_not_claim_deactivated_account`,
-  `deactivated_local_account_cannot_accept_invitation`,
-  `deactivated_sso_account_cannot_accept_invitation`,
-  `deactivated_invitee_cannot_accept_workspace_invitation_by_token`); and
-  local-mode accept, re-invite, username-collision, expiry, cap, and
-  cross-tenant-guard coverage.
+- **Token leak into observability (finding 1, `middleware.rs`):**
+  `request_tracing` exported the raw URI path both as the `http_request`
+  info-span field (default `RUST_LOG=info`) and as Prometheus label
+  values, and `GET /metrics` is unauthenticated in the default
+  deployment — so the invitation magic-link token (the invitee routes'
+  sole auth factor, valid while Pending for the default 7 days) was
+  readable by anyone who could reach `/metrics`. `redact_token_paths`
+  now rewrites the token segment of `/api/v1/invite/*` and
+  `/api/v1/workspaces/invitations/*` paths to a fixed `{token}` template
+  before the path is used anywhere, for both the span field and the
+  metrics labels; this also bounds the label cardinality to one label
+  set per route. Covered by pure-function unit tests plus a full-router
+  round trip (`invite_token_redacted_from_metrics_labels`) asserting the
+  secret appears nowhere in the rendered metrics and the template is the
+  `path` label.
+- **Reserved system ABAC identity on the accept path (finding 2,
+  `api/invitations.rs`):** the unauthenticated invitation-accept arm
+  accepted `display_name == gyre-system-token` (explicitly, or as the
+  default derived from the username / email local-part), violating the
+  task-129 invariant every sibling display_name write path (profile
+  update, create_user, SSO provisioning, SCIM) enforces — the resulting
+  account would be bricked behind the ABAC middleware's fail-closed
+  identity check with no self-service recovery. Explicit `display_name`
+  and `username` values are now rejected 400 before the single-use claim
+  (reserved input does not consume the invitation); the derived case is
+  rejected inside the create arm, whose failure compensation rolls the
+  invitation back to Pending. Covered by
+  `accept_rejects_reserved_system_abac_identity` (three input paths,
+  non-consumption, and no user created under the reserved handle).
 
 ### Test evidence
 
-Executed in earlier rounds on the pre-merge tree (all exit 0): `cargo check
--p gyre-server -p gyre-domain -p gyre-adapters -p gyre-ports`, `cargo test
--p gyre-domain` (543 passed), `cargo test -p gyre-adapters` (545 passed;
-invitation suite 5 passed), `cargo test -p gyre-common -p gyre-ports`
-(125 passed), `cargo test -p gyre-cli invitation` (1 passed), and the
-mechanical gates `check-arch`, `check-abac-route-registry`,
-`check-abac-exempt-handlers`, `check-migration-versions`,
-`check-mem-port-contracts`, `check-mcp-write-tools`, `check-dead-message-kinds`.
-This round (tree at 758462f4, after the 706bc7bd base merge): `rustfmt --check`
-and `cargo check -p gyre-adapters` exit 0, and `cargo clippy -p gyre-adapters
---all-targets` exits 0 with zero `postgres/repair.rs` findings (the 4b40530b
-finding reproduced and confirmed gone; remaining `redundant_field_names`
-hits in postgres/sqlite `audit.rs` are pre-existing baseline on lines
-identical to the assignment base). Evidence:
-`/tmp/stage/review-evidence/clippy-repair.txt`. Full `cargo test -p
-gyre-server` (incl. the `api::invitations` suite) and `cargo test --all`
-remain recorded for the independent verifier (sandbox 4 GiB build-wrapper
-limit); the base merge touched no invitation-surface or test file, so the
-prior rounds' server-suite evidence stands for the merged tree.
+This round (tree at 6af1d71c), all via the sandbox build wrapper
+(`/tmp/stage/bin/cargo`): `cargo check -p gyre-server` exit 0;
+`cargo check -p gyre-server --tests` exit 0 (new test code compiles);
+`cargo clippy -p gyre-server --lib` clean on every changed line
+(remaining warnings are pre-existing crate baseline);
+`cargo fmt --check` clean; mechanical gates `check-arch.sh`,
+`check-byte-slice-truncation.sh`, `check-inert-enforcement.sh`,
+`check-forwarded-header-trust.sh`, `check-task-commit-attribution.sh`
+all OK. The extracted `redact_token_paths` logic was additionally
+probed standalone (11 path cases behave as asserted). Full server test
+compilation exceeds the sandbox's 4 GiB build-wrapper budget — the
+verifier must run `cargo test -p gyre-server --lib middleware::` and
+`cargo test -p gyre-server --lib api::invitations::` (especially the
+five new tests named above) plus the pre-existing invitation suite as
+regression; details in `/tmp/stage/review-evidence/repair-2cff1e20.md`.
+Earlier-round evidence (domain/adapters/ports/CLI suites, mechanical
+gates) is unchanged by this repair, which touches only
+`gyre-server/src/middleware.rs` and `gyre-server/src/api/invitations.rs`.
