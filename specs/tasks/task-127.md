@@ -114,29 +114,33 @@ query (`gyre-adapters/src/sqlite/notification.rs`), which excludes
 resolved and dismissed rows in SQL while `list_for_user` keeps the full
 Inbox contract.
 
-### This round (contract repair on head `f5d66cea`)
+### This round (contract repair on head `c73451ab`)
 
 The executor restored the assigned task contract in the checkout again
-(same contract-repair finding), reverting the task document's frontmatter,
-acceptance checkboxes, and shipped notes to the assigned baseline. The
-production implementation was preserved unchanged: no source file was
-modified this round beyond this task document. The branch head is
-`f5d66cea`, whose tree is byte-identical to the independently exercised
-state from the previous round (merge commit `696fc58d` plus the prior
-contract-restoration commit; `e5089d9`, the assignment base, is task-143
-attestation work — Rust-side only, no web/ surface).
+(same contract-repair finding, third repetition), reverting the task
+document's frontmatter, acceptance checkboxes, and shipped notes to the
+assigned baseline. The production implementation was preserved unchanged:
+no source file was modified this round beyond this task document. The
+source tree (everything except `specs/tasks/task-127.md`) is
+byte-identical to the round-3 independently exercised state —
+`git diff f5d66cea c73451ab -- . ':!specs/tasks/task-127.md'` is empty,
+and the working tree matched HEAD for all files before this restore.
 
 Evidence this round (recorded under /tmp/stage/review-evidence):
 
-- `cd web && npm ci && /tmp/stage/bin/npm test` → 123 files / 2435
-  passed, 41 skipped, exit 0 on the current head
-  (`web-npm-test-round3.log`).
-- Rust sources are unchanged since the prior round's verified state
-  (`SKIP_WEB_BUILD=1 cargo check -p gyre-server` clean, mechanical
-  checks OK); `scripts/check-task-commit-attribution.sh` passes with
-  the restored frontmatter list (it fails with the executor's bare
-  `commits: []` restore, as expected while the contract is at
-  baseline).
+- Tree-identity check: `git diff f5d66cea c73451ab -- .
+  ':!specs/tasks/task-127.md'` → empty (source unchanged since the
+  round-3 full-suite verification).
+- Focused vitest on the task-127 surfaces
+  (`UserProfile`, `PublicUserProfile`, `TenantSettings`,
+  `InvitationAccept`, `InvitationDeclineNavigate`, `NotificationBell`,
+  `NotificationDrawer`, `NotificationSettings`, `notifications-store`)
+  after `npm ci` → 9 files / 120 tests passed, exit 0
+  (`web-focused-vitest-round4.log`).
+- The full 2435-test web suite was not repeated: the source tree is
+  byte-identical to the round-3 verified state, where it passed
+  (123 files / 2435 passed, 41 skipped, exit 0 —
+  `web-npm-test-round3.log`).
 
 Prior-round history retained as context: the published head was rebased
 onto main when task-114's independently-approved public profile page
