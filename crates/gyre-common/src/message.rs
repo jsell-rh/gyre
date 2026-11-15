@@ -82,6 +82,15 @@ pub enum MessageKind {
     ReviewRequest,
     StatusUpdate,
     Escalation,
+    /// Forge → author agent: the outcome of a gate run on the author's MR
+    /// (agent-gates.md §Gate Failure Feedback — Agent Inbox Delivery).
+    /// server_only = true (the forge emits it; an agent must not forge a
+    /// gate outcome for another agent). Tier: Directed — persisted in the
+    /// author's inbox until acked, read by the next session on startup;
+    /// live sessions also get the WebSocket broadcast for immediate
+    /// reaction. Payload: `{mr_id, gate_name, gate_type, status, output,
+    /// spec_ref, attempt, gate_agent_id}`.
+    GateResult,
 
     // ── Tier 2: Events (signed + persisted with TTL) ────────────────────
     AgentCreated,
@@ -196,6 +205,7 @@ impl MessageKind {
             MessageKind::ReviewRequest => "review_request",
             MessageKind::StatusUpdate => "status_update",
             MessageKind::Escalation => "escalation",
+            MessageKind::GateResult => "gate_result",
             MessageKind::AgentCreated => "agent_created",
             MessageKind::AgentStatusChanged => "agent_status_changed",
             MessageKind::AgentContainerSpawned => "agent_container_spawned",
@@ -236,12 +246,15 @@ impl MessageKind {
         }
     }
 
-    /// Returns true for built-in Event-tier variants — these may only be sent by the server.
+    /// Returns true for kinds that may only be sent by the server: the
+    /// built-in Event-tier variants, plus the forge-emitted Directed
+    /// `GateResult` (a gate outcome is forge authority, not peer traffic).
     /// Custom(String) returns false even though it defaults to Event tier.
     pub fn server_only(&self) -> bool {
         matches!(
             self,
-            MessageKind::AgentCreated
+            MessageKind::GateResult
+                | MessageKind::AgentCreated
                 | MessageKind::AgentStatusChanged
                 | MessageKind::AgentContainerSpawned
                 | MessageKind::AgentCompleted
@@ -281,7 +294,8 @@ impl MessageKind {
             MessageKind::TaskAssignment
             | MessageKind::ReviewRequest
             | MessageKind::StatusUpdate
-            | MessageKind::Escalation => MessageTier::Directed,
+            | MessageKind::Escalation
+            | MessageKind::GateResult => MessageTier::Directed,
 
             MessageKind::AgentCreated
             | MessageKind::AgentStatusChanged
@@ -346,6 +360,23 @@ impl MessageKind {
             MessageKind::Escalation => {
                 Some(&(const { [f("reason", Str, true), f("context", Str, false)] }))
             }
+            // Directed — agent-gates.md §Gate Failure Feedback: the exact
+            // field set of the spec's GateResult message ("attempt" is the
+            // 1-based number of this gate run for the MR).
+            MessageKind::GateResult => Some(
+                &(const {
+                    [
+                        f("mr_id", Str, true),
+                        f("gate_name", Str, true),
+                        f("gate_type", Str, false),
+                        f("status", Str, false),
+                        f("output", Str, false),
+                        f("spec_ref", Str, false),
+                        f("attempt", U32, true),
+                        f("gate_agent_id", Str, false),
+                    ]
+                }),
+            ),
             // Events
             MessageKind::AgentCreated => Some(&(const { [f("agent_id", Str, true)] })),
             MessageKind::AgentStatusChanged => {
@@ -688,6 +719,7 @@ impl MessageKind {
             "review_request" => MessageKind::ReviewRequest,
             "status_update" => MessageKind::StatusUpdate,
             "escalation" => MessageKind::Escalation,
+            "gate_result" => MessageKind::GateResult,
             "agent_created" => MessageKind::AgentCreated,
             "agent_status_changed" => MessageKind::AgentStatusChanged,
             "agent_container_spawned" => MessageKind::AgentContainerSpawned,
