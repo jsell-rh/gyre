@@ -7,10 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Profile Page (`/@{username}`)"
-commits:
-  - fc06e371
-  - 978faf1a
-  - d813d79b
+commits: ["d813d79b46ef04732ccd88ffb83039a9e606293f", "978faf1a180b555eab24b739a2b5653f21bdcad3", "fc06e3713988b2ec3647e87e077da00b23ad52c1"]
 ---
 
 ## Spec Excerpt
