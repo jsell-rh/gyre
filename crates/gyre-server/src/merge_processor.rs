@@ -9761,6 +9761,21 @@ mod tests {
             ),
             "all bundle signatures must verify"
         );
+
+        // task-144: the bundle is stored through the AttestationStorage
+        // port — retrievable by MR id from the audit-events target.
+        // Reverting the port wiring in `store_merge_attestation_bundle`
+        // fails this assertion while the raw audit query above still
+        // passes only if the event were recorded by some other path.
+        let retrieved = state
+            .attestation_storage
+            .retrieve_by_mr(&mr.id)
+            .await
+            .unwrap()
+            .expect("bundle must be retrievable by MR id through the storage port");
+        assert_eq!(retrieved.mr_id, mr.id.to_string());
+        assert_eq!(retrieved.merge_commit_sha, bundle.merge_commit_sha);
+        assert_eq!(retrieved.bundle_signature, bundle.bundle_signature);
     }
 
     /// TASK-095 R2-1: post-merge gates must execute against the exact
