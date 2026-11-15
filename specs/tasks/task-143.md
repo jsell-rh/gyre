@@ -71,13 +71,13 @@ This can be done offline, after the fact, by auditors, compliance teams, or othe
 
 ## Acceptance Criteria
 
-- [x] `AttestationVerifier` port trait defined
-- [x] `VerificationResult` type captures per-component verification status
-- [x] Structural consistency checks (same MR/spec across all gates)
-- [x] Cryptographic signature verification for bundle, gates, and spec approval
-- [x] `POST /api/v1/attestations/verify` endpoint
-- [x] CLI `gyre verify-attestation` command
-- [x] Tests pass
+- [ ] `AttestationVerifier` port trait defined
+- [ ] `VerificationResult` type captures per-component verification status
+- [ ] Structural consistency checks (same MR/spec across all gates)
+- [ ] Cryptographic signature verification for bundle, gates, and spec approval
+- [ ] `POST /api/v1/attestations/verify` endpoint
+- [ ] CLI `gyre verify-attestation` command
+- [ ] Tests pass
 
 ## Agent Instructions
 
