@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Failure Feedback"
-commits: ["f03a3c830c382d4f063244889f3a31ecfdad711b", "fdb0a05cabef6adb1c6801c996561dee454408a3", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "0e6ab6ad0a862ac91f322ec9c174933a245f21ea"]
+commits: ["0e6ab6ad0a862ac91f322ec9c174933a245f21ea", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "fdb0a05cabef6adb1c6801c996561dee454408a3", "f03a3c830c382d4f063244889f3a31ecfdad711b", "32b47d85c80162c526b324bfe9709b20b53853e3"]
 ---
 
 ## Spec Excerpt
@@ -101,6 +101,15 @@ verification findings (rustfmt changed lines, trailing whitespace in
 the all-gates-failed description strings, clippy
 redundant_pattern_matching in `ws.rs`) — see commit f03a3c83.
 
+This round was a rebase repair (finding 4534be0a): main advanced to
+706bc7bd (task-142/144/145 coverage rows), conflicting with this
+branch's row-9 marking in `specs/coverage/system/agent-gates.md`.
+Resolved by taking the union — row 9 (task-137) stays implemented, rows
+12–13 (task-142) implemented and row 15 (task-144) in-progress from
+main are kept, header recomputed from the merged table (7/25, 9 n/a)
+and `specs/coverage/SUMMARY.md` regenerated via
+`scripts/update-coverage-summary.sh` (merge commit 32b47d85).
+
 ### GateResult message + inbox delivery
 
 - `MessageKind::GateResult` (gyre-common): Directed tier, `server_only`
@@ -191,7 +200,7 @@ budget), so the verifier must execute the server suite — at minimum:
 `cargo test -p gyre-server all_gates_failed`,
 `cargo test -p gyre-server ws_agent_directed`, plus
 `scripts/check-rustfmt-diff.py` and `scripts/check-clippy-diff.py`
-against the merge base. Probes run in this round (evidence under
+against the merge base. Earlier-round probes (evidence retained under
 `/tmp/stage/review-evidence/`): `cargo check -p gyre-server --tests`
 exit 0; `cargo clippy -p gyre-server --tests -W clippy::all` filtered
 to changed lines — 0 findings (512 pre-existing warnings outside the
@@ -201,3 +210,10 @@ was verified case-equivalent (pass on timeout or clean close, fail iff
 a message arrived), and the reassessment-description string edit was
 checked against the test's `contains("lint")` /
 `contains("unit tests")` assertions.
+
+This round on the merged tree: `cargo check -p gyre-server` exit 0
+(7m09s, no errors — the auto-merged `merge_processor.rs` combining
+task-137 gate feedback with task-144 attestation storage type-checks);
+`scripts/check-dead-message-kinds.sh` and `scripts/check-arch.sh`
+pass; `scripts/update-coverage-summary.sh` output committed.
+`cargo test --all` remains for the independent verifier.
