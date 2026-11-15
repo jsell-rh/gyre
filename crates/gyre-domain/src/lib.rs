@@ -28,6 +28,7 @@ pub mod git_types;
 pub mod go_extractor;
 pub mod invitation;
 pub mod llm_config;
+pub mod merge_attestation;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
@@ -95,6 +96,10 @@ pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult, R
 pub use go_extractor::GoExtractor;
 pub use invitation::{InvitationPolicy, InvitationStatus, TenantInvitation, WorkspaceInvitation};
 pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
+pub use merge_attestation::{
+    AuthorAttestation, GateAttestation as MergeGateAttestation, MergeAttestationBundle,
+    SpecRefAttestation, MERGE_ATTESTATION_VERSION,
+};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{
     DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrError, MrStatus,
