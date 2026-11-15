@@ -1105,8 +1105,15 @@ async fn unauthorized_approver_is_denied_by_abac() {
         "the human approval must be recorded in the ledger"
     );
     assert!(
-        rows.iter().any(|a| a.approver_id == "user:Human Approver"),
+        rows.iter().any(|a| a.approver_id == "user-human-approver"),
         "the ledger must record the approver identity, got: {:?}",
         rows.iter().map(|a| &a.approver_id).collect::<Vec<_>>()
     );
+    // HSI §12 judgment-ledger attribution key: the durable spec-approvals
+    // ledger records the acting human's canonical user Id (the same key
+    // GET /users/me/judgments resolves for the caller), NOT the
+    // `user:<display name>` KeyBinding label — that label lives on the
+    // approval-history event. A display-name key could never match the
+    // judgment-ledger reader (writer/reader identity-key mismatch) and
+    // misattributes on display-name collisions.
 }

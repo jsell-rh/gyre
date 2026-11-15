@@ -132,6 +132,7 @@ async fn evaluate_workspace(
                 Some(8),
                 None,
                 None,
+                &[],
                 20,
                 0,
             )
@@ -353,6 +354,7 @@ mod tests {
                 None,
                 Some(NotificationType::TrustSuggestion.as_str()),
                 None,
+                &[],
                 50,
                 0,
             )
