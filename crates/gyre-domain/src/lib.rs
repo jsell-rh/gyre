@@ -14,6 +14,7 @@ pub mod agent_card;
 pub mod agent_tracking;
 pub mod analytics;
 pub mod attestation;
+pub mod attestation_verification;
 pub mod audit;
 pub mod budget;
 pub mod call_graph_resolve;
@@ -71,6 +72,10 @@ pub use agent_tracking::{AgentCommit, AgentWorktree, LoopConfig, Session};
 pub use analytics::{AnalyticsEvent, CostEntry};
 pub use attestation::{
     constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
+};
+pub use attestation_verification::{
+    assemble_verification_result, check_bundle_consistency, GateVerificationResult,
+    VerificationResult,
 };
 pub use audit::{AuditEvent, AuditEventType, AuditOutcome};
 pub use budget::{BudgetCallRecord, BudgetConfig, BudgetEnforcementAction, BudgetUsage};

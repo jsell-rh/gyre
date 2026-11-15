@@ -7,7 +7,7 @@
 | abac-policy-engine.md | 19 | 2 | 0 | 0 | 17 | 0 | 100% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| agent-gates.md | 25 | 9 | 0 | 8 | 7 | 0 | 43% |
+| agent-gates.md | 25 | 9 | 0 | 7 | 8 | 0 | 50% |
 | agent-runtime.md | 33 | 1 | 0 | 10 | 22 | 0 | 68% |
 | analytics.md | 12 | 0 | 0 | 0 | 12 | 0 | 100% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |

@@ -113,6 +113,24 @@ enum Commands {
         #[arg(long, default_value = "origin")]
         remote: String,
     },
+    /// Verify the merge attestation bundle attached to a merge commit
+    /// (agent-gates.md §Part 3 Verification)
+    VerifyAttestation {
+        /// Merge commit SHA whose bundle to verify
+        commit_sha: String,
+        /// Path to the git repository holding the bundle note
+        #[arg(long, default_value = ".")]
+        repo: String,
+        /// Git notes ref holding merge attestation bundles
+        #[arg(long, default_value = "refs/notes/merge-attestations")]
+        notes_ref: String,
+        /// Gyre server base URL (default: ~/.gyre/config)
+        #[arg(long)]
+        server: Option<String>,
+        /// Bearer token (default: ~/.gyre/config, else the dev token)
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Merge request operations
     Mr {
         #[command(subcommand)]
@@ -1215,6 +1233,25 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("failed to run git: {e}"))?;
             if !status.success() {
                 anyhow::bail!("git push failed");
+            }
+        }
+
+        Commands::VerifyAttestation {
+            commit_sha,
+            repo,
+            notes_ref,
+            server,
+            token,
+        } => {
+            let cfg = config::Config::load()?;
+            let server = server.unwrap_or(cfg.server);
+            let token = token
+                .or_else(|| cfg.token.clone())
+                .unwrap_or_else(|| DEFAULT_TOKEN.to_string());
+            let valid =
+                run_verify_attestation(&server, &token, &repo, &notes_ref, &commit_sha).await?;
+            if !valid {
+                std::process::exit(1);
             }
         }
 
@@ -3155,6 +3192,122 @@ fn infer_repo_from_git_remote() -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// Read the merge attestation bundle JSON from a merge commit's git note
+/// (agent-gates.md §Part 3 Storage: bundles are stored "as a git note on
+/// the merge commit" under `refs/notes/merge-attestations`). Runs real
+/// `git notes show` in `repo_path` — the note is the offline artifact
+/// the spec's verification protocol starts from.
+async fn read_merge_attestation_note(
+    repo_path: &str,
+    notes_ref: &str,
+    commit_sha: &str,
+) -> Result<serde_json::Value> {
+    let output = tokio::process::Command::new("git")
+        .args([
+            "-C",
+            repo_path,
+            "notes",
+            &format!("--ref={notes_ref}"),
+            "show",
+            commit_sha,
+        ])
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run git (is it installed?): {e}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git notes show failed for {commit_sha} (ref {notes_ref}): {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).map_err(|e| {
+        anyhow::anyhow!("git note on {commit_sha} is not a valid merge attestation bundle: {e}")
+    })
+}
+
+/// `gyre verify-attestation <commit-sha>`: read the merge attestation
+/// bundle from the merge commit's git note, run the verification protocol
+/// (bundle signature, per-gate signatures, spec approval signature,
+/// consistency) against the server's issuer key via
+/// `POST /api/v1/attestations/verify`, and print the per-component
+/// result. Returns whether the bundle verified.
+async fn run_verify_attestation(
+    server: &str,
+    token: &str,
+    repo_path: &str,
+    notes_ref: &str,
+    commit_sha: &str,
+) -> Result<bool> {
+    let bundle = read_merge_attestation_note(repo_path, notes_ref, commit_sha).await?;
+    let api = client::GyreClient::new(server.to_string(), token.to_string());
+    let result = api.verify_attestation(&bundle).await?;
+    print!("{}", format_verification_result(commit_sha, &result));
+    Ok(result.valid)
+}
+
+/// Human-readable rendering of a verification result: the overall
+/// verdict, one line per gate attestation, the spec approval and
+/// consistency outcomes, and every finding. Pure — kept separate from
+/// the I/O path so the rendering is testable.
+fn format_verification_result(
+    commit_sha: &str,
+    result: &gyre_domain::attestation_verification::VerificationResult,
+) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    let verdict = if result.valid { "VALID" } else { "INVALID" };
+    let _ = writeln!(out, "Merge attestation bundle for {commit_sha}: {verdict}");
+    let _ = writeln!(
+        out,
+        "  bundle signature: {}",
+        if result.bundle_signature_valid {
+            "verified"
+        } else {
+            "FAILED"
+        }
+    );
+    for gate in &result.gate_results {
+        let _ = writeln!(
+            out,
+            "  gate '{}' ({}): {} — signed by {}",
+            gate.name,
+            gate.gate_type,
+            if gate.signature_valid {
+                "verified"
+            } else {
+                "FAILED"
+            },
+            gate.signed_by
+        );
+        for err in &gate.errors {
+            let _ = writeln!(out, "    - {err}");
+        }
+    }
+    let spec_approval = match result.spec_approval_valid {
+        Some(true) => "verified".to_string(),
+        Some(false) => "FAILED".to_string(),
+        None => "not present (no cryptographic countersignature)".to_string(),
+    };
+    let _ = writeln!(out, "  spec approval signature: {spec_approval}");
+    let _ = writeln!(
+        out,
+        "  consistency (all gates reference the same MR/spec): {}",
+        if result.consistency_check {
+            "ok"
+        } else {
+            "FAILED"
+        }
+    );
+    if !result.errors.is_empty() {
+        let _ = writeln!(out, "  findings:");
+        for err in &result.errors {
+            let _ = writeln!(out, "    - {err}");
+        }
+    }
+    out
 }
 
 /// Resolve the workspace whose budget a `gyre budget` command operates on.
@@ -9637,5 +9790,215 @@ resource_types: [repo]
         assert!(requests[0]
             .request_line
             .starts_with("POST /api/v1/users/me/sessions/revoke-all"));
+    }
+
+    #[test]
+    fn verify_attestation_command_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "verify-attestation",
+            "789abc",
+            "--repo",
+            "/path/to/repo",
+        ]);
+        assert!(args.is_ok());
+        match args.unwrap().command {
+            Commands::VerifyAttestation {
+                commit_sha,
+                repo,
+                notes_ref,
+                server,
+                token,
+            } => {
+                assert_eq!(commit_sha, "789abc");
+                assert_eq!(repo, "/path/to/repo");
+                assert_eq!(notes_ref, "refs/notes/merge-attestations");
+                assert!(server.is_none());
+                assert!(token.is_none());
+            }
+            _ => panic!("Expected VerifyAttestation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_attestation_posts_note_bundle_and_parses_result() {
+        // Mock server answers with a failing verification result; the
+        // client must POST the bundle JSON it was given and parse the
+        // per-component response into the domain type.
+        let body = serde_json::json!({
+            "valid": false,
+            "bundle_signature_valid": false,
+            "gate_results": [{
+                "name": "tests",
+                "gate_type": "TestCommand",
+                "signed_by": "forge",
+                "signature_valid": false,
+                "errors": []
+            }],
+            "spec_approval_valid": null,
+            "consistency_check": true,
+            "errors": ["bundle_signature failed verification against the issuer's key"]
+        });
+        let (base, captured) = client::test_http::spawn_mock_http_server_sequence(vec![(
+            "200 OK".to_string(),
+            body.to_string(),
+        )]);
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let bundle = serde_json::json!({"mr_id": "MR-1", "gates": []});
+        let result = api.verify_attestation(&bundle).await.unwrap();
+
+        assert!(!result.valid);
+        assert!(!result.bundle_signature_valid);
+        assert_eq!(result.gate_results.len(), 1);
+        assert!(!result.gate_results[0].signature_valid);
+        assert_eq!(result.spec_approval_valid, None);
+        assert!(result.consistency_check);
+        assert_eq!(result.errors.len(), 1);
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .request_line
+            .starts_with("POST /api/v1/attestations/verify"));
+        assert!(requests[0].body.contains("MR-1"), "bundle must be sent");
+    }
+
+    #[test]
+    fn verification_result_rendering_names_failing_components() {
+        let result = gyre_domain::attestation_verification::VerificationResult {
+            valid: false,
+            bundle_signature_valid: false,
+            gate_results: vec![
+                gyre_domain::attestation_verification::GateVerificationResult {
+                    name: "tests".to_string(),
+                    gate_type: "TestCommand".to_string(),
+                    signed_by: "forge".to_string(),
+                    signature_valid: false,
+                    errors: vec![],
+                },
+                gyre_domain::attestation_verification::GateVerificationResult {
+                    name: "security-review".to_string(),
+                    gate_type: "AgentReview".to_string(),
+                    signed_by: "agent:security-gate-7".to_string(),
+                    signature_valid: true,
+                    errors: vec![],
+                },
+            ],
+            spec_approval_valid: None,
+            consistency_check: false,
+            errors: vec!["bundle mr_id is empty".to_string()],
+        };
+        let text = format_verification_result("789abc", &result);
+        assert!(text.contains("INVALID"));
+        assert!(text.contains("789abc"));
+        assert!(text.contains("bundle signature: FAILED"));
+        assert!(text.contains("gate 'tests' (TestCommand): FAILED"));
+        assert!(text.contains("gate 'security-review' (AgentReview): verified"));
+        assert!(text.contains("spec approval signature: not present"));
+        assert!(text.contains("consistency"));
+        assert!(text.contains("bundle mr_id is empty"));
+
+        // A fully valid result renders VALID with no findings block.
+        let ok = gyre_domain::attestation_verification::assemble_verification_result(
+            true,
+            vec![],
+            Some(true),
+            vec![],
+        );
+        let text = format_verification_result("abc", &ok);
+        assert!(text.contains("VALID"));
+        assert!(!text.contains("INVALID"));
+        assert!(!text.contains("findings:"));
+        assert!(text.contains("spec approval signature: verified"));
+    }
+
+    #[tokio::test]
+    async fn reads_bundle_from_real_git_note() {
+        if !std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@gyre.dev"]);
+        run(&["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo.join("f.txt"), "hello").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "base"]);
+        let rev = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(&rev.stdout).trim().to_string();
+
+        // Attach a merge attestation bundle note exactly the way the
+        // merge processor stores it.
+        let bundle = serde_json::json!({
+            "merge_attestation_version": "1.0",
+            "mr_id": "MR-1",
+            "merge_commit_sha": sha,
+            "merged_at": 1,
+            "gates": []
+        });
+        run(&[
+            "notes",
+            "--ref=refs/notes/merge-attestations",
+            "add",
+            "-f",
+            "-m",
+            &bundle.to_string(),
+            &sha,
+        ]);
+
+        let read = read_merge_attestation_note(
+            repo.to_str().unwrap(),
+            "refs/notes/merge-attestations",
+            &sha,
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["mr_id"], "MR-1");
+        assert_eq!(read["merge_commit_sha"], serde_json::json!(sha));
+
+        // A commit with no note is an explicit error, not a silent pass.
+        std::fs::write(repo.join("g.txt"), "x").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "second"]);
+        let rev2 = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let sha2 = String::from_utf8_lossy(&rev2.stdout).trim().to_string();
+        let err = read_merge_attestation_note(
+            repo.to_str().unwrap(),
+            "refs/notes/merge-attestations",
+            &sha2,
+        )
+        .await;
+        assert!(err.is_err(), "missing note must fail, not verify nothing");
     }
 }
