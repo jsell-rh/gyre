@@ -3,7 +3,7 @@ title: "Implement attestation bundle verification protocol"
 spec_ref: "agent-gates.md §Part 3 Verification"
 depends_on:
   - task-142
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-gates.md §Verification"
 commits: ["af49a8977c73d6f9f2f729b9222b548bd29c469c", "24c2ac7c1b6c48d6a5e8b3e311a14605c429c5dd", "c17f82bf6b532073258d45c2115d350ded08b64f", "bdc62a832717bb37b5e5888002775b2f9d02ceaa", "795ce919c6ff6c49c3ea234c459a435d0ee19afc", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "c880471aebf2b922d0aa3e48187e8b9aa07e4b3c"]
