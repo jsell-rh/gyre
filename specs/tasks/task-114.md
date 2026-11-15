@@ -4,7 +4,7 @@ spec_ref: "user-management.md §User Profile Page (`/@{username}`)"
 depends_on:
   - task-113
   - task-208
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Profile Page (`/@{username}`)"
 commits: ["b25f1060558b2e557a329efbda7eb9efcae231e8", "d813d79b46ef04732ccd88ffb83039a9e606293f", "978faf1a180b555eab24b739a2b5653f21bdcad3", "fc06e3713988b2ec3647e87e077da00b23ad52c1", "23ebbb9c7aa80a3405ca92c7b33d868650958ea9"]
@@ -138,8 +138,38 @@ The prior candidate failed deterministic verification on the
   `SpecApprovalRepository` already had it. No verifier or exemption
   file was touched.
 
+### Rebase resolution (6509b2c1)
+
+The published PR head (1574206a) conflicted with current main
+(81c24bf0, task-137 gate-failure feedback). Resolved by merging main
+into the branch (merge base c9cc1536):
+
+- Only conflicted file: `specs/coverage/SUMMARY.md` — resolved by
+  mechanical regeneration (`scripts/update-coverage-summary.sh`)
+  from the merged coverage files: agent-gates row from main
+  (task-137 closed row 9), user-management row from this branch
+  (task-114 row 23), and an HSI row recount that fixes a stale
+  candidate-side summary (HEAD's committed SUMMARY said 15/13 while
+  its own coverage file already said 14/14).
+- Source sides touch disjoint files (this branch: users API, ports,
+  adapters, mem, search_sync, web/src; main: message bus, gate
+  executor, merge processor, ralph loop, ws) — no semantic overlap;
+  `cargo check -p gyre-server --lib --tests` clean on the merged tree.
+- `web/dist` keeps the executor-restored assignment-base assets in
+  the merge commit; final integration rebuilds and publishes them
+  remotely. No dist files committed by this round.
+- This round's in-sandbox probes: cargo check (lib + tests) exit 0;
+  arch / ABAC route-registry / mem-port-contracts / task-commit-
+  attribution gates pass; focused vitest `PublicUserProfile.test.js`
+  8/8 and `AppShell.test.js` 77/77 (incl. the `/@{username}` routing
+  tests); `cargo test -p gyre-adapters --lib list_by` 27 passed.
+  Evidence: /tmp/stage/review-evidence/rebase-resolution.md.
+
 ### Test evidence
 
+- In-sandbox (rebase round): probes listed under "Rebase resolution"
+  above; full command log in
+  /tmp/stage/review-evidence/rebase-resolution.md.
 - In-sandbox (implementation round): full vitest suite 121 files / 2398
   passed (41 skipped); focused `PublicUserProfile.test.js` (8 tests:
   header, memberships + teams, stats, activity + MR navigation, empty
