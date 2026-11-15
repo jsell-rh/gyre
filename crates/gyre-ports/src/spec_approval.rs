@@ -22,6 +22,10 @@ pub trait SpecApprovalRepository: Send + Sync {
     /// Chain step 8); uses the (spec_path, spec_sha) index.
     async fn find_by_spec_sha(&self, spec_path: &str, spec_sha: &str) -> Result<Vec<SpecApproval>>;
     async fn list_all(&self) -> Result<Vec<SpecApproval>>;
+    /// Ledger entries recorded by one approver, newest first (public
+    /// profile activity feed + stats: user-management.md §User Profile
+    /// Page).
+    async fn list_by_approver(&self, approver_id: &str) -> Result<Vec<SpecApproval>>;
     /// Active approvals for a path: approved and not revoked/rejected.
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<SpecApproval>>;
 

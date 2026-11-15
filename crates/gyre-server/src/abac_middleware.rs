@@ -743,6 +743,11 @@ impl ResourceResolver {
                 // Tenant-public profile by username (user-management.md
                 // §API > User Management); tenant containment in-handler.
                 RouteResourceMapping::api("/api/v1/users/:username", "user", None),
+                // Public profile activity feed + stats (user-management.md
+                // §User Profile Page): same "user" resource mapping as the
+                // profile itself; tenant containment in-handler.
+                RouteResourceMapping::api("/api/v1/users/:username/activity", "user", None),
+                RouteResourceMapping::api("/api/v1/users/:username/stats", "user", None),
                 // Deactivation is TenantAdmin-only, enforced in-handler
                 // (same split as POST /users).
                 RouteResourceMapping::api("/api/v1/users/:id/deactivate", "user", None),

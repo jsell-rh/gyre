@@ -603,6 +603,15 @@ export const api = {
     const qs = params ? new URLSearchParams(params).toString() : '';
     return request(`/users/me/judgments${qs ? '?' + qs : ''}`);
   },
+  // Public user profile (user-management.md §User Profile Page, /@{username}):
+  // tenant-scoped profile, activity feed (public actions only), and
+  // aggregate stats. Cross-tenant or unknown handles 404.
+  publicUserProfile: (username) => request(`/users/${encodeURIComponent(username)}`),
+  publicUserActivity: (username, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/users/${encodeURIComponent(username)}/activity${qs ? '?' + qs : ''}`);
+  },
+  publicUserStats: (username) => request(`/users/${encodeURIComponent(username)}/stats`),
   // Knowledge graph (TASK-174/TASK-175)
   repoGraph: (id) => request(`/repos/${id}/graph`),
   repoGraphNode: (repoId, nodeId) => request(`/repos/${repoId}/graph/node/${nodeId}`),

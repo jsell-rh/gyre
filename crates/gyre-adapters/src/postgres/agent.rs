@@ -301,6 +301,23 @@ impl AgentRepository for PgStorage {
         .await?
     }
 
+    async fn list_by_spawner(&self, spawned_by: &str) -> Result<Vec<Agent>> {
+        let pool = Arc::clone(&self.pool);
+        let spawner = spawned_by.to_string();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Agent>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agents::table
+                .filter(agents::tenant_id.eq(&tenant))
+                .filter(agents::spawned_by.eq(&spawner))
+                .order(agents::spawned_at.desc())
+                .load::<AgentRow>(&mut *conn)
+                .context("list agents by spawner")?;
+            rows.into_iter().map(|r| r.into_agent()).collect()
+        })
+        .await?
+    }
+
     async fn update_status(&self, agent_id: &Id, status: AgentStatus) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
