@@ -615,8 +615,9 @@ export const api = {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/users/me/notifications/count${qs}`).then(r => r?.count ?? 0);
   },
-  // Spec notification paths (user-management.md §API > Notifications,
-  // task-125): listing with filters, unread count, read/unread, bulk read.
+  // Spec notification paths (user-management.md §API > Notifications and
+  // §In-App Notification UI; task-125 endpoints, task-113 UI consumers):
+  // listing with filters, unread count, read/unread, bulk read, preferences.
   notifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/notifications${qs ? '?' + qs : ''}`);
@@ -625,10 +626,16 @@ export const api = {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/notifications/unread-count${qs}`).then(r => r?.count ?? 0);
   },
+  // PUT is the spec method for mark-read (user-management.md §API >
+  // Notifications; the server keeps POST as a legacy alias).
   markNotificationRead: (id) =>
-    request(`/notifications/${id}/read`, { method: 'POST' }),
+    request(`/notifications/${id}/read`, { method: 'PUT' }),
   markNotificationUnread: (id) =>
     request(`/notifications/${id}/unread`, { method: 'POST' }),
+  // Spec-path preferences (task-125): GET/PUT /notifications/preferences.
+  notificationChannels: () => request('/notifications/preferences'),
+  updateNotificationChannels: (body) =>
+    request('/notifications/preferences', { method: 'PUT', body: JSON.stringify(body) }),
   dismissNotification: (id) =>
     request(`/notifications/${id}/dismiss`, { method: 'POST' }),
   markAllNotificationsRead: (workspaceId) => {

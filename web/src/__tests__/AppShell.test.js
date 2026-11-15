@@ -345,10 +345,23 @@ describe('App shell — topbar first, no sidebar (ui-navigation.md §1)', () => 
 });
 
 // ── Notification bell (user-management.md §In-App Notification UI, ──────
-//    amended ui-navigation.md §1: the bell shows the unread count and
-//    opens the notification drawer)
+//    amended ui-navigation.md §1: the bell is the single top-bar
+//    notification surface — it shows the unread count and opens the
+//    notification drawer)
 
 describe('Notification bell (user-management.md §In-App Notification UI)', () => {
+  // The bell's unread count rides lib/notifications.svelte.js
+  // (refreshUnreadCount → raw fetch of GET /notifications/unread-count),
+  // not the api.js mock — mock the endpoint at the fetch level.
+  function mockUnreadCountFetch(counts) {
+    let call = 0;
+    global.fetch = vi.fn(() => {
+      const count = counts[Math.min(call, counts.length - 1)];
+      call += 1;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ count }) });
+    });
+  }
+
   beforeEach(() => {
     window.history.pushState({}, '', '/');
     localStorage.clear();
@@ -366,22 +379,25 @@ describe('Notification bell (user-management.md §In-App Notification UI)', () =
     // The bell badge is the unread notification count (spec: "Notification
     // bell in top nav with unread count badge"). decisionsCount (legacy
     // /users/me/notifications/count) must not drive the badge.
-    api.unreadNotificationCount.mockResolvedValue(3);
     api.notificationCount.mockResolvedValue(7);
+    mockUnreadCountFetch([3]);
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="notification-bell"]')).toBeTruthy();
     }, { timeout: 3000 });
     await waitFor(() => {
-      expect(api.unreadNotificationCount).toHaveBeenCalled();
-      const badge = container.querySelector('[data-testid="notification-bell"] .decisions-count');
+      const badge = container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]');
       expect(badge).toBeTruthy();
       expect(badge.textContent).toBe('3');
     }, { timeout: 3000 });
+    // The count came from the unread-count endpoint (raw fetch), not from
+    // the decisions-count endpoint (api.notificationCount).
+    const fetchedUrls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(fetchedUrls.some(u => u.includes('/notifications/unread-count'))).toBe(true);
   });
 
   it('clicking the bell opens the notification drawer', async () => {
-    api.unreadNotificationCount.mockResolvedValue(2);
+    mockUnreadCountFetch([2]);
     api.notifications.mockResolvedValue({
       notifications: [
         { id: 'n-1', title: 'Gate failure in payment-api', priority_level: 'High', read: false, created_at: 1700000000 },
@@ -402,15 +418,11 @@ describe('Notification bell (user-management.md §In-App Notification UI)', () =
   it('refreshes the unread badge when the drawer closes', async () => {
     // Read-state changes made inside the drawer (mark read / mark all read)
     // must be reflected on the bell badge when it closes.
-    let calls = 0;
-    api.unreadNotificationCount.mockImplementation(() => {
-      calls += 1;
-      return Promise.resolve(calls === 1 ? 2 : 0);
-    });
+    mockUnreadCountFetch([2, 0]);
     api.notifications.mockResolvedValue({ notifications: [] });
     const { container } = render(App);
     await waitFor(() => {
-      const badge = container.querySelector('[data-testid="notification-bell"] .decisions-count');
+      const badge = container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]');
       expect(badge).toBeTruthy();
       expect(badge.textContent).toBe('2');
     }, { timeout: 3000 });
@@ -421,9 +433,13 @@ describe('Notification bell (user-management.md §In-App Notification UI)', () =
     // Close via the drawer's close button.
     await fireEvent.click(container.querySelector('[data-testid="notification-drawer"] .close-btn'));
     await waitFor(() => {
-      expect(container.querySelector('[data-testid="notification-bell"] .decisions-count')).toBeNull();
+      expect(container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]')).toBeNull();
     }, { timeout: 3000 });
-    expect(api.unreadNotificationCount.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // The badge was re-read from the server after the close.
+    const unreadCalls = global.fetch.mock.calls
+      .map(c => String(c[0]))
+      .filter(u => u.includes('/notifications/unread-count'));
+    expect(unreadCalls.length).toBeGreaterThanOrEqual(2);
   });
 });
 

@@ -4,6 +4,7 @@
   import { createWsStore } from './lib/ws.js';
   import { createPresenceHeartbeat } from './lib/presence.js';
   import { createLivenessTracker } from './lib/liveness.svelte.js';
+  import { attachNotificationStream } from './lib/notifications.svelte.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
@@ -12,7 +13,8 @@
   import UserProfile from './components/UserProfile.svelte';
   import PublicUserProfile from './components/PublicUserProfile.svelte';
   import InvitationAccept from './components/InvitationAccept.svelte';
-  import NotificationDrawer from './components/NotificationDrawer.svelte';
+  import NotificationBell from './components/NotificationBell.svelte';
+  import NotificationSettings from './components/NotificationSettings.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
@@ -27,7 +29,7 @@
 
   // ── Navigation mode ──────────────────────────────────────────────────
   // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' |
-  // 'public_profile' (@username) | 'invite_accept' (/invite/:id)
+  // 'public_profile' (@username) | 'invite_accept' (/invite/:id) | 'notification_settings'
   let mode = $state('workspace_home');
 
   // ── Public profile / invitation accept state ────────────────────────
@@ -86,6 +88,11 @@
     const store = createWsStore();
     wsStore = store;
     const unsub = store.onStatus((s) => (wsStatus = s));
+    // Notification bell realtime (user-management.md §In-App Notification
+    // UI): NotificationPush messages on this connection bump the unread
+    // badge live. Rides the same socket as presence/liveness — the SPA
+    // holds one realtime channel per tab.
+    const detachNotifications = attachNotificationStream(store);
     // Presence heartbeat (HSI §1): send-on-connect, 30s timer, view-change
     // re-send (5s debounce), and disconnect on beforeunload. Without it the
     // server idle-evicts this tab after 60s and other users lose the
@@ -103,6 +110,7 @@
     });
     return () => {
       unsub();
+      detachNotifications();
       presenceHeartbeat.destroy();
       presenceHeartbeat = null;
       livenessTracker.destroy();
@@ -147,9 +155,6 @@
   let wsDropdownEl = $state(null);
 
   let mobileDrawerOpen = $state(false);
-  // Notification drawer (user-management.md §UI Pages > Notification
-  // Drawer): slide-out panel from the top-nav bell.
-  let notifDrawerOpen = $state(false);
   let createWsModalOpen = $state(false);
   let createWsForm = $state({ name: '', description: '' });
   let createWsSaving = $state(false);
@@ -217,26 +222,11 @@
   }
 
   // ── Notification bell (user-management.md §In-App Notification UI) ─────
-  // The bell badge shows the UNREAD notification count
-  // (GET /notifications/unread-count), distinct from decisionsCount (the
-  // active-decisions count the workspace home's Decisions section renders).
-  let unreadCount = $state(0);
-
-  async function loadUnreadCount() {
-    try {
-      unreadCount = await api.unreadNotificationCount(currentWorkspace?.id);
-    } catch {
-      unreadCount = 0; // fail closed — badge shows nothing rather than a stale count
-    }
-  }
-
-  // Refresh the badge when the drawer closes: read/unread changes made
-  // inside the drawer (mark read, mark all read) must be reflected. The
-  // cleanup runs on the true→false transition of notifDrawerOpen.
-  $effect(() => {
-    if (!notifDrawerOpen) return;
-    return () => { loadUnreadCount(); };
-  });
+  // The bell + drawer are the NotificationBell component (single top-bar
+  // notification surface per the amended ui-navigation.md §1): its badge is
+  // the UNREAD notification count (GET /notifications/unread-count), kept
+  // live by the NotificationPush realtime stream wired above and a 60s
+  // resync — see components/NotificationBell.svelte.
 
   // ── Slug helpers ──────────────────────────────────────────────────────
   /** Get URL slug for a workspace. Uses ws.slug if present, else ws.id. */
@@ -301,6 +291,12 @@
       return { mode: 'invite_accept', slug: null, repoName: null, tab: null, entityType: null, entityId: null, inviteId: raw[1] };
     }
 
+    // /settings/notifications (user-management.md §In-App Notification UI:
+    // notification preferences page in user settings)
+    if (raw[0] === 'settings' && raw[1] === 'notifications') {
+      return { mode: 'notification_settings', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
+    }
+
     // /all  or  /all/settings  or  /all/agent-rules  (cross-workspace view §10)
     if (raw[0] === 'all') {
       const tab = raw[1] ?? null;
@@ -362,6 +358,7 @@
     if (m === 'profile') return '/profile';
     if (m === 'public_profile') return `/@${encodeURIComponent(username ?? '')}`;
     if (m === 'invite_accept') return `/invite/${encodeURIComponent(inviteId ?? '')}`;
+    if (m === 'notification_settings') return '/settings/notifications';
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
     }
@@ -415,7 +412,6 @@
     pushState({ mode: 'workspace_home', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
     if (currentWorkspace) loadWorkspaceData(currentWorkspace.id);
     loadDecisionsCount();
-    loadUnreadCount();
   }
 
   async function loadRepoDetail(repoId) {
@@ -666,6 +662,8 @@
       inviteWorkspaceId = p.inviteId;
     } else if (p.mode === 'profile') {
       mode = 'profile';
+    } else if (p.mode === 'notification_settings') {
+      mode = 'notification_settings';
     } else if (p.mode === 'cross_workspace') {
       mode = 'cross_workspace';
       crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
@@ -699,7 +697,6 @@
       mode = 'workspace_home';
     }
     loadDecisionsCount();
-    loadUnreadCount();
   }
 
   /** Navigate to an SPA path (notification action_url deep links). */
@@ -709,6 +706,12 @@
     window.history.pushState({ ...window.history.state, path }, '', path);
     applyParsed(parsed);
     fadeContent();
+  }
+
+  function goToNotificationSettings() {
+    mode = 'notification_settings';
+    fadeContent();
+    pushState({ mode: 'notification_settings', slug: null, repoName: null, tab: null });
   }
   function goToCrossWorkspace() {
     mode = 'cross_workspace';
@@ -788,6 +791,7 @@
   setContext('goToPublicProfile', (username) => goToPublicProfile(username));
   setContext('goToInviteAccept', (workspaceId) => goToInviteAccept(workspaceId));
   setContext('navigateToPath', (path) => navigateToPath(path));
+  setContext('goToNotificationSettings', () => goToNotificationSettings());
   setContext('goToRepo', (repo, tab) => goToRepo(repo, tab));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
@@ -883,7 +887,6 @@
     if (e.key === 'Escape') {
       if (shortcutsOpen) { shortcutsOpen = false; gKeyPending = false; return; }
       if (mobileDrawerOpen) { mobileDrawerOpen = false; gKeyPending = false; return; }
-      if (notifDrawerOpen) { notifDrawerOpen = false; gKeyPending = false; return; }
       if (userMenuOpen) { userMenuOpen = false; gKeyPending = false; return; }
       if (wsDropdownOpen) { wsDropdownOpen = false; gKeyPending = false; return; }
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
@@ -1152,6 +1155,8 @@
       document.title = publicUsername ? `@${publicUsername} | Gyre` : 'Profile | Gyre';
     } else if (mode === 'invite_accept') {
       document.title = 'Workspace Invitation | Gyre';
+    } else if (mode === 'notification_settings') {
+      document.title = 'Notification Settings | Gyre';
     } else if (mode === 'cross_workspace') {
       document.title = 'All Workspaces | Gyre';
     } else if (mode === 'agent_rules') {
@@ -1215,6 +1220,8 @@
     } else if (parsed?.mode === 'invite_accept') {
       mode = 'invite_accept';
       inviteWorkspaceId = parsed.inviteId ?? null;
+    } else if (parsed?.mode === 'notification_settings') {
+      mode = 'notification_settings';
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
       crossWorkspaceTab = (parsed.tab === 'settings' || parsed.tab === 'agent-rules') ? parsed.tab : null;
@@ -1317,10 +1324,8 @@
       selfUserId = me?.id ?? null;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
-    loadUnreadCount();
     const decisionsInterval = setInterval(() => {
       loadDecisionsCount();
-      loadUnreadCount();
     }, 60_000);
 
     // 4. Popstate (browser back/forward)
@@ -1345,7 +1350,7 @@
       }
       if (e.state?.mode) {
         const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: pUsername, inviteId: pInviteId } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'public_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'analytics')
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'public_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
           ? m : 'workspace_home';
         if (m === 'public_profile') publicUsername = pUsername ?? parseUrl(window.location.pathname)?.username ?? '';
         if (m === 'invite_accept') inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
@@ -1358,7 +1363,7 @@
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'public_profile' && m !== 'invite_accept') {
+        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'public_profile' && m !== 'invite_accept' && m !== 'notification_settings') {
           // Try to recover workspace from URL slug if state doesn't have wsId
           const p2 = parseUrl(window.location.pathname);
           if (p2?.slug) {
@@ -1387,7 +1392,6 @@
         fadeContent();
         if (currentWorkspace) loadWorkspaceData(currentWorkspace.id);
         loadDecisionsCount();
-        loadUnreadCount();
         return;
       }
       // Fallback: re-parse URL
@@ -1401,6 +1405,8 @@
         } else if (p.mode === 'invite_accept') {
           mode = 'invite_accept';
           inviteWorkspaceId = p.inviteId ?? null;
+        } else if (p.mode === 'notification_settings') {
+          mode = 'notification_settings';
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
           crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
@@ -1766,34 +1772,14 @@
         </button>
       </div>
 
-      <!-- Right: decisions badge + user avatar -->
+      <!-- Right: notification bell + user avatar -->
       <div class="topbar-right">
-        <!-- Notification bell (user-management.md §In-App Notification UI):
-            opens the notification drawer (§UI Pages > Notification Drawer).
-            The badge is the unread notification count
-            (GET /notifications/unread-count) — not the active-decisions
-            count; the decisions count remains on the workspace home's
-            Decisions section (ui-navigation.md §2, amended task-127). -->
-        <button
-          class="decisions-badge-btn"
-          onclick={() => (notifDrawerOpen = true)}
-          aria-label={unreadCount > 0 ? $t('topbar.unread_notifications', { values: { count: unreadCount } }) : $t('topbar.no_unread_notifications')}
-          title={$t('notification_drawer.title')}
-          aria-haspopup="dialog"
-          aria-expanded={notifDrawerOpen}
-          data-testid="notification-bell"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
-            <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-            <path d="M13.73 21a2 2 0 01-3.46 0"/>
-          </svg>
-          {#if unreadCount > 0}
-            <span class="decisions-count" aria-hidden="true">{unreadCount > 99 ? '99+' : unreadCount}</span>
-          {/if}
-        </button>
-        <span class="sr-only" aria-live="polite" aria-atomic="true">
-          {unreadCount > 0 ? $t('topbar.unread_notifications', { values: { count: unreadCount } }) : ''}
-        </span>
+        <!-- Notification bell (user-management.md §In-App Notification UI;
+            amended ui-navigation.md §1 — the single top-bar notification
+            surface, superseding the old decisions-count badge click):
+            unread count badge + slide-out drawer (§UI Pages > Notification
+            Drawer — active-only, grouped by priority). -->
+        <NotificationBell {workspaces} currentWorkspaceId={currentWorkspace?.id ?? null} />
 
         <!-- User avatar dropdown -->
         <div class="user-menu-wrap">
@@ -1826,6 +1812,9 @@
             >
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToProfile(); userMenuOpen = false; }}>
                 {$t('topbar.profile')}
+              </button>
+              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToNotificationSettings(); userMenuOpen = false; }} data-testid="user-menu-notification-settings">
+                {$t('topbar.notification_settings')}
               </button>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
                 {$t('topbar.api_token')}
@@ -1975,6 +1964,8 @@
           <PublicUserProfile username={publicUsername} />
         {:else if mode === 'invite_accept'}
           <InvitationAccept inviteId={inviteWorkspaceId} />
+        {:else if mode === 'notification_settings'}
+          <NotificationSettings />
         {/if}
       </div>
     </main>
@@ -2073,7 +2064,6 @@
 }} />
 <!-- Notification drawer (user-management.md §UI Pages): slide-out panel
     from the bell with priority grouping, deep links, and read/unread. -->
-<NotificationDrawer bind:open={notifDrawerOpen} onnavigate={(path) => navigateToPath(path)} />
 <Toast />
 
 <!-- Keyboard shortcut overlay -->
@@ -2527,90 +2517,6 @@
     flex-shrink: 0;
   }
 
-  .decisions-badge-btn {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    background: transparent;
-    border: none;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    border-radius: var(--radius);
-    transition: color var(--transition-fast), background var(--transition-fast);
-  }
-
-  .decisions-badge-btn:hover {
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-  }
-
-  .decisions-badge-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .decisions-count {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    min-width: 14px;
-    height: 14px;
-    padding: 0 3px;
-    background: var(--color-danger);
-    color: var(--color-text-inverse);
-    border-radius: var(--radius-full);
-    font-size: var(--text-xs);
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
-  }
-
-  .user-btn {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
-    border-radius: 50%;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    transition: color var(--transition-fast), border-color var(--transition-fast);
-  }
-
-  .user-btn:hover {
-    color: var(--color-text);
-    border-color: var(--color-text-muted);
-  }
-
-  .user-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .auth-dot {
-    position: absolute;
-    bottom: 0;
-    right: 0;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--color-danger);
-    border: 2px solid var(--color-surface);
-    transition: background var(--transition-fast);
-  }
-
-  .user-btn.auth-active .auth-dot {
-    background: var(--color-success);
-  }
-
   .user-menu-wrap { position: relative; }
 
   .user-dropdown {
@@ -3030,7 +2936,6 @@
   @media (prefers-reduced-motion: reduce) {
     .content-inner,
     .search-trigger,
-    .decisions-badge-btn,
     .user-btn,
     .auth-dot,
     .user-dropdown-item,

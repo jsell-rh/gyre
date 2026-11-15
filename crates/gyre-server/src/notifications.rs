@@ -4,8 +4,9 @@
 use crate::AppState;
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_ports::NotificationRepository;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 
 /// Resolve a deep-link URL for a notification source
 /// (user-management.md §Notification Entity: "Deep link to relevant page").
@@ -694,34 +695,91 @@ pub async fn resolve_owner_ref(state: &AppState, workspace_id: &Id, owner: &str)
     resolved
 }
 
-// ─── SSE fan-out wrapper (user-management.md §API > Notifications) ───────────
+// ─── Real-time fan-out wrapper (user-management.md §API > Notifications) ─────
 
-/// [`NotificationRepository`] decorator that fans every `create` out to the
-/// SSE broadcast channel behind `/notifications/stream`.
+/// Type of the per-connection server→client channel in `AppState::ws_connections`.
+pub type WsTargetedSender = tokio::sync::mpsc::Sender<String>;
+
+/// [`NotificationRepository`] decorator that fans every `create` out to both
+/// realtime channels:
+///
+/// * the SSE broadcast channel behind `GET /notifications/stream`, and
+/// * the live WebSocket connections authenticated as the notification's
+///   owner (the in-app bell's realtime channel — the SPA holds ONE
+///   long-lived `/ws` connection per tab for presence/liveness, so the
+///   notification push rides it as `WsMessage::NotificationPush` instead
+///   of a second always-open HTTP stream per tab).
 ///
 /// This is the single fan-out point: `AppState::create_notification` routes
 /// through it, and background paths that persist notifications without an
 /// `&AppState` at hand (the `DivergencePorts` feeders in git_http, mirror_sync,
 /// and repo import) must wrap their repository with
 /// [`AppState::broadcasting_notifications`] instead of passing the bare repo —
-/// a bare repo persists fine but a connected stream client never sees the
+/// a bare repo persists fine but a connected client never sees the
 /// notification (task-125 review finding).
 ///
-/// Broadcast is fire-and-forget: no subscribers, or a lagged one, must never
-/// fail the persist. Every non-`create` method delegates to the inner
-/// repository unchanged.
+/// Both fan-outs are fire-and-forget: no subscribers, a lagged one, or an
+/// offline owner must never fail the persist. Every non-`create` method
+/// delegates to the inner repository unchanged.
 pub struct BroadcastingNotificationRepo {
     inner: Arc<dyn NotificationRepository>,
     tx: broadcast::Sender<String>,
+    /// Live WS connections (connection_id → targeted sender), shared with
+    /// the `/ws` handler. Empty when the decorator is built standalone.
+    ws_connections: Arc<RwLock<HashMap<u64, WsTargetedSender>>>,
+    /// Server-verified user identity per WS connection (connection_id →
+    /// user_id), shared with the `/ws` handler. Pushes match this verified
+    /// identity — never a client-supplied id.
+    ws_connection_users: Arc<RwLock<HashMap<u64, String>>>,
 }
 
 impl BroadcastingNotificationRepo {
     /// Build a broadcasting decorator over a repository and an SSE channel.
     /// Production callers should prefer `AppState::broadcasting_notifications`,
-    /// which wires the state's own channel; this constructor exists for
-    /// callers (and tests) that own a separate channel.
+    /// which wires the state's own channel and WS connection registries; this
+    /// constructor exists for callers (and tests) that own a separate channel
+    /// and have no live WS connections to push to.
     pub fn new(inner: Arc<dyn NotificationRepository>, tx: broadcast::Sender<String>) -> Self {
-        Self { inner, tx }
+        Self {
+            inner,
+            tx,
+            ws_connections: Arc::new(RwLock::new(HashMap::new())),
+            ws_connection_users: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Push `notification` to every live WS connection authenticated as its
+    /// owner. Connections are matched by the server-verified user identity
+    /// recorded at connection time (same contract as the impersonation push
+    /// this replaces): a connection without a verified user identity (shared
+    /// token, agent tokens) never receives another user's notifications.
+    /// Best-effort: a full targeted channel (slow client) skips the push —
+    /// the notification is already persisted and visible on next poll.
+    async fn push_to_live_connections(&self, notification: &Notification) {
+        let payload = match serde_json::to_string(&gyre_common::WsMessage::NotificationPush {
+            notification: notification.clone(),
+        }) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let conns = self.ws_connections.read().await;
+        let users = self.ws_connection_users.read().await;
+        let mut sent = 0usize;
+        for (conn_id, tx) in conns.iter() {
+            let matches = users
+                .get(conn_id)
+                .map(|uid| uid == notification.user_id.as_str())
+                .unwrap_or(false);
+            if matches && tx.try_send(payload.clone()).is_ok() {
+                sent += 1;
+            }
+        }
+        if sent == 0 {
+            tracing::debug!(
+                user_id = %notification.user_id,
+                "notification WS push: user not online, Inbox notification only"
+            );
+        }
     }
 }
 
@@ -732,6 +790,7 @@ impl NotificationRepository for BroadcastingNotificationRepo {
         if let Ok(json) = serde_json::to_string(notification) {
             let _ = self.tx.send(json);
         }
+        self.push_to_live_connections(notification).await;
         Ok(())
     }
 
@@ -875,15 +934,19 @@ impl NotificationRepository for BroadcastingNotificationRepo {
 }
 
 impl AppState {
-    /// A notification repository whose `create` both persists and broadcasts
-    /// to live `/notifications/stream` subscribers — the exact fan-out
+    /// A notification repository whose `create` persists AND fans out to both
+    /// realtime channels — the `/notifications/stream` SSE subscribers and
+    /// the live `/ws` connections authenticated as the notification's owner
+    /// (the in-app bell) — the exact fan-out
     /// `AppState::create_notification` routes through. Background paths
     /// building `DivergencePorts` use this instead of the bare
-    /// `state.notifications` so their notifications reach the stream.
+    /// `state.notifications` so their notifications reach connected clients.
     pub fn broadcasting_notifications(&self) -> BroadcastingNotificationRepo {
         BroadcastingNotificationRepo {
             inner: Arc::clone(&self.notifications),
             tx: self.notification_broadcast_tx.clone(),
+            ws_connections: Arc::clone(&self.ws_connections),
+            ws_connection_users: Arc::clone(&self.ws_connection_users),
         }
     }
 }
@@ -1182,5 +1245,64 @@ mod tests {
             .unwrap();
         assert_eq!(members.len(), 1);
         assert!(matches!(members[0].role, WorkspaceRole::Admin));
+    }
+
+    /// user-management.md real-time bell: `create_notification` pushes a
+    /// `NotificationPush` over the WS targeted channel of every live
+    /// connection authenticated as the notification's owner — and ONLY
+    /// those connections (verified-identity match, never another user's).
+    #[tokio::test]
+    async fn create_notification_pushes_to_owners_live_ws_connections_only() {
+        let (state, ws) = setup().await;
+
+        // Two "live" connections, wired exactly like handle_socket does:
+        // a targeted mpsc sender registered under a connection id, plus the
+        // server-verified user identity for that connection.
+        let (owner_tx, mut owner_rx) = tokio::sync::mpsc::channel::<String>(32);
+        let (other_tx, mut other_rx) = tokio::sync::mpsc::channel::<String>(32);
+        state.ws_connections.write().await.insert(1, owner_tx);
+        state.ws_connections.write().await.insert(2, other_tx);
+        state
+            .ws_connection_users
+            .write()
+            .await
+            .insert(1, "user-n1".to_string());
+        state
+            .ws_connection_users
+            .write()
+            .await
+            .insert(2, "user-other".to_string());
+
+        let notif = Notification::new(
+            Id::new("notif-ws-1"),
+            ws.clone(),
+            Id::new("user-n1"),
+            NotificationType::GateFailure,
+            "Gate failed".to_string(),
+            "tenant-1".to_string(),
+            1_000,
+        );
+        state.create_notification(&notif).await.unwrap();
+
+        // The owner's connection receives exactly one NotificationPush
+        // carrying the persisted notification.
+        let payload = owner_rx
+            .recv()
+            .await
+            .expect("owner connection must receive the push");
+        let msg: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(msg["type"], "NotificationPush");
+        assert_eq!(msg["notification"]["id"], notif.id.as_str());
+        assert_eq!(msg["notification"]["user_id"], "user-n1");
+        assert!(
+            owner_rx.try_recv().is_err(),
+            "exactly one push, not a duplicate"
+        );
+
+        // The other user's connection receives nothing.
+        assert!(
+            other_rx.try_recv().is_err(),
+            "a connection verified as another user must never receive this push"
+        );
     }
 }
