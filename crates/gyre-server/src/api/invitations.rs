@@ -703,6 +703,32 @@ pub async fn accept_tenant_invitation(
             .map_err(|e| ApiError::InvalidInput(format!("invalid username: {e}")))?;
     }
 
+    // The reserved system ABAC identity (task-129 review round 3; review
+    // 2cff1e20 finding 2 for this path): the local-mode accept arm creates
+    // a user whose display_name becomes the ABAC subject.id under
+    // API-key/JWT auth, and `system-full-access` (priority 1000) matches
+    // the reserved identity — accepting it here would brick the invitee's
+    // fresh account behind the middleware's fail-closed identity check
+    // with no self-service recovery. Same invariant as the profile-update,
+    // create-user, SSO-provisioning, and SCIM write paths. Checked before
+    // the single-use claim so reserved input does not consume the
+    // invitation (same reasoning as the username format gate above); the
+    // derived-username case (email local-part) is guarded inside the
+    // create arm.
+    if req.display_name.as_deref() == Some(gyre_domain::SYSTEM_ABAC_IDENTITY) {
+        return Err(ApiError::InvalidInput(format!(
+            "display_name '{}' is reserved for the system principal",
+            gyre_domain::SYSTEM_ABAC_IDENTITY
+        )));
+    }
+    if req.username.as_deref() == Some(gyre_domain::SYSTEM_ABAC_IDENTITY) {
+        return Err(ApiError::InvalidInput(format!(
+            "username '{}' is reserved: it would become the user's display_name \
+             and reserved system ABAC identity",
+            gyre_domain::SYSTEM_ABAC_IDENTITY
+        )));
+    }
+
     let token_hash = hash_token(&token);
     let invitation = state
         .tenant_invitations
@@ -901,6 +927,19 @@ async fn accept_tenant_invitation_claimed(
                     }
                 };
                 let display_name = req.display_name.clone().unwrap_or_else(|| username.clone());
+                // Reserved system ABAC identity guard for the derived case
+                // (email local-part "gyre-system-token@…" sanitizes to the
+                // reserved handle and becomes the default display_name):
+                // same invariant as the pre-claim check for explicit input.
+                // Failing here rolls the invitation back to Pending (the
+                // caller compensates), so the invitee can retry with valid
+                // input.
+                if display_name == gyre_domain::SYSTEM_ABAC_IDENTITY {
+                    return Err(ApiError::InvalidInput(format!(
+                        "derived display_name '{}' is reserved for the system principal",
+                        gyre_domain::SYSTEM_ABAC_IDENTITY
+                    )));
+                }
                 let mut user = User::new(id, tenant_ns, username, now);
                 user.display_name = display_name;
                 user.email = Some(email.clone());
@@ -4187,6 +4226,109 @@ mod tests {
             .unwrap()
             .expect("minted key resolves to the accepted user");
         assert_eq!(stored.to_string(), user_id);
+    }
+
+    /// Review 2cff1e20 finding 2: the reserved system ABAC identity
+    /// ("gyre-system-token") must not be provisionable through the
+    /// unauthenticated invitation-accept path — neither as an explicit
+    /// display_name nor as an explicit username (which becomes the
+    /// default display_name). Every sibling display_name write path
+    /// (profile update, create_user, SSO provisioning, SCIM) enforces
+    /// this; a user created under the reserved handle would be bricked
+    /// behind the ABAC middleware's fail-closed identity check with no
+    /// self-service recovery. Rejection must also leave the invitation
+    /// Pending (checked before the single-use claim).
+    #[tokio::test]
+    async fn accept_rejects_reserved_system_abac_identity() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .with_state(state.clone());
+
+        let (status, json) = http_invite(&app, "eve@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Explicit display_name equal to the reserved identity → 400.
+        let (status, body) = http_accept(
+            &app,
+            &token,
+            serde_json::json!({"display_name": gyre_domain::SYSTEM_ABAC_IDENTITY}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "reserved display_name must be rejected: {body}"
+        );
+
+        // Explicit username equal to the reserved identity → 400 (it
+        // would become the default display_name).
+        let (status, body) = http_accept(
+            &app,
+            &token,
+            serde_json::json!({"username": gyre_domain::SYSTEM_ABAC_IDENTITY}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "reserved username must be rejected: {body}"
+        );
+
+        // Derived case: the email local-part sanitizes to the reserved
+        // handle and becomes the default display_name → 400.
+        let (status, json) = http_invite(
+            &app,
+            &format!("{}@example.com", gyre_domain::SYSTEM_ABAC_IDENTITY),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let derived_token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let (status, body) = http_accept(&app, &derived_token, serde_json::json!({})).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "display_name derived from the email local-part must not be the \
+             reserved system identity: {body}"
+        );
+
+        // The rejected invitations were not consumed: the first one still
+        // accepts cleanly with valid input (the pre-claim guard left it
+        // Pending, and the derived-case failure rolled back to Pending).
+        let (status, _body) =
+            http_accept(&app, &token, serde_json::json!({"display_name": "Eve"})).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "rejected reserved-identity attempts must not consume the invitation"
+        );
+        // And no user was created under the reserved handle.
+        let reserved = state
+            .users
+            .find_by_username(gyre_domain::SYSTEM_ABAC_IDENTITY)
+            .await
+            .unwrap();
+        assert!(
+            reserved.is_none(),
+            "no user may be provisioned under the reserved system identity"
+        );
     }
 
     /// Review d6b8a97, dedupe arm: a SECOND invitation to an already
