@@ -101,9 +101,10 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 ## Shipped
 
 Tenant & workspace invitation flow, complete and reviewed across earlier
-rounds on this branch. Earlier rounds on this branch resolved the rebase
-onto base `81c24bf0`; this round repaired the single failing verification
-gate (rustfmt) on the merged head.
+rounds on this branch. Earlier rounds resolved the rebases onto bases
+`81c24bf0` and repaired a rustfmt verification failure; this round
+resolved the rebase onto assignment base `6cacb4bf` (task-114) — a
+source-merge only, no feature change.
 
 ### Feature surface (cumulative)
 
@@ -137,35 +138,40 @@ gate (rustfmt) on the merged head.
   Pending invitations Expired using the same conditional claim so a
   racing accept is never overwritten; expired tokens rejected on accept.
 
-### This round (verification repair 6d62522d)
+### This round (rebase onto assignment base 6cacb4bf)
 
-- The verification run (`bash /tmp/stage/checks.sh`, candidate `9de867d2`)
-  failed exactly one gate: `check-rustfmt-diff.py` reported changed lines
-  needing formatting in `crates/gyre-server/src/api/invitations.rs`
-  (lines 2176, 2639–2641, 2742–2745, 2882–2883 — all inside `mod tests`).
-  Everything else in that run passed: clippy changed-lines clean, all
-  architecture/ABAC/migration/attribution checks OK, web build succeeded
-  (warnings only).
-- Fix: `rustfmt --edition 2021` on the file — whitespace-only reflow of
-  `assert_eq!`/`assert_ne!`/`.route(...)` arguments in test code, no token
-  or semantic change (diff: 14 insertions, 10 deletions, all in tests).
-- Post-fix probes (logs under `/tmp/stage/review-evidence/`):
-  `rustfmt --check` on the file exits 0 with no diff;
-  `python3 scripts/check-rustfmt-diff.py 81c24bf0` reports
-  "changed lines clean (23 Rust files checked)".
+- Resolved the rebase of this branch onto base `6cacb4bf` (task-114 public
+  user profile page). Three conflicts: the `users::` import list in
+  `api/mod.rs` (upstream's task-114 list still named task-124's parallel
+  invitation handlers `accept_invitation`/`list_invitations`/
+  `revoke_invitation`, which this branch removed in favor of the
+  `WorkspaceInvitation` model — resolution keeps the union minus those
+  three dead handlers, preserving task-114's `get_user_activity`/
+  `get_user_stats`), plus the two user-management coverage headers
+  (merged audit note; SUMMARY regenerated mechanically via
+  `scripts/update-coverage-summary.sh`: 11 n/a, 0 not-started,
+  4 task-assigned, 21 implemented, 84%).
+- Probes on the merged head (`/tmp/stage/review-evidence/rebase-6cacb4bf/`):
+  `cargo check -p gyre-server` exit 0; `cargo test -p gyre-domain
+  invitation` 4 passed; `cargo test -p gyre-adapters invitation --lib`
+  5 passed; `check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-abac-exempt-handlers.sh`, `check-migration-versions.sh`,
+  `check-migration-sql-portability.sh`, `check-mem-port-contracts.sh` all
+  exit 0. The task-110 feature surface is unchanged by this round —
+  source-merge only.
 
 ### Test evidence
 
-- Rebase round (post-merge head, prior round): `cargo check -p
-  gyre-server --tests` exit 0; `cargo test -p gyre-domain invitation`
-  4 passed; `cargo test -p gyre-adapters invitation --lib` 5 passed;
-  mechanical gates (`check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-migration-versions.sh`, `check-mem-port-contracts.sh`,
-  `check-migration-sql-portability.sh`,
-  `check-task-commit-attribution.sh`) all exit 0.
-- This round: rustfmt gates above; the change is rustfmt-produced
-  whitespace inside test macros, so no behavioral surface moved.
+- Rebase round (merged head 51202483, this round): `cargo check -p
+  gyre-server` exit 0; `cargo test -p gyre-domain invitation` 4 passed;
+  `cargo test -p gyre-adapters invitation --lib` 5 passed; mechanical
+  gates (`check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-abac-exempt-handlers.sh`, `check-migration-versions.sh`,
+  `check-mem-port-contracts.sh`, `check-migration-sql-portability.sh`)
+  all exit 0. Prior rounds: rustfmt/verification repairs recorded above
+  (6d62522d) — rustfmt-diff clean against 81c24bf0.
 - Verifier must still run: `cargo test -p gyre-server --lib
   api::invitations::` (26 tests incl. the six review-96521ecf hardening
-  tests), full `cargo test --all`, and all-target clippy — server test
-  compilation exceeds this sandbox's 4 GiB build budget.
+  tests), the merged task-114 user-profile tests, full `cargo test --all`,
+  and all-target clippy — server test compilation exceeds this sandbox's
+  4 GiB build budget.
