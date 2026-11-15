@@ -2132,6 +2132,16 @@ async fn find_or_create_user_tenant(
     if let (Some(tenant), Some(email), true) = (tenant_id, email, email_verified) {
         let local_ns = format!("tenant:{tenant}:email:{}", email.to_lowercase());
         if let Some(mut invited) = state.users.find_by_external_id(&local_ns).await? {
+            // Deactivated accounts cannot be claimed back into service
+            // via the SSO email link (same contract as the direct
+            // external_id branch above: deactivation is
+            // TenantAdmin-initiated and outlives the user's IdP session —
+            // a verified-email match for a deactivated invitation
+            // account is still that deactivated account, not a fresh
+            // one to link).
+            if invited.is_deactivated() {
+                anyhow::bail!("user account is deactivated; contact a tenant administrator");
+            }
             // Claim: same email in the same tenant. Re-point the
             // external_id at the SSO subject via the port's sanctioned
             // claim transition — update() rejects external_id changes
@@ -4357,6 +4367,83 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// Review 4cf9e027 F1 (deactivation contract): the SSO email-link
+    /// claim branch must not claim a DEACTIVATED invitation-created
+    /// account. Deactivation is TenantAdmin-initiated and outlives the
+    /// user's IdP session (the contract enforced by the API-key, WS, and
+    /// direct external_id paths) — a verified-email match for a
+    /// deactivated account must not mint a live session for it.
+    #[tokio::test]
+    async fn jwt_email_link_does_not_claim_deactivated_account() {
+        let state = make_test_state_with_jwt();
+
+        // Invitation-created local account, then deactivated by a
+        // TenantAdmin (PUT /api/v1/users/{id}/deactivate cascade).
+        let mut invited = gyre_domain::User::new(
+            gyre_common::Id::new("invited-user-deact"),
+            "tenant:acme:email:dave@example.com",
+            "dave",
+            1000,
+        );
+        invited.email = Some("dave@example.com".to_string());
+        invited.tenant_id = Some(gyre_common::Id::new("acme"));
+        state.users.create(&invited).await.unwrap();
+        let mut stored = state
+            .users
+            .find_by_id(&gyre_common::Id::new("invited-user-deact"))
+            .await
+            .unwrap()
+            .unwrap();
+        stored.deactivate(2000);
+        state.users.update(&stored).await.unwrap();
+
+        // SSO login with matching verified email in the same tenant.
+        let claims = serde_json::json!({
+            "sub": "keycloak-sub-dave",
+            "preferred_username": "dave",
+            "email": "dave@example.com",
+            "email_verified": true,
+            "tenant_id": "acme"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let resp = app_with_jwt_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a deactivated account must not re-authenticate via the email-link claim"
+        );
+
+        // The deactivated account was NOT claimed: it keeps its
+        // namespaced external_id, and no session-bearing account was
+        // created for the SSO subject.
+        let untouched = state
+            .users
+            .find_by_external_id("tenant:acme:email:dave@example.com")
+            .await
+            .unwrap()
+            .expect("deactivated invitation account was not claimed");
+        assert_eq!(untouched.id, gyre_common::Id::new("invited-user-deact"));
+        assert!(untouched.is_deactivated());
+        assert!(
+            state
+                .users
+                .find_by_external_id("keycloak-sub-dave")
+                .await
+                .unwrap()
+                .is_none(),
+            "no account exists under the SSO subject — the login failed closed"
+        );
     }
 
     /// An UNVERIFIED email must not claim the invitation account — an

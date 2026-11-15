@@ -21,6 +21,17 @@
 -- Unique constraints enforce one PENDING invitation per (tenant, email) /
 -- (workspace, user); the partial index keeps re-invite after terminal
 -- states (Revoked/Declined/Expired) possible with a fresh token.
+--
+-- Timestamp columns are BIGINT (int8): the adapters' row structs bind
+-- them as diesel BigInt/i64, and on PostgreSQL an int4 column makes
+-- every read fail at runtime (FromSql<BigInt, Pg> rejects int4's 4-byte
+-- binary format) — the shared-migration failure class. SQLite is
+-- unaffected either way (dynamic typing), but the declaration matches
+-- the repo convention for timestamps. Databases that already ran an
+-- earlier INTEGER variant of this migration are repaired by the
+-- PostgreSQL-only post-migration hook
+-- (postgres `repair::ensure_invitation_timestamps_bigint`), which
+-- ALTERs the six columns to BIGINT in place.
 
 CREATE TABLE tenant_invitations (
     id               TEXT PRIMARY KEY NOT NULL,
@@ -32,9 +43,9 @@ CREATE TABLE tenant_invitations (
     workspace_roles  TEXT NOT NULL,   -- JSON array of workspace roles
     status           TEXT NOT NULL,
     token_hash       TEXT NOT NULL,
-    expires_at       INTEGER NOT NULL,
-    created_at       INTEGER NOT NULL,
-    accepted_at      INTEGER
+    expires_at       BIGINT NOT NULL,
+    created_at       BIGINT NOT NULL,
+    accepted_at      BIGINT
 );
 
 CREATE UNIQUE INDEX idx_tenant_invitations_token
@@ -52,9 +63,9 @@ CREATE TABLE workspace_invitations (
     role             TEXT NOT NULL,
     status           TEXT NOT NULL,
     token_hash       TEXT NOT NULL,
-    expires_at       INTEGER NOT NULL,
-    created_at       INTEGER NOT NULL,
-    accepted_at      INTEGER
+    expires_at       BIGINT NOT NULL,
+    created_at       BIGINT NOT NULL,
+    accepted_at      BIGINT
 );
 
 CREATE UNIQUE INDEX idx_workspace_invitations_token

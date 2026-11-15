@@ -820,11 +820,31 @@ async fn accept_tenant_invitation_claimed(
     let mut mint_credential = false;
     let (user, mode) = match state.users.find_by_external_id(&tenant_ns).await? {
         Some(existing) => {
+            // Deactivated accounts cannot accept invitations (the
+            // deactivation contract enforced on every auth path —
+            // auth.rs API-key/WS/SSO extractors): the TenantAdmin who
+            // deactivated this account must reactivate it before the
+            // invitee can onboard through it. Acceptance must not
+            // re-apply roles or activate memberships on a deactivated
+            // account.
+            if existing.is_deactivated() {
+                return Err(ApiError::forbidden(
+                    "user account is deactivated; contact a tenant administrator",
+                ));
+            }
             mint_credential = true;
             (existing, "linked")
         }
         None => match find_tenant_user_by_email(state, &invitation.tenant_id, &email).await? {
             Some(mut sso_user) => {
+                // Same deactivation contract as the local-mode arm
+                // above: a deactivated SSO-provisioned account is not a
+                // valid link target for invitation acceptance.
+                if sso_user.is_deactivated() {
+                    return Err(ApiError::forbidden(
+                        "user account is deactivated; contact a tenant administrator",
+                    ));
+                }
                 // The inviting TenantAdmin chose the role at invite time;
                 // acceptance applies it to the linked account exactly as
                 // the local-mode path does for a fresh account.
@@ -1521,6 +1541,21 @@ pub async fn accept_workspace_invitation(
         if caller != invitation.user_id {
             return Err(ApiError::Forbidden(
                 "this invitation was issued to a different user".to_string(),
+            ));
+        }
+    }
+    // Deactivated accounts cannot accept workspace invitations (the
+    // deactivation contract enforced on every auth path). The token
+    // accept route is reachable without an authenticated session, so
+    // the per-handler check is required here — without it, token
+    // possession alone would activate a membership on an account the
+    // TenantAdmin deactivated. The authenticated sibling routes
+    // (accept_my_workspace_invitation) are guarded by the auth
+    // extractors' deactivation check.
+    if let Some(invitee) = state.users.find_by_id(&invitation.user_id).await? {
+        if invitee.is_deactivated() {
+            return Err(ApiError::forbidden(
+                "user account is deactivated; contact a tenant administrator",
             ));
         }
     }
@@ -4775,6 +4810,233 @@ mod tests {
         assert!(state
             .workspace_memberships
             .find_by_user_and_workspace(&invitee.id, &Id::new("ws-exp"))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Review 4cf9e027 F3 (deactivation contract): a deactivated
+    /// local-mode account (invitation-created, `tenant:{t}:email:{e}`
+    /// namespace external_id) must not accept a tenant invitation —
+    /// acceptance would re-apply the invited role, activate
+    /// pre-assigned memberships, and mint a credential for an account
+    /// the TenantAdmin deactivated.
+    #[tokio::test]
+    async fn deactivated_local_account_cannot_accept_invitation() {
+        let state = test_state();
+        // The state a deactivated invitee leaves behind: an
+        // invitation-created local account that a TenantAdmin deactivated.
+        let mut bob = User::new(
+            Id::new("bob-deact"),
+            "tenant:default:email:bob-deact@example.com",
+            "bob-deact",
+            now_secs(),
+        );
+        bob.email = Some("bob-deact@example.com".to_string());
+        bob.tenant_id = Some(Id::new("default"));
+        bob.global_role = GlobalRole::Member;
+        bob.roles = vec![UserRole::Developer];
+        state.users.create(&bob).await.unwrap();
+        let mut stored = state.users.find_by_id(&bob.id).await.unwrap().unwrap();
+        stored.deactivate(now_secs());
+        state.users.update(&stored).await.unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .with_state(state.clone());
+        let (status, json) = http_invite(&app, "bob-deact@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let inv_id = Id::new(json["id"].as_str().unwrap());
+
+        // Unauthenticated accept through the real magic-link route: the
+        // token is the auth factor, so the deactivation check must fire
+        // inside the handler.
+        let (status, body) = http_accept(&app, &token, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("deactivated"));
+
+        // The single-use claim was rolled back: the invitation stays
+        // Pending (usable after the account is reactivated), and the
+        // deactivated account was not promoted, given memberships, or
+        // re-credentialed.
+        let inv = state
+            .tenant_invitations
+            .find_by_id(&inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inv.status, InvitationStatus::Pending);
+        assert!(inv.accepted_at.is_none());
+        let after = state.users.find_by_id(&bob.id).await.unwrap().unwrap();
+        assert!(after.is_deactivated(), "account stays deactivated");
+        assert_eq!(after.roles, vec![UserRole::Developer]);
+    }
+
+    /// Review 4cf9e027 F3, SSO arm: a deactivated SSO-provisioned account
+    /// matched by email must not be a link target for invitation
+    /// acceptance — the invited role must not be re-applied and the
+    /// pre-assigned membership must not activate on a deactivated
+    /// account.
+    #[tokio::test]
+    async fn deactivated_sso_account_cannot_accept_invitation() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-sso-deact"),
+            Id::new("default"),
+            "SSO Deact WS",
+            "sso-deact-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let mut sso_user = User::new(
+            Id::new("sso-carol-deact"),
+            "keycloak-subj-sso-carol-deact",
+            "sso-carol-deact",
+            now_secs(),
+        );
+        sso_user.email = Some("sso-carol-deact@example.com".to_string());
+        sso_user.tenant_id = Some(Id::new("default"));
+        sso_user.global_role = GlobalRole::Member;
+        sso_user.roles = vec![UserRole::Developer];
+        state.users.create(&sso_user).await.unwrap();
+        let mut stored = state.users.find_by_id(&sso_user.id).await.unwrap().unwrap();
+        stored.deactivate(now_secs());
+        state.users.update(&stored).await.unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .with_state(state.clone());
+        let (status, json) = http_invite(&app, "sso-carol-deact@example.com").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let inv_id = Id::new(json["id"].as_str().unwrap());
+
+        let (status, body) = http_accept(&app, &token, serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("deactivated"));
+
+        // No membership activated, no role re-applied, invitation rolled
+        // back to Pending.
+        assert!(state
+            .workspace_memberships
+            .find_by_user_and_workspace(&sso_user.id, &Id::new("ws-sso-deact"))
+            .await
+            .unwrap()
+            .is_none());
+        let after = state.users.find_by_id(&sso_user.id).await.unwrap().unwrap();
+        assert!(after.is_deactivated());
+        assert_eq!(after.global_role, GlobalRole::Member);
+        let inv = state
+            .tenant_invitations
+            .find_by_id(&inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inv.status, InvitationStatus::Pending);
+    }
+
+    /// Review 4cf9e027 F3, workspace arm: the token-based workspace
+    /// invitation accept route is reachable without an authenticated
+    /// session, so token possession alone must not activate a membership
+    /// for an account the TenantAdmin deactivated.
+    #[tokio::test]
+    async fn deactivated_invitee_cannot_accept_workspace_invitation_by_token() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-deact"),
+            Id::new("default"),
+            "Deact WS",
+            "deact-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let mut invitee = User::new(
+            Id::new("invitee-deact"),
+            "tenant:default:email:invitee-deact@x.com",
+            "invitee-deact",
+            now_secs(),
+        );
+        invitee.tenant_id = Some(Id::new("default"));
+        state.users.create(&invitee).await.unwrap();
+        let mut stored = state.users.find_by_id(&invitee.id).await.unwrap().unwrap();
+        stored.deactivate(now_secs());
+        state.users.update(&stored).await.unwrap();
+        let invitation = WorkspaceInvitation {
+            id: Id::new("ws-inv-deact"),
+            tenant_id: Id::new("default"),
+            workspace_id: Id::new("ws-deact"),
+            user_id: invitee.id.clone(),
+            invited_by: Id::new("someadmin"),
+            role: WorkspaceRole::Developer,
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("deactivated-ws-token"),
+            expires_at: now_secs() + 86_400,
+            created_at: now_secs(),
+            accepted_at: None,
+        };
+        state
+            .workspace_invitations
+            .create(&invitation)
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route(
+                "/api/v1/workspaces/invitations/:token/accept",
+                post(accept_workspace_invitation),
+            )
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/invitations/deactivated-ws-token/accept")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The invitation was never claimed (still Pending) and no
+        // membership exists for the deactivated invitee.
+        let stored_inv = state
+            .workspace_invitations
+            .find_by_id(&Id::new("ws-inv-deact"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_inv.status, InvitationStatus::Pending);
+        assert!(state
+            .workspace_memberships
+            .find_by_user_and_workspace(&invitee.id, &Id::new("ws-deact"))
             .await
             .unwrap()
             .is_none());
