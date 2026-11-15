@@ -5,6 +5,7 @@ pub mod agent_tracking;
 pub mod agents;
 pub mod aibom;
 pub mod analytics;
+pub mod attestations;
 pub mod audit;
 pub mod auth;
 pub mod budget;
@@ -165,6 +166,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/attestations/:commit_sha/chain",
             get(provenance::get_attestation_chain),
+        )
+        // Merge attestation bundle verification (agent-gates.md §Part 3
+        // Verification): caller-supplied bundle, per-component result.
+        .route(
+            "/api/v1/attestations/verify",
+            post(attestations::verify_bundle),
         )
         // AI Bill of Materials (M14.3)
         .route("/api/v1/repos/:id/aibom", get(aibom::get_aibom))

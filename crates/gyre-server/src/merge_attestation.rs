@@ -246,8 +246,11 @@ async fn build_spec_approval(state: &AppState, spec_ref: &str) -> Option<SpecRef
 /// Whether a gate type is an agent gate — its results are signed by the
 /// gate agent that produced the review, not the forge (agent-gates.md
 /// §What Gets Signed and By Whom: "AgentReview results — Gate agent").
+/// Same rule as the domain's `attestation_verification::is_agent_gate_type`
+/// (the verification consistency check enforces the signing table this
+/// function implements when signing).
 fn is_agent_gate(gate_type: &str) -> bool {
-    matches!(gate_type, "AgentReview" | "AgentValidation")
+    gyre_domain::attestation_verification::is_agent_gate_type(gate_type)
 }
 
 /// Find the review a gate agent submitted through a given gate: the
@@ -491,72 +494,181 @@ pub async fn store_merge_attestation_bundle(
 
 // ── Verification ─────────────────────────────────────────────────────────────
 
-/// Verify every signature in a merge attestation bundle.
-///
-/// - The bundle-level forge signature over the canonical unsigned
-///   document.
-/// - Each gate's signature over its canonical unsigned attestation, with
-///   the key of the party its `signed_by` names ("forge" → the forge key,
-///   "agent:<id>" → that gate agent's derived key).
-///
-/// Requires the forge key (the Gyre instance holds it; external verifiers
-/// resolve keys via OIDC once that integration lands). Returns `false` on
-/// any tampering: a modified field, a swapped signature, or a `signed_by`
-/// that does not match the signing party's key.
-pub fn verify_merge_attestation_bundle(
-    bundle: &MergeAttestationBundle,
-    forge_key: &crate::auth::AgentSigningKey,
-) -> bool {
+/// Verify a base64-encoded Ed25519 `signature` over `payload` with the
+/// raw 32-byte `public_key`. The single crypto primitive every
+/// verification path shares, so sign/verify parity is a property of one
+/// function pair (`ForgeSigner`/`GateAgentSigner` sign, this verifies).
+pub fn verify_ed25519(payload: &[u8], signature: &str, public_key: &[u8]) -> bool {
     use ring::signature::UnparsedPublicKey;
 
-    let ed25519_signature_ok = |payload: &[u8], sig_b64: &str, public_key: &[u8]| -> bool {
-        let Ok(sig) = BASE64.decode(sig_b64) else {
-            return false;
-        };
-        UnparsedPublicKey::new(&ring::signature::ED25519, public_key)
-            .verify(payload, &sig)
-            .is_ok()
+    let Ok(sig) = BASE64.decode(signature) else {
+        return false;
     };
+    UnparsedPublicKey::new(&ring::signature::ED25519, public_key)
+        .verify(payload, &sig)
+        .is_ok()
+}
 
-    // 1. Bundle-level forge signature over the entire unsigned document.
-    let Some(bundle_sig) = bundle.bundle_signature.as_deref() else {
-        return false;
-    };
-    if !ed25519_signature_ok(
-        bundle.unsigned_canonical_json().as_bytes(),
-        bundle_sig,
-        &forge_key.public_key_bytes,
-    ) {
-        return false;
+/// The Gyre instance's verification party for merge attestation bundles
+/// (agent-gates.md §Part 3 Verification), implementing the
+/// [`AttestationVerifier`] port with the same key scheme the task-142
+/// signers produce: the forge's Ed25519 server key (whose public half is
+/// published at `/.well-known/jwks.json` — the "OIDC issuer" a verifier
+/// trusts) verifies bundle signatures and forge-signed gate results;
+/// gate-agent signatures verify against the per-agent key re-derived
+/// from the forge key material bound to the agent id.
+///
+/// Verification combines the pure domain consistency check (step 5:
+/// all gate results reference the same MR/spec) with the cryptographic
+/// checks (steps 1–3) into a per-component
+/// [`gyre_domain::attestation_verification::VerificationResult`], so an
+/// auditor sees which component failed rather than a single boolean.
+///
+/// Holding the forge key, this verifier serves the instance's own REST
+/// endpoint (`POST /api/v1/attestations/verify`) and CLI
+/// (`gyre verify-attestation`). Fully-external offline verification of
+/// gate-agent signatures — where only the issuer's *public* key is
+/// available — arrives with the Sigstore/OIDC identity integration that
+/// replaces the placeholder key scheme through the same port.
+pub struct ForgeAttestationVerifier {
+    forge_key: Arc<crate::auth::AgentSigningKey>,
+}
+
+impl ForgeAttestationVerifier {
+    pub fn new(forge_key: Arc<crate::auth::AgentSigningKey>) -> Self {
+        Self { forge_key }
     }
+}
 
-    // 2. Per-gate signatures, each against the named party's key.
-    for gate in &bundle.gates {
-        let Some(sig) = gate.signature.as_deref() else {
-            return false;
+#[async_trait::async_trait]
+impl gyre_ports::AttestationVerifier for ForgeAttestationVerifier {
+    /// Run the full verification protocol (agent-gates.md §Verification):
+    /// bundle signature, every gate signature, spec approval signature,
+    /// and the structural consistency check.
+    async fn verify_bundle(
+        &self,
+        bundle: &MergeAttestationBundle,
+    ) -> anyhow::Result<gyre_domain::attestation_verification::VerificationResult> {
+        use gyre_domain::attestation_verification::{
+            assemble_verification_result, check_bundle_consistency, GateVerificationResult,
         };
-        let ok = match gate.signed_by.strip_prefix("agent:") {
-            Some(agent_id) => {
-                let signer = GateAgentSigner::derive(forge_key, agent_id);
-                ed25519_signature_ok(
-                    gate.unsigned_gate_json().as_bytes(),
-                    sig,
-                    signer.public_key_bytes(),
-                )
-            }
-            None if gate.signed_by == "forge" => ed25519_signature_ok(
-                gate.unsigned_gate_json().as_bytes(),
+
+        // Step 5 — structural consistency (pure domain function, no I/O).
+        let consistency_errors = check_bundle_consistency(bundle);
+
+        // Step 1 — bundle-level forge signature over the canonical
+        // unsigned document.
+        let bundle_signature_valid = match bundle.bundle_signature.as_deref() {
+            Some(sig) => verify_ed25519(
+                bundle.unsigned_canonical_json().as_bytes(),
                 sig,
-                &forge_key.public_key_bytes,
+                &self.forge_key.public_key_bytes,
             ),
             None => false,
         };
-        if !ok {
-            return false;
+
+        // Step 2 — each gate's signature against the named party's key.
+        let mut gate_results = Vec::with_capacity(bundle.gates.len());
+        for gate in &bundle.gates {
+            let mut errors = Vec::new();
+            let signature_valid = if gate.signature.is_none() {
+                errors.push("gate attestation carries no signature".to_string());
+                false
+            } else {
+                self.verify_gate_signature(gate).await.unwrap_or(false)
+            };
+            gate_results.push(GateVerificationResult {
+                name: gate.name.clone(),
+                gate_type: gate.gate_type.clone(),
+                signed_by: gate.signed_by.clone(),
+                signature_valid,
+                errors,
+            });
         }
+
+        // Step 3 — the spec approval signature. Absent approval or absent
+        // signature is indeterminate (None) and reported as a finding — an
+        // approval without a cryptographic countersignature is never
+        // silently scored as verified.
+        let mut spec_findings: Vec<String> = Vec::new();
+        let spec_approval_valid = match &bundle.spec_approval {
+            None => None,
+            Some(approval) => match approval.signature.as_deref() {
+                None => {
+                    spec_findings.push(
+                        "spec approval carries no signature — not cryptographically countersigned"
+                            .to_string(),
+                    );
+                    None
+                }
+                Some(_) => match self.verify_spec_approval(approval).await {
+                    Ok(valid) => Some(valid),
+                    Err(e) => {
+                        spec_findings.push(format!("spec approval signature not verifiable: {e}"));
+                        Some(false)
+                    }
+                },
+            },
+        };
+
+        let mut result = assemble_verification_result(
+            bundle_signature_valid,
+            gate_results,
+            spec_approval_valid,
+            consistency_errors,
+        );
+        result.errors.extend(spec_findings);
+        Ok(result)
     }
 
-    true
+    /// Verify one gate attestation's signature over its canonical
+    /// unsigned JSON against the key of the party `signed_by` names.
+    async fn verify_gate_signature(&self, gate: &MergeGateAttestation) -> anyhow::Result<bool> {
+        let Some(sig) = gate.signature.as_deref() else {
+            return Ok(false);
+        };
+        let payload = gate.unsigned_gate_json();
+        // Resolve the named party's public key: "agent:<id>" → that gate
+        // agent's derived key; "forge" → the forge key. Any other
+        // identity names no key this verifier holds → not verified.
+        let public_key: Vec<u8> = match gate.signed_by.strip_prefix("agent:") {
+            Some(agent_id) if !agent_id.is_empty() => {
+                GateAgentSigner::derive(&self.forge_key, agent_id)
+                    .public_key_bytes()
+                    .to_vec()
+            }
+            None if gate.signed_by == "forge" => self.forge_key.public_key_bytes.clone(),
+            _ => return Ok(false),
+        };
+        let valid = verify_ed25519(payload.as_bytes(), sig, &public_key);
+        Ok(valid)
+    }
+
+    /// Verify the spec approval signature over the canonical unsigned
+    /// approval attestation against the approver's key. Agent approvers
+    /// ("agent:<id>") verify against the same per-agent key scheme the
+    /// gate signers use; any other approver identity has no
+    /// platform-resolvable key until the Sigstore/OIDC integration —
+    /// reported as an error, never scored as verified.
+    async fn verify_spec_approval(&self, approval: &SpecRefAttestation) -> anyhow::Result<bool> {
+        let sig = approval.signature.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("spec approval carries no signature — nothing to verify")
+        })?;
+        match approval.approver.strip_prefix("agent:") {
+            Some(agent_id) if !agent_id.is_empty() => {
+                let signer = GateAgentSigner::derive(&self.forge_key, agent_id);
+                Ok(verify_ed25519(
+                    approval.unsigned_spec_approval_json().as_bytes(),
+                    sig,
+                    signer.public_key_bytes(),
+                ))
+            }
+            _ => Err(anyhow::anyhow!(
+                "no platform-verifiable key for approver {:?} — Sigstore/OIDC key resolution arrives with the issuer identity integration",
+                approval.approver
+            )),
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -626,7 +738,10 @@ mod tests {
         let mr = make_mr();
         state.merge_requests.create(&mr).await.unwrap();
 
-        // Active, signed spec approval for the exact (path, sha).
+        // Active spec approval for the exact (path, sha). The ledger's
+        // signature is optional — seeded absent here (the honest default:
+        // no client-supplied Sigstore signature); the signed-approval
+        // verification path has its own tests below.
         let mut approval = gyre_domain::SpecApproval::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             "specs/system/identity-security.md",
@@ -634,7 +749,6 @@ mod tests {
             "user:jsell",
         );
         approval.approve(1_700_000_050).unwrap();
-        approval.signature = Some("<sigstore signature on spec approval>".to_string());
         state.spec_approvals.create(&approval).await.unwrap();
 
         let test_gate = make_gate(gyre_domain::GateType::TestCommand, "tests");
@@ -740,7 +854,9 @@ mod tests {
         assert!(bundle.spec_ref.is_some());
         let approval = bundle.spec_approval.as_ref().unwrap();
         assert_eq!(approval.approver, "user:jsell");
-        assert!(approval.signature.is_some());
+        // The ledger entry carries no signature, so the bundle carries
+        // none either — never fabricated.
+        assert!(approval.signature.is_none());
 
         // Author attestation (from the seeded provenance records).
         let author = bundle.author.as_ref().unwrap();
@@ -798,10 +914,33 @@ mod tests {
             .collect();
         assert_eq!(sigs.len(), 3, "each gate has its own signature");
 
-        // Every signature verifies against the signing party's real key.
+        // The full verification protocol passes on every component: the
+        // bundle signature, all three gate signatures, and the structural
+        // consistency check (the spec approval carries no signature, so
+        // its outcome is indeterminate — None — and is reported as a
+        // finding without failing the bundle).
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&bundle)
+            .await
+            .unwrap();
         assert!(
-            verify_merge_attestation_bundle(&bundle, &state.agent_signing_key),
-            "all signatures must verify"
+            result.valid,
+            "valid bundle must pass verification: {:?}",
+            result.errors
+        );
+        assert!(result.bundle_signature_valid);
+        assert!(result.consistency_check);
+        assert_eq!(result.gate_results.len(), 3);
+        assert!(result.gate_results.iter().all(|g| g.signature_valid));
+        assert_eq!(result.spec_approval_valid, None);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("spec approval carries no signature")),
+            "the unsigned approval must be reported, not silently passed: {:?}",
+            result.errors
         );
 
         // Serializes to valid JSON with the spec's field names.
@@ -818,16 +957,32 @@ mod tests {
         let mut bundle = generate_merge_attestation_bundle(&state, &mr, "789abc", 1_774_000_000)
             .await
             .unwrap();
-        assert!(verify_merge_attestation_bundle(
-            &bundle,
-            &state.agent_signing_key
-        ));
-
-        // Tamper with a gate status: the gate signature must fail.
-        bundle.gates[0].status = "Failed".to_string();
         assert!(
-            !verify_merge_attestation_bundle(&bundle, &state.agent_signing_key),
-            "tampered gate status must fail verification"
+            state
+                .attestation_verifier
+                .verify_bundle(&bundle)
+                .await
+                .unwrap()
+                .valid
+        );
+
+        // Tamper with a gate status: exactly that gate's signature must
+        // fail, the others must stay valid.
+        bundle.gates[0].status = "Failed".to_string();
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&bundle)
+            .await
+            .unwrap();
+        assert!(!result.valid, "tampered gate status must fail verification");
+        assert!(!result.gate_results[0].signature_valid);
+        assert!(result.gate_results[1].signature_valid);
+        assert!(result.gate_results[2].signature_valid);
+        assert!(result.bundle_signature_valid, "gate tampering must not break the bundle signature (it covers the tampered bytes) — it fails because the gate signature no longer matches");
+        assert!(
+            result.errors.iter().any(|e| e.contains("tests")),
+            "the failed gate must be named in the errors: {:?}",
+            result.errors
         );
 
         // Restore, then tamper with merged_at: the bundle signature must fail.
@@ -836,10 +991,16 @@ mod tests {
             .unwrap();
         let mut tampered = fresh.clone();
         tampered.merged_at += 1;
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&tampered)
+            .await
+            .unwrap();
         assert!(
-            !verify_merge_attestation_bundle(&tampered, &state.agent_signing_key),
+            !result.valid,
             "tampered merged_at must fail the bundle signature"
         );
+        assert!(!result.bundle_signature_valid);
 
         // Swap a gate agent's signature onto a forge-signed gate: the
         // named party's key must reject it.
@@ -856,10 +1017,21 @@ mod tests {
             .find(|g| g.signed_by == "forge")
             .unwrap();
         forge_gate.signature = Some(agent_sig);
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&swapped)
+            .await
+            .unwrap();
         assert!(
-            !verify_merge_attestation_bundle(&swapped, &state.agent_signing_key),
+            !result.valid,
             "a gate-agent signature must not verify under the forge key"
         );
+        let swapped_gate = result
+            .gate_results
+            .iter()
+            .find(|g| g.signed_by == "forge" && !g.signature_valid)
+            .expect("the forge-signed gate with the swapped signature must be flagged");
+        assert!(!swapped_gate.signature_valid);
     }
 
     #[tokio::test]
@@ -871,19 +1043,157 @@ mod tests {
             .unwrap();
 
         bundle.bundle_signature = None;
-        assert!(!verify_merge_attestation_bundle(
-            &bundle,
-            &state.agent_signing_key
-        ));
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&bundle)
+            .await
+            .unwrap();
+        assert!(!result.valid);
+        assert!(!result.bundle_signature_valid);
+        assert!(
+            result.errors.iter().any(|e| e.contains("bundle_signature")),
+            "missing bundle signature must be reported: {:?}",
+            result.errors
+        );
 
         let mut bundle2 = generate_merge_attestation_bundle(&state, &mr, "789abc", 1_774_000_000)
             .await
             .unwrap();
         bundle2.gates[0].signature = None;
-        assert!(!verify_merge_attestation_bundle(
-            &bundle2,
-            &state.agent_signing_key
-        ));
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&bundle2)
+            .await
+            .unwrap();
+        assert!(!result.valid);
+        assert!(!result.gate_results[0].signature_valid);
+        // The missing gate signature is also a consistency error (the
+        // consistency check requires every gate attestation to carry one).
+        assert!(!result.consistency_check);
+    }
+
+    /// A bundle whose structural consistency is broken fails step 5 even
+    /// though every present signature is cryptographically intact: here a
+    /// gate attestation is moved under a reviewer identity that does not
+    /// match its signer (the "all gate results reference the same MR and
+    /// reviewer/signer" binding).
+    #[tokio::test]
+    async fn inconsistent_reviewer_binding_fails_consistency_check() {
+        let state = test_state();
+        let mr = seed(&state).await;
+        let mut bundle = generate_merge_attestation_bundle(&state, &mr, "789abc", 1_774_000_000)
+            .await
+            .unwrap();
+
+        // Rebind the review's OIDC subject to a different agent without
+        // re-signing: the reviewer/signer binding the consistency check
+        // enforces is broken (the gate's signed bytes changed too, so its
+        // signature fails alongside — the consistency failure is the
+        // step-5 verdict this test pins).
+        let gate = bundle
+            .gates
+            .iter_mut()
+            .find(|g| g.gate_type == "AgentReview")
+            .unwrap();
+        gate.reviewer_oidc_sub = Some("agent:not-the-reviewer".to_string());
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&bundle)
+            .await
+            .unwrap();
+        assert!(!result.valid);
+        assert!(
+            !result.consistency_check,
+            "reviewer identity mismatch must fail step 5"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("reviewer_oidc_sub")),
+            "got {:?}",
+            result.errors
+        );
+    }
+
+    /// Spec approval signatures verify end-to-end when present: an agent
+    /// approver's signature over the canonical unsigned approval
+    /// attestation verifies (Some(true)); a tampered payload or signature
+    /// fails (Some(false)); a user approver's opaque Sigstore signature
+    /// cannot be resolved to a platform key and is reported, never
+    /// silently passed.
+    #[tokio::test]
+    async fn spec_approval_signature_verification_round_trip() {
+        let state = test_state();
+        let mr = seed(&state).await;
+        let mut bundle = generate_merge_attestation_bundle(&state, &mr, "789abc", 1_774_000_000)
+            .await
+            .unwrap();
+
+        // Sign the approval as an agent approver with the same per-agent
+        // key scheme the gate signers use.
+        let mut approval = bundle.spec_approval.clone().unwrap();
+        approval.approver = "agent:security-gate-7".to_string();
+        let signer = GateAgentSigner::derive(&state.agent_signing_key, "security-gate-7");
+        let signature = signer
+            .sign(approval.unsigned_spec_approval_json().as_bytes())
+            .await
+            .unwrap();
+        approval.signature = Some(signature);
+        bundle.spec_approval = Some(approval.clone());
+        // The bundle signature must be re-computed over the changed bytes.
+        let forge = ForgeSigner::new(state.agent_signing_key.clone());
+        bundle.bundle_signature = Some(
+            forge
+                .sign(bundle.unsigned_canonical_json().as_bytes())
+                .await
+                .unwrap(),
+        );
+
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&bundle)
+            .await
+            .unwrap();
+        assert_eq!(result.spec_approval_valid, Some(true));
+        assert!(
+            result.valid,
+            "signed approval must verify: {:?}",
+            result.errors
+        );
+
+        // Tamper with the approval time after signing: the signature must fail.
+        let mut tampered = bundle.clone();
+        tampered.spec_approval.as_mut().unwrap().approved_at = Some(1);
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&tampered)
+            .await
+            .unwrap();
+        assert_eq!(result.spec_approval_valid, Some(false));
+        assert!(!result.valid);
+
+        // A user approver's opaque signature has no platform-resolvable
+        // key: reported as not verifiable, scored Some(false).
+        let mut user_signed = bundle.clone();
+        let mut ap = user_signed.spec_approval.clone().unwrap();
+        ap.approver = "user:jsell".to_string();
+        ap.signature = Some(BASE64.encode([0u8; 64]));
+        user_signed.spec_approval = Some(ap);
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&user_signed)
+            .await
+            .unwrap();
+        assert_eq!(result.spec_approval_valid, Some(false));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("no platform-verifiable key for approver")),
+            "got {:?}",
+            result.errors
+        );
     }
 
     /// F1 regression: the bundle's `author.attestation_level` must equal
@@ -1011,9 +1321,12 @@ mod tests {
         assert!(bundle.spec_ref.is_none());
         assert!(bundle.spec_approval.is_none());
         // Still a valid signed bundle.
-        assert!(verify_merge_attestation_bundle(
-            &bundle,
-            &state.agent_signing_key
-        ));
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&bundle)
+            .await
+            .unwrap();
+        assert!(result.valid, "got {:?}", result.errors);
+        assert_eq!(result.spec_approval_valid, None);
     }
 }

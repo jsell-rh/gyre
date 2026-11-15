@@ -1282,6 +1282,32 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing trace response")
     }
 
+    /// POST /api/v1/attestations/verify — run the merge attestation bundle
+    /// verification protocol (agent-gates.md §Part 3 Verification) over a
+    /// caller-supplied bundle. Returns the per-component result
+    /// (bundle signature, per-gate signatures, spec approval signature,
+    /// consistency, findings); a bundle that fails verification is a
+    /// valid answer here, not an error.
+    pub async fn verify_attestation(
+        &self,
+        bundle: &serde_json::Value,
+    ) -> Result<gyre_domain::attestation_verification::VerificationResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/attestations/verify", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(bundle)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("verify attestation failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing verification result")
+    }
+
     /// POST /api/v1/repos/:repo_id/specs/assist (SSE stream → collected `{diff, explanation}` responses)
     pub async fn spec_assist(
         &self,
