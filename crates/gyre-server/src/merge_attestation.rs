@@ -1116,6 +1116,78 @@ mod tests {
         );
     }
 
+    /// A forge self-attestation of an agent review is rejected by the
+    /// full protocol even when every signature is cryptographically
+    /// intact: the AgentReview gate is re-signed by the forge key (so its
+    /// signature verifies under that key) and the bundle signature is
+    /// recomputed over the changed bytes — the bundle must still fail on
+    /// the step-5 signing-party rule (agent-gates.md §What Gets Signed
+    /// and By Whom: "AgentReview results — Gate agent").
+    #[tokio::test]
+    async fn forge_signed_agent_review_gate_fails_verification() {
+        let state = test_state();
+        let mr = seed(&state).await;
+        let mut bundle = generate_merge_attestation_bundle(&state, &mr, "789abc", 1_774_000_000)
+            .await
+            .unwrap();
+
+        // Forge self-attests the agent review: claim the forge as signer
+        // and produce a real forge signature over the gate's bytes.
+        let gate = bundle
+            .gates
+            .iter_mut()
+            .find(|g| g.gate_type == "AgentReview")
+            .unwrap();
+        let forge = ForgeSigner::new(state.agent_signing_key.clone());
+        gate.signed_by = "forge".to_string();
+        gate.signature = Some(
+            forge
+                .sign(gate.unsigned_gate_json().as_bytes())
+                .await
+                .unwrap(),
+        );
+        // Re-sign the bundle so its signature covers the tampered bytes.
+        bundle.bundle_signature = Some(
+            forge
+                .sign(bundle.unsigned_canonical_json().as_bytes())
+                .await
+                .unwrap(),
+        );
+
+        let result = state
+            .attestation_verifier
+            .verify_bundle(&bundle)
+            .await
+            .unwrap();
+        assert!(
+            !result.valid,
+            "a forge-signed agent review must fail the full protocol"
+        );
+        assert!(
+            !result.consistency_check,
+            "the signing-party rule is a step-5 consistency invariant"
+        );
+        // The rejection is not a crypto failure: the forge signature over
+        // the gate's own bytes verifies — the protocol rejects *who*
+        // signed it, not the signature's validity.
+        assert!(result.bundle_signature_valid);
+        let review_gate = result
+            .gate_results
+            .iter()
+            .find(|g| g.gate_type == "AgentReview")
+            .unwrap();
+        assert!(review_gate.signature_valid);
+        assert_eq!(review_gate.signed_by, "forge");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("signed by the forge")),
+            "the signing-party violation must be named: {:?}",
+            result.errors
+        );
+    }
+
     /// Spec approval signatures verify end-to-end when present: an agent
     /// approver's signature over the canonical unsigned approval
     /// attestation verifies (Some(true)); a tampered payload or signature

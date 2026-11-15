@@ -158,7 +158,19 @@ pub fn check_bundle_consistency(bundle: &MergeAttestationBundle) -> Vec<String> 
                     gate.signed_by
                 ));
             }
-            None => {}
+            None => {
+                // signed_by == "forge": agent review/validation results
+                // are signed by the gate agent that produced them
+                // (agent-gates.md §What Gets Signed and By Whom) — a
+                // forge self-attestation of an agent gate would let a
+                // single party forge the multi-party bundle.
+                if is_agent_gate_type(&gate.gate_type) {
+                    errors.push(format!(
+                        "{label} is an {} gate signed by the forge — agent review results are signed by the gate agent that produced them",
+                        gate.gate_type
+                    ));
+                }
+            }
         }
     }
 
@@ -325,6 +337,23 @@ mod tests {
             errors
                 .iter()
                 .any(|e| e.contains("records reviewer security-gate-7")),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn agent_gate_signed_by_forge_fails_consistency() {
+        // The signing-party rule runs in both directions: an
+        // AgentReview/AgentValidation gate attestation signed by "forge"
+        // is a forge self-attestation of an agent review — exactly the
+        // single-party forgery the multi-party scheme exists to prevent
+        // (agent-gates.md §What Gets Signed and By Whom). The signature
+        // may verify against the forge key; consistency must still fail.
+        let mut bundle = sample_bundle();
+        bundle.gates[1].signed_by = "forge".to_string();
+        let errors = check_bundle_consistency(&bundle);
+        assert!(
+            errors.iter().any(|e| e.contains("signed by the forge")),
             "got {errors:?}"
         );
     }
