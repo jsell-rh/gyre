@@ -83,16 +83,16 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 
 ## Acceptance Criteria
 
-- [x] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
-- [x] Port traits for both invitation types
-- [x] SQLite adapter with migrations (check current migration number)
-- [x] All 5 tenant invitation API endpoints functional
-- [x] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
-- [x] Token generation uses cryptographically random bytes, stored as SHA-256 hash
-- [x] Invitation expiry background job marks expired invitations
-- [x] Bulk invite endpoint accepts array of invitations
-- [x] Routes registered in `api/mod.rs` with ABAC mappings
-- [ ] `cargo test --all` passes (server suite deferred to the independent verifier; see below)
+- [ ] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
+- [ ] Port traits for both invitation types
+- [ ] SQLite adapter with migrations (check current migration number)
+- [ ] All 5 tenant invitation API endpoints functional
+- [ ] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
+- [ ] Token generation uses cryptographically random bytes, stored as SHA-256 hash
+- [ ] Invitation expiry background job marks expired invitations
+- [ ] Bulk invite endpoint accepts array of invitations
+- [ ] Routes registered in `api/mod.rs` with ABAC mappings
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -100,10 +100,9 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 ## Shipped
 
-Tenant & workspace invitation flow, implemented and carried through multiple
-review/repair rounds on this branch; this round resolved the DIRTY merge
-state against current main head 9fb371ac (task-111 session management) with
-the retained implementation preserved (merge commit 47bd64d0):
+Tenant & workspace invitation flow, fully implemented and carried through
+multiple review/repair rounds on this branch (candidate b262a447, including
+the merge with main head 9fb371ac / task-111 session management at 47bd64d0):
 
 - **Domain entities** (`gyre-domain`): `TenantInvitation`, `WorkspaceInvitation`,
   `InvitationStatus` (Pending/Accepted/Declined/Expired/Revoked), per-tenant
@@ -136,48 +135,35 @@ the retained implementation preserved (merge commit 47bd64d0):
   non-member invitee is still denied on a workspace-mapped route, then exercises
   accept (204 + membership) and decline (204 + no membership).
 
-### This round: merge-conflict resolution (repair 145e1f10)
+### This round: contract repair 1c8b016b
 
-Resolved the merge of main head 9fb371ac (task-111 session management) into
-this branch; the implementation itself is unchanged. Four conflicted paths:
+No code change — the production fix on this branch is preserved as-is. The
+executor restored the assigned task document; this round re-applied the
+progress bookkeeping without touching the protected task text:
 
-- `crates/gyre-server/src/api/mod.rs` — the `users::` import conflict taken as
-  the union of both sides minus `list_invitations`/`revoke_invitation`: main's
-  users.rs carried task-124's parallel workspace-invitation handlers, but the
-  merged users.rs is this branch's version (those handlers were removed at the
-  prior repair in favor of task-110's `WorkspaceInvitation` model, which
-  registers the same routes from `api/invitations.rs`), so importing them would
-  not compile and registering them would duplicate routes. Session imports
-  (`list_my_sessions`, `revoke_my_session`, `revoke_all_my_sessions`,
-  `list_user_sessions`, `revoke_user_session`, `revoke_all_user_sessions`)
-  are kept — those handlers exist in the merged users.rs.
-- `crates/gyre-server/src/main.rs` — kept both background spawns:
-  `gyre_server::api::invitations::spawn_invitation_expiry` (task-110) and
-  `spawn_session_cleanup` (task-111).
-- `specs/coverage/system/user-management.md` — merged recount: rows 5/6/7/25
-  (task-110) and 12/26 (task-111 sessions) implemented; row 30 (§CLI) now
-  implemented because both formerly-open command groups resolve against live
-  endpoints in this tree (sessions → task-111, tenant invitations → task-110).
-- `specs/coverage/SUMMARY.md` — regenerated mechanically via
-  `scripts/update-coverage-summary.sh` (also picks up main's auto-merged
-  abac-policy-engine/agent-gates row changes): user-management 36 rows,
-  11 n/a, 7 task-assigned, 18 implemented; TOTAL 802/220/0/186/233/163 = 68%.
+- Restored the `commits:` attribution list (12 SHAs, same as the prior
+  checkpoint) so `scripts/check-task-commit-attribution.sh` passes — the
+  executor's restore had wiped it, leaving 9 task-labeled product-surface
+  commits invisible to review scoping.
+- Re-added this `## Shipped` section (it was removed with the restore).
+- Set `progress: ready-for-review`.
+- The Acceptance Criteria checkboxes are left exactly as assigned (unchecked);
+  the prior round's `[x]` edits were the protected-task-text change that
+  triggered this repair, so completion is documented here instead.
 
 ### Verification evidence (this round)
 
 - `cargo check -p gyre-server` and `cargo check -p gyre-server --tests` —
-  clean (exit 0, no errors).
-- `cargo test -p gyre-domain` — 539 + 8 passed.
-- `cargo test -p gyre-adapters` — 545 passed (includes the invitation and
-  session repository/migration adapter tests).
-- Mechanical invariant checks PASS: `check-arch`, `check-abac-route-registry`,
-  `check-migration-versions`, `check-abac-exempt-handlers`,
-  `check-dead-message-kinds`, `check-mem-port-contracts`,
-  `check-in-memory-state-stores`, `check-migration-sql-portability`,
-  `check-unbounded-external-http`.
-- Static duplicate-route scan of the merged `api/mod.rs`: 309 registrations,
-  no duplicate paths (axum panics on duplicates at router construction).
-- Server test compilation/run is left to the independent verifier per the
-  4 GiB budget rule; the suites to execute there:
-  `cargo test -p gyre-server invitations`, `cargo test -p gyre-server sessions`,
-  and `cargo test --all`.
+  clean (exit 0).
+- `cargo test -p gyre-domain invitation` — 4 passed, 0 failed.
+- `cargo test -p gyre-adapters invitation` — 5 passed, 0 failed.
+- Mechanical invariant checks PASS: `check-arch`, `check-migration-versions`,
+  `check-abac-route-registry`, `check-mem-port-contracts`,
+  `check-migration-sql-portability`, `check-task-commit-attribution`
+  (after attribution restore).
+- No active merge/rebase: `main` = `origin/main` = 9fb371ac, already merged
+  via 47bd64d0; the earlier DIRTY-merge finding 145e1f10 remains resolved.
+- Server test execution is left to the independent verifier per the 4 GiB
+  budget rule; the suites to execute there: `cargo test -p gyre-server
+  invitations`, `cargo test -p gyre-server sessions`, and `cargo test --all`.
+  Evidence retained under /tmp/stage/review-evidence/round-contract-repair.md.
