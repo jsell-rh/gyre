@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Verification"
-commits: ["c880471aebf2b922d0aa3e48187e8b9aa07e4b3c", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "795ce919c6ff6c49c3ea234c459a435d0ee19afc", "bdc62a832717bb37b5e5888002775b2f9d02ceaa"]
+commits: ["bdc62a832717bb37b5e5888002775b2f9d02ceaa", "795ce919c6ff6c49c3ea234c459a435d0ee19afc", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "c880471aebf2b922d0aa3e48187e8b9aa07e4b3c"]
 ---
 
 ## Spec Excerpt
