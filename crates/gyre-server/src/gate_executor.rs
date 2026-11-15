@@ -7949,7 +7949,7 @@ specs:
                 eventually(|| async {
                     state
                         .notifications
-                        .list_for_user(uid, None, None, None, None, None, 50, 0)
+                        .list_for_user(uid, None, None, None, None, None, &[], 50, 0)
                         .await
                         .unwrap()
                         .iter()
