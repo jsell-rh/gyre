@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["9843f5c1470952ccbe14e9ff1dc0c3cddb9a7e7d", "9a1ab6010c79b2d9c6470aa0c53127fb5b30cc3e", "d1e30d9cfde4d02a432e84adf31c4656b21d877e", "9293115418c199d2d0ee0d75f207b3b37cfcd721", "e743177f5edecc31d937f136291c548146ef3d81", "07bb5685fe8d5e220c3b62259a102967104f411b", "a69b9ed8d8f1071a2198346da7e4392df921bb93", "d07a957fcf768d4d116f3e527788da7a2acb6076", "bc1d0c0cc30b775dc20f68cf5c2789e01a1ad5ce", "17bfb44719748cdaeb4e36a168acc996b778cb27", "22c4f6b5c604bbb55c7530fd2bed7733b743f492", "4d1d81b3e5d7ffdb22b7c6cb83fb4199457824e9", "eaca83fb8c0bf871c51a7ff7dc9adaea4b9f83ad", "062f925e2d5abdf4196291df05fac6cf9e9fbd06", "b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["9843f5c1470952ccbe14e9ff1dc0c3cddb9a7e7d", "9a1ab6010c79b2d9c6470aa0c53127fb5b30cc3e", "d1e30d9cfde4d02a432e84adf31c4656b21d877e", "9293115418c199d2d0ee0d75f207b3b37cfcd721", "e743177f5edecc31d937f136291c548146ef3d81", "07bb5685fe8d5e220c3b62259a102967104f411b", "a69b9ed8d8f1071a2198346da7e4392df921bb93", "d07a957fcf768d4d116f3e527788da7a2acb6076", "bc1d0c0cc30b775dc20f68cf5c2789e01a1ad5ce", "17bfb44719748cdaeb4e36a168acc996b778cb27", "22c4f6b5c604bbb55c7530fd2bed7733b743f492", "4d1d81b3e5d7ffdb22b7c6cb83fb4199457824e9", "eaca83fb8c0bf871c51a7ff7dc9adaea4b9f83ad", "062f925e2d5abdf4196291df05fac6cf9e9fbd06", "b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "11f52013"]
 ---
 
 ## Spec Excerpt
@@ -132,52 +132,46 @@ union, and the `gate` `JudgmentType` variant), the write paths that produce
 those events (workspace trust transitions, human MR approvals past failed
 gates, meta-spec publishes), and read-only auth-provider info
 (`oidc_issuer`, `last_login_at`) on `GET /api/v1/users/me`. The HSI §12 spec
-was amended to name the concrete aggregation sources and the
+names the concrete aggregation sources and the
 `approval|rejection|gate|trust|meta-spec` type values.
 
-### This round: merge repair against main 9fb371ac (task-111 session management)
+### This round: verification repair (durable finding 8d6fe3d8)
 
-Main advanced to 9fb371ac (task-111 user sessions + task-131 ABAC policy
-CLI); merging it into this branch conflicted in four files (durable finding
-96a04041). Resolution keeps both feature sets: task-111's
-`SessionRepository` (sqlite/postgres adapters, `MemSessionRepository`, API
-routes, migration 000064) alongside task-209's judgment-ledger aggregation —
-imports combined, `sessions` wired next to the `with_sources` judgment ledger
-in `mem.rs`, task-209's judgment-ledger implementation kept at the branch
-version (SQL workspace filter + audit sources), and `docs/api-reference.md`
-carries both the new session endpoint rows and the enhanced
-judgments/notifications rows. No new queries, routes, or exemptions were
-introduced by the resolution.
+`cargo test --all` on the pre-merge candidate df1d05cd failed exactly one
+test, `api::merge_requests::tests::human_approval_on_failed_gate_writes_gate_override_event`:
+the test built its state with `make_test_state_with_jwt()` but never called
+`seed_repo(&state)`, so `create_test_mr`'s POST was refused by `create_mr`'s
+unknown-repository check (M34 hierarchy enforcement) and the helper panicked
+on the missing response `id`. Fix: add the missing `seed_repo` call
+(commit 11f52013) — the test now reaches the assertions it was written for
+(agent-token approval writes no event; human JWT approval writes one
+`gate_override` per FAILED gate with mr_id/gate_id/from/to; the ledger
+surfaces it under `?type=gate`). The main merge e1a7fc43 (task-142
+attestation) was already on the branch and is untouched by this repair.
 
-### Test evidence (head b9f093aa)
+### Test evidence (head 11f52013)
 
-- `cargo check --workspace --all-targets` (SKIP_WEB_BUILD=1): clean — all
-  crates and test targets type-check on the merged tree.
-- `cargo test -p gyre-adapters`: 551 passed, 0 failed (includes the 27
-  user_profile tests — task-209 judgment-ledger aggregation/filtering tests
-  and task-111 session roundtrip/scoping/retention tests coexisting).
-- `cargo test -p gyre-domain --lib`: 536 passed, 0 failed.
-- `cargo fmt --check` on the three resolved Rust files: clean.
-- Mechanical checks exit 0: check-arch, check-mem-port-contracts,
-  check-migration-versions, check-in-memory-state-stores,
-  check-abac-route-registry, check-abac-exempt-handlers, check-mcp-write-tools,
-  check-dead-message-kinds, check-byte-slice-truncation,
-  check-inert-enforcement, check-lossy-secret-conversion
-  (logs in review-evidence).
-- `scripts/check-tenant-filter.sh` cannot execute in this sandbox: it uses
-  gawk's 3-argument `match()` and only mawk 1.3.4 is installed (awk parse
-  error before any file is scanned — environmental, not a code finding; the
-  resolution adds no new Diesel read queries). Remote verification should
-  run it under gawk.
-- web/ is untouched by this merge (byte-identical to the previously verified
-  branch state), so `cd web && npm ci && npm test` is unchanged from prior
-  verified rounds.
+- `cargo check -p gyre-server --all-targets` (SKIP_WEB_BUILD=1): clean —
+  the server crate and its test targets type-check on the merged tree with
+  the fix.
+- `cargo fmt --check -p gyre-server`: clean.
+- Full-history mechanical checks (findings.log, run on this tree): all
+  exit 0 (arch, ABAC registry/exempt handlers, MCP write tools, migration
+  versions/SQL portability, dead message kinds, byte-slice truncation,
+  relative-path defaults, fail-open ref resolution, mem port contracts,
+  scope/lossy/forwarded/in-memory-store/unbounded-HTTP checks,
+  task-commit attribution).
+- The failing gyre-server test itself cannot execute in this sandbox
+  (build wrapper: server test builds exceed the 4 GiB model budget) — see
+  the verifier list below.
 
 ### Verifier must run (blocked here by the 4 GiB build budget)
 
-- `cargo test --all` on the merge head b9f093aa.
-- `cargo test -p gyre-server` (session middleware/endpoints + judgment
-  write-path tests on the merged tree).
+- `cargo test -p gyre-server --lib
+  api::merge_requests::tests::human_approval_on_failed_gate_writes_gate_override_event`
+  on head 11f52013 (the repaired test).
+- `cargo test --all` on head 11f52013.
 - `cd web && npm ci && npm test`.
-- `scripts/check-tenant-filter.sh` under gawk.
+- `scripts/check-tenant-filter.sh` under gawk (mawk-only sandbox cannot
+  parse its 3-argument `match()`).
 - Exact-head GitHub checks on the published PR head.
