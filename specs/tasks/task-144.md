@@ -3,7 +3,7 @@ title: "Implement attestation bundle storage targets"
 spec_ref: "agent-gates.md §Part 3 Storage"
 depends_on:
   - task-142
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-gates.md §Storage"
 commits: ["164c44be9b1b3cc779244d7cd9e02007d5d57bbd"]
