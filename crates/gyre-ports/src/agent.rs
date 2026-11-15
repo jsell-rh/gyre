@@ -4,6 +4,7 @@ use gyre_common::Id;
 use gyre_domain::{Agent, AgentStatus, AgentUsage};
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait AgentRepository: Send + Sync {
     async fn create(&self, agent: &Agent) -> Result<()>;
     async fn find_by_id(&self, id: &Id) -> Result<Option<Agent>>;

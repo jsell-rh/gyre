@@ -886,7 +886,7 @@ impl AgentRepository for MemAgentRepository {
             .filter(|a| a.spawned_by.as_deref() == Some(spawned_by))
             .cloned()
             .collect();
-        out.sort_by(|a, b| b.spawned_at.cmp(&a.spawned_at));
+        out.sort_by_key(|a| std::cmp::Reverse(a.spawned_at));
         Ok(out)
     }
 
@@ -1152,7 +1152,7 @@ impl ReviewRepository for MemReviewRepository {
             .filter(|r| r.reviewer_agent_id == reviewer_agent_id)
             .cloned()
             .collect();
-        reviews.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        reviews.sort_by_key(|r| std::cmp::Reverse(r.created_at));
         Ok(reviews)
     }
 

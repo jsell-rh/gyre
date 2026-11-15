@@ -419,15 +419,18 @@ pub async fn get_user_activity(
     // MR reviews — reviewer_agent_id is the user id (merge_requests.rs
     // rejects a human review recorded under any other identity).
     for review in state.reviews.list_by_reviewer(user.id.as_str()).await? {
-        let (mr_title, repo_id, workspace_id) =
-            match state.merge_requests.find_by_id(&review.merge_request_id).await {
-                Ok(Some(mr)) => (
-                    Some(mr.title),
-                    Some(mr.repository_id.to_string()),
-                    Some(mr.workspace_id.to_string()),
-                ),
-                _ => (None, None, None),
-            };
+        let (mr_title, repo_id, workspace_id) = match state
+            .merge_requests
+            .find_by_id(&review.merge_request_id)
+            .await
+        {
+            Ok(Some(mr)) => (
+                Some(mr.title),
+                Some(mr.repository_id.to_string()),
+                Some(mr.workspace_id.to_string()),
+            ),
+            _ => (None, None, None),
+        };
         events.push((
             review.created_at,
             serde_json::json!({
@@ -514,7 +517,7 @@ pub async fn get_user_activity(
     }
 
     // Newest first, then paginate.
-    events.sort_by(|a, b| b.0.cmp(&a.0));
+    events.sort_by_key(|&(ts, _)| std::cmp::Reverse(ts));
     let total = events.len();
     let page: Vec<serde_json::Value> = events
         .into_iter()
@@ -544,7 +547,11 @@ pub async fn get_user_stats(
 
     // MRs reviewed: human reviews are recorded under the user id, so this
     // is an exact (globally unique id) attribution.
-    let mrs_reviewed = state.reviews.list_by_reviewer(user.id.as_str()).await?.len() as u64;
+    let mrs_reviewed = state
+        .reviews
+        .list_by_reviewer(user.id.as_str())
+        .await?
+        .len() as u64;
 
     // Specs approved: ledger rows with approved_at set that were neither
     // revoked nor rejected. Deduped across the caller's identity forms.
@@ -5973,7 +5980,11 @@ mod tests {
         state.teams.create(&team).await.unwrap();
         state
             .teams
-            .add_member(&TeamMembership::new(team.id.clone(), owner.id.clone(), 1_700_000_001))
+            .add_member(&TeamMembership::new(
+                team.id.clone(),
+                owner.id.clone(),
+                1_700_000_001,
+            ))
             .await
             .unwrap();
 
@@ -6061,11 +6072,8 @@ mod tests {
 
         // 3. One agent spawn (spawn paths record the raw principal id —
         //    the display name for user principals).
-        let mut agent = gyre_domain::Agent::new(
-            Id::new("agent-1"),
-            "implementer-1",
-            1_700_000_300u64,
-        );
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("agent-1"), "implementer-1", 1_700_000_300u64);
         agent.workspace_id = Id::new(ws_id.clone());
         agent.spawned_by = Some(owner.display_name.clone());
         state.agents.create(&agent).await.unwrap();
@@ -6101,7 +6109,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let stats = body_json(resp).await;
         assert_eq!(stats["mrs_reviewed"], 1, "only the owner's review counts");
-        assert_eq!(stats["specs_approved"], 1, "the rejected entry is not an approval");
+        assert_eq!(
+            stats["specs_approved"], 1,
+            "the rejected entry is not an approval"
+        );
         assert_eq!(stats["agents_spawned"], 1);
 
         // ── Activity feed ─────────────────────────────────────────────
@@ -6121,14 +6132,27 @@ mod tests {
         let events = feed["activity"].as_array().unwrap();
         assert_eq!(events.len(), 4, "review + approval + rejection + spawn");
         // Newest first: agent spawn (300) > approval (200) > review (100) > rejection (50).
-        let types: Vec<&str> = events.iter().map(|e| e["event_type"].as_str().unwrap()).collect();
-        assert_eq!(types, ["agent_spawned", "spec_approved", "mr_review", "spec_rejected"]);
+        let types: Vec<&str> = events
+            .iter()
+            .map(|e| e["event_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "agent_spawned",
+                "spec_approved",
+                "mr_review",
+                "spec_rejected"
+            ]
+        );
         // The review event joins the MR for navigation.
         assert_eq!(events[2]["mr_id"], "mr-1");
         assert_eq!(events[2]["mr_title"], "Add feature");
         assert_eq!(events[2]["repo_id"], "repo-1");
         // The other reviewer's review is absent.
-        assert!(events.iter().all(|e| e["event_type"] != "mr_review" || e["mr_id"] == "mr-1"));
+        assert!(events
+            .iter()
+            .all(|e| e["event_type"] != "mr_review" || e["mr_id"] == "mr-1"));
 
         // Pagination: limit=2 returns the two newest events.
         let resp = app
@@ -6148,8 +6172,12 @@ mod tests {
 
         // ── A same-tenant peer can read the feed (same ABAC "user" read
         //    mapping as the profile itself; containment is the only gate). ──
-        let (_, peer_key) =
-            seed_keyed_user(&state, "peer-viewer", vec![gyre_domain::UserRole::Developer]).await;
+        let (_, peer_key) = seed_keyed_user(
+            &state,
+            "peer-viewer",
+            vec![gyre_domain::UserRole::Developer],
+        )
+        .await;
         let resp = app
             .clone()
             .oneshot(
@@ -6165,10 +6193,16 @@ mod tests {
 
         // ── Tenant containment: a cross-tenant caller gets 404 on both
         //    endpoints (indistinguishable from a nonexistent handle). ──
-        let (_, key) = seed_keyed_user(&state, "t2-viewer", vec![gyre_domain::UserRole::Developer]).await;
+        let (_, key) =
+            seed_keyed_user(&state, "t2-viewer", vec![gyre_domain::UserRole::Developer]).await;
         // Re-bind the seeded viewer to t-2 for the cross-tenant case
         // (seed_keyed_user always binds to t-1).
-        let mut t2 = state.users.find_by_username("t2-viewer").await.unwrap().unwrap();
+        let mut t2 = state
+            .users
+            .find_by_username("t2-viewer")
+            .await
+            .unwrap()
+            .unwrap();
         t2.tenant_id = Some(Id::new("t-2"));
         state.users.update(&t2).await.unwrap();
         for path in ["activity", "stats"] {
@@ -6183,7 +6217,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path} must 404 cross-tenant");
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must 404 cross-tenant"
+            );
         }
     }
 

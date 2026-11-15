@@ -4,6 +4,7 @@ use gyre_common::Id;
 use gyre_domain::{Review, ReviewComment};
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait ReviewRepository: Send + Sync {
     async fn add_comment(&self, comment: &ReviewComment) -> Result<()>;
     async fn list_comments(&self, mr_id: &Id) -> Result<Vec<ReviewComment>>;
