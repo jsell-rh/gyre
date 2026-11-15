@@ -10,6 +10,7 @@ coverage_sections:
 commits:
   - fc06e371
   - 978faf1a
+  - d813d79b
 ---
 
 ## Spec Excerpt
