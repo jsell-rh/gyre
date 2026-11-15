@@ -3775,7 +3775,7 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path)
             .cloned()
             .collect();
-        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn find_by_spec_sha(
@@ -3791,7 +3791,7 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path && a.spec_sha == spec_sha)
             .cloned()
             .collect();
-        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
@@ -3803,7 +3803,7 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path && a.is_active())
             .cloned()
             .collect();
-        out.reverse();
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApproval>> {
@@ -3819,7 +3819,10 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.approver_id == approver_id)
             .cloned()
             .collect();
-        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        // The store is a HashMap (arbitrary iteration order), so ordering
+        // must be derived from the rows, not insertion: sort by id string
+        // descending, mirroring the SQL adapters' ORDER BY id DESC.
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str()));
         Ok(out)
     }
 

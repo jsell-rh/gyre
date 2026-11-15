@@ -370,16 +370,22 @@ pub struct ListUsersParams {
 // ─── Public profile activity & stats (user-management.md §User Profile
 //     Page — /@{username} surface) ───────────────────────────────────────
 
-/// The `approver_id` strings a user's spec-approval records can carry.
-/// The approval path (specs.rs `approve_spec`) derives the approver from
-/// the verified principal and records `user:{agent_id}`; for user
-/// principals `agent_id` is the display name. Both name forms are matched
-/// so records written under the username (the default display name at
-/// provisioning) still attribute after a display-name change.
+/// The `approver_id` strings a user's spec-approval ledger rows can carry.
+/// The production writer (specs.rs `approve_spec`) records the canonical
+/// user Id for human principals — pinned by the specs.rs regression "ledger
+/// approver_id must be the canonical user Id" — so that form is primary.
+/// The `user:{display_name}` / `user:{username}` forms are legacy rows from
+/// the pre-canonical-Id writer (the default display name at provisioning is
+/// the username, so both name spellings occur after a display-name change);
+/// they are matched so historical approvals still attribute. Rows matched
+/// under several forms are deduped by ledger id at the call sites.
 fn approval_identity_forms(user: &User) -> Vec<String> {
-    let mut forms = vec![format!("user:{}", user.display_name)];
-    if user.username != user.display_name {
-        forms.push(format!("user:{}", user.username));
+    let mut forms = vec![user.id.to_string()];
+    for name in [&user.display_name, &user.username] {
+        let form = format!("user:{}", name);
+        if !forms.contains(&form) {
+            forms.push(form);
+        }
     }
     forms
 }
@@ -6326,13 +6332,17 @@ mod tests {
             .await
             .unwrap();
 
-        // 2. One approved spec ledger entry + one rejected entry, recorded
-        //    under `user:{display_name}` (the identity approve_spec writes).
+        // 2. One approved spec ledger entry recorded under the canonical
+        //    user Id — the form approve_spec writes for human principals
+        //    (pinned by the specs.rs regression "ledger approver_id must be
+        //    the canonical user Id") — plus one rejected entry under the
+        //    legacy `user:{display_name}` form, pinning that historical
+        //    rows still attribute.
         let mut approved = gyre_domain::SpecApproval::new(
             Id::new("approval-1"),
             "specs/system/vision.md",
             "a".repeat(40),
-            format!("user:{}", owner.display_name),
+            owner.id.to_string(),
         );
         approved.approve(1_700_000_200).unwrap();
         state.spec_approvals.create(&approved).await.unwrap();
