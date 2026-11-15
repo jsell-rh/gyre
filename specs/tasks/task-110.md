@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["43b15db3df88aed619f631a209e0cce124594100", "8833f8d99ccd1536a06ad81e364f80efc5c3f330", "01958bc011244ae4a4c06258baec597a00d8134d", "9f9be53014102d44e5e8c148d21b580448c226c7", "d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb"]
+commits: ["43b15db3df88aed619f631a209e0cce124594100", "8833f8d99ccd1536a06ad81e364f80efc5c3f330", "01958bc011244ae4a4c06258baec597a00d8134d", "9f9be53014102d44e5e8c148d21b580448c226c7", "d1103854d71b5b8adec5f2c7e03d691f7e8dc059", "5df8f2b136b1ad5792b58269cb4dc778ec301b05", "e52fea4f3bfc0ce1a57f99b0db6c98f55fe14209", "6bef61b7f7c9d5ccf391a9514a9064b8888d10f5", "ea366b150438e6b185edcf812cab5c5b1384b77a", "797cf52f94910a8c8bb9a5ae3f4f59868a99d820", "c1de316bd3c1f9b2fd09689891f58f36abf95c66", "8c469c538bd84cf880cb72522855c66a7a8f7d4d", "0f4fea9aa717616b17ad1c76bc868d21906e22cc", "8f66d5a436ac2926fa8b12714abc34540a81d1fb", "758462f45d6b162bc273c4a676e6bb33442e5dde"]
 ---
 
 ## Spec Excerpt
@@ -101,12 +101,13 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 ## Shipped
 
 Tenant & workspace invitation flow, fully implemented and carried through
-multiple review/repair rounds on this branch (latest: rebase repair onto
-assignment base b8d63b0d — task-113 in-app notification UI & email templates —
-merged at 1ada3106; the merge brought task-113's rows 19/20 into the coverage
-matrix and touched the invitation surface in no file: the auto-merged
-user.rs/users.rs/lib.rs/main.rs hunts are purely additive task-113 changes
-(email module, `EmailConfig.type_overrides`, `NotificationPush` fan-out)):
+multiple review/repair rounds on this branch. Latest round: rebase onto
+assignment base 706bc7bd — task-144 attestation bundle storage targets —
+merged at cd0f85ff (auto-merge, no conflicts; the base touches only additive
+task-144 files — attestation_storage.rs, rekor.rs, merge_attestation.rs,
+mem.rs, merge_processor.rs, middleware.rs — and `git diff 706bc7bd HEAD` is
+empty for every invitation-surface file), plus repair of the retained
+verification finding 4b40530b (clippy) in commit 758462f4:
 
 - **Domain entities** (`gyre-domain`): `TenantInvitation`, `WorkspaceInvitation`,
   `InvitationStatus` (Pending/Accepted/Declined/Expired/Revoked), per-tenant
@@ -144,6 +145,14 @@ user.rs/users.rs/lib.rs/main.rs hunts are purely additive task-113 changes
   variant are repaired in place by the PG-only post-migration hook
   `postgres/repair.rs::ensure_invitation_timestamps_bigint`
   (information_schema check + `ALTER COLUMN ... TYPE BIGINT`, idempotent).
+  Verification 4b40530b flagged `clippy::redundant_field_names` at
+  `postgres/repair.rs:41` — the diesel_derives 2.3.7 `QueryableByName`
+  derive expands to `Self { field: field }` with spans mapped onto the
+  `ColumnRow` declaration, the same known false positive already allowed in
+  `postgres/search.rs`, `postgres/analytics.rs`, `sqlite/search.rs`, and
+  `sqlite/analytics.rs`; 758462f4 scopes the lint off at module level in
+  `postgres/repair.rs` with the sibling explanatory comment (no hand-written
+  `field: field` initializations exist in the file).
 - **Background expiry job** marks `Pending` invitations past `expires_at` as
   `Expired`; handlers also lazy-expire on touch.
 - **Tests** include a production-chain regression
@@ -160,20 +169,22 @@ user.rs/users.rs/lib.rs/main.rs hunts are purely additive task-113 changes
 
 ### Test evidence
 
-Executed on the merged tree (base b8d63b0d) in this round (all exit 0):
-`cargo check -p gyre-server -p gyre-domain -p gyre-adapters -p gyre-ports`,
-`cargo test -p gyre-domain` (543 passed), `cargo test -p gyre-adapters`
-(545 passed; invitation suite 5 passed), `cargo test -p gyre-common -p gyre-ports`
+Executed in earlier rounds on the pre-merge tree (all exit 0): `cargo check
+-p gyre-server -p gyre-domain -p gyre-adapters -p gyre-ports`, `cargo test
+-p gyre-domain` (543 passed), `cargo test -p gyre-adapters` (545 passed;
+invitation suite 5 passed), `cargo test -p gyre-common -p gyre-ports`
 (125 passed), `cargo test -p gyre-cli invitation` (1 passed), and the
 mechanical gates `check-arch`, `check-abac-route-registry`,
 `check-abac-exempt-handlers`, `check-migration-versions`,
-`check-mem-port-contracts`, `check-mcp-write-tools`, `check-dead-message-kinds`;
-full `scripts/check-*.sh` sweep compared against pre-merge HEAD shows no new
-failures beyond the (now-restored) task attribution frontmatter. Coverage
-matrix resolved for the merge: rows 25-30 kept from this branch, rows 19/20
-(task-113) adopted from the base, SUMMARY regenerated mechanically
-(user-management 36 rows: 11 n/a, 0 not-started, 5 task-assigned,
-20 implemented, 80%). Evidence: `/tmp/stage/review-evidence/merge-b8d63b0d.txt`.
-Full `cargo test -p gyre-server` (incl. the `api::invitations` suite) and
-`cargo test --all` remain recorded for the independent verifier (sandbox
-4 GiB build-wrapper limit).
+`check-mem-port-contracts`, `check-mcp-write-tools`, `check-dead-message-kinds`.
+This round (tree at 758462f4, after the 706bc7bd base merge): `rustfmt --check`
+and `cargo check -p gyre-adapters` exit 0, and `cargo clippy -p gyre-adapters
+--all-targets` exits 0 with zero `postgres/repair.rs` findings (the 4b40530b
+finding reproduced and confirmed gone; remaining `redundant_field_names`
+hits in postgres/sqlite `audit.rs` are pre-existing baseline on lines
+identical to the assignment base). Evidence:
+`/tmp/stage/review-evidence/clippy-repair.txt`. Full `cargo test -p
+gyre-server` (incl. the `api::invitations` suite) and `cargo test --all`
+remain recorded for the independent verifier (sandbox 4 GiB build-wrapper
+limit); the base merge touched no invitation-surface or test file, so the
+prior rounds' server-suite evidence stands for the merged tree.
