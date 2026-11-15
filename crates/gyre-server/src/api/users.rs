@@ -6146,6 +6146,23 @@ mod tests {
         assert_eq!(feed["activity"].as_array().unwrap().len(), 2);
         assert_eq!(feed["total"], 4);
 
+        // ── A same-tenant peer can read the feed (same ABAC "user" read
+        //    mapping as the profile itself; containment is the only gate). ──
+        let (_, peer_key) =
+            seed_keyed_user(&state, "peer-viewer", vec![gyre_domain::UserRole::Developer]).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{}/activity", owner.username))
+                    .header("Authorization", format!("Bearer {peer_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
         // ── Tenant containment: a cross-tenant caller gets 404 on both
         //    endpoints (indistinguishable from a nonexistent handle). ──
         let (_, key) = seed_keyed_user(&state, "t2-viewer", vec![gyre_domain::UserRole::Developer]).await;

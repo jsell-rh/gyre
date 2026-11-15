@@ -9,6 +9,7 @@ coverage_sections:
   - "user-management.md §User Profile Page (`/@{username}`)"
 commits:
   - fc06e371
+  - d6f0928b
 ---
 
 ## Spec Excerpt
