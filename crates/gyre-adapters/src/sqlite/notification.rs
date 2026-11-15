@@ -978,7 +978,8 @@ mod tests {
         .unwrap();
         let ids: Vec<&str> = active.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(
-            ids, vec!["n-read", "n-active"],
+            ids,
+            vec!["n-read", "n-active"],
             "resolved and dismissed rows are excluded; a read-but-active row is kept"
         );
 

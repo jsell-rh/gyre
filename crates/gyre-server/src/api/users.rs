@@ -2972,7 +2972,10 @@ mod tests {
                 1_700_000_000,
             )
         };
-        state.create_notification(&seed("notif-active")).await.unwrap();
+        state
+            .create_notification(&seed("notif-active"))
+            .await
+            .unwrap();
         let resolved = seed("notif-resolved");
         state.create_notification(&resolved).await.unwrap();
         state
