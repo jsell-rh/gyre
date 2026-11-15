@@ -19,6 +19,16 @@
 //! Idempotent: a no-op when the columns are already BIGINT (fresh
 //! databases, or a second run), and a no-op when the tables are absent.
 
+// `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+// `Self { field: field, … }` with spans mapped onto the `ColumnRow`
+// declaration below, so clippy::redundant_field_names fires on
+// derive-generated code. The generated construction sits in a dummy
+// module that inherits neither struct- nor field-level `#[allow]`
+// (verified on the postgres/search.rs and postgres/analytics.rs
+// siblings), so the lint is scoped off for this whole module instead.
+// Nothing in this file writes `field: field` initializations by hand.
+#![allow(clippy::redundant_field_names)]
+
 use anyhow::Result;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
