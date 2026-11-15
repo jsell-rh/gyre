@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Profile Page (`/@{username}`)"
-commits: ["23ebbb9c7aa80a3405ca92c7b33d868650958ea9", "b25f1060558b2e557a329efbda7eb9efcae231e8", "d813d79b46ef04732ccd88ffb83039a9e606293f", "978faf1a180b555eab24b739a2b5653f21bdcad3", "fc06e3713988b2ec3647e87e077da00b23ad52c1"]
+commits: ["23ebbb9c7aa80a3405ca92c7b33d868650958ea9", "b25f1060558b2e557a329efbda7eb9efcae231e8", "d813d79b46ef04732ccd88ffb83039a9e606293f", "978faf1a180b555eab24b739a2b5653f21bdcad3", "fc06e3713988b2ec3647e87e077da00b23ad52c1", "c60e741e10695fda2884e7fc03a9e7aa88cd9d85"]
 ---
 
 ## Spec Excerpt
@@ -81,8 +81,10 @@ satisfied is below.
 - `GET /api/v1/users/{username}/stats` — `{mrs_reviewed,
   specs_approved, agents_spawned}` from the same stores, with the same
   attribution rules the feed uses (reviews by globally-unique user id;
-  ledger entries matched against both identity forms `approve_spec`
-  writes, deduped by row id; spawns by recorded principal id).
+  ledger entries matched against the canonical user Id `approve_spec`
+  writes for human principals plus the legacy `user:{name}` forms for
+  pre-canonical-Id rows, deduped by row id; spawns by the recorded
+  principal id).
 - All three handlers share `resolve_public_user`: tenant containment
   with 404 for cross-tenant handles (indistinguishable from
   nonexistent). ABAC resolver maps the two new routes to the "user"
@@ -91,7 +93,8 @@ satisfied is below.
   `SpecApprovalRepository::list_by_approver`,
   `AgentRepository::list_by_spawner` — implemented in SQLite,
   PostgreSQL, mem, and the search-sync indexing wrappers (real queries,
-  newest-first ordering; SQLite adapter tests prove filter + ordering).
+  deterministic id-desc ordering matching the SQL adapters; SQLite
+  adapter tests prove filter + ordering).
 
 ### Frontend
 
@@ -117,83 +120,59 @@ satisfied is below.
   tightened to exact-text matches because the menu now also offers
   "Public profile".
 
-### Verification-gate repair round (b25f1060)
+### Review repair round (c60e741e)
 
-The prior candidate failed deterministic verification on the
-  diff-scoped rustfmt and clippy gates (no behavioral defect). Fixed in
-  b25f1060, all changes confined to lines this branch added:
+Independent review (4cacdd86) found the spec-approval attribution read
+the wrong identity key. Fixed in c60e741e:
 
-- rustfmt: `api/users.rs` reformatted where the check flagged (handler
-  and test code added by this task).
-- clippy `unnecessary_sort_by`: the three descending sorts
-  (`api/users.rs` activity merge, `mem.rs` `list_by_spawner` /
-  `list_by_reviewer`) now use `sort_by_key` + `Reverse`, matching the
-  existing `mem.rs` convention; ordering semantics unchanged
-  (descending, stable).
-- clippy `double_must_use`: `AgentRepository` and `ReviewRepository`
-  gained the same `#[allow(clippy::double_must_use)]` trait attribute
-  with rationale comment that base already carries on ~20 other port
-  traits (async-trait 0.1.89 injects `#[must_use]` into every expanded
-  method while the boxed-future return is already `#[must_use]`);
-  `SpecApprovalRepository` already had it. No verifier or exemption
-  file was touched.
-
-### Rebase resolution (6509b2c1)
-
-The published PR head (1574206a) conflicted with current main
-(81c24bf0, task-137 gate-failure feedback). Resolved by merging main
-into the branch (merge base c9cc1536):
-
-- Only conflicted file: `specs/coverage/SUMMARY.md` — resolved by
-  mechanical regeneration (`scripts/update-coverage-summary.sh`)
-  from the merged coverage files: agent-gates row from main
-  (task-137 closed row 9), user-management row from this branch
-  (task-114 row 23), and an HSI row recount that fixes a stale
-  candidate-side summary (HEAD's committed SUMMARY said 15/13 while
-  its own coverage file already said 14/14).
-- Source sides touch disjoint files (this branch: users API, ports,
-  adapters, mem, search_sync, web/src; main: message bus, gate
-  executor, merge processor, ralph loop, ws) — no semantic overlap;
-  `cargo check -p gyre-server --lib --tests` clean on the merged tree.
-- `web/dist` keeps the executor-restored assignment-base assets in
-  the merge commit; final integration rebuilds and publishes them
-  remotely. No dist files committed by this round.
-- This round's in-sandbox probes: cargo check (lib + tests) exit 0;
-  arch / ABAC route-registry / mem-port-contracts / task-commit-
-  attribution gates pass; focused vitest `PublicUserProfile.test.js`
-  8/8 and `AppShell.test.js` 77/77 (incl. the `/@{username}` routing
-  tests); `cargo test -p gyre-adapters --lib list_by` 27 passed.
-  Evidence: /tmp/stage/review-evidence/rebase-resolution.md.
+- `approval_identity_forms` matched only legacy `user:{display_name}` /
+  `user:{username}` ledger keys, but the production writer
+  (`approve_spec`) records the raw canonical user Id for every human
+  principal (pinned by the specs.rs regression "ledger approver_id must
+  be the canonical user Id") — disjoint key sets, so
+  `/stats` always returned `specs_approved=0` and the feed never showed
+  spec events for real human approvals. The canonical Id is now the
+  primary queried form; the legacy name forms remain so
+  pre-canonical-Id rows still attribute (call-site dedup by ledger id
+  unchanged). Residual, acknowledged: legacy name-form rows can
+  cross-attribute within a tenant when two users share a display name
+  (review noted this as minor/non-blocking; no discriminator exists on
+  those rows, and current-writer rows attribute exactly by canonical
+  Id). Agent-spawn attribution still matches the display-name principal
+  id because that is what the spawn path records — changing that
+  writer is out of this task's scope.
+- The mirrored-logic test was re-seeded via the production identity:
+  the approved ledger row now carries `owner.id.to_string()` (the form
+  `approve_spec` writes), and the rejected row keeps the legacy
+  `user:{display_name}` form to pin the historical fallback.
+- `MemSpecApprovalRepository` list methods claimed "insertion order:
+  newest first" but reversed arbitrary HashMap iteration; they now sort
+  by id string descending, mirroring the SQL adapters' `ORDER BY id
+  DESC` (the port contract's deterministic ordering).
 
 ### Test evidence
 
-- In-sandbox (rebase round): probes listed under "Rebase resolution"
-  above; full command log in
-  /tmp/stage/review-evidence/rebase-resolution.md.
-- In-sandbox (implementation round): full vitest suite 121 files / 2398
-  passed (41 skipped); focused `PublicUserProfile.test.js` (8 tests:
-  header, memberships + teams, stats, activity + MR navigation, empty
-  feed, 404 handling, HSI §12 NOT-list guard) and `AppShell.test.js`
-  routing tests for `/@{username}`; `cargo test -p gyre-adapters --lib
-  list_by` (27 passed, incl. the three new adapter tests); check-abac-
-  route-registry / check-arch / check-mem-port-contracts all pass.
-- In-sandbox (repair round): `python3 scripts/check-rustfmt-diff.py
-  706bc7bd` clean (14 files); `cargo clippy -p gyre-ports --all-targets`
-  emits no warnings for the three touched port files; `cargo check -p
-  gyre-server --lib --tests` exit 0; the fast mechanical gate scripts
-  (arch, hierarchy, ABAC registry/exempt-handlers, mem-port-contracts,
-  scope/forged/forwarded/inert/lossy/fabricated, in-memory stores,
-  unbounded HTTP, task attribution) all pass.
+- In-sandbox (this round): `cargo check -p gyre-server --lib` and
+  `cargo check -p gyre-server --all-targets` (covers the cfg(test)
+  module with the re-seeded test) both exit 0. Evidence:
+  /tmp/stage/review-evidence/review-repair.md.
+- In-sandbox (prior rounds): full vitest suite 121 files / 2398 passed;
+  focused `PublicUserProfile.test.js` (8 tests incl. the HSI §12
+  NOT-list guard) and `AppShell.test.js` `/@{username}` routing tests;
+  `cargo test -p gyre-adapters --lib list_by` (27 passed); the fast
+  mechanical gate scripts (arch, ABAC registry/exempt-handlers,
+  mem-port-contracts, task attribution) all pass.
 - Deferred to the independent verifier (4 GiB build wrapper):
   `cargo test -p gyre-server --lib api::users::tests` — mem-backed
   tests `public_profile_includes_teams` and
-  `public_profile_activity_and_stats` (stats correctness — another
-  reviewer's rows excluded, rejected approval not counted; newest-first
-  ordering; `?limit=` pagination + total; same-tenant peer gets 200 on
-  the feed; cross-tenant 404 on both endpoints) plus the pre-existing
-  `get_user_by_username_is_tenant_scoped` regression — and the
-  workspace-wide `cargo clippy --all-targets` diff gate. Required probe
-  list in /tmp/stage/review-evidence/verifier-tests.md.
+  `public_profile_activity_and_stats` (production-identity spec
+  attribution: approved row under the canonical user Id counts, legacy
+  row attributes, rejected entry not counted as approval; another
+  reviewer's rows excluded; newest-first ordering; `?limit=` pagination
+  + total; same-tenant peer 200; cross-tenant 404) plus the
+  pre-existing `get_user_by_username_is_tenant_scoped` regression — and
+  the workspace-wide `cargo clippy --all-targets` diff gate. Required
+  probe list in /tmp/stage/review-evidence/verifier-tests.md.
 
 ## Agent Instructions
 
