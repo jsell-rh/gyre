@@ -299,8 +299,13 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
     }
 
     // 2. Gate failure details → the agent's inbox, as messages the next
-    //    session reads on startup (gyre_message_poll). One message per
-    //    failed gate, carrying the gate's real recorded output.
+    //    session reads on startup (gyre_message_poll). One GateResult per
+    //    failed gate, carrying the gate's real recorded output. The gate
+    //    executor already delivers GateResult at failure time
+    //    (§Gate Failure Feedback: "Speed matters"); this loop path is the
+    //    fallback for failures it did not cover (optional gates, results
+    //    from paths that bypass the executor) — the delivery marker keeps
+    //    the author's next session from reading the same failure twice.
     let failed = state
         .gate_results
         .list_by_mr_id(mr_id.as_str())
@@ -310,30 +315,49 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
         .filter(|r| r.status == GateStatus::Failed)
         .collect::<Vec<_>>();
     for r in &failed {
-        let gate_name = state
+        let gate = state
             .quality_gates
             .find_by_id(r.gate_id.as_str())
             .await
             .ok()
-            .flatten()
-            .map(|g| g.name)
+            .flatten();
+        let gate_name = gate
+            .as_ref()
+            .map(|g| g.name.clone())
             .unwrap_or_else(|| r.gate_id.to_string());
+        let gate_type_str = gate
+            .as_ref()
+            .map(|g| format!("{:?}", g.gate_type))
+            .unwrap_or_else(|| "Unknown".to_string());
+        let attempt = crate::gate_executor::gate_attempt_count(state, &mr.id, &r.gate_id).await;
+        if crate::gate_executor::gate_result_already_delivered(
+            state, &mr.id, &r.gate_id, &agent.id, attempt,
+        )
+        .await
+        {
+            continue;
+        }
         state
             .emit_event(
                 Some(agent.workspace_id.clone()),
                 Destination::Agent(agent.id.clone()),
-                MessageKind::GateFailure,
+                MessageKind::GateResult,
                 Some(serde_json::json!({
                     "mr_id": mr.id.to_string(),
                     "gate_name": gate_name,
-                    "gate_type": "gate_failure",
+                    "gate_type": gate_type_str,
                     "status": "Failed",
                     "output": r.output.clone().unwrap_or_default(),
                     "spec_ref": mr.spec_ref.clone(),
-                    "iteration": agent.iteration,
+                    "attempt": attempt,
+                    "gate_agent_id": format!("gate-agent:{}", r.gate_id.as_str()),
                 })),
             )
             .await;
+        crate::gate_executor::mark_gate_result_delivered(
+            state, &mr.id, &r.gate_id, &agent.id, attempt,
+        )
+        .await;
     }
 
     // 3. Close the failed MR so the next completion creates a fresh one
@@ -1100,7 +1124,7 @@ mod tests {
             .unwrap();
         let failure = inbox
             .iter()
-            .find(|m| m.kind == MessageKind::GateFailure)
+            .find(|m| m.kind == MessageKind::GateResult)
             .expect("gate failure message in agent inbox");
         assert_eq!(
             failure
@@ -1114,6 +1138,26 @@ mod tests {
             Some("test auth_retry failed: expected 3 attempts"),
             "the agent receives the gate's REAL recorded output"
         );
+        // §Gate Failure Feedback: the fallback delivery carries the full
+        // GateResult field set — the real gate type (not a placeholder) and
+        // the per-(MR, gate) attempt number.
+        assert_eq!(
+            failure
+                .payload
+                .as_ref()
+                .and_then(|p| p["gate_type"].as_str()),
+            Some("TestCommand")
+        );
+        assert_eq!(
+            failure.payload.as_ref().and_then(|p| p["status"].as_str()),
+            Some("Failed")
+        );
+        let attempt = failure
+            .payload
+            .as_ref()
+            .and_then(|p| p["attempt"].as_u64())
+            .expect("attempt number present");
+        assert!(attempt >= 1, "attempt is 1-based, got {attempt}");
 
         // Fresh JWT: the completion path revoked the old token; the
         // re-spawn mints and stores a new one.
