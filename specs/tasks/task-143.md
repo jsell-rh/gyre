@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Verification"
-commits: ["c17f82bf6b532073258d45c2115d350ded08b64f", "bdc62a832717bb37b5e5888002775b2f9d02ceaa", "795ce919c6ff6c49c3ea234c459a435d0ee19afc", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "c880471aebf2b922d0aa3e48187e8b9aa07e4b3c"]
+commits: ["c880471aebf2b922d0aa3e48187e8b9aa07e4b3c", "c2df4d71daf5b999dcf0af5fae95e6bf009dabaf", "795ce919c6ff6c49c3ea234c459a435d0ee19afc", "bdc62a832717bb37b5e5888002775b2f9d02ceaa", "c17f82bf6b532073258d45c2115d350ded08b64f", "24c2ac7c1b6c48d6a5e8b3e311a14605c429c5dd"]
 ---
 
 ## Spec Excerpt
@@ -71,13 +71,13 @@ This can be done offline, after the fact, by auditors, compliance teams, or othe
 
 ## Acceptance Criteria
 
-- [ ] `AttestationVerifier` port trait defined
-- [ ] `VerificationResult` type captures per-component verification status
-- [ ] Structural consistency checks (same MR/spec across all gates)
-- [ ] Cryptographic signature verification for bundle, gates, and spec approval
-- [ ] `POST /api/v1/attestations/verify` endpoint
-- [ ] CLI `gyre verify-attestation` command
-- [ ] Tests pass
+- [x] `AttestationVerifier` port trait defined
+- [x] `VerificationResult` type captures per-component verification status
+- [x] Structural consistency checks (same MR/spec across all gates)
+- [x] Cryptographic signature verification for bundle, gates, and spec approval
+- [x] `POST /api/v1/attestations/verify` endpoint
+- [x] CLI `gyre verify-attestation` command
+- [x] Tests pass
 
 ## Agent Instructions
 
@@ -99,14 +99,21 @@ This can be done offline, after the fact, by auditors, compliance teams, or othe
 - **CLI**: `gyre verify-attestation <commit-sha>` — reads the bundle from the merge commit's git note, POSTs it to the verify endpoint, prints the per-component result, exits 1 on failure.
 - **Spec approval signatures (honest tri-state)**: absent → `None` + explicit finding, never silently passed; present signatures really verified (agent approvers against the per-agent key scheme; other identities reported not platform-verifiable pending the Sigstore/OIDC integration — task-142's reviewed deferral).
 - **Spec step 4 (Rekor)** stays with task-144's storage scope: the bundle format carries no author commit SHAs to check.
-- **Review repairs**: `c2df4d71` — the consistency check's forge arm now rejects agent gate types (a forge self-attested AgentReview no longer verifies, even re-signed); `795ce919` — gate-signature verification restructured off the inert-enforcement crash path (identical fail-closed semantics); `bdc62a83` — the gate-tamper test's bundle-signature assertion was inverted: `unsigned_canonical_json()` nulls only `bundle_signature`, so the gates array IS covered by the bundle-level signature and gate tampering breaks it (proven with a standalone probe using the real domain type + real ring Ed25519: `/tmp/stage/review-evidence/gate-tamper-probe-output.txt`); the tampered gate is now addressed by name because `list_by_mr_id` has no ordering contract (mem HashMap / SQL adapters without ORDER BY), which made the old `gates[0]` indexing flaky.
-- **Verification-gate repair** (`c17f82bf`, this round): the deterministic gate (finding `679e3bf2`) failed on `clippy::manual_unwrap_or_default` at `merge_attestation.rs:528` — the match form `Ok(valid) => valid, Err(_) => false` had been forced by the inert-enforcement script's NameError crash, which this branch had already fixed by defining its missing `BOUND` regex (`c880471a`). Now uses `.await.unwrap_or_default()`: bool's default is `false`, so a verification error still fails closed, and `BOUND` recognizes the `.unwrap` chain so the line counts as bound — no exemption, no checker weakening. All remaining clippy warnings in `gyre-server` are pre-existing at the assignment base (verified per site: `merge_processor.rs:1669`, `mem.rs`, `explorer_ws.rs`, ...).
-- **Merge resolution** (`94c9ac2f`): rebased this task's verification work onto the task-144 base (AttestationStorage port + storage wiring) — both ports coexist in `gyre-ports`/`AppState`; the merge-processor bundle test now asserts BOTH the full verification protocol and storage-port retrieval; coverage rows 13–15 and the header reflect both tasks' state (7/25 implemented).
+
+### Verification-gate repair (this round, 24c2ac7c)
+
+Finding `74454d36` (exit 1, `bash /tmp/stage/checks.sh`): the gate runs the static-lint series twice — first with the **upstream (base) verifier scripts** against candidate code, then with the candidate's own scripts. The upstream `check-inert-enforcement.sh` (at base `c9cc1536`) references a `BOUND` regex it never defines, so any statement-position `.verify_*`/`.evaluate_*`/`.enforce_*`/`.validate_*` method call in non-test candidate code crashed it with `NameError` — the gate's only failing step (everything else in the 925-line log passed: rustfmt-diff, clippy-diff, all other upstream+candidate lints, web build). `merge_attestation.rs:528` was the single METH_CALL match in the tree (found by replicating the upstream scan exactly — see evidence). The earlier candidate-side fix (`c880471a`) had defined `BOUND` in the branch's own copy, which is why the candidate rerun printed OK while the upstream overlay run crashed.
+
+Fix (`24c2ac7c`): bind the awaited result first (`let gate_verified = self.verify_gate_signature(gate).await;` then `gate_verified.unwrap_or_default()`). Identical fail-closed semantics (bool default false), keeps the clippy-required method form (the `c17f82bf` repair for finding `679e3bf2`), and removes the statement-position call shape the upstream checker cannot evaluate. No checker was weakened; no exemption added.
 
 ### Test evidence
 
-- `cargo test -p gyre-domain` — 550 passed, 0 failed (24 attestation tests, incl. `attestation_verification` consistency cases). Re-run after `c17f82bf`: 550 passed, 0 failed.
-- `cargo test -p gyre-cli` — 221 passed, 0 failed (incl. `verify_attestation_command_parses`, `verify_attestation_posts_note_bundle_and_parses_result`, `cli_verify`). Re-run after `c17f82bf`: 221 + 1 passed, 0 failed.
-- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --lib` and `--all-targets` (post-`c17f82bf`) — zero diagnostics in `merge_attestation.rs`, no `manual_unwrap_or_default` anywhere in `gyre-server`; remaining warnings pre-exist at base `706bc7bd`. `cargo fmt --check -p gyre-server` clean. `check-arch.sh`, `check-inert-enforcement.sh`, `check-fail-open-ref-resolution.sh`, `check-abac-route-registry.sh` all pass. Evidence: `/tmp/stage/review-evidence/clippy-repair-evidence.txt`.
-- Standalone crypto probe (real `MergeAttestationBundle::unsigned_canonical_json` + real ring Ed25519 sign/verify): untampered bundle signature verifies; gate-status tampering changes the canonical payload and the bundle signature does NOT verify — confirms the fixed `assert!(!result.bundle_signature_valid)`.
-- **Verifier must run** (server test compilation exceeds the in-sandbox 4 GiB build wrapper): `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` (incl. `tampered_bundle_fails_verification`, `unsigned_and_missing_signatures_fail_verification`, `forge_signed_agent_review_gate_fails_verification`, `spec_approval_signature_verification_round_trip`, `inconsistent_reviewer_binding_fails_consistency_check`) and `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_processor` (incl. the merged `merge_processor_generates_multi_party_attestation_bundle` verifying both protocol and storage).
+- `cargo test -p gyre-domain` — 551 passed, 0 failed (incl. the `attestation_verification` consistency suite).
+- `cargo test -p gyre-cli` — 221 + 1 passed, 0 failed (incl. `verify_attestation_command_parses`, `verify_attestation_posts_note_bundle_and_parses_result`).
+- `SKIP_WEB_BUILD=1 cargo check --workspace --all-targets` — clean (post-merge with base `c9cc1536`).
+- `SKIP_WEB_BUILD=1 python3 scripts/check-clippy-diff.py c9cc1536` — changed lines clean. `python3 scripts/check-rustfmt-diff.py c9cc1536` — clean. `cargo fmt --check -p gyre-server` — clean.
+- Upstream `check-inert-enforcement.sh` (extracted from base `c9cc1536`) against candidate code: exit 0 after the fix (crashed with `NameError: BOUND` before it). Candidate script: OK. Zero METH_CALL matches remain in non-test code (probe: `review-evidence/find-bound-crash-lines.py`, output `upstream-inert-enforcement.txt`).
+- All repo `scripts/check-*.sh` behave identically to base `c9cc1536` (side-by-side run in a base worktree; the failing ones — mawk regex dialect, sandbox 4 GiB build guard, missing `jj` — fail identically at base and are environment/pre-existing, not branch defects).
+- Web: `npm ci && npm test` — 120 files, 2391 passed, 41 skipped. `web/` (src and dist) is byte-identical to base.
+- **Verifier must run** (server test compilation exceeds the in-sandbox 4 GiB build wrapper): `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_attestation` (incl. `tampered_bundle_fails_verification`, `unsigned_and_missing_signatures_fail_verification`, `forge_signed_agent_review_gate_fails_verification`, `spec_approval_signature_verification_round_trip`, `inconsistent_reviewer_binding_fails_consistency_check`) and `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_processor` (incl. `merge_processor_generates_multi_party_attestation_bundle` verifying both protocol and storage).
+- Sandbox restrictions recorded for remote verification: this sandbox's `awk` is mawk 1.3.4 (gawk `\s` regex extensions fail in several advisory lints — identical at base), `jj` is not installed (jj recorded-fixture tests cannot run here), and the build wrapper blocks gyre-server test compilation (exit 64, 4 GiB budget).
