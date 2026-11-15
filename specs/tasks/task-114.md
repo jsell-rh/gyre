@@ -4,7 +4,7 @@ spec_ref: "user-management.md §User Profile Page (`/@{username}`)"
 depends_on:
   - task-113
   - task-208
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §User Profile Page (`/@{username}`)"
 commits: ["b25f1060558b2e557a329efbda7eb9efcae231e8", "d813d79b46ef04732ccd88ffb83039a9e606293f", "978faf1a180b555eab24b739a2b5653f21bdcad3", "fc06e3713988b2ec3647e87e077da00b23ad52c1"]
