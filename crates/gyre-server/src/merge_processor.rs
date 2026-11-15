@@ -9770,15 +9770,23 @@ mod tests {
         assert_eq!(sec.reviewer_agent_id.as_deref(), Some("security-gate-7"));
         assert_eq!(sec.review_decision.as_deref(), Some("Approved"));
 
-        // Every signature in the bundle verifies against the signing
-        // party's real key material.
+        // Every signature in the bundle verifies end-to-end through the
+        // full verification protocol (bundle signature, per-gate
+        // signatures, consistency) on a bundle the merge processor
+        // actually produced and stored.
+        let verification = state
+            .attestation_verifier
+            .verify_bundle(&bundle)
+            .await
+            .expect("verification must run");
         assert!(
-            crate::merge_attestation::verify_merge_attestation_bundle(
-                &bundle,
-                &state.agent_signing_key
-            ),
-            "all bundle signatures must verify"
+            verification.valid,
+            "bundle produced by the merge processor must verify: {:?}",
+            verification.errors
         );
+        assert!(verification.bundle_signature_valid);
+        assert!(verification.consistency_check);
+        assert!(verification.gate_results.iter().all(|g| g.signature_valid));
 
         // task-144: the bundle is stored through the AttestationStorage
         // port — retrievable by MR id from the audit-events target.

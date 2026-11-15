@@ -5108,6 +5108,8 @@ fn test_state_inner(
     );
     let rekor: Arc<dyn gyre_ports::RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
 
+    let forge_key = Arc::new(crate::auth::AgentSigningKey::generate());
+
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
@@ -5124,7 +5126,10 @@ fn test_state_inner(
         telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
         message_broadcast_tx: broadcast::channel(16).0,
         kv_store: kv.unwrap_or_else(|| Arc::new(MemKvStore::default())),
-        agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
+        agent_signing_key: forge_key.clone(),
+        attestation_verifier: Arc::new(crate::merge_attestation::ForgeAttestationVerifier::new(
+            forge_key.clone(),
+        )),
         agent_jwt_ttl_secs: 3600,
         users: Arc::new(MemUserRepository::default()),
         api_keys: Arc::new(MemApiKeyRepository::default()),

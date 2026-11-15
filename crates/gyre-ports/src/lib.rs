@@ -9,6 +9,7 @@ pub mod analytics;
 pub mod attestation_repo;
 pub mod attestation_signer;
 pub mod attestation_storage;
+pub mod attestation_verifier;
 pub mod audit;
 pub mod breaking_change;
 pub mod budget;
@@ -76,6 +77,7 @@ pub use analytics::{AnalyticsGroupBy, AnalyticsQueryFilter, AnalyticsRepository,
 pub use attestation_repo::AttestationRepository;
 pub use attestation_signer::AttestationSigner;
 pub use attestation_storage::{AttestationScope, AttestationStorage};
+pub use attestation_verifier::AttestationVerifier;
 pub use audit::{AuditQueryFilter, AuditRepository, CompressionStats};
 pub use breaking_change::BreakingChangeRepository;
 pub use budget::BudgetRepository;
