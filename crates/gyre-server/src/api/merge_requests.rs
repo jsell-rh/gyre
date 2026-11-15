@@ -2566,6 +2566,11 @@ mod tests {
         use gyre_ports::AuditQueryFilter;
 
         let state = make_test_state_with_jwt();
+        // create_mr resolves the MR's workspace scope from its repository and
+        // refuses unknown repositories — seed repo-1 like every other
+        // state-building test in this module, or the POST 404s and
+        // create_test_mr panics on the missing `id`.
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Override test").await;
 
