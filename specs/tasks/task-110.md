@@ -50,6 +50,50 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 
 **Invitation expiry:** Background job marks expired invitations as `Expired`. Configurable per-tenant: `tenant_invite_expiry_days` (default: 7), `workspace_invite_expiry_days` (default: 7), `max_pending_invitations` per workspace (default: 50).
 
+## Implementation Plan
+
+1. **Domain entities in `gyre-domain`:**
+   - Add `TenantInvitation` struct with all spec fields
+   - Add `InvitationStatus` enum
+   - Add `InvitationPolicy` struct for configurable expiry
+   - Add `WorkspaceInvitation` struct (workspace-level invitation with pending/accept/decline lifecycle)
+
+2. **Port traits in `gyre-ports`:**
+   - `TenantInvitationRepository` — CRUD + list by tenant + find by token_hash
+   - `WorkspaceInvitationRepository` — CRUD + list by workspace + find by token
+
+3. **SQLite adapter in `gyre-adapters`:**
+   - Migration for `tenant_invitations` table
+   - Migration for `workspace_invitations` table
+   - Implement both repository traits
+
+4. **API endpoints in `gyre-server`:**
+   - `POST /api/v1/tenant/invite` — create invitation, generate token, hash and store
+   - `POST /api/v1/tenant/invite/bulk` — batch create
+   - `GET /api/v1/tenant/invitations` — list with status filter
+   - `DELETE /api/v1/tenant/invitations/{id}` — revoke (set status to Revoked)
+   - `POST /api/v1/invite/{token}/accept` — validate token, create user (local mode) or link account (SSO), activate workspace memberships
+   - Wire workspace invitation endpoints into existing workspace member routes
+
+5. **Background job:**
+   - Expiry checker runs on server startup interval (e.g., every hour)
+   - Marks `Pending` invitations past `expires_at` as `Expired`
+
+6. **Register routes in `api/mod.rs`** and add ABAC route mappings in `abac_middleware.rs`.
+
+## Acceptance Criteria
+
+- [ ] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
+- [ ] Port traits for both invitation types
+- [ ] SQLite adapter with migrations (check current migration number)
+- [ ] All 5 tenant invitation API endpoints functional
+- [ ] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
+- [ ] Token generation uses cryptographically random bytes, stored as SHA-256 hash
+- [ ] Invitation expiry background job marks expired invitations
+- [ ] Bulk invite endpoint accepts array of invitations
+- [ ] Routes registered in `api/mod.rs` with ABAC mappings
+- [ ] `cargo test --all` passes
+
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
@@ -58,8 +102,9 @@ Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §
 
 Tenant & workspace invitation flow, fully implemented and carried through
 multiple review/repair rounds on this branch (latest: review 4cf9e027
-repair at 8833f8d9, on top of the merge with main head 9fb371ac / task-111
-session management):
+repair at 8833f8d9, then merged with assignment base 103d665e / task-142
+merge attestation at 3e31e890 — merge touched only task-142 files, no
+invitation-surface conflicts):
 
 - **Domain entities** (`gyre-domain`): `TenantInvitation`, `WorkspaceInvitation`,
   `InvitationStatus` (Pending/Accepted/Declined/Expired/Revoked), per-tenant
@@ -69,7 +114,8 @@ session management):
   `WorkspaceInvitationRepository` port traits implemented by the SQLite,
   Postgres, and mem adapters (mem guards the port-documented duplicate
   constraints in code); shared portable migrations for both tables plus
-  DB-level pending-scope uniqueness.
+  DB-level pending-scope uniqueness (migration 000064 partial unique
+  indexes, with raced-duplicate dedup before index creation).
 - **API** (`gyre-server/src/api/invitations.rs`): the five tenant endpoints
   (`POST /tenant/invite`, `POST /tenant/invite/bulk`, `GET /tenant/invitations`,
   `DELETE /tenant/invitations/{id}`, `POST /invite/{token}/accept`) plus the
@@ -112,11 +158,13 @@ session management):
 
 ### Test evidence
 
-Executed in this assignment (exit 0): `cargo check -p gyre-adapters`,
-`cargo check -p gyre-server`, `cargo check -p gyre-server --tests`,
-`cargo test -p gyre-adapters --lib invitation` (5 passed),
+Executed on the merged tree (base 103d665e) in this round (exit 0):
+`cargo check -p gyre-server`, `cargo test -p gyre-adapters --lib invitation`
+(5 passed), `cargo test -p gyre-domain invitation` (4 passed),
 `scripts/check-migration-sql-portability.sh`, `scripts/check-migration-versions.sh`,
-`scripts/check-arch.sh`; rustfmt clean. `cargo test -p gyre-server` was
-blocked by the sandbox 4 GiB build wrapper and is recorded for the
-independent verifier together with the PG repair probe — see
-`/tmp/stage/review-evidence/repair-4cf9e027.txt`.
+`scripts/check-arch.sh`, `scripts/check-abac-route-registry.sh`,
+`scripts/check-abac-exempt-handlers.sh`, `scripts/check-mem-port-contracts.sh`,
+`scripts/check-dead-message-kinds.sh`; no conflict markers post-merge.
+Evidence: `/tmp/stage/review-evidence/`. Full `cargo test -p gyre-server` and
+`cargo test --all` remain recorded for the independent verifier (sandbox
+4 GiB build-wrapper limit).
