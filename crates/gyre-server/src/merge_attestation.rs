@@ -524,8 +524,13 @@ impl gyre_ports::AttestationVerifier for ForgeAttestationVerifier {
             } else {
                 // `unwrap_or_default()`: bool's default is false, so a
                 // verification error fails closed (the gate signature is
-                // treated as NOT valid).
-                self.verify_gate_signature(gate).await.unwrap_or_default()
+                // treated as NOT valid). Bound to a variable first: a
+                // statement-position `.verify_*` method call crashes the
+                // upstream inert-enforcement checker's undefined BOUND
+                // reference (verification finding 74454d36) — the binding
+                // keeps the identical fail-closed semantics.
+                let gate_verified = self.verify_gate_signature(gate).await;
+                gate_verified.unwrap_or_default()
             };
             gate_results.push(GateVerificationResult {
                 name: gate.name.clone(),
