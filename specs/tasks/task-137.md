@@ -3,7 +3,7 @@ title: "Implement gate failure feedback: inbox delivery, task creation, escalati
 spec_ref: "agent-gates.md §Gate Failure Feedback"
 depends_on:
   - task-136
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-gates.md §Gate Failure Feedback"
 commits: ["7d319cabfb3f5eb7321b0d90dca3aac94a8ab615", "f03a3c830c382d4f063244889f3a31ecfdad711b", "fdb0a05cabef6adb1c6801c996561dee454408a3", "a8c4e4e9bb2420097ad85096ea1d28ae4f2571d3", "0e6ab6ad0a862ac91f322ec9c174933a245f21ea"]
