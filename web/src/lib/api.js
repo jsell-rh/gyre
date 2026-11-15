@@ -570,7 +570,28 @@ export const api = {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/users/me/notifications/count${qs}`).then(r => r?.count ?? 0);
   },
+  // Task-113 (user-management.md §In-App Notification UI / §API >
+  // Notifications): spec-path listing, unread count, read/unread marking.
+  notifications: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/notifications${qs ? '?' + qs : ''}`);
+  },
+  unreadNotificationCount: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/unread-count${qs}`).then(r => r?.count ?? 0);
+  },
   markNotificationRead: (id) =>
+    request(`/notifications/${id}/read`, { method: 'PUT' }),
+  markNotificationUnread: (id) =>
+    request(`/notifications/${id}/unread`, { method: 'POST' }),
+  markAllNotificationsRead: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/mark-all-read${qs}`, { method: 'POST' });
+  },
+  notificationChannels: () => request('/notifications/preferences'),
+  updateNotificationChannels: (body) =>
+    request('/notifications/preferences', { method: 'PUT', body: JSON.stringify(body) }),
+  dismissNotification: (id) =>
     request(`/notifications/${id}/dismiss`, { method: 'POST' }),
   resolveNotification: (id) =>
     request(`/notifications/${id}/resolve`, { method: 'POST' }),
