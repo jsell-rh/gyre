@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f", "4aa5a87a34ae46598a3a3e36d0ff2f10c601f0b6"]
 ---
 
 ## Spec Excerpt
@@ -97,71 +97,43 @@ Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `
 
 ## Shipped
 
-All acceptance-criterion pages ship as real Svelte 5 (runes) components
-against the task-124/125/111 endpoints across the recorded commits (see
-`commits:` frontmatter and git history for per-round details).
+All acceptance-criterion pages shipped in earlier rounds as real Svelte 5
+(runes) components against the task-124/125/111 endpoints — see the
+`commits:` frontmatter history in git (earlier rounds recorded their commit
+lists before this round's reset) and the detailed per-round notes in the
+`specs/coverage/system/user-management.md` §UI Pages row. This round is a
+review repair on top of that work.
 
-### This round (rebase repair `237f9a5b`)
+### This round (review repair `4aa5a87a`)
 
-The assignment was a rebase repair: main's task-113 head `b8d63b0`
-(in-app notification UI & email templates) had to be integrated into this
-branch, and both sides had independently built a notification bell +
-drawer (add/add conflicts on `NotificationDrawer.svelte` and its test;
-content conflicts in `App.svelte`, `api.js`, `en.json`, and the two
-coverage files). The merge reconciles them into one surface preserving
-both feature sets:
+The assigned review finding: the declined-state "Go to all workspaces"
+button (data-testid="invite-go-all", `InvitationAccept.svelte`) was a
+silent no-op in production — the component reads
+`getContext('goToCrossWorkspace')`, but `App.svelte` (the only ancestor)
+never provided that context, so a user declining an invitation was
+stranded on the declined screen with a dead button.
 
-- **Bell:** task-113's `NotificationBell` component (shared
-  `notificationState` store, realtime `NotificationPush` bumps on the
-  app's single `/ws` connection, unread-count endpoint badge) is the
-  single top-bar bell, per this task's spec-lifecycle amendment to
-  `ui-navigation.md` §1 (the old decisions-count badge click is
-  superseded; the duplicate inline bell this branch had added to
-  `App.svelte` is removed). The candidate's 60s full-resync interval was
-  kept (drift guard alongside the realtime pushes).
-- **Drawer:** one `NotificationDrawer` merging task-113's filter bar
-  (type/priority/workspace/repo driving the task-125 list filters),
-  realtime reload on push, live-connection dot and preferences link with
-  task-127's active-only listing (`?active=true` → `list_active_for_user`,
-  server-enforced), unread pill, `InvitationReceived` → `/invite/{ws}`
-  deep link, and no-fabricated-target disable. Deep links route through
-  the app's `navigateToPath` when rendered in the app, falling back to
-  pushState + popstate replay.
-- **API client:** `markNotificationRead` uses the spec PUT method (POST
-  remains a server-side legacy alias); task-113's spec-path preferences
-  client (`notificationChannels`/`updateNotificationChannels`) kept.
-- **Routes:** `App.svelte` keeps both sides' modes — `/@username`,
-  `/invite/:id` (task-127) and `/settings/notifications` (task-113) —
-  through parseUrl/urlFor/pushState/popstate/title handling.
-- **Coverage:** `specs/coverage/system/user-management.md` header and
-  rows 19/31 carry a dated merge-reconciliation note; `SUMMARY.md`
-  regenerated mechanically via `scripts/update-coverage-summary.sh`
-  (user-management now 10 task-assigned / 15 implemented — rows 19/20
-  are task-113's, landed via this merge).
+- **Fix:** `App.svelte` now sets `setContext('goToCrossWorkspace', () =>
+  goToCrossWorkspace())` alongside its sibling navigation contexts.
+- **Same-path defect fixed:** the mount-time canonical `urlFor` rebuild
+  dropped `inviteId`/`username`, so a full page load at `/invite/{ws}` or
+  `/@{user}` rewrote the URL to `/invite/` / `/@`, destroying the deep
+  link (state survived, refresh did not). The canonical call now carries
+  the route parameter for those modes.
+- **Test:** new `InvitationDeclineNavigate.test.js` renders the real
+  `App.svelte` at `/invite/{ws}` (page-load path, api/ws mocked via the
+  established `CrossWorkspaceEntry.test.js` harness pattern), declines
+  the invitation, clicks go-to-all, and asserts navigation to `/all` with
+  `cross_workspace` history state. Mutation-checked: fails with the fix
+  stashed, passes with it applied.
 
 ### Test evidence (this round)
 
-- `cd web && npm ci && npm test` — **2418 passed**, 41 skipped, 122 files
-  (includes the merged NotificationDrawer suite covering both sides'
-  assertions: active-only request shape, priority grouping, unread pill,
-  read/unread/bulk endpoints, action_url + InvitationReceived deep links,
-  disabled no-target items, filter pass-through; plus NotificationBell,
-  notifications-store, NotificationSettings, and the AppShell bell tests
-  re-pinned to the unread-count endpoint via the store's fetch).
-- `/tmp/stage/bin/cargo check -p gyre-server` — clean.
-- `/tmp/stage/bin/cargo check -p gyre-server --tests` — clean (covers the
-  auto-merged `users.rs`/`notifications.rs` test code).
-- `/tmp/stage/bin/cargo test -p gyre-adapters list_active_for_user` —
-  passes (`list_active_for_user_excludes_resolved_and_dismissed`, real
-  SQLite storage).
-- Deferred to the independent verifier (gyre-server test binary exceeds
-  the in-sandbox 4 GiB wrapper budget):
-  `cargo test -p gyre-server spec_path_notifications_active_filter_excludes_resolved_and_dismissed`,
-  plus the usual full `cargo test --all` and web e2e.
-
-### Still open (owned elsewhere, not this task's pages)
-
-- Tenant Invitation Management incl. `/invite/{token}` magic links, bulk
-  invite, and invitation expiry countdown — task-110 (not-started) owns the
-  backend; no expiry field exists on WorkspaceMembership yet.
-- Public-profile activity feed/stats — no per-user endpoints exist.
+- `npm ci` (locked deps), then focused:
+  `npx vitest run src/__tests__/InvitationDeclineNavigate.test.js
+  src/__tests__/InvitationAccept.test.js` — 2 files, 6 tests passed.
+- Full frontend suite `npm test`: 123 files passed, 2419 tests passed,
+  41 skipped.
+- No Rust changes this round; server suites from earlier rounds still
+  apply for the verifier. Evidence retained at
+  `/tmp/stage/review-evidence/task-127-repair.txt`.
