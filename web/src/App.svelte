@@ -216,6 +216,28 @@
     } catch { /* ignore */ }
   }
 
+  // ── Notification bell (user-management.md §In-App Notification UI) ─────
+  // The bell badge shows the UNREAD notification count
+  // (GET /notifications/unread-count), distinct from decisionsCount (the
+  // active-decisions count the workspace home's Decisions section renders).
+  let unreadCount = $state(0);
+
+  async function loadUnreadCount() {
+    try {
+      unreadCount = await api.unreadNotificationCount(currentWorkspace?.id);
+    } catch {
+      unreadCount = 0; // fail closed — badge shows nothing rather than a stale count
+    }
+  }
+
+  // Refresh the badge when the drawer closes: read/unread changes made
+  // inside the drawer (mark read, mark all read) must be reflected. The
+  // cleanup runs on the true→false transition of notifDrawerOpen.
+  $effect(() => {
+    if (!notifDrawerOpen) return;
+    return () => { loadUnreadCount(); };
+  });
+
   // ── Slug helpers ──────────────────────────────────────────────────────
   /** Get URL slug for a workspace. Uses ws.slug if present, else ws.id. */
   function wsSlug(ws) {
@@ -393,6 +415,7 @@
     pushState({ mode: 'workspace_home', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
     if (currentWorkspace) loadWorkspaceData(currentWorkspace.id);
     loadDecisionsCount();
+    loadUnreadCount();
   }
 
   async function loadRepoDetail(repoId) {
@@ -676,6 +699,7 @@
       mode = 'workspace_home';
     }
     loadDecisionsCount();
+    loadUnreadCount();
   }
 
   /** Navigate to an SPA path (notification action_url deep links). */
@@ -1293,7 +1317,11 @@
       selfUserId = me?.id ?? null;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
-    const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
+    loadUnreadCount();
+    const decisionsInterval = setInterval(() => {
+      loadDecisionsCount();
+      loadUnreadCount();
+    }, 60_000);
 
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
@@ -1359,6 +1387,7 @@
         fadeContent();
         if (currentWorkspace) loadWorkspaceData(currentWorkspace.id);
         loadDecisionsCount();
+        loadUnreadCount();
         return;
       }
       // Fallback: re-parse URL
@@ -1739,30 +1768,31 @@
 
       <!-- Right: decisions badge + user avatar -->
       <div class="topbar-right">
-        <!-- Decisions badge (🔔) -->
-        <!-- Notification bell: opens the notification drawer
-            (user-management.md §UI Pages > Notification Drawer). The badge
-            count is the global active-decisions count (ui-navigation.md
-            principle 4). -->
+        <!-- Notification bell (user-management.md §In-App Notification UI):
+            opens the notification drawer (§UI Pages > Notification Drawer).
+            The badge is the unread notification count
+            (GET /notifications/unread-count) — not the active-decisions
+            count; the decisions count remains on the workspace home's
+            Decisions section (ui-navigation.md §2, amended task-127). -->
         <button
           class="decisions-badge-btn"
           onclick={() => (notifDrawerOpen = true)}
-          aria-label={decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : $t('topbar.no_decisions')}
+          aria-label={unreadCount > 0 ? $t('topbar.unread_notifications', { values: { count: unreadCount } }) : $t('topbar.no_unread_notifications')}
           title={$t('notification_drawer.title')}
           aria-haspopup="dialog"
           aria-expanded={notifDrawerOpen}
-          data-testid="decisions-badge"
+          data-testid="notification-bell"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
             <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
             <path d="M13.73 21a2 2 0 01-3.46 0"/>
           </svg>
-          {#if decisionsCount > 0}
-            <span class="decisions-count" aria-hidden="true">{decisionsCount > 99 ? '99+' : decisionsCount}</span>
+          {#if unreadCount > 0}
+            <span class="decisions-count" aria-hidden="true">{unreadCount > 99 ? '99+' : unreadCount}</span>
           {/if}
         </button>
         <span class="sr-only" aria-live="polite" aria-atomic="true">
-          {decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : ''}
+          {unreadCount > 0 ? $t('topbar.unread_notifications', { values: { count: unreadCount } }) : ''}
         </span>
 
         <!-- User avatar dropdown -->

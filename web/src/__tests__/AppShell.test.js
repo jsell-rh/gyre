@@ -303,6 +303,8 @@ vi.mock('../lib/api.js', () => ({
     workspaceRepos: vi.fn().mockResolvedValue([]),
     workspaceBudget: vi.fn().mockResolvedValue(null),
     notificationCount: vi.fn().mockResolvedValue(0),
+    unreadNotificationCount: vi.fn().mockResolvedValue(0),
+    notifications: vi.fn().mockResolvedValue({ notifications: [] }),
     tokenInfo: vi.fn().mockResolvedValue({ kind: 'global' }),
     me: vi.fn().mockResolvedValue(null),
     version: vi.fn().mockResolvedValue({ version: '0.1.0', commit: 'abc1234', milestone: 'M35' }),
@@ -328,6 +330,8 @@ describe('App shell — topbar first, no sidebar (ui-navigation.md §1)', () => 
     api.workspaceRepos.mockResolvedValue([]);
     api.workspaceBudget.mockResolvedValue(null);
     api.notificationCount.mockResolvedValue(0);
+    api.unreadNotificationCount.mockResolvedValue(0);
+    api.notifications.mockResolvedValue({ notifications: [] });
   });
 
   it('renders topbar without a sidebar', async () => {
@@ -338,6 +342,89 @@ describe('App shell — topbar first, no sidebar (ui-navigation.md §1)', () => 
     }, { timeout: 3000 });
   });
 
+});
+
+// ── Notification bell (user-management.md §In-App Notification UI, ──────
+//    amended ui-navigation.md §1: the bell shows the unread count and
+//    opens the notification drawer)
+
+describe('Notification bell (user-management.md §In-App Notification UI)', () => {
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+    api.unreadNotificationCount.mockResolvedValue(0);
+    api.notifications.mockResolvedValue({ notifications: [] });
+    api.version.mockResolvedValue({ version: '0.1.0' });
+  });
+
+  it('badge shows the unread count from GET /notifications/unread-count, not the decisions count', async () => {
+    // The bell badge is the unread notification count (spec: "Notification
+    // bell in top nav with unread count badge"). decisionsCount (legacy
+    // /users/me/notifications/count) must not drive the badge.
+    api.unreadNotificationCount.mockResolvedValue(3);
+    api.notificationCount.mockResolvedValue(7);
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    await waitFor(() => {
+      expect(api.unreadNotificationCount).toHaveBeenCalled();
+      const badge = container.querySelector('[data-testid="notification-bell"] .decisions-count');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toBe('3');
+    }, { timeout: 3000 });
+  });
+
+  it('clicking the bell opens the notification drawer', async () => {
+    api.unreadNotificationCount.mockResolvedValue(2);
+    api.notifications.mockResolvedValue({
+      notifications: [
+        { id: 'n-1', title: 'Gate failure in payment-api', priority_level: 'High', read: false, created_at: 1700000000 },
+      ],
+    });
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="notification-bell"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-drawer"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // The drawer lists active-only notifications (?active=true).
+    expect(api.notifications).toHaveBeenCalledWith({ limit: 50, active: true });
+  });
+
+  it('refreshes the unread badge when the drawer closes', async () => {
+    // Read-state changes made inside the drawer (mark read / mark all read)
+    // must be reflected on the bell badge when it closes.
+    let calls = 0;
+    api.unreadNotificationCount.mockImplementation(() => {
+      calls += 1;
+      return Promise.resolve(calls === 1 ? 2 : 0);
+    });
+    api.notifications.mockResolvedValue({ notifications: [] });
+    const { container } = render(App);
+    await waitFor(() => {
+      const badge = container.querySelector('[data-testid="notification-bell"] .decisions-count');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toBe('2');
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="notification-bell"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-drawer"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // Close via the drawer's close button.
+    await fireEvent.click(container.querySelector('[data-testid="notification-drawer"] .close-btn'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"] .decisions-count')).toBeNull();
+    }, { timeout: 3000 });
+    expect(api.unreadNotificationCount.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 // ── Mobile drawer section navigation (ui-navigation.md §8) ──────────────

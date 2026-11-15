@@ -3,13 +3,16 @@
  * (user-management.md §UI Pages > Notification Drawer).
  *
  * Covers:
- *   - Opens and loads recent notifications from GET /notifications
+ *   - Opens and loads recent notifications from GET /notifications?active=true
  *   - Groups by priority band (Urgent/High/Medium/Low)
  *   - Unread badge count reflects unread items
  *   - Deep link click calls onnavigate with the action_url
  *   - InvitationReceived deep-links to /invite/{workspace_id}
  *   - Mark read / unread calls the task-125 endpoints
  *   - Mark all read calls the bulk endpoint
+ *   - The list request is active-only (dismissed/resolved rows are excluded
+ *     server-side — pinned by the adapter test
+ *     list_active_for_user_excludes_resolved_and_dismissed)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
@@ -68,8 +71,18 @@ describe('NotificationDrawer', () => {
 
   it('loads recent notifications when opened', async () => {
     const { container } = await renderOpen();
-    expect(api.notifications).toHaveBeenCalledWith({ limit: 50 });
+    expect(api.notifications).toHaveBeenCalledWith({ limit: 50, active: true });
     expect(container.querySelector('[data-testid="notification-drawer"]')).toBeTruthy();
+  });
+
+  it('requests the active-only listing (dismissed/resolved excluded server-side)', async () => {
+    // The drawer must ask for ?active=true: the server excludes rows the
+    // user resolved or dismissed in the Inbox, so a dismissed card never
+    // reappears in the drawer. (The exclusion itself is enforced by the
+    // SQLite adapter test of the same name — this pins the request shape.)
+    await renderOpen();
+    const call = api.notifications.mock.calls[0][0];
+    expect(call.active).toBe(true);
   });
 
   it('groups notifications by priority band', async () => {

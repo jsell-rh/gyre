@@ -6,6 +6,8 @@
    *
    * - Recent notifications grouped by priority band (Urgent / High /
    *   Medium / Low — the four-level bands of §Notification Entity).
+   * - Active-only listing (`?active=true`): rows the user resolved or
+   *   dismissed in the Inbox/Decisions surface are excluded by the query.
    * - Deep links: clicking a notification navigates via `onnavigate`
    *     with the notification's action_url (server-resolved SPA path) or,
    *     for InvitationReceived, the invitation accept page.
@@ -74,7 +76,11 @@
     loading = true;
     error = null;
     try {
-      const raw = await api.notifications({ limit: 50 });
+      // active=true: the drawer lists only active (unresolved, undismissed)
+      // notifications — rows the user resolved or dismissed in the
+      // Inbox/Decisions surface never reappear here (the server enforces
+      // the filter in the query, user-management.md §In-App Notification UI).
+      const raw = await api.notifications({ limit: 50, active: true });
       notifications = Array.isArray(raw?.notifications) ? raw.notifications : [];
     } catch (e) {
       error = e?.message ?? String(e);

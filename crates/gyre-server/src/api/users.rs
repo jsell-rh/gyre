@@ -531,6 +531,11 @@ pub struct NotificationParams {
     /// Four-level priority name (Low/Medium/High/Urgent), case-insensitive —
     /// widens to the HSI §8 rank band it covers.
     pub priority: Option<String>,
+    /// Active-only listing (user-management.md §In-App Notification UI:
+    /// the notification drawer shows recent notifications; rows the user
+    /// has resolved or dismissed elsewhere are excluded by the query).
+    /// `?active=true`.
+    pub active: Option<bool>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
@@ -649,19 +654,38 @@ async fn list_my_notifications_impl(
     let max_priority = params.max_priority.or(band_max);
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
-    let notifications = state
-        .notifications
-        .list_for_user(
-            &user_id,
-            workspace_id.as_ref(),
-            min_priority,
-            max_priority,
-            params.notification_type.as_deref(),
-            repo_id.as_ref(),
-            limit,
-            offset,
-        )
-        .await?;
+    // `?active=true` routes to the active-only listing (drawer surface);
+    // the default keeps the full listing the Inbox depends on (its
+    // show-dismissed toggle needs resolved/dismissed rows client-side).
+    let notifications = if params.active.unwrap_or(false) {
+        state
+            .notifications
+            .list_active_for_user(
+                &user_id,
+                workspace_id.as_ref(),
+                min_priority,
+                max_priority,
+                params.notification_type.as_deref(),
+                repo_id.as_ref(),
+                limit,
+                offset,
+            )
+            .await?
+    } else {
+        state
+            .notifications
+            .list_for_user(
+                &user_id,
+                workspace_id.as_ref(),
+                min_priority,
+                max_priority,
+                params.notification_type.as_deref(),
+                repo_id.as_ref(),
+                limit,
+                offset,
+            )
+            .await?
+    };
     let items: Vec<NotificationResponse> = notifications.into_iter().map(Into::into).collect();
     Ok(Json(serde_json::json!({
         "notifications": items,
@@ -2928,6 +2952,80 @@ mod tests {
         assert_eq!(notifs.len(), 1);
         assert_eq!(json["limit"], 1);
         assert_eq!(json["offset"], 1);
+    }
+
+    /// `?active=true` (user-management.md §In-App Notification UI): the
+    /// notification drawer's listing excludes rows the user has already
+    /// resolved or dismissed, while the default listing still returns them
+    /// (the Inbox's show-dismissed toggle depends on the full listing).
+    #[tokio::test]
+    async fn spec_path_notifications_active_filter_excludes_resolved_and_dismissed() {
+        let state = test_state();
+        let seed = |id: &str| {
+            Notification::new(
+                Id::new(id),
+                Id::new("ws-default"),
+                Id::new("system"),
+                NotificationType::GatePassed,
+                id,
+                "default",
+                1_700_000_000,
+            )
+        };
+        state.create_notification(&seed("notif-active")).await.unwrap();
+        let resolved = seed("notif-resolved");
+        state.create_notification(&resolved).await.unwrap();
+        state
+            .notifications
+            .resolve(&Id::new("notif-resolved"), &Id::new("system"), None)
+            .await
+            .unwrap();
+        let dismissed = seed("notif-dismissed");
+        state.create_notification(&dismissed).await.unwrap();
+        state
+            .notifications
+            .dismiss(&Id::new("notif-dismissed"), &Id::new("system"))
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        // Default listing: all three (Inbox surface contract unchanged).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            3,
+            "default listing still returns resolved and dismissed rows"
+        );
+
+        // Active-only listing: just the untouched row.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications?active=true")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "resolved and dismissed rows are excluded");
+        assert_eq!(notifs[0]["id"], "notif-active");
     }
 
     /// Spec path (user-management.md §API > Notifications): unread-count
