@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["c5902874c8d6692ed9ab6c1544ffd1daf2380839", "d577374a98ca345672978b2b8a9763b618a6af31", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["5383928c6fcd65a1ee1b90a49b91c3f1e97bb756", "c5902874c8d6692ed9ab6c1544ffd1daf2380839", "d577374a98ca345672978b2b8a9763b618a6af31", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
 ---
 
 ## Spec Excerpt
@@ -97,42 +97,39 @@ Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `
 
 ## Shipped
 
-All acceptance-criterion pages shipped in earlier rounds as real Svelte 5
-(runes) components against the task-124/125/111 endpoints: User Settings
-(profile editing, preferences, notification channels) and Session
-Management in `UserProfile.svelte`; User Profile at `/@username`
+All acceptance-criterion pages shipped as real Svelte 5 (runes) components
+consuming the task-124/125 API endpoints (`web/src/lib/api.js`): User Settings
+(profile editing, preferences, notification channels) and Session Management
+in `UserProfile.svelte`; User Profile at `/@username`
 (`PublicUserProfile.svelte`); Tenant User Management and Invitation
 Management in `TenantSettings.svelte`; Workspace Members/Invitations,
 ownership transfer, and Team Management in `WorkspaceSettings.svelte`;
 Invitation Accept at `/invite/{token}` (`InvitationAccept.svelte`);
-Notification Drawer + bell unread badge (`NotificationDrawer.svelte`,
-`NotificationBell.svelte`, `notifications.svelte.js`); Notification
-Preferences in the profile's Notification Preferences tab.
+Notification Drawer with bell unread badge, priority grouping, deep links
+(`NotificationDrawer.svelte`, `NotificationBell.svelte`,
+`notifications.svelte.js`); Notification Preferences in the profile's
+Notification Preferences tab and `NotificationSettings.svelte`.
 
-### This round (review repair, commit `c5902874`)
+### This round (merge repair, commit `5383928c`)
 
-Fixed the one merge-resolution compile defect flagged by review
-(759a9183, carried from the main-merge 25ca4f72): the adapter test
-`list_active_for_user_excludes_resolved_and_dismissed` in
-`crates/gyre-adapters/src/sqlite/notification.rs` still called
-`NotificationRepository::list_for_user` with the pre-task-209
-9-argument shape, but the trait gained `exclude_types: &[&str]` as
-argument #8 (HSI §12). Inserted `&[]` so the test's full-listing
-assertion keeps the Inbox contract. No production code changed.
+Rebased the branch onto the new assignment base `81c24bf0` (task-137 gate
+feedback work). The merge touched only server crates and specs — no
+`web/src` files changed, so the verified UI work is intact on the new base.
+Resolved the `specs/coverage/SUMMARY.md` conflict mechanically by
+regenerating with `scripts/update-coverage-summary.sh` (agent-gates row
+matches the merged coverage file: 8 assigned / 7 implemented; HSI shifted
+one section to implemented per the merged state).
 
 Evidence (recorded under /tmp/stage/review-evidence):
 
+- `cd web && npm ci && npm test` → 123 files, 2426 passed / 41 skipped,
+  exit 0.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → clean, exit 0.
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib
   list_active_for_user_excludes_resolved_and_dismissed` → 1 passed,
-  exit 0 (`review-evidence/cargo-adapters-test-fix.txt`).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → clean, exit 0
-  (same evidence file).
+  exit 0.
 
 For the independent verifier (deferred per 4 GiB build budget):
 
-- `cargo test --all` (workspace; unblocked by this fix)
-- gyre-server handler tests:
-  `spec_path_notifications_active_filter_excludes_resolved_and_dismissed`,
-  `invitee_can_decline_own_pending_invitation`
-- `cd web && npm ci && npm test` (frontend unchanged this round;
-  passing in the prior round's verification)
+- `cargo test --all` (workspace)
+- gyre-server handler tests for user/session/invitation/team endpoints
