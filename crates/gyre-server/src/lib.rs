@@ -13,6 +13,7 @@ pub(crate) mod constraint_check;
 pub mod container_audit;
 pub mod dep_staleness;
 pub mod domain_events;
+pub mod email;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
@@ -29,6 +30,7 @@ pub mod llm_rate_limit;
 pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
+pub mod merge_attestation;
 pub mod merge_policy;
 pub mod merge_processor;
 pub mod metrics;
@@ -81,18 +83,19 @@ use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetCallRepository,
-    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
-    ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
-    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
-    MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
-    MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
-    PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoAccessOverrideRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository,
-    SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
-    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    AttestationRepository, AttestationStorage, AuditRepository, BreakingChangeRepository,
+    BudgetCallRepository, BudgetRepository, BudgetUsageRepository, ComputeTargetRepository,
+    ContainerAuditRepository, ConversationRepository, CostRepository, DependencyPolicyRepository,
+    DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
+    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository,
+    MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
+    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
+    QualityGateRepository, RekorClient, RepoAccessOverrideRepository, RepoRepository,
+    ReviewRepository, RolloutPolicyRepository, SpawnLogRepository, SpecApprovalEventRepository,
+    SpecApprovalRepository, SpecLedgerRepository, SpecLifecycleRepository, SpecPolicyRepository,
+    TaskRepository, TeamRepository, TenantMetaSpecSetRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -275,6 +278,13 @@ pub struct AppState {
     pub costs: Arc<dyn CostRepository>,
     /// Audit event store.
     pub audit: Arc<dyn AuditRepository>,
+    /// Merge attestation bundle storage (agent-gates.md §Part 3
+    /// Storage): git note on the merge commit + `merge_attestation_bundle`
+    /// audit event, queryable by MR id and commit SHA.
+    pub attestation_storage: Arc<dyn AttestationStorage>,
+    /// Rekor transparency log for merge attestation non-repudiation
+    /// (no-op until a Rekor backend is configured).
+    pub rekor: Arc<dyn RekorClient>,
     /// SIEM target store and forwarding state.
     pub siem_store: SiemStore,
     /// Broadcast channel for live audit event SSE stream.
@@ -598,16 +608,18 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
-    /// Persist a notification and broadcast it to live SSE stream subscribers
-    /// (user-management.md §API > Notifications: real-time stream).
+    /// Persist a notification and fan it out to both realtime channels
+    /// (user-management.md §API > Notifications): the `/notifications/stream`
+    /// SSE subscribers and the live `/ws` connections authenticated as the
+    /// notification's owner (the in-app bell).
     ///
     /// Single fan-out point for notification creation: every production
     /// emitter goes through here (or through the
     /// [`BroadcastingNotificationRepo`](crate::notifications::BroadcastingNotificationRepo)
     /// this delegates to, which background paths without an `&AppState` use)
-    /// so a connected `/notifications/stream` client sees every notification
-    /// the moment it is stored. Broadcast is fire-and-forget (no subscribers,
-    /// or a lagged one, must never fail the persist).
+    /// so a connected client sees every notification the moment it is
+    /// stored. Fan-out is fire-and-forget (no subscribers, a lagged one, or
+    /// an offline owner must never fail the persist).
     pub async fn create_notification(
         &self,
         notification: &gyre_common::Notification,
@@ -1272,6 +1284,18 @@ pub fn build_state(
         Arc::clone(&search),
     );
 
+    // agent-gates.md §Part 3 Storage: merge attestation bundles stored
+    // as git notes on the merge commit + `merge_attestation_bundle`
+    // audit events (queryable by MR id and commit SHA). Wraps the same
+    // audit repository so bundles flow through the identical store
+    // (SQLite/PG/mem) and search-sync path as every other audit event.
+    // Rekor transparency-log publication is stubbed until a backend is
+    // configured (no-op adapter warns on every submission).
+    let attestation_storage: Arc<dyn AttestationStorage> = Arc::new(
+        gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
+    );
+    let rekor: Arc<dyn RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
+
     // Spec-link graph persistence (spec-links.md §Forge-Maintained Spec Graph).
     // The SQL table is authoritative; the in-memory store is a hot cache,
     // loaded here at boot so the graph survives restarts without re-push.
@@ -1332,6 +1356,8 @@ pub fn build_state(
         analytics,
         costs: store!(dyn CostRepository, mem::MemCostRepository::default()),
         audit,
+        attestation_storage,
+        rekor,
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
         notification_broadcast_tx,
