@@ -1012,10 +1012,11 @@ mod tests {
         );
 
         // The full listing still returns all four rows.
-        let all =
-            NotificationRepository::list_for_user(&s, &user1, None, None, None, None, None, 50, 0)
-                .await
-                .unwrap();
+        let all = NotificationRepository::list_for_user(
+            &s, &user1, None, None, None, None, None, &[], 50, 0,
+        )
+        .await
+        .unwrap();
         assert_eq!(all.len(), 4, "list_for_user keeps the Inbox contract");
     }
 
