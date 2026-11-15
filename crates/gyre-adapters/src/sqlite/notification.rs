@@ -1013,7 +1013,16 @@ mod tests {
 
         // The full listing still returns all four rows.
         let all = NotificationRepository::list_for_user(
-            &s, &user1, None, None, None, None, None, &[], 50, 0,
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            50,
+            0,
         )
         .await
         .unwrap();
