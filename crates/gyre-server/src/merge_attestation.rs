@@ -20,10 +20,13 @@
 //! changing the bundle format: every signer covers the same canonical
 //! payload bytes.
 //!
-//! The signed bundle is stored (spec §Storage) as a git note on the merge
-//! commit under `refs/notes/merge-attestations` and as an audit event
-//! (`merge_attestation_bundle`) for queryability. Rekor transparency-log
-//! publication arrives with the Sigstore/OIDC integration.
+//! The signed bundle is stored (spec §Storage) through the
+//! `AttestationStorage` port: as a git note on the merge commit under
+//! `refs/notes/merge-attestations` and as an audit event
+//! (`merge_attestation_bundle`) for queryability, then submitted to the
+//! Rekor transparency log (no-op adapter until a Rekor backend is
+//! configured — every submission warns that non-repudiation is
+//! pending).
 
 use std::sync::Arc;
 
@@ -40,16 +43,11 @@ use sha2::{Digest, Sha256};
 
 use crate::AppState;
 
-/// Git notes ref for merge attestation bundles (spec §Storage: "as a git
-/// note on the merge commit"). Distinct from the legacy
-/// `refs/notes/attestations` ref, whose dual-write (chain vs. legacy
-/// bundle) is managed by `crate::attestation` — a separate ref avoids
-/// racing that logic.
-pub const MERGE_ATTESTATION_NOTES_REF: &str = "refs/notes/merge-attestations";
-
-/// Event type recorded in the audit log for each generated bundle (spec
-/// §Storage: "in the audit_events table for queryability").
-pub const MERGE_ATTESTATION_AUDIT_TYPE: &str = "merge_attestation_bundle";
+// Storage-target constants live with the bundle type in gyre-domain;
+// re-exported here for the existing call sites.
+pub use gyre_domain::merge_attestation::{
+    MERGE_ATTESTATION_AUDIT_TYPE, MERGE_ATTESTATION_NOTES_REF,
+};
 
 /// Domain separator for gate-agent key derivation (see
 /// [`GateAgentSigner::derive`]).
@@ -402,91 +400,40 @@ pub async fn generate_merge_attestation_bundle(
 
 // ── Storage ──────────────────────────────────────────────────────────────────
 
-/// Persist the signed bundle: as an audit event (queryability) and as a
-/// git note on the merge commit (spec §Storage). Failures are logged —
-/// the merge has already landed and must not be rolled back by bundle
-/// storage — but they are surfaced, never silently swallowed.
+/// Persist the signed bundle through the `AttestationStorage` port
+/// (spec §Storage: git note on the merge commit + `merge_attestation_bundle`
+/// audit event, queryable by MR id and commit SHA) and submit it to the
+/// Rekor transparency log. Failures are logged — the merge has already
+/// landed and must not be rolled back by bundle storage — but they are
+/// surfaced, never silently swallowed.
 pub async fn store_merge_attestation_bundle(
     state: &AppState,
     mr: &MergeRequest,
     repo: &gyre_domain::Repository,
     bundle: &MergeAttestationBundle,
 ) {
-    // Audit event: the signed bundle JSON in full.
-    let event = gyre_domain::AuditEvent::new(
-        Id::new(uuid::Uuid::new_v4().to_string()),
-        gyre_domain::AuditEventType::Custom(MERGE_ATTESTATION_AUDIT_TYPE.to_string()),
-        None,
-        None,
-        None,
-        Some(mr.workspace_id.clone()),
-        Some(repo.id.clone()),
-        "merge_request".to_string(),
-        Some(mr.id.to_string()),
-        gyre_domain::AuditOutcome::Success,
-        serde_json::to_value(bundle).unwrap_or(serde_json::Value::Null),
-        None,
-        None,
-        crate::api::now_secs(),
-    );
-    if let Err(e) = state.audit.record(&event).await {
+    let scope = gyre_ports::attestation_storage::AttestationScope {
+        workspace_id: mr.workspace_id.clone(),
+        repo_id: repo.id.clone(),
+    };
+    if let Err(e) = state
+        .attestation_storage
+        .store(std::path::Path::new(&repo.path), &scope, bundle)
+        .await
+    {
         tracing::warn!(
             mr_id = %mr.id,
             error = %e,
-            "failed to record merge attestation bundle audit event"
+            "failed to store merge attestation bundle (git note / audit event)"
         );
     }
-
-    // Git note on the merge commit. Fire-and-forget like the legacy
-    // attestation note: a missing git binary or a read-only repo must not
-    // fail the merge; the audit event above is the durable record.
-    let note_json = match serde_json::to_string(bundle) {
-        Ok(j) => j,
-        Err(e) => {
-            tracing::warn!(mr_id = %mr.id, error = %e, "cannot serialize merge attestation bundle note");
-            return;
-        }
-    };
-    let repo_path = repo.path.clone();
-    let sha = bundle.merge_commit_sha.clone();
-    let mr_id = mr.id.to_string();
-    tokio::spawn(async move {
-        let out = tokio::process::Command::new("git")
-            .args([
-                "-C",
-                &repo_path,
-                "notes",
-                &format!("--ref={MERGE_ATTESTATION_NOTES_REF}"),
-                "add",
-                "-f",
-                "-m",
-                &note_json,
-                &sha,
-            ])
-            .output()
-            .await;
-        match out {
-            Ok(o) if o.status.success() => {
-                tracing::info!(mr_id = %mr_id, sha = %sha, "merge attestation bundle note attached");
-            }
-            Ok(o) => {
-                tracing::warn!(
-                    mr_id = %mr_id,
-                    sha = %sha,
-                    stderr = %String::from_utf8_lossy(&o.stderr),
-                    "merge attestation bundle git note failed — bundle stored in audit log only"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    mr_id = %mr_id,
-                    sha = %sha,
-                    error = %e,
-                    "git not found — merge attestation bundle stored in audit log only"
-                );
-            }
-        }
-    });
+    if let Err(e) = state.rekor.submit(bundle).await {
+        tracing::warn!(
+            mr_id = %mr.id,
+            error = %e,
+            "failed to submit merge attestation bundle to the Rekor transparency log"
+        );
+    }
 }
 
 // ── Verification ─────────────────────────────────────────────────────────────

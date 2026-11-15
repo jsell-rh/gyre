@@ -22,6 +22,18 @@ use serde::{Deserialize, Serialize};
 /// Version tag of the merge attestation bundle format (spec: "1.0").
 pub const MERGE_ATTESTATION_VERSION: &str = "1.0";
 
+/// Git notes ref for merge attestation bundles (agent-gates.md §Storage:
+/// "as a git note on the merge commit", accessible via `git notes show`).
+/// Distinct from the chain-attestation ref `refs/notes/attestations`
+/// (supply-chain.md §5.3), whose dual-write logic owns that ref — a
+/// separate ref avoids racing it.
+pub const MERGE_ATTESTATION_NOTES_REF: &str = "refs/notes/merge-attestations";
+
+/// Audit event type recorded for each stored merge attestation bundle
+/// (agent-gates.md §Storage: "in the audit_events table for
+/// queryability").
+pub const MERGE_ATTESTATION_AUDIT_TYPE: &str = "merge_attestation_bundle";
+
 /// SHA-256 of `bytes` as a `sha256:<hex>` string — the hash format the
 /// spec uses for gate output hashes and review body hashes.
 pub fn sha256_hex(bytes: &[u8]) -> String {
