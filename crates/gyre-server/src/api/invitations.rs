@@ -2070,7 +2070,10 @@ mod tests {
     use tower::ServiceExt;
 
     fn app() -> Router {
-        let state = test_state();
+        app_with_state(test_state())
+    }
+
+    fn app_with_state(state: Arc<AppState>) -> Router {
         Router::new()
             .route("/api/v1/tenant/invite", post(invite_to_tenant))
             .route("/api/v1/tenant/invite/bulk", post(bulk_invite_to_tenant))
@@ -2125,7 +2128,8 @@ mod tests {
 
     #[tokio::test]
     async fn tenant_invite_lifecycle_create_list_revoke() {
-        let app = app();
+        let state = test_state();
+        let app = app_with_state(state.clone());
 
         // Create.
         let resp = app
@@ -2159,8 +2163,17 @@ mod tests {
         assert!(invite_url.contains("/invite/"), "magic link returned");
         let inv_id = json["id"].as_str().unwrap().to_string();
         // Token is never stored in plaintext: the stored hash is SHA-256 of
-        // the URL token.
+        // the URL token — asserted against the repository row, not just
+        // described (review 96521ecf F4).
         let token = invite_url.rsplit('/').next().unwrap().to_string();
+        let stored = state
+            .tenant_invitations
+            .find_by_id(&Id::new(inv_id.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.token_hash, hash_token(&token));
+        assert_ne!(stored.token_hash, token, "token must not be stored verbatim");
 
         // List.
         let resp = app
@@ -2316,6 +2329,102 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
+    /// Review 96521ecf F3: the tenant-invitation DECLINE happy path — a
+    /// token-only decline (no Bearer) returns 204, transitions the stored
+    /// row to Declined, mints no user account, and burns the token against
+    /// later acceptance.
+    #[tokio::test]
+    async fn tenant_decline_via_token_marks_declined_and_creates_no_account() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route(
+                "/api/v1/invite/:token/accept",
+                post(accept_tenant_invitation),
+            )
+            .route(
+                "/api/v1/invite/:token/decline",
+                post(decline_tenant_invitation),
+            )
+            .with_state(state.clone());
+
+        // Create through the API so the token is a real generated one.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"email": "decliner@example.com"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let inv_id = json["id"].as_str().unwrap().to_string();
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Token-only decline (no authorization header) → 204.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/invite/{token}/decline"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Stored row is Declined (terminal), not deleted.
+        let stored = state
+            .tenant_invitations
+            .find_by_id(&Id::new(inv_id.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Declined);
+        assert_eq!(stored.accepted_at, None);
+
+        // Declining must not provision an account for the invited email.
+        let users = state.users.list().await.unwrap();
+        assert!(
+            users
+                .iter()
+                .all(|u| u.email.as_deref() != Some("decliner@example.com")),
+            "decline must not create a user account"
+        );
+
+        // The declined token is burned: acceptance → 409.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/invite/{token}/accept"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
     #[tokio::test]
     async fn expired_invitation_cannot_be_accepted_and_job_marks_expired() {
         let state = test_state();
@@ -2394,9 +2503,82 @@ mod tests {
         assert_eq!(marked_inv.status, InvitationStatus::Expired);
     }
 
+    /// Review 96521ecf F1: the expiry job's WORKSPACE arm. The existing job
+    /// test seeds only TenantInvitation rows; this one proves
+    /// run_expiry_once transitions an expired Pending WorkspaceInvitation
+    /// to Expired (a row the accept handler never touches) and leaves a
+    /// still-fresh Pending row alone — deleting the workspace loop in
+    /// run_expiry_once must fail this test.
+    #[tokio::test]
+    async fn expiry_job_marks_expired_workspace_invitations() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-expjob"),
+            Id::new("default"),
+            "ExpJob WS",
+            "expjob-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let expired = WorkspaceInvitation {
+            id: Id::new("ws-inv-expjob"),
+            tenant_id: Id::new("default"),
+            workspace_id: ws.id.clone(),
+            user_id: Id::new("u-expjob"),
+            invited_by: Id::new("someadmin"),
+            role: WorkspaceRole::Developer,
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("expjob-token"),
+            expires_at: now_secs() - 10,
+            created_at: now_secs() - 100,
+            accepted_at: None,
+        };
+        state.workspace_invitations.create(&expired).await.unwrap();
+        // Control row: still-fresh Pending must survive the job untouched.
+        let fresh = WorkspaceInvitation {
+            id: Id::new("ws-inv-expjob-fresh"),
+            tenant_id: Id::new("default"),
+            workspace_id: ws.id.clone(),
+            user_id: Id::new("u-expjob-2"),
+            invited_by: Id::new("someadmin"),
+            role: WorkspaceRole::Viewer,
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("expjob-fresh-token"),
+            expires_at: now_secs() + 86_400,
+            created_at: now_secs(),
+            accepted_at: None,
+        };
+        state.workspace_invitations.create(&fresh).await.unwrap();
+
+        let marked = run_expiry_once(&state).await.unwrap();
+        assert_eq!(
+            marked, 1,
+            "job marks exactly the expired workspace seed, not the fresh one"
+        );
+        let stored = state
+            .workspace_invitations
+            .find_by_id(&Id::new("ws-inv-expjob"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Expired);
+        let still_fresh = state
+            .workspace_invitations
+            .find_by_id(&Id::new("ws-inv-expjob-fresh"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            still_fresh.status,
+            InvitationStatus::Pending,
+            "unexpired workspace invitation must stay Pending"
+        );
+    }
+
     #[tokio::test]
     async fn bulk_invite_creates_all_and_reports_errors() {
-        let app = app();
+        let state = test_state();
+        let app = app_with_state(state.clone());
         let resp = app
             .clone()
             .oneshot(
@@ -2427,6 +2609,38 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["created_count"], 2);
         assert_eq!(json["error_count"], 2);
+        // Per-entry errors must carry the correct source index (entries 2
+        // and 3 are the invalid ones).
+        let error_indexes = json["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["index"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(error_indexes, vec![2, 3]);
+
+        // The response body is not persistence (review 96521ecf F2):
+        // confirm through the repository that exactly the two valid
+        // entries were persisted as Pending rows, and the invalid ones
+        // were not persisted at all.
+        let stored = state
+            .tenant_invitations
+            .list_by_tenant(&Id::new("default"))
+            .await
+            .unwrap();
+        let mut emails: Vec<&str> = stored.iter().map(|i| i.email.as_str()).collect();
+        emails.sort_unstable();
+        assert_eq!(
+            emails,
+            vec!["one@example.com", "two@example.com"],
+            "bulk invite must persist exactly the two valid entries"
+        );
+        assert!(
+            stored
+                .iter()
+                .all(|i| i.status == InvitationStatus::Pending),
+            "freshly created bulk invitations must be Pending"
+        );
     }
 
     /// HTTP-layer negative authorization (review F4): a non-admin
@@ -2478,6 +2692,195 @@ mod tests {
             .await
             .unwrap();
         assert!(pending.is_empty(), "403 must not create an invitation");
+    }
+
+    /// Review 96521ecf F5: the require_tenant_admin guard must hold on
+    /// EVERY admin route, not just POST /api/v1/tenant/invite — list,
+    /// bulk, revoke, and the policy GET/PUT all reject a plain Member
+    /// with 403 and produce no side effects.
+    #[tokio::test]
+    async fn non_admin_blocked_on_remaining_tenant_invitation_admin_routes() {
+        let state = test_state();
+        // A plain Member user with a real API key (same pattern as
+        // non_admin_cannot_invite_via_http).
+        let mut pleb = User::new(
+            Id::new("pleb-2"),
+            "tenant:default:email:pleb2@x.com",
+            "pleb2",
+            now_secs(),
+        );
+        pleb.email = Some("pleb2@x.com".to_string());
+        pleb.tenant_id = Some(Id::new("default"));
+        state.users.create(&pleb).await.unwrap();
+        let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&raw_key), &pleb.id, "test")
+            .await
+            .unwrap();
+
+        // Seed one pending invitation as the admin so the revoke attempt
+        // targets a real row (its survival is the no-side-effect proof).
+        let seed = TenantInvitation {
+            id: Id::new("inv-pleb-target"),
+            tenant_id: Id::new("default"),
+            email: "target@example.com".to_string(),
+            invited_by: Id::new("system"),
+            role: GlobalRole::Member,
+            workspace_ids: vec![],
+            workspace_roles: vec![],
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("pleb-target-token"),
+            expires_at: now_secs() + 86_400,
+            created_at: now_secs(),
+            accepted_at: None,
+        };
+        state.tenant_invitations.create(&seed).await.unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite/bulk", post(bulk_invite_to_tenant))
+            .route(
+                "/api/v1/tenant/invitations",
+                get(list_tenant_invitations),
+            )
+            .route(
+                "/api/v1/tenant/invitations/:id",
+                delete(revoke_tenant_invitation),
+            )
+            .route(
+                "/api/v1/tenant/invitations/policy",
+                get(get_invitation_policy).put(update_invitation_policy),
+            )
+            .with_state(state.clone());
+        let auth = format!("Bearer {raw_key}");
+
+        // GET list → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/tenant/invitations")
+                    .header("authorization", &auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // POST bulk → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite/bulk")
+                    .header("authorization", &auth)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "invitations": [{"email": "bulk-pleb@x.com"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // DELETE revoke → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tenant/invitations/inv-pleb-target")
+                    .header("authorization", &auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // GET policy → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", &auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // PUT policy → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", &auth)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "tenant_invite_expiry_days": 99,
+                            "max_pending_invitations": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // No side effects: the seeded invitation is still Pending, no bulk
+        // invitation was created, and the policy still reports defaults.
+        let stored = state
+            .tenant_invitations
+            .find_by_id(&Id::new("inv-pleb-target"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Pending);
+        let all = state
+            .tenant_invitations
+            .list_by_tenant(&Id::new("default"))
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1, "403s must not create invitations");
+        let admin_app = Router::new()
+            .route(
+                "/api/v1/tenant/invitations/policy",
+                get(get_invitation_policy),
+            )
+            .with_state(state.clone());
+        let resp = admin_app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tenant_invite_expiry_days"], 7, "policy PUT must not persist");
+        assert_eq!(json["max_pending_invitations"], 50, "policy PUT must not persist");
     }
 
     /// Task-110 identity guard: a Bearer-authenticated caller whose email
@@ -3431,6 +3834,90 @@ mod tests {
         assert!(all.is_empty(), "403 must not create an invitation");
     }
 
+    /// Review 96521ecf F6: the invite_to_workspace role gate distinguishes
+    /// membership ROLE — a Developer MEMBER (not a non-member) must get
+    /// 403, so a regression authorizing any member fails here. Only the
+    /// non-member case was covered before.
+    #[tokio::test]
+    async fn developer_member_cannot_invite_to_workspace() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-devgate"),
+            Id::new("default"),
+            "DevGate WS",
+            "devgate-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        // A Developer MEMBER of the workspace with a real API key — the
+        // role gate must reject them even though they are a member.
+        let mut developer = User::new(
+            Id::new("dev-member"),
+            "tenant:default:email:devmember@x.com",
+            "devmember",
+            now_secs(),
+        );
+        developer.email = Some("devmember@x.com".to_string());
+        developer.tenant_id = Some(Id::new("default"));
+        state.users.create(&developer).await.unwrap();
+        let membership = WorkspaceMembership::new(
+            Id::new("m-dev-member"),
+            developer.id.clone(),
+            ws.id.clone(),
+            WorkspaceRole::Developer,
+            Id::new("someowner"),
+            now_secs(),
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+        let dev_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&dev_key), &developer.id, "test")
+            .await
+            .unwrap();
+
+        // A valid invitee target so the ONLY failure mode is the role gate.
+        let mut target = User::new(
+            Id::new("devgate-target"),
+            "tenant:default:email:devtarget@x.com",
+            "devtarget",
+            now_secs(),
+        );
+        target.email = Some("devtarget@x.com".to_string());
+        target.tenant_id = Some(Id::new("default"));
+        state.users.create(&target).await.unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-devgate/invite")
+                    .header("authorization", format!("Bearer {dev_key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "devtarget"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let all = state
+            .workspace_invitations
+            .list_by_workspace(&ws.id)
+            .await
+            .unwrap();
+        assert!(all.is_empty(), "403 must not create an invitation");
+    }
+
     /// Review F1/F2: the invitee-facing surface must close the loop
     /// end-to-end — invite by username (spec step 1), the invitee lists
     /// THEIR pending invitations via GET /api/v1/users/me/invitations,
@@ -3919,7 +4406,7 @@ mod tests {
         let notifs = f
             .state
             .notifications
-            .list_for_user(&f.invitee_id, None, None, None, None, None, 50, 0)
+            .list_for_user(&f.invitee_id, None, None, None, None, None, &[], 50, 0)
             .await
             .unwrap();
         let notif = notifs
