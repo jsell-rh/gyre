@@ -98,13 +98,14 @@ use std::sync::Arc;
 use users::{
     accept_invitation, add_team_member, create_team, create_token, create_user, deactivate_user,
     delete_team, delete_token, dismiss_notification, get_judgments, get_me, get_my_notifications,
-    get_notification_count, get_notification_preferences, get_unread_count, get_user_by_username,
-    invite_member, list_invitations, list_members, list_my_notifications, list_my_sessions,
-    list_teams, list_tokens, list_user_sessions, list_users, mark_all_read_notifications,
-    mark_notification_read, mark_notification_unread, notification_stream, remove_member,
-    remove_team_member, resolve_notification, revoke_all_my_sessions, revoke_all_user_sessions,
-    revoke_invitation, revoke_my_session, revoke_user_session, update_me, update_member_role,
-    update_notification_preferences, update_team,
+    get_notification_count, get_notification_preferences, get_unread_count, get_user_activity,
+    get_user_by_username, get_user_stats, invite_member, list_invitations, list_members,
+    list_my_notifications, list_my_sessions, list_teams, list_tokens, list_user_sessions,
+    list_users, mark_all_read_notifications, mark_notification_read, mark_notification_unread,
+    notification_stream, remove_member, remove_team_member, resolve_notification,
+    revoke_all_my_sessions, revoke_all_user_sessions, revoke_invitation, revoke_my_session,
+    revoke_user_session, update_me, update_member_role, update_notification_preferences,
+    update_team,
 };
 
 use crate::AppState;
@@ -926,6 +927,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // User Management). Registered after /users/me: axum's matchit
         // prioritizes the static segment, so /users/me never lands here.
         .route("/api/v1/users/:username", get(get_user_by_username))
+        // Public profile activity feed + aggregate stats
+        // (user-management.md §User Profile Page, /@{username} surface):
+        // same tenant containment as the profile itself (in-handler).
+        .route("/api/v1/users/:username/activity", get(get_user_activity))
+        .route("/api/v1/users/:username/stats", get(get_user_stats))
         // Deactivate a user (TenantAdmin only, per-handler check)
         .route("/api/v1/users/:id/deactivate", put(deactivate_user))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
