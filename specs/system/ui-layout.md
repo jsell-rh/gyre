@@ -4,6 +4,8 @@
 
 ## 1. Application Shell
 
+> **Superseded by `ui-navigation.md` §1/§1a (recorded for the sidebar by operator decision `16871182b1370b61693fc691`, 2026-11-16).** The shell described here — topbar + six-item sidebar + status bar — was replaced by the two-mode shell (workspace home / repo mode with horizontal tabs). `ui-navigation.md` §1a additionally specifies an optional, collapsible, per-mode navigation rail (specified, not yet shipped). This section is preserved for the layout dimensions and status-bar details that `ui-navigation.md` still references; do not implement the six-item sidebar from here.
+
 ### Fixed Structure
 
 The application shell has three permanent zones that never change:
