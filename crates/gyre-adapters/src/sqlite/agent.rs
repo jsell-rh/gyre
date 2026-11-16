@@ -74,6 +74,7 @@ struct AgentRow {
     orchestrator_type: String,
     repo_id: Option<String>,
     restart_on_failure: bool,
+    attestation_level: Option<i32>,
     persona_id: Option<String>,
 }
 
@@ -96,6 +97,7 @@ impl AgentRow {
             orchestrator_type: str_to_orchestrator_type(&self.orchestrator_type)?,
             repo_id: self.repo_id.map(Id::new),
             restart_on_failure: self.restart_on_failure,
+            attestation_level: self.attestation_level.map(|v| v.clamp(0, 255) as u8),
             persona_id: self.persona_id.map(Id::new),
         })
     }
@@ -118,6 +120,7 @@ struct NewAgentRow<'a> {
     orchestrator_type: &'a str,
     repo_id: Option<&'a str>,
     restart_on_failure: bool,
+    attestation_level: Option<i32>,
     persona_id: Option<&'a str>,
 }
 
@@ -144,6 +147,7 @@ impl AgentRepository for SqliteStorage {
                 orchestrator_type: orchestrator_type_to_str(&a.orchestrator_type),
                 repo_id: a.repo_id.as_ref().map(|id| id.as_str()),
                 restart_on_failure: a.restart_on_failure,
+                attestation_level: a.attestation_level.map(|v| v as i32),
                 persona_id: a.persona_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(agents::table)
@@ -162,6 +166,7 @@ impl AgentRepository for SqliteStorage {
                     agents::orchestrator_type.eq(row.orchestrator_type),
                     agents::repo_id.eq(row.repo_id),
                     agents::restart_on_failure.eq(row.restart_on_failure),
+                    agents::attestation_level.eq(row.attestation_level),
                     agents::persona_id.eq(row.persona_id),
                 ))
                 .execute(&mut *conn)
@@ -258,6 +263,7 @@ impl AgentRepository for SqliteStorage {
                 agents::orchestrator_type.eq(orchestrator_type_to_str(&a.orchestrator_type)),
                 agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
                 agents::restart_on_failure.eq(a.restart_on_failure),
+                agents::attestation_level.eq(a.attestation_level.map(|v| v as i32)),
                 agents::persona_id.eq(a.persona_id.as_ref().map(|id| id.as_str())),
             ))
             .execute(&mut *conn)

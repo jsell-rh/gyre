@@ -1,13 +1,13 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-11-15
+**Last updated:** 2026-11-16
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
 | abac-policy-engine.md | 19 | 2 | 0 | 0 | 17 | 0 | 100% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| agent-gates.md | 25 | 9 | 0 | 7 | 8 | 0 | 50% |
+| agent-gates.md | 25 | 9 | 0 | 8 | 8 | 0 | 50% |
 | agent-runtime.md | 33 | 1 | 0 | 10 | 22 | 0 | 68% |
 | analytics.md | 12 | 0 | 0 | 0 | 12 | 0 | 100% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |
@@ -35,7 +35,7 @@
 | spec-lifecycle.md | 13 | 3 | 0 | 0 | 5 | 5 | 100% |
 | spec-links.md | 17 | 3 | 0 | 0 | 4 | 10 | 100% |
 | spec-registry.md | 19 | 1 | 0 | 2 | 7 | 9 | 88% |
-| supply-chain.md | 18 | 4 | 0 | 7 | 6 | 1 | 50% |
+| supply-chain.md | 18 | 4 | 0 | 3 | 10 | 1 | 78% |
 | system-explorer.md | 19 | 10 | 0 | 9 | 0 | 0 | 0% |
 | trusted-foundry-integration.md | 26 | 26 | 0 | 0 | 0 | 0 | 0% |
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 11 | 0 | 4 | 21 | 0 | 84% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **220** | **0** | **178** | **240** | **163** | **69%** |
+| **TOTAL** | **802** | **220** | **0** | **174** | **245** | **163** | **70%** |
