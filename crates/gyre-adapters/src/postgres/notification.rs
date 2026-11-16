@@ -322,9 +322,14 @@ impl NotificationRepository for PgStorage {
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
         let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id
+        // (restored in the task-160 rebase repair — see the SQLite twin's
+        // comment for the scope-key contract).
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())

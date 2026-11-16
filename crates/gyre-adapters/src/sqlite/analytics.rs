@@ -200,9 +200,17 @@ impl AnalyticsRepository for SqliteStorage {
     async fn query_filtered(&self, filter: &AnalyticsQueryFilter) -> Result<Vec<AnalyticsEvent>> {
         let pool = Arc::clone(&self.pool);
         let filter = filter.clone();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id —
+        // same handle scope as `query`/`count`/`aggregate_by_day` in this
+        // file (rows are stamped with the handle's tenant at insert). Without
+        // this filter, an unfiltered `query_filtered` returned every
+        // tenant's rows from the shared database.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AnalyticsEvent>> {
             let mut conn = pool.get().context("get db connection")?;
-            let mut query = analytics_events::table.into_boxed();
+            let mut query = analytics_events::table
+                .filter(analytics_events::tenant_id.eq(&tenant))
+                .into_boxed();
             if let Some(ref name) = filter.event_name {
                 // Exact or trailing-`*` prefix match (analytics.md
                 // §Query Parameters). Prefix matching is LITERAL and
@@ -284,12 +292,18 @@ impl AnalyticsRepository for SqliteStorage {
     ) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
         let filter = filter.clone();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id —
+        // the raw-SQL twin of query_filtered's boxed filter above. The
+        // tenant predicate is the FIRST WHERE term and the FIRST bind so the
+        // placeholder order stays in lockstep.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
             let mut conn = pool.get().context("get db connection")?;
             // Server-side aggregation over the FULL filtered set (task-146
             // review F1): the WHERE clause mirrors query_filtered exactly
-            // (exact/trailing-`*` event_name, scope equality, inclusive
-            // since/until); LIMIT bounds the number of returned groups.
+            // (tenant scope, exact/trailing-`*` event_name, scope equality,
+            // inclusive since/until); LIMIT bounds the number of returned
+            // groups.
             let key_expr = match group_by {
                 AnalyticsGroupBy::EventName => "event_name".to_string(),
                 AnalyticsGroupBy::AgentId => "COALESCE(agent_id, '(none)')".to_string(),
@@ -300,6 +314,7 @@ impl AnalyticsRepository for SqliteStorage {
                 "SELECT {key_expr} AS k, COUNT(*) AS cnt \
                  FROM analytics_events WHERE 1=1"
             );
+            sql.push_str(" AND tenant_id = ?");
             if filter.event_name.is_some() {
                 // Exact or trailing-`*` prefix match (analytics.md
                 // §Query Parameters), same operator choice as
@@ -339,6 +354,7 @@ impl AnalyticsRepository for SqliteStorage {
             // into_boxed(): bind() returns Self, so binds can be applied
             // conditionally (diesel's documented loop-binding pattern).
             let mut query = diesel::sql_query(&sql).into_boxed();
+            query = query.bind::<Text, _>(tenant);
             if let Some(name) = &filter.event_name {
                 match name.strip_suffix('*') {
                     Some(prefix) => {

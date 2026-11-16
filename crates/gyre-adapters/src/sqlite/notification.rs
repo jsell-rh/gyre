@@ -322,9 +322,18 @@ impl NotificationRepository for SqliteStorage {
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
         let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+        // Restored in the task-160 rebase repair — the merge kept the base
+        // side's exclude_types parameter but dropped this filter, re-opening
+        // the cross-tenant read. Notification rows carry the domain
+        // Notification's tenant_id at insert; the storage handle's tenant
+        // scope selects which tenant's rows this read may see
+        // (SqliteStorage handles are per-tenant: new_for_tenant/with_tenant).
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())
