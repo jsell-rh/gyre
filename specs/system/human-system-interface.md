@@ -1,6 +1,8 @@
 # Human-System Interface
 
 > This spec defines how humans interact with a fully autonomous software development system. It **supersedes `ui-journeys.md`** (which is deprecated — its navigation model, journeys, and keyboard shortcuts are replaced by this spec). It extends `system-explorer.md` with concrete interaction patterns for trust calibration, agent interrogation, scoped communication, and LLM-driven architectural exploration.
+>
+> **§1 (Navigation Model) is superseded by `ui-navigation.md`** (two-mode model: workspace home + repo horizontal tabs), which §1.3 below records for the stable-sidebar subsection, including the 2026-11-16 amendment (decision `16871182b1370b61693fc691`) toward a context-dependent collapsible navigation rail (`ui-navigation.md` §1a). All other sections of this spec remain valid.
 
 ## The Novel Problem
 
@@ -21,7 +23,11 @@ Every surface in this spec exists to serve one of those five activities. If it d
 
 ### Stable Sidebar, Adaptive Content
 
-The sidebar is **permanent and unchanging** regardless of scope. Users build muscle memory for nav item positions. The *content area* adapts to the current scope (tenant, workspace, repo), not the sidebar.
+> **SUPERSEDED — do not implement.** The permanent six-item sidebar described below is no longer the navigation contract. It was superseded by `ui-navigation.md` (two-mode model: workspace home dashboard + repo horizontal tabs, Principle 5 "no permanent sidebar"), and then — by operator decision `16871182b1370b61693fc691` (2026-11-16, option_c, recorded by jsell; see `specs/tasks/task-246.md`) — amended toward a **context-dependent collapsible navigation rail** on navigation-heavy screens. The current requirement is `ui-navigation.md` §1a (Collapsible Navigation Rail): optional, scope-labelled, per-mode item sets with stable ordering, collapsed by default to preserve canvas/editor space, and a drawer on narrow viewports. The historical text is preserved below for intent only.
+
+**Historical text (superseded — preserved for intent, not for implementation):**
+
+The sidebar was specified as **permanent and unchanging** regardless of scope. Users build muscle memory for nav item positions. The *content area* adapts to the current scope (tenant, workspace, repo), not the sidebar.
 
 ```
 Sidebar (always visible, always these items):
@@ -36,6 +42,8 @@ Sidebar (always visible, always these items):
 Six items. That's it.
 
 **Why not scope-dependent sidebar?** Changing the sidebar when the user navigates between scopes is disorienting — the same navigation item moves position or disappears. Notion, Backstage, and VS Code all keep the primary nav stable. The content area is where scope manifests.
+
+*(Superseding note: the 2026-11-16 operator decision accepted the muscle-memory argument in scoped form — stable ordering **within each mode** of `ui-navigation.md` §1a — while rejecting the fixed global menu, which the two-mode rework had shown to be scope-ambiguous.)*
 
 ### Scope Indicator (Breadcrumb)
 
