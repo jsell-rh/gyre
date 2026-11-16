@@ -83,32 +83,26 @@ commit 1724c6a3d: patrol escalation emits through the scoped
 `emit_event(ws, ...)` and skips-and-logs workspaceless findings) are part
 of the commit list above.
 
-### Contract-restoration round verification (round 6, parent head 05d616bff)
+### Verification on this head (contract-restoration round)
 
-The executor again restored the assigned task document to its baseline
-(frontmatter/checkboxes only — the production fix and its 11 attributed
+The executor restored the assigned task document to its baseline
+(frontmatter only — the production scripts and their 11 attributed
 commits are untouched and reachable from HEAD). This round re-applied the
-ready-for-review state and re-verified the shipped behavior on the
-current head (no production code changed this round):
+ready-for-review state and re-verified the shipped behavior; no
+production code changed:
 
 - All three scripts pass fresh on this head: `check-hierarchy.sh` exit 0,
   `check-tenant-filter.sh` exit 0 (118 read methods on tenant-column
   tables checked), `check-api-auth.sh` exit 0
   (`/tmp/stage/review-evidence/check-{hierarchy,tenant-filter,api-auth}.log`).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exit 0 on this head —
-  the sibling-attempt E0308 finding (reconciliation.rs
-  `emit_event(None, ...)` vs the scoped `emit_event` signature) does not
-  apply to this branch: `emit_tenant_meta_spec_set_updated` already emits
-  through `AppState::emit_tenant_event`.
-- `cargo test -p gyre-domain` on this head: 474 + 8 passed, 0 failed
-  (`domain-tests-round6.txt`).
-- Negative test re-run: injecting `workspace_id: Option<Id>` into the
-  domain `Task` struct makes `check-hierarchy.sh` exit 1 with the §2
-  message; restored, exit 0, worktree clean
+- Negative test: injecting `workspace_id: Option<Id>` into the domain
+  `Task` struct makes `check-hierarchy.sh` exit 1 with the §2 message;
+  restored, exit 0, worktree clean
   (`check-hierarchy-negative.log`).
-- `check-task-commit-attribution.sh` fails on the executor-restored
-  empty `commits: []` and passes again once the 11-commit list is
-  restored (`round6-summary.txt` for the full round evidence).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exit 0 on this head
+  (`cargo-check-server.txt`).
+- `cargo test -p gyre-domain`: 474 + 8 passed, 0 failed
+  (`domain-tests.txt`).
 
 Server suites the verifier must run on this head (per the sandbox build
 budget): `cargo test --all`, all-target clippy, and the frozen-baseline
