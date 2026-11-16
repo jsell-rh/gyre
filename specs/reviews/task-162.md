@@ -1,0 +1,36 @@
+# Review — task-162 (Message bus — wire MessageConsumer dispatcher and event TTL expiry job)
+
+Spec: `specs/system/message-bus.md` §Relationship to Notifications, §Implementation Notes.
+Candidate under review: `81985c57` (branch `pipeline/task-162/50fafce60aa5468196e34500cfba8e24-1`, assigned base `e5df7847`; branch commits `dd716a98`, `6d20863c`, `5192ff75`, `51221dc0` merged onto the base via `35b7094b`).
+Verdict: **needs revision** (3 findings, round 1 of this rebase; see `/tmp/stage/verdict.json`).
+
+## What was verified as real
+
+- **Dispatcher**: `spawn_message_consumer()` (`message_dispatcher.rs`) takes single-owner possession of the 256-capacity mpsc receiver via `AppState::take_message_dispatch_rx()` (second call is a logged no-op — pinned by `spawn_message_consumer_end_to_end`) and spawns the background drain task; `MessageDispatcher` holds `Vec<Arc<dyn MessageConsumer>>` and dispatches every drained message. Wired from `main.rs:171`. All three send paths (`AppState::emit_event`, `api/messages.rs` REST send, `mcp.rs` `message.send`) do one non-blocking `try_send` with a warning log on full-channel drop — matches the spec's backpressure contract.
+- **NotificationBridge** implements `MessageConsumer` for GateFailure / BudgetWarning / AgentError / ReconciliationCompleted, resolves tenant via workspace lookup (no fabricated `"default"` scope — `check-fabricated-scope-defaults.sh` passes), skips unresolvable workspaces/agents rather than mis-attributing, and delegates creation to the shared `notify_rich` helper so bridge notifications carry the same structured source + deep link.
+- **TTL job**: `spawn_message_expiry` (hourly, `MissedTickBehavior::Delay`, first tick immediate) calls `run_message_expiry` → `expire_events(now − GYRE_EVENT_TTL_SECS·1000)` + `expire_acked_inboxes(now − GYRE_DEAD_INBOX_TTL_SECS·1000)`, defaults 604800 each, `env_u64` warns-and-falls-back on invalid values. Registered as `message_expiry` in the admin job registry (triggerable via `POST /admin/jobs/message_expiry/run`) while the standalone loop records cycles — the same registry pattern as `merge_processor`/`stale_agent_detector`; no double loop (no `spawn_job("message_expiry")` anywhere).
+- **Mem-adapter contract alignment**: `MemMessageRepository` now tracks `ack_reason` (`acknowledge()` → `"explicit"`, `acknowledge_all(reason)`) and `expire_acked_inboxes` only deletes agent-targeted messages acked `agent_completed`/`agent_orphaned` — matching the SQLite/Postgres adapters and the port doc contract; `expire_events` retains agent-targeted rows. This closes a pre-existing mem/SQLite contract divergence.
+- **Tests** (type-checked via `cargo check -p gyre-server --tests`, exit 0; the candidate's own tests were not executable in this sandbox — gyre-server codegen is blocked by the executor's 4 GiB wrapper, probes recorded in `/tmp/stage/review-evidence/deferred-probes.txt`): the dispatcher/TTL tests are substantive — TTL retention boundaries distinguish unacked Directed, explicit-ack, and `agent_completed` dead-inbox rows; env-var tests are serialized on a shared mutex because env is process-global; the end-to-end test drives `emit_event` through the real channel and polls for the notification.
+
+## Findings (blocking)
+
+1. **`cargo test --all` acceptance criterion broken** — `gate_executor.rs` `failing_gate_notifies_author_with_gate_result_payload` (~line 7305). The candidate removed the synchronous `notify_gate_failure` call from `run_gate` but left this pre-existing test un-migrated: it never spawns `spawn_message_consumer`, and the candidate's `lib.rs` change removed the no-op drain task from `build_state`, so nothing consumes the dispatch channel in the test's state. The only remaining production caller of `notify_gate_failure` is the bridge, which never runs there → the "failed gate must notify the author's spawning user" assertion fails. Verifier probe: `cargo test -p gyre-server --lib failing_gate_notifies_author_with_gate_result_payload`.
+
+2. **Duplicate GateFailure notifications on spec-policy violations** — `merge_processor.rs` `report_spec_policy_violation` (called from merge-queue processing at 2153/2177) both emits a Workspace-targeted `GateFailure` event and directly creates a `GateFailure` notification via `notify_spec_policy_violation`. The bridge now consumes that event and creates a second, noisier notification ("Gate 'unknown' failed …") for the same user/MR; `notify_gate_failure` has no dedupe. Harmless before this change (channel was a no-op drain); the candidate deduped the gate_executor/ralph_loop pair but missed this emitter. No test spawns the dispatcher on this path, so the suite is blind to it.
+
+3. **Duplicate + over-broad AgentBudgetWarning fan-out** — `NotificationBridge::on_budget_warning` fans an undeduped `AgentBudgetWarning` to every Admin/Developer/Owner member of the workspace, while the emitting path (`api/budget.rs` → `notify_agent_budget_warning`) has already created per-period-deduped notifications for "spawning user + workspace Admin" (user-management.md §Who Gets Notified, line 452). In production (dispatcher running) each 80% crossing gives Admins two notifications, and Developers/Owners receive notifications the spec's routing row does not grant. Budget tests don't spawn the dispatcher, so the duplication is invisible to the suite.
+
+## Minor (non-blocking, recorded)
+
+- `message_dispatcher.rs` doc comments and the regression test `notification_bridge_ignores_agent_directed_gate_failure_copy` claim `ralph_loop::on_gates_failed` publishes an Agent-targeted **GateFailure** copy; it actually emits `MessageKind::GateResult` (ralph_loop.rs ~341). The dedupe guard is harmless but its stated rationale is wrong.
+- `MessageKind::AgentError` has no production emitter (pre-existing entry in `scripts/dead-message-kind-exemptions.txt`), so the bridge's AgentError handler is currently unreachable in production. The task plan names AgentError explicitly, so this is a pre-existing repo gap, not a candidate regression — but the coverage row's "AgentError→rank-2" claim rests on a kind nothing emits.
+
+## Mechanical checks (candidate tree)
+
+`scripts/check-arch.sh`, `scripts/check-fabricated-scope-defaults.sh`, `scripts/check-dead-message-kinds.sh` → all exit 0. `cargo check -p gyre-server` and `cargo check -p gyre-server --tests` → exit 0.
+
+## Required for the next round
+
+1. Migrate or repair `failing_gate_notifies_author_with_gate_result_payload` (spawn the dispatcher in it, as the new gate test and the reconciliation test do) — and run the gyre-server test suite.
+2. Make spec-policy `GateFailure` single-creation: either stop emitting the bus event from `report_spec_policy_violation`'s direct-notify path, mark that payload so the bridge skips it, or drop the direct `notify_spec_policy_violation` call and let the bridge derive it (preserving the specific title/body).
+3. Reconcile `on_budget_warning` with the existing deduped routing: fan out only to recipients the sync path does not already cover (or route the bridge through the same `notify_agent_budget_warning` per-period dedupe), and align the recipient set with user-management.md's "spawning user + workspace Admin" row.
