@@ -58,6 +58,7 @@ REQUIRED_FIELDS=(
 
 Read `specs/system/hierarchy-enforcement.md` §2 (Invariant Enforcement), §3 (Enforcement), and §7 (Mechanical Enforcement) for the full script requirements. The scripts are purely static analysis (grep/regex) — no runtime execution. Check the existing `scripts/check-arch.sh` for style conventions used by other enforcement scripts in this codebase.
 
+
 ## Shipped
 
 All three hierarchy-enforcement scripts exist, are executable, carry
@@ -78,41 +79,43 @@ usage comments, and are wired into `.pre-commit-config.yaml` and
   route↔`RouteResourceMapping` cross-reference delegated to the
   frozen-baseline `check-abac-route-registry.sh` (spec §7).
 
-### Rebase repair at the merged base (`3b8b0eb6`)
+### Rebase repair at base `c66ee2ac` (task-123 notification)
 
-Merging base `6082be2f` (task-165 supply-chain + the task-099 F1 emit
-contract) left three push-path call sites in `git_http.rs` calling
-`emit_event(Some(repo_workspace_id.clone()), ...)`, but the base
-changed `emit_event` to take `workspace_id: Id` directly (tenant now
-resolved from the workspace record inside the emitter). The whole
-`gyre-server` crate failed `cargo check` with three E0308s — this was
-the failing verification finding. Fixed by unwrapping the `Some(...)`
-at the three sites (stack-policy `PushRejected`, warn-mode
-`ConstraintViolation` ×2), matching the sibling push-path call sites
-that already pass the `Id`.
+Merging base `c66ee2ac` into the branch conflicted in
+`crates/gyre-adapters/src/{sqlite,postgres}/notification.rs`
+(`list_for_user`): the base replaced the single-type
+`notification_type` parameter with the exact-match
+`notification_types: Option<&[&str]>` set filter, while the branch had
+added `let tenant = self.tenant_id.clone()` scoping (spec §3) and the
+base had not. The post-conflict merged body already referenced both
+`ntypes` and `&tenant`, so both sides were kept: the base's
+`Vec<String>` set copy (with the empty-set-means-nothing contract) and
+the branch's tenant binding. The merge was committed as `7a9f7419`;
+no other file conflicted.
 
-### Verification on this head (`3b8b0eb6`)
+### Verification on this head (`7a9f7419`)
 
 Fresh runs (logs under `/tmp/stage/review-evidence/`):
 
-- `SKIP_WEB_BUILD=1 cargo check --workspace` → exit 0 (server,
-  adapters, cli all type-check; was 3 × E0308 before the repair).
-- `bash scripts/check-hierarchy.sh` → exit 0; mutation kill
-  reconfirmed: making `Task.workspace_id` `Option<Id>` makes the script
-  exit 1 naming the file and line
-  (`check-hierarchy-mutation.log`), revert restores exit 0.
-- `bash scripts/check-tenant-filter.sh` → exit 0: 124 read methods on
-  tenant-column tables checked, 0 violations.
-- `bash scripts/check-api-auth.sh` → exit 0.
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --test tenant_isolation`
-  → 2 passed, 0 failed (`tenant-isolation-test.txt`): two SqliteStorage
-  handles over one db file differing only by tenant scope —
-  cross-tenant rows invisible in both directions, and create() stamps
-  the storage's real tenant rather than a fabricated one.
-
-The task `commits:` frontmatter was restored to the full branch list
-(15 prior SHAs) plus this round's repair commit, so
-`check-task-commit-attribution.sh` passes again after the round reset.
+- `scripts/check-hierarchy.sh` → exit 0
+  (`check-hierarchy.log`); mutation kill reconfirmed: making
+  `Task.workspace_id` `Option<Id>` makes the script exit 1 naming the
+  file and line, revert restores exit 0
+  (`check-hierarchy-mutation.log`).
+- `scripts/check-tenant-filter.sh` → exit 0: 124 read methods on
+  tenant-column tables checked (including the merged notification
+  reads), 0 violations (`check-tenant-filter.log`).
+- `scripts/check-api-auth.sh` → exit 0 (`check-api-auth.log`).
+- `cargo check -p gyre-adapters` → exit 0; `cargo check -p gyre-server`
+  → exit 0 — the two crates touched by the merge type-check.
+- `cargo test -p gyre-adapters --lib notification` → 13 passed, 0
+  failed (`adapters-notification-tests.log`) — covers the conflicted
+  sqlite notification adapter.
+- `cargo test -p gyre-adapters --test tenant_isolation` → 2 passed, 0
+  failed (`tenant-isolation-test.log`).
+- `scripts/check-task-commit-attribution.sh` → exit 0 with the
+  restored `commits:` frontmatter; the round's merge commit is not
+  task-labeled surface (merge commits are out of the script's scope).
 
 Large server-wide suites (`cargo test --all`) are deferred to the
 independent verifier per the assignment's build-budget rules; the
