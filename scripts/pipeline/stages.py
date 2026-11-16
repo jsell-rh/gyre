@@ -310,7 +310,7 @@ def publish(execution, task):
                     proof = {'pr': url, 'merged': observation['mergeCommit']['oid'],
                              'previous_head': observation['headRefOid'], 'pending_head': head}
                     execution.store.event('historical_publication_detached', proof, task['name'], execution.claim['id'])
-                    return proof, updates, []
+                    return {'historical_publication': proof}, updates, []
                 error = PublicationMismatch('Merged PR head differs from the verified source; inspect the retained publication evidence before retrying')
                 error.diagnostic = {'pr': url, 'observed': observation, 'verified': verified}
                 raise error

@@ -29,3 +29,13 @@ class ProgressTests(unittest.TestCase):
         t=snapshot(self.s)['tasks'][0]
         self.assertEqual(t['blockers'],[])
         self.assertIsNone(t['condition'])
+
+    def test_detaching_a_historical_pr_does_not_claim_new_delivery_progress(self):
+        self.s.put_task('task-001','g','body',{})
+        self.s.event('completed',{'merged':'actual-upstream-merge'})
+        self.s.db.execute('UPDATE events SET at=?',(time.time()-7200,))
+        self.s.event('completed',{'merged':'historical-merge','pending_head':'new-unmerged-source'})
+        self.s.event('completed',{'historical_publication':{'merged':'historical-merge'}})
+        progress=snapshot(self.s)['health']['delivery']
+        self.assertGreater(progress['seconds_since_merge'],7190)
+        self.assertEqual(progress['condition'],'Stalled')

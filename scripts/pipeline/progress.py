@@ -35,6 +35,7 @@ def blockers(store, task, tasks, work):
 def delivery(store, tasks):
     now=time.time();unfinished=[t for t in tasks if not t['current_satisfied']]
     row=store.db.execute("""SELECT max(at) at FROM events WHERE kind='completed'
+        AND json_extract(detail,'$.pending_head') IS NULL
         AND (json_extract(detail,'$.merged') IS NOT NULL OR json_extract(detail,'$.status')='merged')""").fetchone()
     last=row['at'] if row else None
     active=sum(bool(t['stage']) for t in unfinished)
