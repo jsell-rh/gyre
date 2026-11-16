@@ -41,12 +41,12 @@ Event-tier messages have a configurable TTL (default 7 days, `GYRE_EVENT_TTL_SEC
 
 ## Acceptance Criteria
 
-- [x] `spawn_message_consumer()` function exists and starts a background dispatcher task
-- [x] At least one `MessageConsumer` (notification bridge) is registered and creates notifications from message bus events
-- [x] Event TTL expiry job runs periodically and cleans up old Event-tier messages
-- [x] Dead agent inbox cleanup runs periodically
-- [x] `GYRE_EVENT_TTL_SECS` and `GYRE_DEAD_INBOX_TTL_SECS` env vars are respected
-- [x] `cargo test --all` passes
+- [ ] `spawn_message_consumer()` function exists and starts a background dispatcher task
+- [ ] At least one `MessageConsumer` (notification bridge) is registered and creates notifications from message bus events
+- [ ] Event TTL expiry job runs periodically and cleans up old Event-tier messages
+- [ ] Dead agent inbox cleanup runs periodically
+- [ ] `GYRE_EVENT_TTL_SECS` and `GYRE_DEAD_INBOX_TTL_SECS` env vars are respected
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
