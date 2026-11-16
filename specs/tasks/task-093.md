@@ -7,7 +7,7 @@ coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
   - "platform-model.md §3 Repo Orchestrator"
-commits: ["34baa7370f43cca5bf5aeacfa2e66bca53711aa0", "decfec1b65384fd70cf6a5bbc10716e0afac302e", "0346b089db211c060ff44f08b80d782b94efc405", "6f9af6286c3188657a6746e277777ab818584d14", "b277fff9697fac6b1284131169a99f970c46d055", "45d6d869ac7408a8557975bcb195478c4edb716e", "c9743839d1b784fb7ce4c46f9d536fdd72e1d197", "d7e588d9ffc25b8a5755dc411e4dba650caa599b", "098fe57564253fa29f4d738b16ae5b8ee32f8eae", "73b1c92efc920a9725e0531219b030c3f3ecc22d", "c158eb6853538d989766f84b3f4b236f7fb73ad7", "c83dc841a282381a36a130853c846de4c13e1195", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "2ae69e973fce1e3a316205af1f238c3a457bd458"]
+commits: ["2ae69e973fce1e3a316205af1f238c3a457bd458", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "d54224113232c496a3072f1152b5a2a6034099a5"]
 review: specs/reviews/task-093.md
 ---
 
@@ -91,57 +91,39 @@ Product behavior for this task (OrchestratorType domain enum, one-live-per-scope
 spawn endpoints with tenant containment, scoped JWTs per tier, stale-detector
 auto-restart with budget symmetry and death escalation, MCP orchestrator tool
 suite with tier gates) was implemented and review-verified in earlier rounds
-(review round-2 verdict: complete — see `specs/reviews/task-093.md`). The prior
-assignment for this round was interrupted mid-merge while folding main
-(`047d6524`) into the branch, leaving committed conflict markers in four files.
+(round-2 verdict: complete — see `specs/reviews/task-093.md`). This round
+repaired the two round-4 review findings against the merge of main
+(`047d6524`) into the branch:
 
-This round finished that merge resolution in commit
-`34baa7370f43cca5bf5aeacfa2e66bca53711aa0`:
+### Restored dropped analytics kill-tests (commit `d5422411`)
 
-### What was resolved
+Merge resolution `34baa737` silently dropped two of main's tests from
+`crates/gyre-server/src/api/orchestrator.rs`:
+`orchestrator_spawn_emits_agent_spawned_analytics_event` and
+`orchestrator_spawn_analytics_reports_resolved_compute_target`. They pin the
+f3f37604 regression (`agent.spawned` `compute_target` must report the
+resolved launch target, not hardcoded `"local"`) plus the null `task_id` /
+persona properties. Both restored verbatim from base `047d652`
+(byte-identity verified by diff against the extracted base region); they
+call the current 5-arg `spawn_workspace_orchestrator_core` signature and the
+existing `test_state`/`seed` fixtures unchanged.
 
-- `crates/gyre-cli/src/bootstrap.rs` — main's single-source persona
-  definitions (`gyre_domain::BUILTIN_PERSONA_DEFS` re-export) replace the
-  branch's private embeds; the CLI consumer already used the domain field
-  names.
-- `crates/gyre-server/src/abac_middleware.rs` — both sides' route-registry
-  additions kept (task-093 orchestrator/spawn + main's
-  commits/:sha/signature/verification) and main's drifted-built-in-policy
-  refresh seeding adopted.
-- `crates/gyre-server/src/api/orchestrator.rs` — adopted main's
-  supersede-rename name resolution (a name held by a dead row is released by
-  renaming the row `-superseded-N`; a live holder still rejects with 400);
-  removed the superseded `unique_default_name` helper and a stray brace from
-  the interrupted edit. Test modules are the union: main's task-115
-  system-orchestrator heartbeat-refresh regression plus launch/analytics
-  tests, alongside this task's revision tests (wrapper tenant containment,
-  budget symmetry, disconnect-behavior inheritance, fail/stop death
-  handling, escalation payload flag). Respawn tests re-pinned to the
-  canonical-name-reuse semantics; the contradictory
-  `explicit_name_conflict_still_rejected_when_dead_agent_holds_it` test was
-  dropped — supersede coverage for explicit names (and the live-holder 400)
-  is pinned by `spawn_frees_name_of_stopped_predecessor`.
-- `crates/gyre-server/src/mcp.rs` — test-module union: main's §1
-  token-scoping suite (worker/workspace-orchestrator scope gates) plus this
-  task's `gyre_message_send` RBAC write-gate tests.
+### rustfmt changed-lines gate
 
-### Test evidence (this sandbox, resolved tree)
+The three flagged regions (unformatted let-chain in a test, double blank
+line, missing EOF newline) were formatted — zero semantic change. Probe:
+`python3 scripts/check-rustfmt-diff.py 047d652495dde3b1ae6ddbea4f8cf1b077a3c18f`
+exits 0 ("changed lines clean, 6 Rust files checked").
 
-- `cargo check -p gyre-server`, `-p gyre-server --tests`,
-  `--workspace --all-targets` — all clean, no warnings.
-- `cargo test -p gyre-domain` → 555+8 passed; `-p gyre-ports -p gyre-common`
-  → 125 passed; `-p gyre-cli` → 221 passed + 1 doc.
-- All mechanical gates pass: check-arch, abac-route-registry,
-  abac-exempt-handlers, mcp-write-tools, inert-enforcement,
-  mem-port-contracts, dead-message-kinds, byte-slice-truncation,
-  relative-path-defaults, fail-open-ref-resolution, migration-versions,
-  fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults,
-  forwarded-header-trust, in-memory-state-stores,
-  unbounded-external-http, migration-sql-portability, forged-scope-fields.
+### Verification evidence
 
-gyre-server test codegen is blocked by the sandbox build wrapper (4 GiB
-budget); the independent verifier must run:
-`cargo test -p gyre-server --lib api::orchestrator`,
-`cargo test -p gyre-server --lib -- mcp::tests::mcp_scope`,
-`cargo test -p gyre-server --lib -- mcp::tests::mcp_message_send`,
-`cargo test -p gyre-server --lib stale_agents`, and `cargo test --all`.
+- `cargo check -p gyre-server --tests` (via the build wrapper): passes,
+  9m20s — the restored tests type-check against the current tree.
+- Tests the independent verifier must execute:
+  `cargo test -p gyre-server orchestrator_spawn_emits_agent_spawned_analytics_event`
+  and
+  `cargo test -p gyre-server orchestrator_spawn_analytics_reports_resolved_compute_target`
+  (server test builds exceed this sandbox's 4 GiB model budget; deferred
+  per the build-wrapper contract). Evidence recorded under
+  `/tmp/stage/review-evidence`.
+- `python3 scripts/check-rustfmt-diff.py 047d652495dde3b1ae6ddbea4f8cf1b077a3c18f`: exit 0.
