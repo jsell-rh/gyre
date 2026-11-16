@@ -47,12 +47,12 @@ REQUIRED_FIELDS=(
 
 ## Acceptance Criteria
 
-- [x] `scripts/check-hierarchy.sh` exists and passes on current codebase
-- [x] `scripts/check-hierarchy.sh` would fail if `workspace_id: Option<Id>` were added to Task
-- [x] `scripts/check-tenant-filter.sh` exists and passes (with documented skip list)
-- [x] `scripts/check-api-auth.sh` exists and passes
-- [x] All scripts have usage comments at the top
-- [x] `cargo test --all` still passes
+- [ ] `scripts/check-hierarchy.sh` exists and passes on current codebase
+- [ ] `scripts/check-hierarchy.sh` would fail if `workspace_id: Option<Id>` were added to Task
+- [ ] `scripts/check-tenant-filter.sh` exists and passes (with documented skip list)
+- [ ] `scripts/check-api-auth.sh` exists and passes
+- [ ] All scripts have usage comments at the top
+- [ ] `cargo test --all` still passes
 
 ## Agent Instructions
 
