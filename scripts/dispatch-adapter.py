@@ -121,6 +121,10 @@ def read_rows(store):
         status = {'claimed': 'running', 'retry': 'failed', 'attention': 'attention',
                   'ready': 'queued', 'succeeded': 'succeeded'}[r['state']]
         outcome = json.loads(r['result']) if r['result'] else {}
+        hold=store.setting(store.runtime_hold_key(r['task'],r['stage'],r['generation']))
+        if hold and r['state'] in ('ready','retry'):
+            status='attention';outcome=hold
+
         if r['state'] == 'attention' and outcome.get('category') == 'gateway_transport':
             status = 'uncertain'
         if status == 'failed' and outcome.get('category') == 'observation':
@@ -137,7 +141,7 @@ def read_rows(store):
             'run_id': f"{r['id']}:{r['token']}",
             'log': str(store.directory/'attempts'/r['id']/str(r['token'])/'output.log'),
             'error': outcome.get('message', ''),
-            'failure_category':outcome.get('category','') if r['state']=='attention' else '',
+            'failure_category':outcome.get('category','') if r['state']=='attention' or status=='attention' else '',
             'cancel_requested': canceled})
     return result
 
@@ -229,7 +233,7 @@ def main():
     store = Store(args.state)
     load(store)
     try:
-        request = json.load(sys.stdin) if action in ('authorize','launch','retry','cancel','history','settings-save') else None
+        request = json.load(sys.stdin) if action in ('authorize','launch','retry','cancel','history','settings-save','choose-decision') else None
         if action == 'config':
             result = {'adapter_backend': True, 'scope':scope(store), 'watch':True, 'plain':args.plain,
                 'concurrency':store.setting('slots',8), 'poll_interval':max(1, int(args.interval)),
@@ -239,6 +243,13 @@ def main():
                 'supervisor_lock':str(store.directory/'supervisor.lock'), 'log_dir':str(store.directory/'dispatcher/logs'),
                 'gateway_name':store.setting('gateway','gyre-gyre'),
                 'environment':{'OPENSHELL_GATEWAY':store.setting('gateway','gyre-gyre'), 'OPENSHELL_GATEWAY_ENDPOINT':None}}
+        elif action == 'decisions':
+            from pipeline.decisions import list_decisions
+            result=list_decisions(store)
+        elif action == 'choose-decision':
+            if request.get('scope')!=scope(store):raise ValueError('Decision belongs to another controller scope')
+            from pipeline.decisions import choose
+            result=choose(store,request['id'],request['option'],source='local TUI')
         elif action == 'settings-save':
             result = save_configuration(store, request)
         elif action == 'activate':

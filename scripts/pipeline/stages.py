@@ -28,15 +28,20 @@ def prompt(execution, task):
     findings = [finding | {'log_tail': finding['log_tail'][-allowance:]}
                 if finding.get('log_tail') else finding for finding in findings]
     return '\n\n'.join(((ROOT / 'specs/GOAL.md').read_text(),
-                        (ROOT / f'specs/prompts/pipeline-{role}.md').read_text(),
+                        (ROOT / ('specs/prompts/pipeline-decision.md' if execution.claim['input'].get('decision_request') else f'specs/prompts/pipeline-{role}.md')).read_text(),
                         'Assigned task:\n' + bounded,
                         'Exact assignment:\n' + json.dumps(execution.claim['input']),
                         'Current requirement inputs:\n' + json.dumps((task['data'].get('requirements') or {}).get('components', {})),
                         'Previous assignment outcome:\n' + str(execution.claim.get('result') or 'none')[-4000:],
-                        'Durable findings:\n' + json.dumps(findings)))
+                        'Durable findings:\n' + json.dumps(findings),
+                        ('Authorized amendment paths (exact paths; no other edits):\n' +
+                         json.dumps(task['data']['decision_allowed_paths'])) if task['data'].get('source_decision') else ''))
 
 
 def triage(execution, task):
+    if execution.claim['input'].get('decision_request'):
+        from .decisions import prepare
+        return prepare(execution,task)
     if execution.claim['input'].get('baseline_probe'):
         from .repairs import recheck
         return recheck(execution, task)
@@ -74,6 +79,17 @@ def triage(execution, task):
 def implement(execution, task):
     from .contract_recovery import normalize
     result = normalize(execution, task) or execution.cloud_step(task, prompt(execution, task))
+    if task['data'].get('source_decision'):
+        path=checkout(execution,result['head'])
+        base=execution.claim['input']['base']
+        changed=execution.command('git','diff','--name-only','-z',base,result['head'],cwd=path).stdout.rstrip('\0').split('\0')
+        changed=[name for name in changed if name]
+        allowed=set(task['data']['decision_allowed_paths'])
+        invalid=[name for name in changed if name not in allowed]
+        if invalid:
+            from .execution import Attention
+            error=Attention('Decision amendment changed files outside its approved task/spec scope: '+', '.join(invalid))
+            error.category='decision_scope';error.diagnostic={'head':result['head'],'invalid':invalid};raise error
     # A partial source checkpoint survives inference failures. It is never
     # sent to review as though the agent completed its assignment.
     progress = safe_metadata(result['task_body'])['progress']

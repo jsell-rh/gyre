@@ -235,3 +235,15 @@ export function attemptLogPath(paths, id) {
   if (!match) throw new Error("invalid attempt id");
   return join(paths.attempts, match[1], match[2], "output.log");
 }
+
+export async function chooseDecision(paths, id, option) {
+  try {
+    const { stdout } = await execFileP("python3", [paths.command, "--state", paths.state, "decide", id, option, "--source", "local cockpit"],
+      { cwd: paths.root, timeout: 15000, maxBuffer: 1024 * 1024 });
+    return JSON.parse(stdout);
+  } catch (error) {
+    const failure = new Error(String(error.stderr || error.message).trim().split("\n").at(-1).replace(/^ValueError:\s*/, ""));
+    failure.status = 409;
+    throw failure;
+  }
+}
