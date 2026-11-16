@@ -42,6 +42,7 @@ diesel::table! {
         orchestrator_type -> Text,
         repo_id -> Nullable<Text>,
         restart_on_failure -> Bool,
+        attestation_level -> Nullable<Integer>,
         // TASK-099 F2: persona attached to this agent (orchestrators).
         persona_id -> Nullable<Text>,
     }
