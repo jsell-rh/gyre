@@ -2,10 +2,10 @@
 title: "Ghost Overlays — structural prediction visualization on canvas"
 spec_ref: "system-explorer.md §3"
 depends_on: [task-178, task-185]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "system-explorer.md §3. Inline Spec Editing with Progressive Preview"
-commits: ["343ff8c8c4d5a55504571c5c3a53abba9280da5f"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -100,110 +100,3 @@ system-explorer.md §3 defines Inline Spec Editing with Progressive Preview. The
 ## Agent Instructions
 
 Read `system-explorer.md` §3 "Inline Spec Editing with Progressive Preview" for the full specification. The predict endpoint is already implemented — check `crates/gyre-server/src/api/graph.rs` for the `predict_graph` handler and its request/response types. The route is at `POST /api/v1/repos/:id/graph/predict` (verified in `mod.rs`). The ghost overlay visual language must match the table in the spec exactly. The Editor Split (task-172) and LLM-Assisted Spec Editing (task-185) handle the left-side editing; this task focuses on the right-side canvas ghost visualization. For the preview agent spawn, check the agent spawn API in `api/spawn.rs`. Ghost node positioning should use a simple heuristic: place new nodes near their predicted parent or in available space near related existing nodes.
-
-## Shipped
-
-The §3 progressive-preview loop now runs end to end with real data on every
-tier: instant link-graph impact, debounced LLM structural prediction rendered
-as the spec's ghost visual language, and a thorough preview that really spawns
-an implementation agent on a throwaway branch whose completion MR carries the
-code diff.
-
-### Ghost visual language (shared model + SVG layer)
-
-- `web/src/lib/ghostOverlay.js` — pure model shared by every surface:
-  prediction normalization (the §3 wire contract `{action, node_type, name,
-  node_id, confidence, reason, changes, parent_trait}` plus the legacy
-  `{nodeId, type}` overlay shape), the confidence→opacity map (0.3 at 50%,
-  1.0 at 100%, linear between the anchors, faint floor below), positioning
-  (modify/remove overlay their existing node by id or name; add ghosts near
-  the predicted `parent_trait`, staggered, or in deterministic free space),
-  and dotted-green ghost-edge derivation for predicted new relationships.
-- `web/src/lib/GhostOverlay.svelte` — the §3 table exactly: dotted outline +
-  green fill for adds, yellow highlight for modifies, red dotted outline +
-  red strikethrough for removes, dotted green edges, opacity scaled by
-  confidence, hover/focus tooltip showing the prediction reason, confidence
-  and changes, pulsing border while a preview agent runs
-  (`ghost-previewing`), solid border after real implementation
-  (`ghost-confirmed`). Ghosts are hoverable but carry no click handlers —
-  they never trigger canvas navigation.
-- `ArchPreviewCanvas.svelte` renders the layer on top of its nodes (any input
-  shape normalized once), keeps per-node ghost markers, includes ghost
-  positions in the canvas bounds, and renders ghosts even for specs with no
-  graph linkage yet (empty state only when no nodes AND no ghosts).
-
-### Fast tier (debounced prediction)
-
-`EditorSplit.svelte` fires `POST /repos/:id/graph/predict` with
-`{spec_path, draft_content}` 1.2 s after every edit pause (one call per
-pause, not per keystroke), shows a `Predicting…` chip while in flight, and
-renders the response's predictions as ghosts. Server side, the spec-edit path
-of `predict_graph` now appends the §3 output contract to the LLM system
-prompt (so predictions come back with action/confidence/reason) and returns
-real context fields: `affected_specs` (other side of every spec link touching
-the spec), `affected_repos` (workspace repos whose graphs contain live nodes
-governed by the spec) and a deterministic `estimated_agent_cost`. The §8
-explorer-ask caller of the shared prediction core is unchanged (no contract).
-
-### Instant tier (link-graph impact bar)
-
-The moment editing begins, `EditorSplit` computes and renders a compact bar
-above the editor (`impact-bar`): connected specs from `GET /specs/:path/links`,
-repos implementing the spec (inbound `implements` link repos + repos whose
-graphs govern the spec's nodes), and the governed node count from the repo
-graph. Each segment degrades independently; none blocks editing.
-
-### Thorough tier (agent preview)
-
-- New `POST /api/v1/repos/:id/graph/thorough-preview` (ABAC `graph:write`,
-  route + resolver mapping registered): validates the request, creates a
-  preview `Task` carrying the draft in its description
-  (`labels: ["spec-preview"]`, `spec_path`, throwaway `preview/<spec>-<id>`
-  branch), and spawns an implementation agent through the shared
-  `spawn_agent_core` (same worktree/JWT/compute-target/budget path as
-  `POST /agents/spawn`). Returns `{repo_id, task_id, agent_id, branch,
-  process_launched}`; a failed spawn rolls the preview task back (no
-  orphaned Backlog work for the scheduler).
-- `EditorSplit` polls the task with the real status vocabulary (`review`/
-  `done` = complete, `blocked`/`cancelled` = failed), keeps the ghost canvas
-  visible under the progress strip so ghosts pulse while the agent runs, and
-  on completion resolves the agent's MR (`GET /merge-requests?repository_id=`,
-  matched by task/agent) and renders its real diff
-  (`GET /merge-requests/:id/diff` hunks) in the Code Diff tab; ghosts switch
-  to solid/confirmed. A preview that fails, 404s, or times out returns to
-  editing with an error banner — never a fabricated complete state.
-- The ghost overlay clears when the spec is saved (and the saved draft is
-  not re-predicted until the next edit).
-
-### Test evidence
-
-- `web/src/__tests__/ghostOverlay.test.js` (26 tests) — action mapping,
-  opacity anchors and clamping, normalization (both wire shapes,
-  idempotency, drops), positioning heuristics, ghost-edge derivation.
-- `web/src/__tests__/GhostOverlay.test.js` (16 tests) — §3 visual language
-  per action (colors, dotted strokes, strikethrough), confidence opacity,
-  tooltip show/hide/focus with reason + changes, pulse/solid modes,
-  non-navigation.
-- `web/src/__tests__/EditorSplit.test.js` — new §3 describe block: impact
-  bar segments, debounced single predict call after an edit pause,
-  Predicting… indicator lifecycle, ghost rendering from a prediction
-  response (colors/edge/tooltip), ghost clearing on save without
-  re-prediction, pulse→solid transition across a thorough preview, and
-  completion MR diff rendering. The pre-existing mount-predict test was
-  updated for the debounced timing (same assertion, longer waitFor).
-- Full frontend suite: 124 files, 2485 passed, 41 skipped.
-- Server: `cargo check -p gyre-server --tests` clean; the mechanical
-  guards pass (ABAC route registry, architecture lint, mem port contracts,
-  inert enforcement, in-memory state stores).
-
-### Deferred to the independent verifier (server test binaries)
-
-Large gyre-server test compilation is verifier-owned per the assignment
-budget. Execute:
-
-- `cargo test -p gyre-server --lib api::graph::tests::predict_graph_spec_edit_returns_ghost_contract_and_link_context`
-- `cargo test -p gyre-server --lib api::graph::tests::thorough_preview_creates_task_and_spawns_agent_on_throwaway_branch`
-- `cargo test -p gyre-server --lib api::graph::tests::thorough_preview_rejects_missing_fields_and_unknown_repo`
-- `cargo test -p gyre-server --lib api::graph::tests::thorough_preview_rolls_back_preview_task_when_spawn_fails`
-- `cargo test -p gyre-server --lib api::graph::tests::predict_graph` (pre-existing predict regressions)
-- `cargo test -p gyre-server --lib api::spawn` (spawn-core regressions — the thorough preview delegates to it)
