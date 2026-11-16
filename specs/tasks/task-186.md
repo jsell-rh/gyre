@@ -5,7 +5,7 @@ depends_on: [task-178, task-185]
 progress: complete
 coverage_sections:
   - "system-explorer.md §3. Inline Spec Editing with Progressive Preview"
-commits: ["2e6b190d8db841a5b62b99a0f4152ecc93e733cb", "44310fa1fcf02864c93460b3496601f12b89d516", "343ff8c8c4d5a55504571c5c3a53abba9280da5f"]
+commits: ["2e6b190d8db841a5b62b99a0f4152ecc93e733cb", "44310fa1fcf02864c93460b3496601f12b89d516", "343ff8c8c4d5a55504571c5c3a53abba9280da5f", "a939c1c9ef6db51d02b4b7fc27c8f1cb6d0d46aa"]
 ---
 
 ## Spec Excerpt
