@@ -50,3 +50,12 @@ class SavedContractRecoveryTests(FullsendFixture):
         p=next((self.store.directory/'attempts'/repair['id']).glob('*/outcome.json'))
         result=json.loads(p.read_text());result['agent_exit']=1;p.write_text(json.dumps(result))
         self.assertIsNone(normalize(self.execution,self.store.task('task-9999')))
+
+    def test_detached_clone_without_main_tracking_ref_is_supported(self):
+        from pipeline.stages import checkout
+        self.saved()
+        path=checkout(self.execution,self.store.task('task-9999')['data']['candidate'])
+        self.call('git','update-ref','-d','refs/remotes/origin/main',cwd=path)
+        result=normalize(self.execution,self.store.task('task-9999'))
+        self.assertTrue(result['valid'])
+        self.call('git','rev-parse','--verify','refs/remotes/origin/main',cwd=path)

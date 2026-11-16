@@ -196,8 +196,7 @@ class Store:
                 except PriorityError:
                     return False
             row = next((row for row in rows
-                        if (not compute or not self.db.execute(
-                            "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
+                        if (not compute or not self.blocking_resources(task=row['task']))
                         and not self.runtime_held(row)
                         and (not compute or self.admission_available(stage,capacity,work=row))
                         and self.integration_available(dict(row))
@@ -225,19 +224,36 @@ class Store:
     def admission_name(ident, token):
         return f'admission-{ident}-{token}'
 
-    def compute_resources(self):
-        """Cleanup debt occupies compute until fresh scoped runtime evidence says otherwise."""
+    def compute_released(self, row):
+        """Fresh, assignment-scoped evidence of a deleting sandbox's absent pod."""
         context,namespace=self.setting('runtime_kube_context'),self.setting('runtime_namespace')
-        now=time.time()
-        result=[]
-        for row in self.db.execute("SELECT * FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'"):
-            proof=json.loads(row['data']).get('compute_observation') or {}
-            released=(row['kind']=='sandbox' and row['state']=='deleting' and context and namespace
-                and proof.get('context')==context and proof.get('namespace')==namespace
-                and proof.get('work')==row['work'] and proof.get('token')==row['token']
-                and proof.get('absent') is True and 0<=now-proof.get('at',0)<180)
-            if not released:result.append(row)
-        return result
+        proof=json.loads(row['data']).get('compute_observation') or {}
+        return bool(row['kind']=='sandbox' and row['state']=='deleting' and context and namespace
+            and proof.get('context')==context and proof.get('namespace')==namespace
+            and proof.get('work')==row['work'] and proof.get('token')==row['token']
+            and proof.get('absent') is True and 0<=time.time()-proof.get('at',0)<180)
+
+    def compute_resources(self):
+        """Cleanup debt occupies compute until fresh scoped evidence says otherwise."""
+        return [row for row in self.db.execute("SELECT * FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'")
+                if not self.compute_released(row)]
+
+    def blocking_resources(self, *, task=None, work=None):
+        """Keep cleanup debt separate from a live runtime or unsalvaged source.
+
+        Read-only stages own no production source. An implementer may bypass
+        old metadata only with a recorded never-started source disposition.
+        Provider deletion remains tracked, but a run-scoped credential owns no
+        compute and must not strand an otherwise independent next attempt.
+        """
+        rows=self.db.execute("""SELECT r.*,w.stage FROM resources r JOIN work w ON w.id=r.work
+            WHERE r.state<>'absent' AND (? IS NULL OR w.task=?) AND (? IS NULL OR r.work=?)""",
+            (task,task,work,work)).fetchall()
+        return [row for row in rows if row['kind']!='provider' and not (
+            self.compute_released(row) and (row['stage'] in ('review','verify','assess')
+                or ((json.loads(row['data']).get('source_capture') or {}).get('state')=='not_started'
+                    and (json.loads(row['data']).get('source_capture') or {}).get('work')==row['work']
+                    and (json.loads(row['data']).get('source_capture') or {}).get('token')==row['token'])))]
 
     def compute_used(self):
         return len(self.compute_resources())

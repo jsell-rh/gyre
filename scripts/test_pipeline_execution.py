@@ -110,6 +110,15 @@ class CrashTest(unittest.TestCase):
         execution.log.unlink()
         self.assertEqual(execution.log_tail(),'')
 
+    def test_consumed_partial_receipt_seeds_a_fresh_repair_instead_of_replaying_itself(self):
+        from pipeline.fullsend import adopt
+        prior=self.store.directory/'attempts'/self.work/'0';(prior/'bundle').mkdir(parents=True)
+        (prior/'bundle/job.json').write_text(json.dumps({'stage':'implement','task':'task-001','branch':'private'}))
+        (prior/'outcome.json').write_text(json.dumps({'published':True,'head':'saved','valid':True,'agent_exit':0,'stream_exit':0}))
+        self.store.put_task('task-001','g','body',{'candidate':'saved','repair':{'category':'implementation','source':'saved'}})
+        self.assertIsNone(adopt(Execution(self.store,self.claim),self.store.task('task-001')))
+        self.assertEqual(self.store.task('task-001')['data']['candidate'],'saved')
+
     def test_terminal_readiness_does_not_hold_dead_compute(self):
         from pipeline.execution import Retry
         execution = Execution(self.store, self.claim)

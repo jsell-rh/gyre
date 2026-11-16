@@ -842,3 +842,15 @@ The cockpit distinguishes gateway/controller readiness from delivery progress.
 It reports the last confirmed merge and current task blockers, including named
 unfinished dependencies. A live scheduler with unfinished work and no merge for
 an hour reports delivery as stalled instead of implying healthy throughput.
+
+A deleting sandbox whose pod is proven absent may leave gateway metadata behind.
+That debt does not block another read-only attempt of the same task. A coding
+attempt may proceed only when source recovery was explicitly recorded as
+never-started, or the old resource has been deleted. Absence evidence must be
+fresh and match namespace, context, work identity and fencing token. An unknown
+or still-live pod and uncaptured implementation source continue to block safely;
+cleanup retries and provider tracking remain independent.
+
+A consumed implementation receipt that already produced the task's current
+repair is a source seed, never that repair's solution. Adoption skips that
+receipt and executes the recorded repair instead of replaying the same outcome.

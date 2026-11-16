@@ -66,6 +66,14 @@ def adopt(execution, task):
         job_path = path.parent / 'bundle/job.json'
         if not job_path.is_file() or not receipt.get('published'):
             continue
+        repair = task['data'].get('repair') or {}
+        if (claim['stage'] == 'implement' and repair
+                and task['data'].get('candidate') == receipt.get('head')
+                and repair.get('source') == receipt.get('head')):
+            # This outcome was already consumed and produced the current repair.
+            # Re-adopting it cannot address its own finding. Keep its source as
+            # the seed, but execute the repair rather than replaying the receipt.
+            continue
         job = json.loads(job_path.read_text())
         if job['stage'] != claim['stage'] or job['task'] != task['name']:
             raise ValueError('published receipt belongs to another assignment')
@@ -322,7 +330,7 @@ def cloud_step(execution, task, prompt):
     execution.login()
     from .inference import check, credential
     check(execution.store)
-    outstanding = execution.store.db.execute("SELECT name FROM resources WHERE work=? AND state<>'absent' AND kind<>'admission'", (execution.claim['id'],)).fetchall()
+    outstanding = [row for row in execution.store.blocking_resources(work=execution.claim['id']) if row['kind']!='admission']
     if outstanding:
         raise Wait('Previous attempt still owns resources; cleanup must finish first')
     cfg, repo, shim = prepare(execution, task, prompt)

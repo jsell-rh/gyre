@@ -39,6 +39,9 @@ def normalize(execution, task):
     execution.command('git', 'add', '--', str(document), cwd=path)
     execution.command('git', '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m',
                       f"process({task['name']}): restore assigned acceptance markers", cwd=path)
+    # Detached CI/shared clones may not have origin/main yet. Attribution
+    # requires that exact tracking ref rather than an ambient local branch.
+    execution.command('git', 'fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main', cwd=path, timeout=180)
     # Include any unlisted source commits in normal attribution bookkeeping.
     execution.command('python3', str(ROOT / 'scripts/dev-attribution.py'), task['name'], '--commit', cwd=path)
     head = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()

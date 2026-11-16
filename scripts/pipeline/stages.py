@@ -617,6 +617,15 @@ for p in pairs:
 """
         try:
             if item['phase'].lower() != 'ready' and not any(old_directory.parent.glob('*/remote.offset')):
+                try:
+                    diagnostic=json.loads((old_directory/'diagnostic.json').read_text())
+                except (OSError,ValueError):
+                    diagnostic={}
+                if old_work and old_work['stage']=='implement' and diagnostic.get('category')=='sandbox_provisioning':
+                    saved=json.loads(record['data'])
+                    execution.store.resource_state(resource, record['state'], saved|{'source_capture':{
+                        'state':'not_started','reason':'Provisioning failed before agent attachment',
+                        'work':record['work'],'token':record['token']}})
                 raise RuntimeError('No agent was attached; skip unreachable source capture and purge the unready sandbox')
             if old_work and old_work['stage']=='implement':
                 execution.os('sandbox','upload',resource,str(ROOT/'scripts/pipeline-agent.py'),'/tmp/stage/pipeline-agent.py','--no-git-ignore',timeout=60)

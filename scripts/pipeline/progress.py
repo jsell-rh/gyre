@@ -20,7 +20,7 @@ def blockers(store, task, tasks, work):
         if hold:add(hold.get('category','hold'),f"{stage}: {hold.get('message','Needs diagnosis')}")
     if (data.get('repair') or {}).get('shared_environment'):
         add('shared_environment','Waiting for shared CI repair: '+str(data['repair'].get('prerequisite')))
-    resources=store.db.execute("SELECT r.name,r.kind,r.state FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent' AND r.kind IN ('sandbox','admission','runner','host')",(name,)).fetchall()
+    resources=store.blocking_resources(task=name)
     if resources and not any(w['state']=='claimed' and w['stage'] not in ('observe','cleanup') for w in work):
         add('cleanup','Waiting for owned resource cleanup: '+', '.join(r['name'] for r in resources))
     for item in work:
