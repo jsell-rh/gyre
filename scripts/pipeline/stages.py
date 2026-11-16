@@ -80,7 +80,8 @@ def implement(execution, task):
     if task['data'].get('source_decision'):
         path=checkout(execution,result['head'])
         base=execution.claim['input']['base']
-        changed=execution.command('git','diff','--name-only',base,result['head'],cwd=path).stdout.splitlines()
+        changed=execution.command('git','diff','--name-only','-z',base,result['head'],cwd=path).stdout.rstrip('\0').split('\0')
+        changed=[name for name in changed if name]
         allowed=set(task['data']['decision_allowed_paths'])
         invalid=[name for name in changed if name not in allowed]
         if invalid:
