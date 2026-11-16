@@ -7,7 +7,7 @@ coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
   - "platform-model.md §3 Repo Orchestrator"
-commits: ["d54224113232c496a3072f1152b5a2a6034099a5", "34baa7370f43cca5bf5aeacfa2e66bca53711aa0", "decfec1b65384fd70cf6a5bbc10716e0afac302e", "0346b089db211c060ff44f08b80d782b94efc405", "6f9af6286c3188657a6746e277777ab818584d14", "b277fff9697fac6b1284131169a99f970c46d055", "45d6d869ac7408a8557975bcb195478c4edb716e", "c9743839d1b784fb7ce4c46f9d536fdd72e1d197", "d7e588d9ffc25b8a5755dc411e4dba650caa599b", "098fe57564253fa29f4d738b16ae5b8ee32f8eae", "73b1c92efc920a9725e0531219b030c3f3ecc22d", "c158eb6853538d989766f84b3f4b236f7fb73ad7", "c83dc841a282381a36a130853c846de4c13e1195", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "2ae69e973fce1e3a316205af1f238c3a457bd458"]
+commits: ["2ae69e973fce1e3a316205af1f238c3a457bd458", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "dadd8fa461e46b7b35e7159d1625d47e2d331096"]
 review: specs/reviews/task-093.md
 ---
 
@@ -92,38 +92,51 @@ spawn endpoints with tenant containment, scoped JWTs per tier, stale-detector
 auto-restart with budget symmetry and death escalation, MCP orchestrator tool
 suite with tier gates) was implemented and review-verified in earlier rounds
 (round-2 verdict: complete — see `specs/reviews/task-093.md`). This round
-repaired the two round-4 review findings against the merge of main
-(`047d6524`) into the branch:
+repaired the 13 `cargo test --all` failures from verification attempt
+`5164edc7` (run on the merge of the candidate with base `6082be2f`):
 
-### Restored dropped analytics kill-tests (commit `d5422411`)
+### Root cause
 
-Merge resolution `34baa737` silently dropped two of main's tests from
-`crates/gyre-server/src/api/orchestrator.rs`:
-`orchestrator_spawn_emits_agent_spawned_analytics_event` and
-`orchestrator_spawn_analytics_reports_resolved_compute_target`. They pin the
-f3f37604 regression (`agent.spawned` `compute_target` must report the
-resolved launch target, not hardcoded `"local"`) plus the null `task_id` /
-persona properties. Both restored verbatim from base `047d652`
-(byte-identity verified by diff against the extracted base region); they
-call the current 5-arg `spawn_workspace_orchestrator_core` signature and the
-existing `test_state`/`seed` fixtures unchanged.
+All 13 failures were fixture/production parity gaps introduced when main's
+test files (byte-identical to base) met this branch's review-approved
+fail-closed persona enforcement:
 
-### rustfmt changed-lines gate
+- **12 failures (signal_chain ×9, api/specs ×2, ralph_loop ×1):** the task-093
+  spawn cores enforce the persona meta-spec layer (`validate_persona` in
+  `api/orchestrator.rs`, approved in rounds 1–3). Production always satisfies
+  it — startup seeds the built-in meta-specs (`main.rs:59`). The fixtures
+  (`chain_state`, `loop_state`, the two specs chain tests) seed only the
+  entity-layer persona, so every orchestrator spawn in the chain failed
+  closed and no phase past Phase 2 ever ran (no orchestrator, no delegation
+  or coordination tasks, no repo orchestrator). Fixed by mirroring startup
+  (`crate::seed_builtin_meta_specs(&state).await`) in the four fixtures — the
+  exact pattern mcp's `orch_state` already uses (its spawn tests passed the
+  failing run; only the tenant-binding test below failed there).
+- **1 failure (`mcp_message_send_denies_readonly_api_key`):** `User::new`
+  leaves `tenant_id: None`, and the API-key auth path now fails closed for
+  tenant-less users with a plain-text 403, panicking the test's response
+  JSON parse before the RBAC assertion. Fixed by binding the ReadOnly user
+  to orch_state's tenant `t1` — restoring exactly the round-2-verified
+  scenario (auth passes, ReadOnly denied at the write-tool gate with
+  JSON-RPC -32603, nothing persisted).
 
-The three flagged regions (unformatted let-chain in a test, double blank
-line, missing EOF newline) were formatted — zero semantic change. Probe:
-`python3 scripts/check-rustfmt-diff.py 047d652495dde3b1ae6ddbea4f8cf1b077a3c18f`
-exits 0 ("changed lines clean, 6 Rust files checked").
+No assertions were changed, no production code was changed, no exemptions
+were added.
 
-### Verification evidence
+### Test evidence
 
-- `cargo check -p gyre-server --tests` (via the build wrapper): passes,
-  9m20s — the restored tests type-check against the current tree.
-- Tests the independent verifier must execute:
-  `cargo test -p gyre-server orchestrator_spawn_emits_agent_spawned_analytics_event`
-  and
-  `cargo test -p gyre-server orchestrator_spawn_analytics_reports_resolved_compute_target`
-  (server test builds exceed this sandbox's 4 GiB model budget; deferred
-  per the build-wrapper contract). Evidence recorded under
-  `/tmp/stage/review-evidence`.
-- `python3 scripts/check-rustfmt-diff.py 047d652495dde3b1ae6ddbea4f8cf1b077a3c18f`: exit 0.
+- `cargo check -p gyre-server --tests` (build wrapper): exit 0, 9m14s —
+  all four edited fixtures type-check.
+- `python3 scripts/check-rustfmt-diff.py 6082be2f`: exit 0, changed lines
+  clean.
+- `scripts/check-conditional-test-guards.sh`: exit 0.
+- Root-cause analysis and probe logs: `/tmp/stage/review-evidence/task-093-fixture-repair.md`.
+
+### Deferred to the independent verifier (gyre-server test execution is
+wrapper-blocked in this stage)
+
+- `cargo test -p gyre-server --lib signal_chain::tests`
+- `cargo test -p gyre-server --lib api::specs::tests`
+- `cargo test -p gyre-server --lib ralph_loop::tests`
+- `cargo test -p gyre-server --lib mcp::tests::mcp_message_send`
+- `cargo test --all` (the `cargo test --all passes` acceptance criterion)
