@@ -22,6 +22,7 @@ class PublicationRecoveryTests(unittest.TestCase):
         updates = superseded(self.task, self.observed, self.verified)
         self.assertIsNone(updates['pr'])
         self.assertIsNone(updates['published_verified'])
+        self.assertEqual(updates['publication_epoch'], 'merged')
         self.assertNotIn('delivered', updates)
         self.assertEqual(updates['previous_delivery']['sha'], 'merged')
 
@@ -56,3 +57,19 @@ class PublicationRecoveryTests(unittest.TestCase):
             with patch.object(e,'login'),patch.object(e,'os') as cli:
                 with self.assertRaises(Wait) as raised:cleanup(e,s.task('task-001'))
             cli.assert_not_called();self.assertEqual(raised.exception.retry_delay,900)
+
+    def test_detachment_creates_new_work_identity_even_on_unchanged_base(self):
+        from pipeline.catalog import discover
+        from pipeline.eligibility import eligible
+        with tempfile.TemporaryDirectory() as directory:
+            s=Store(directory);self.addCleanup(s.close)
+            data=self.task['data']|{'candidate':'new-source','candidate_base':'base','dependencies':[],
+                'triaged':'new','verified':self.verified|{'candidate':'new-source','passed':True},
+                'review':{'candidate':'new-source','approved':True}}
+            s.put_task('task-001','new','body',data)
+            first=discover(s,'publish','base')[0];claim=s.claim('publish','first')
+            updates=superseded(s.task('task-001'),self.observed,data['verified'])
+            s.finish(first,claim['token'],{},updates)
+            second=discover(s,'publish','base')[0]
+            self.assertNotEqual(first,second)
+            self.assertIsNotNone(s.claim('publish','new-pr',ident=second,eligible=lambda w:eligible(s,w)))

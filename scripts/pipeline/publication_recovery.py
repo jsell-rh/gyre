@@ -20,7 +20,7 @@ def superseded(task, observation, verified):
             and previous.get('candidate') == observation.get('headRefOid')
             and previous.get('generation') and previous['generation'] != task['generation']
             and observation['headRefOid'] != verified['head']):
-        return {'previous_delivery': previous, 'pr': None, 'delivery_branch': f"pipeline/delivery/{task['name']}-{task['generation'][:12]}",
+        return {'previous_delivery': previous, 'publication_epoch': sha, 'pr': None, 'delivery_branch': f"pipeline/delivery/{task['name']}-{task['generation'][:12]}",
                 'published_head': None, 'published_verified': None, 'ci': None,
                 'pr_body_hash': None}
     return None
