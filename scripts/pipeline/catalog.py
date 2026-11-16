@@ -123,6 +123,13 @@ def discover(store, stage, base):
                 selected.append(store.enqueue('triage',name,task['generation'],
                     {'base':base,'binding_errors':requirements['errors']},priority=20000))
             continue
+        from .decisions import request as decision_request, exists as decision_exists
+        decision = decision_request(store,task)
+        if decision:
+            if stage == 'triage' and not decision_exists(store,decision['id']):
+                selected.append(store.enqueue('triage',name,task['generation'],
+                    {'base':base,'decision_request':decision},priority=25000))
+            continue
         assessment = pending(data)
         if assessment:
             if stage == 'assess':

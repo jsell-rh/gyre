@@ -560,3 +560,25 @@ else: print('fixture control operation')
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ValidatorOwnershipTests(FullsendFixture):
+    def test_previous_token_cleanup_debt_is_excluded_from_current_receipt(self):
+        from pipeline.fullsend import owned_sandbox
+        for name,token,state in [('previous',self.claim['token']-1,'deleting'),('current',self.claim['token'],'present')]:
+            self.store.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
+                (name,self.work,token,'sandbox',state,'{}',time.time()))
+        self.assertEqual(owned_sandbox(self.execution),'current')
+        self.store.resource_state('current','absent')
+        with self.assertRaisesRegex(ValueError,'exactly one'):
+            owned_sandbox(self.execution)
+        self.store.resource_state('previous','present')
+        with self.assertRaises(ValueError):owned_sandbox(self.execution)
+
+    def test_multiple_current_attempt_sandboxes_still_fail_closed(self):
+        from pipeline.fullsend import owned_sandbox
+        for name in ('first','second'):
+            self.store.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
+                (name,self.work,self.claim['token'],'sandbox','present','{}',time.time()))
+        with self.assertRaisesRegex(ValueError,'exactly one'):
+            owned_sandbox(self.execution)

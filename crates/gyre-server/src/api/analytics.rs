@@ -3016,20 +3016,33 @@ mod tests {
             .await
             .unwrap();
         let app = crate::build_router(state);
-
+        // Usage is a stored snapshot, not the handler's evaluation clock.
+        // Cross a second boundary deliberately: seed-time equality hid this race.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let request_start = super::now_secs();
         let (status, body) = decide(
             &app,
             "budget.headroom",
             serde_json::json!({"workspace_id": ws.as_str()}),
         )
         .await;
+        let request_end = super::now_secs();
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body["tokens_remaining_pct"], serde_json::json!(75.0));
         assert_eq!(body["cost_remaining_pct"], serde_json::json!(80.0));
-        // Token burn 2500/h → 7500 left → 3h out.
-        assert_eq!(
-            body["projected_exhaustion_at"].as_str().unwrap(),
-            gyre_domain::decisions::format_iso8601_utc(now + 10_800)
+        // 7500 tokens left / 2500 used = three more elapsed periods.
+        // The handler evaluates within this request interval, not at seed time.
+        // Allow one second of downward floating-point truncation, as the domain
+        // converts its positive fractional ETA to whole seconds.
+        let period_start = now - 3_600;
+        let earliest = (request_start + 3 * (request_start - period_start)).saturating_sub(1);
+        let latest = request_end + 3 * (request_end - period_start);
+        let projected = body["projected_exhaustion_at"].as_str().unwrap();
+        let earliest = gyre_domain::decisions::format_iso8601_utc(earliest);
+        let latest = gyre_domain::decisions::format_iso8601_utc(latest);
+        assert!(
+            projected >= earliest.as_str() && projected <= latest.as_str(),
+            "projection {projected} outside request-derived interval {earliest}..={latest}"
         );
     }
 

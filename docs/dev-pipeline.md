@@ -854,3 +854,42 @@ cleanup retries and provider tracking remain independent.
 A consumed implementation receipt that already produced the task's current
 repair is a source seed, never that repair's solution. Adoption skips that
 receipt and executes the recorded repair instead of replaying the same outcome.
+
+Before allocating a review sandbox, a Git-only preflight checks the exact saved
+candidate against observed main. Known source conflicts create a structured
+rebase finding and return to implementation without a model review. Clean
+merges and generated-web-only conflicts still require normal independent review;
+the verifier remains responsible for deterministic generated assets and checks
+the final exact merge tree. No existing approval is transferred to rebased code.
+
+Fullsend validation selects the sandbox by both work identity and current fencing
+token. A previous attempt's deleting metadata cannot invalidate or supply a new
+attempt's source receipt. Zero or multiple current-attempt sandboxes still fail
+closed rather than selecting an arbitrary runtime.
+
+## Human decisions for conflicting requirements
+
+A semantic assessment hold now schedules a read-only triage assignment. It
+produces exactly three different options in simple technical English, with the
+conflicting instructions, context, tradeoffs, next actions and one recommendation.
+A recommendation never submits a choice. Missing or malformed options retry once,
+then require diagnosis rather than consuming unbounded model rounds.
+
+Open **Decisions** near the top of the web cockpit, or press **D** in the TUI.
+The TUI uses 1/2/3 to choose and Enter to record; Esc leaves without selecting.
+The CLI equivalents are `python3 scripts/dev-pipeline.py decisions` and
+`python3 scripts/dev-pipeline.py decide DECISION_ID OPTION_ID`.
+
+Selection is atomic and durable in the same pipeline ledger. It records the
+operator, source, time, exact options and chosen direction. A changed task epoch,
+requirements fingerprint or referenced spec document invalidates stale choices.
+Duplicate submission of the same choice does not create another task; changing a
+recorded direction requires a new decision rather than rewriting history.
+
+The selection creates an independent, scoped requirements-amendment task. Its
+protected task document carries the decision and rationale into Git history.
+Only the relevant task/spec/documentation paths may change; product code, tests,
+CI and guards are outside this amendment's authority. Independent review,
+remote verification and GitHub checks still precede merge. After the amendment
+lands, normal source reconciliation reassesses the parent task and builds the
+remaining implementation. The old contradictory task is never blindly unpaused.
