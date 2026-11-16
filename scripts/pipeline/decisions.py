@@ -106,7 +106,7 @@ def choose(store, identity, option_id, actor=None, source='local cockpit', instr
         number=max([int(t['name'][5:]) for t in store.tasks() if re.fullmatch(r'task-\d+',t['name'])]+[0])+1
         name=f'task-{number:03d}'
         title=f"Apply operator decision for {parent['name']}: {option['title']}"
-        body='---\ntitle: '+json.dumps(title)+'\nspec_ref: '+json.dumps(parent['data']['spec_ref'])+'\ndepends_on: []\nprogress: not-started\n---\n\n## Approved operator decision\n\n'
+        body='---\ntitle: '+json.dumps(title)+'\nspec_ref: '+json.dumps(parent['data']['spec_ref'],ensure_ascii=False)+'\ndepends_on: []\nprogress: not-started\n---\n\n## Approved operator decision\n\n'
         body+=json.dumps({'id':identity,'parent':parent['name'],'question':report['question'],'context':report['context'],
             'options':report['options'],'recommendation':report['recommendation'],'selection':selection,'sources':report.get('sources',[])},indent=2)+'\n\n'
         body+=f"Only option `{option_id}` is authorized. The other alternatives are recorded history, not requirements.\n\n## Selected direction\n\n{option['title']}\n\n{option['summary']}\n\n{option['next_step']}\n\n"

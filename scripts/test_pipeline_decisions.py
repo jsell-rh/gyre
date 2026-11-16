@@ -48,6 +48,18 @@ class DecisionTests(unittest.TestCase):
   self.assertIn('No production code',task['body']);self.assertIn('contextual',task['body'])
   self.assertIsNotNone(self.s.setting(self.s.runtime_hold_key('task-082','assess','g')))
   self.assertEqual(len(self.s.tasks()),2)
+ def test_section_symbol_in_spec_binding_survives_amendment_frontmatter(self):
+  ref='nav.md §1'
+  body=BODY.replace('spec_ref: nav.md','spec_ref: '+ref)
+  task=self.s.task('task-082');data=task['data']|{'spec_ref':ref}
+  self.s.put_task('task-082','g',body,data)
+  registry=self.s.directory/'source/specs/task-spec-inputs.json'
+  content=json.loads(registry.read_text());content['bindings'][ref]=content['bindings']['nav.md'];registry.write_text(json.dumps(content))
+  identity=self.ask();result=choose(self.s,identity,'contextual')
+  amendment=self.s.task(result['application_task'])
+  self.assertEqual(amendment['data']['spec_ref'],ref)
+  self.assertEqual(amendment['data']['requirements']['errors'],[])
+
  def test_changed_spec_or_task_fences_a_stale_choice_without_queueing_work(self):
   identity=self.ask();self.spec.write_text('# Navigation\nNew requirements\n')
   with self.assertRaisesRegex(ValueError,'context changed'):choose(self.s,identity,'current')
