@@ -52,6 +52,7 @@ pub mod spec_ledger;
 pub mod spec_lifecycle_config;
 pub mod spec_links;
 pub mod spec_policy;
+pub mod stack;
 pub mod task;
 pub mod team;
 pub mod tenant;
@@ -138,6 +139,7 @@ pub use spec_assertions::{
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use spec_policy::SpecPolicy;
+pub use stack::{AgentStack, HookEntry, McpServerEntry, StackLockfile};
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
 pub use team::{Team, TeamMembership};
 pub use tenant::Tenant;
