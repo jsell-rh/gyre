@@ -794,7 +794,7 @@ pub async fn git_receive_pack(
                 undo_ref_updates(&repo_path, &ref_updates).await;
                 state
                     .emit_event(
-                        Some(repo_workspace_id.clone()),
+                        repo_workspace_id.clone(),
                         gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                         gyre_common::message::MessageKind::PushRejected,
                         Some(serde_json::json!({
@@ -2016,7 +2016,7 @@ async fn enforce_stack_policy(
             warn!(repo_id, agent_id, level, %reason, "stack policy violation (warn mode)");
             state
                 .emit_event(
-                    Some(repo_workspace_id.clone()),
+                    repo_workspace_id.clone(),
                     gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                     gyre_common::message::MessageKind::ConstraintViolation,
                     Some(serde_json::json!({
@@ -2083,7 +2083,7 @@ async fn enforce_stack_policy(
                           "stack drift detected (warn mode)");
                     state
                         .emit_event(
-                            Some(repo_workspace_id.clone()),
+                            repo_workspace_id.clone(),
                             gyre_common::message::Destination::Workspace(
                                 repo_workspace_id.clone(),
                             ),
