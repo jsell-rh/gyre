@@ -93,6 +93,18 @@ class RecoveryPolicyTests(unittest.TestCase):
         self.assertTrue(json.loads(claim['result'])['fresh_model'])
         self.assertIsNone(adopt(Execution(self.s,claim),self.s.task('task-001')))
 
+    def test_terminal_review_recovers_once_only_after_owned_runtime_is_gone(self):
+        t=self.s.task('task-001')
+        self.s.put_task(t['name'],'g','body',{'candidate':'saved','candidate_base':'base'})
+        work=self.hold({'category':'sandbox_stopped','message':'Sandbox reached terminal phase error'},'review')
+        self.s.event('gateway_inventory',{'sandboxes':0});self.s.set_setting('dispatcher_health_at',time.time())
+        self.s.db.execute("INSERT INTO resources VALUES(?,?,?,?,?,?,?)",('owned',work,1,'sandbox','deleting','{}',time.time()))
+        self.assertEqual(reconcile(self.s),[])
+        self.s.resource_state('owned','absent')
+        self.assertEqual(len(reconcile(self.s)),1)
+        self.assertEqual(self.s.task('task-001')['data']['candidate'],'saved')
+        self.assertEqual(reconcile(self.s),[])
+
     def test_stale_generations_do_not_release_current_hold(self):
         self.oom_hold(4)
         self.s.put_task('task-001','new','new body',{})

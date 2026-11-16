@@ -34,6 +34,12 @@ def reconcile(store,now=None):
             elif (gateway_healthy and category=='gateway_transport' and stage in ('assess','verify')
                   and hold.get('message','').startswith('Cannot establish verifier health;')):
                 policy='retain-verifier-on-unknown-health-v1'
+            elif (gateway_healthy and category=='sandbox_stopped' and stage=='review'
+                  and data.get('candidate') and data.get('candidate_base') and not data.get('repair')
+                  and not store.db.execute("SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'",(name,)).fetchone()):
+                # The reviewer owns no production edits. Once its failed runtime
+                # is gone, one fresh review of the retained source is safe.
+                policy='retained-source-terminal-review-v1'
             elif category=='repair_stalled' and stage=='implement':
                 repair=data.get('repair') or {}
                 if repair.get('category')=='contract' and checkbox_delta(repair.get('log_tail')):
@@ -50,7 +56,7 @@ def reconcile(store,now=None):
                 # normal discover/claim predicates select current input/base.
                 store.db.execute("UPDATE work SET state='obsolete',token=token+1,retry_at=0,updated=? WHERE task=? AND generation=? AND stage=? AND state='attention' AND json_extract(result,'$.category')=?",
                                  (now,name,gen,stage,category))
-                if policy=='normalize-retained-checkbox-checkpoint-v3':
+                if policy in ('normalize-retained-checkbox-checkpoint-v3','retained-source-terminal-review-v1'):
                     # Adoption would replay the already-rejected checkbox-only
                     # receipt before the corrected finalizer ever gets to run.
                     # The retained candidate stays the seed for a fresh model.
