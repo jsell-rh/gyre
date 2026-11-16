@@ -3110,7 +3110,7 @@ impl NotificationRepository for MemNotificationRepository {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
-        notification_type: Option<&str>,
+        notification_types: Option<&[&str]>,
         repo_id: Option<&Id>,
         exclude_types: &[&str],
         limit: u32,
@@ -3124,7 +3124,10 @@ impl NotificationRepository for MemNotificationRepository {
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
                     && min_priority.is_none_or(|min| n.priority_rank >= min)
                     && max_priority.is_none_or(|max| n.priority_rank <= max)
-                    && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
+                    // Exact-match set on the type (port contract): an empty
+                    // set matches nothing — `contains` is false for every
+                    // item — never a no-op.
+                    && notification_types.is_none_or(|ts| ts.contains(&n.notification_type.as_str()))
                     && repo_id.is_none_or(|r| n.source.repo_id.as_ref() == Some(r))
                     && !exclude_types.contains(&n.notification_type.as_str())
             })
@@ -3148,14 +3151,15 @@ impl NotificationRepository for MemNotificationRepository {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
-        notification_type: Option<&str>,
+        notification_types: Option<&[&str]>,
         repo_id: Option<&Id>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
         // Same filters as list_for_user plus the active guard (resolved and
         // dismissed rows excluded) — the drawer's listing. Guarded in code
-        // like every other mem contract (no schema to enforce it).
+        // like every other mem contract (no schema to enforce it): an empty
+        // type set matches nothing, same as the SQL adapters.
         let store = self.store.lock().await;
         let mut items: Vec<Notification> = store
             .iter()
@@ -3166,7 +3170,10 @@ impl NotificationRepository for MemNotificationRepository {
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
                     && min_priority.is_none_or(|min| n.priority_rank >= min)
                     && max_priority.is_none_or(|max| n.priority_rank <= max)
-                    && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
+                    && match notification_types {
+                        None => true,
+                        Some(ts) => !ts.is_empty() && ts.contains(&n.notification_type.as_str()),
+                    }
                     && repo_id.is_none_or(|r| n.source.repo_id.as_ref() == Some(r))
             })
             .cloned()
