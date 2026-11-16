@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["fdc9962e68bd9e9fe82997167a67b5372a4cf8f2", "b02f8f185cf6fecddee1470c779c1dd1d38b39a5", "e468155e73374c55968e7ea3b956c8b80227bf2f", "c5902874c8d6692ed9ab6c1544ffd1daf2380839", "d577374a98ca345672978b2b8a9763b618a6af31", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["f5aee7dab7577d13d3698e29818a837de63adad0", "b02f8f185cf6fecddee1470c779c1dd1d38b39a5", "e468155e73374c55968e7ea3b956c8b80227bf2f", "c5902874c8d6692ed9ab6c1544ffd1daf2380839", "d577374a98ca345672978b2b8a9763b618a6af31", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f", "14f27ab5f4ed0ca56d6d59dd4f2503157b4f8a19"]
 ---
 
 ## Spec Excerpt
@@ -113,77 +113,57 @@ query (`gyre-adapters/src/sqlite/notification.rs`), which excludes
 resolved and dismissed rows in SQL while `list_for_user` keeps the full
 Inbox contract.
 
-### This round (merge repair of main head e5df7847)
+### This round (review repair of candidate ec542eaf)
 
-The assignment base moved to main head `e5df7847` (fix/weekend-
-reconciliation PR), which carries task-110's tenant/workspace invitation
-model and task-126's completed CLI. The rebase merge conflicted in
-`crates/gyre-server/src/api/users.rs` and
-`specs/coverage/system/user-management.md`; resolved in merge commit
-`a0b7e9cf`:
+Two review findings repaired:
 
-- `api/users.rs`: task-124's parallel workspace-invitation handlers
-  (membership-row list/accept/revoke + lifecycle test) are removed — the
-  merged `api/mod.rs` registers those paths on `api/invitations.rs`
-  (task-110's `WorkspaceInvitation` model, the assigned superset), and
-  axum rejects duplicate registrations. No dangling references remain;
-  the still-used membership helpers (`can_manage_membership`,
-  `MembershipResponse`, `emit_membership_audit`) are untouched.
-- Coverage matrix: merged recount (11 n/a, 0 not-started, 4
-  task-assigned, 21 implemented); row 30 takes main's task-126
-  completion; row 31 keeps task-127's notes re-audited for the merged
-  contract.
-
-The merge changed the invitation API contract under three task-127 UI
-surfaces, repaired in `fdc9962e` (real contract breakage, not cosmetic):
-
-- `InvitationAccept.svelte` (`/invite/{workspaceId}`) previously
-  resolved the pending invitation as an unaccepted membership row in the
-  tenant-public profile — that model no longer exists, so the page would
-  always render "no pending invitation". It now resolves via the
-  invitee-facing `GET /users/me/invitations` (Pending-status
-  `WorkspaceInvitation` row), accepts via `POST
-  /workspaces/{id}/invite/accept` (204), declines via `POST
-  /workspaces/{id}/invite/decline` (the invitee self-decline DELETE
-  route was removed with the parallel handlers), and shows the expiry
-  countdown the new rows carry.
-- `UserProfile.svelte` Invitations tab: same contract; filters to
-  Pending rows (terminal statuses are not actionable).
-- `WorkspaceSettings.svelte` invitations table: renders the status
-  badge and expiry countdown from `WorkspaceInvitationResponse`, with
-  revoke offered only for Pending rows (the endpoint 409s on terminal
-  statuses).
-- `api.js`: `request()` now attaches the HTTP status to thrown errors —
-  the accept page's 404 not-found branch was previously dead in
-  production (the thrown `Error` carried no `status`, and the old test
-  mocked a property production never set).
+- **Attribution invariant (blocking):** commit `fdc9962e`'s subject
+  mentioned task-110 in prose ("re-point invitation UI surfaces to the
+  merged task-110 contract"), so `scripts/check-task-commit-attribution.sh`
+  required the commit in task-110's `commits:` frontmatter too and
+  failed the tree. Fixed by rewriting the commit subject on this branch
+  to "fix(task-127): re-point invitation UI surfaces to the merged
+  invitation contract" (drop the prose task-110 mention; the body still
+  carries the full context). The rewrite preserved every commit tree,
+  message, author, and committer date — `git diff` between the old head
+  `d754a5d1` and the rewritten head is empty. Rewritten commit:
+  `f5aee7da` (was `fdc9962e`); the recorded commits list now carries the
+  rewritten SHA.
+- **Dead error state in `InvitationAccept.svelte` (non-blocking):**
+  `loadError` was declared and reset but never assigned, so a non-404
+  failure of `GET /workspaces/{id}` (e.g. HTTP 500) left `workspace`
+  null and silently rendered the invite card with an empty workspace
+  name. `load()` now assigns `loadError` and stops on non-404
+  workspace-fetch failures — the page renders
+  `invite_accept.load_error_title` with no accept/decline actions.
+  Fixed in `14f27ab5`, which also adds the distinguishing vitest case
+  (500 on the workspace fetch → load-error state, no invite card);
+  that case fails against the previous code and passes with the fix.
 
 Evidence this round (retained under /tmp/stage/review-evidence):
 
-- `web-focused-vitest-round5.log`: after `npm ci`, focused vitest on
-  the task-127 surfaces (UserProfile, PublicUserProfile, TenantSettings,
-  InvitationAccept, InvitationDeclineNavigate, WorkspaceSettings,
-  NotificationBell, NotificationDrawer, NotificationSettings,
-  notifications-store, AppShell) → 11 files / 289 tests passed, exit 0.
-  New distinguishing cases: an Expired invitation renders the none
-  state (no accept button), terminal invitation rows get no revoke
-  action, and the accept page shows the expiry countdown.
-- `cargo-check-gyre-server-round5.log`: `cargo check -p gyre-server`
-  at the merge resolution → finished clean, exit 0.
-- `check-scripts-round5.log`: arch, ABAC route registry, migration
-  versions, ABAC exempt handlers, dead message kinds, mem port
-  contracts, MCP write tools, byte-slice truncation, fail-open ref
-  resolution, scope-literal/fabricated-scope defaults, lossy secret
-  conversion, inert enforcement, relative path defaults, forwarded
-  header trust, unbounded external HTTP, forged scope fields,
-  in-memory state stores, migration SQL portability → all OK.
-- Environment note for remote verification: this sandbox's `awk` is
-  mawk 1.3.4, so several `scripts/check-*.sh` that use gawk-specific
-  constructs fail with awk syntax errors here (e.g.
-  check-crypto-verify, check-tenant-filter); that is an infrastructure
-  restriction, not a code defect. `check-dead-components.sh` flags 4
-  pre-existing violations on main-side files untouched by this task
-  (CanvasProbeStub, PipelineOverview, accordion helpers).
+- `check-attribution-pre-repair.log`: check run before the repair,
+  confirming the `fdc9962e task-110` violation (the task-127 entries in
+  that log reflect the executor's reset of the working-tree frontmatter
+  to `commits: []`, restored below).
+- `vitest-invitationaccept-repair.log`: focused vitest on
+  InvitationAccept + InvitationDeclineNavigate → 2 files / 8 tests
+  passed, exit 0, including the new load-error case.
+- `vitest-invitationaccept-bugproof.log`: the same suite with ONLY the
+  component fix stashed (old code) → the new load-error case fails,
+  proving it kills the reviewed bug.
+
+Prior-round context (merge repair of main head e5df7847): the base
+merge carried task-110's tenant/workspace invitation model, replacing
+task-124's membership-row model; `api/users.rs` parallel handlers were
+resolved in favor of `api/invitations.rs`, and three task-127 UI
+surfaces were re-pointed to the merged contract (invitee-facing
+`GET /users/me/invitations`, `POST /workspaces/{id}/invite/accept|decline`,
+status badge + expiry countdown, revoke only for Pending rows; `api.js`
+attaches HTTP status to thrown errors so the 404 branch is reachable
+in production). Focused vitest at that head: 11 files / 289 tests
+passed; `cargo check -p gyre-server` clean; mechanical check scripts
+OK (mawk-vs-gawk failures are sandbox restrictions, recorded above).
 
 Remaining open for this section (kept task-assigned, row 31): Tenant
 Invitation Management page (task-110's `/tenant/invite`,
@@ -194,16 +174,6 @@ unauthenticated token-preview endpoint for the specced workspace
 preview, and the local-mode accept must display the minted first
 credential), and inline global-role editing (no endpoint).
 
-Prior-round history retained as context: the published head was
-previously rebased onto main when task-114's independently-approved
-public profile page landed (route model unified on main's `user_profile`
-mode + `goToUserProfile` context; main's `PublicUserProfile.svelte` won
-over task-127's client-side team derivation), the task-113 bell/drawer
-merge was reconciled (task-113's `NotificationBell` + shared store as
-the single bell, both drawers' feature sets merged), and the round-4
-contract-repair round verified the tree byte-identical to the round-3
-full-suite state (full `npm test` 2435 passed at that head).
-
 For the independent verifier (deferred per 4 GiB build budget):
 
 - `cargo test --all` (workspace)
@@ -213,10 +183,5 @@ For the independent verifier (deferred per 4 GiB build budget):
   `spec_path_notifications_active_filter_excludes_resolved_and_dismissed`,
   task-114 profile/activity/stats suites
 - `cd web && npm ci && npm test`
-
-
-## Implementation Notes
-
-Cargo tests were deferred to independent verification, not claimed
-passed. The merge resolution and contract repairs require fresh
-independent review and remote verification.
+- `bash scripts/check-task-commit-attribution.sh` on the final tree
+  (needs full history; the branch-local rewrite keeps it green)
