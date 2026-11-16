@@ -43,6 +43,8 @@ def source(store):
         reconcile_generated(store)
         from pipeline.integration import resolve_upstream_assessments
         resolve_upstream_assessments(store,path,revision)
+        from pipeline.recovery_policy import reconcile as recover_holds
+        recover_holds(store)
         store.set_setting('observed_main', revision)
         return revision
 
@@ -168,11 +170,13 @@ def run_claim(store, claim):
             category = getattr(exc, 'category', None) or ('observation' if isinstance(exc, Wait) else
                        stage if getattr(exc, 'fresh_model', False) else
                        'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution')
+            from pipeline.backend_capacity import classify as capacity_failure
+            reason=capacity_failure(execution,{'category':category,'message':str(exc)[-4000:],
+                'fresh_model':getattr(exc,'fresh_model',False),'diagnostic':getattr(exc,'diagnostic',None)})
             store.retry(claim['id'], claim['token'],
-                        {'category': category, 'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False),
-                         'diagnostic': getattr(exc, 'diagnostic', None)},
+                        reason,
                         delay=getattr(exc, 'retry_delay', None), count_failure=not isinstance(exc, Wait), attention=getattr(exc,'attention',False))
-            execution.phase('NeedsAttention' if getattr(exc,'attention',False) else 'RetryScheduled', reason=str(exc)[-1000:], category=getattr(exc, 'category', None))
+            execution.phase('NeedsAttention' if getattr(exc,'attention',False) else 'RetryScheduled', reason=reason['message'][-1000:], category=reason['category'])
         except StaleClaim:
             pass
         except Exception as recovery_error:

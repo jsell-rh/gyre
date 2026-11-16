@@ -48,6 +48,29 @@ class EfficiencyTests(unittest.TestCase):
         self.assertTrue(prepare_bundle(self.execution,self.repo,identity,target))
         self.assertIn(self.head,subprocess.check_output(['git','bundle','list-heads',str(target)],text=True))
 
+    def test_reviewed_task_document_fix_advances_to_review_without_unrelated_source_edits(self):
+        from pipeline.stages import implement
+        body='---\ntitle: Task\nspec_ref: example.md\ndepends_on: []\nprogress: ready-for-review\n---\n\nRequired behavior.\n\n## Shipped\n\nSessions verified elsewhere.\n'
+        path=self.repo/'specs/tasks/task-001.md';path.parent.mkdir(parents=True);path.write_text(body)
+        self.commit('candidate with misleading shipped claim');candidate=self.git('rev-parse','HEAD')
+        origin=self.root/'origin.git'
+        subprocess.run(['git','clone','-q','--bare',str(self.repo),str(origin)],check=True)
+        self.git('remote','add','origin',str(origin))
+        repaired=body.replace('Sessions verified elsewhere.','Sessions are not implemented; the section remains open.')
+        path.write_text(repaired);self.commit('correct reviewed statement');head=self.git('rev-parse','HEAD')
+        finding={'category':'review','file':'specs/tasks/task-001.md','detail':'Remove false claim that sessions are implemented.'}
+        repair={'category':'review','details':[finding]}
+        self.store.put_task('task-001','g',body,{'candidate':candidate,'candidate_base':self.base,'repair':repair})
+        self.execution.claim['input'].update(base=self.base,candidate=candidate)
+        result={'head':head,'base':self.base,'branch':'private','valid':True,'task_body':repaired,'agent_exit':0}
+        with patch.object(self.execution,'cloud_step',return_value=result),patch('pipeline.stages.prompt',return_value='assigned repair'),patch('pipeline.stages.checkout',return_value=self.repo):
+            _,updates,_=implement(self.execution,self.store.task('task-001'))
+        self.assertIsNone(updates['repair'])
+        self.assertIsNone(updates['review'])
+        self.assertIsNone(updates['verified'])
+        self.assertEqual(updates['review_context'],repair)
+        self.assertEqual(self.git('diff','--name-only',candidate,head),'specs/tasks/task-001.md')
+
     def test_only_explicit_generated_findings_are_deferred(self):
         stale={'file':'web/dist/','detail':'bundle belongs to main','category':'code'}
         defect={'file':'web/src/Inbox.svelte','detail':'missing real action','category':'code'}
