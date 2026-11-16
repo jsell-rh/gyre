@@ -56,7 +56,7 @@ fn status_str(s: &MergeQueueEntryStatus) -> String {
     .to_string()
 }
 
-#[instrument(skip(state, req), fields(mr_id = %req.merge_request_id))]
+#[instrument(skip(state, req, auth), fields(mr_id = %req.merge_request_id))]
 pub async fn enqueue(
     State(state): State<Arc<AppState>>,
     auth: crate::auth::AuthenticatedAgent,

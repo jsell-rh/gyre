@@ -512,9 +512,11 @@ pub async fn post_meta_spec_preview(
         // single POST with N targets must not admit against a workspace whose
         // max_concurrent_agents < N just because the per-target check ran
         // before any increment landed.
-        let mut per_workspace: HashMap<String, u64> = HashMap::new();
+        let mut per_workspace: HashMap<String, u32> = HashMap::new();
         for rt in &resolved {
-            *per_workspace.entry(rt.workspace.id.as_str().to_string()).or_insert(0) += 1;
+            *per_workspace
+                .entry(rt.workspace.id.as_str().to_string())
+                .or_insert(0) += 1;
         }
         for (ws_id, requested) in per_workspace {
             super::budget::check_spawn_budget_for(&state, &ws_id, requested)
@@ -2887,7 +2889,10 @@ mod tests {
             // spawn (no rollback debris to clean up).
             let resp = post_preview(
                 &app,
-                preview_body(&repo_id, &["specs/system/search.md", "specs/system/identity.md"]),
+                preview_body(
+                    &repo_id,
+                    &["specs/system/search.md", "specs/system/identity.md"],
+                ),
             )
             .await;
             assert_eq!(
@@ -2915,7 +2920,10 @@ mod tests {
                 .unwrap();
             let resp = post_preview(
                 &app,
-                preview_body(&repo_id, &["specs/system/search.md", "specs/system/identity.md"]),
+                preview_body(
+                    &repo_id,
+                    &["specs/system/search.md", "specs/system/identity.md"],
+                ),
             )
             .await;
             assert_eq!(resp.status(), StatusCode::ACCEPTED);

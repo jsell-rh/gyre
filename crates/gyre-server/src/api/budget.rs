@@ -256,7 +256,7 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
 pub async fn check_spawn_budget_for(
     state: &AppState,
     project_id: &str,
-    requested: u64,
+    requested: u32,
 ) -> Result<(), String> {
     let key = workspace_key(project_id);
 
