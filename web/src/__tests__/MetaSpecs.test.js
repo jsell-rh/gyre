@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, waitFor, fireEvent } from '@testing-library/svelte';
+import { render, waitFor, fireEvent, screen } from '@testing-library/svelte';
 import MetaSpecs from '../components/MetaSpecs.svelte';
 
 const mockPersonas = [
@@ -94,15 +94,12 @@ vi.mock('../lib/api.js', () => ({
     deleteMetaSpecPreview: vi.fn().mockResolvedValue(null),
     publishPersona: vi.fn().mockRejectedValue(new Error('Not implemented')),
     specsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
-<<<<<<< HEAD
     specsAssistGlobal: vi.fn().mockRejectedValue(new Error('Not available')),
-=======
     metaSpecsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     graphPredict: vi.fn().mockResolvedValue({ predictions: [] }),
     specsSave: vi.fn().mockResolvedValue({ mr_id: 1 }),
     workspacePresence: vi.fn().mockResolvedValue([]),
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
   },
 }));
 
@@ -1283,17 +1280,26 @@ describe('MetaSpecs -- workspace scope', () => {
 
   it('locked editor shows the diff of pending changes vs the published prompt (§9 State 2)', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockResolvedValue(
-      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
-    );
-    api.previewPersonaStatus.mockResolvedValue(
-      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
-    );
+    // Real §5 PreviewResponse (meta_specs.rs): { preview_id, agents } — the
+    // POST starts the run; the locked pane appears while it is running.
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-lock-1',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-lock-1/retry' },
+      ],
+    });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-lock-1',
+      state: 'running',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-lock-1/retry', status: 'running', diff: null },
+      ],
+    });
 
     const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
 
     // Edit the draft beyond the published registry prompt (persona-1).
-    const textarea = await findByTestId('editor-split-textarea');
+    const textarea = await findByTestId('persona-textarea');
     await fireEvent.input(textarea, {
       target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
     });
@@ -1305,7 +1311,7 @@ describe('MetaSpecs -- workspace scope', () => {
     // State 2 wireframe's "+ Handle all errors..." line.
     const locked = await findByTestId('editor-locked');
     expect(locked).toBeTruthy();
-    expect(queryByTestId('editor-split-textarea')).toBeNull();
+    expect(queryByTestId('persona-textarea')).toBeNull();
     const diff = await findByTestId('locked-diff');
     const addLine = diff.querySelector('.locked-diff-add .locked-diff-text');
     expect(addLine.textContent).toBe('Handle all errors with Result<T, E>.');
@@ -1314,6 +1320,7 @@ describe('MetaSpecs -- workspace scope', () => {
     const ctxLine = diff.querySelector('.locked-diff-context .locked-diff-text');
     expect(ctxLine.textContent).toBe('You are a backend developer focused on Rust.');
     expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -0');
+    vi.useRealTimers();
   });
 
   it('locked editor falls back to the verbatim draft when the meta-spec has no stored prompt', async () => {
@@ -1321,15 +1328,22 @@ describe('MetaSpecs -- workspace scope', () => {
     api.getMetaSpecs.mockResolvedValue([
       { ...mockPersonas[0], prompt: '' },
     ]);
-    api.previewPersona.mockResolvedValue(
-      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
-    );
-    api.previewPersonaStatus.mockResolvedValue(
-      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
-    );
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-lock-2',
+      agents: [
+        { agent_id: 'ag-2', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-lock-2/retry' },
+      ],
+    });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-lock-2',
+      state: 'running',
+      agents: [
+        { agent_id: 'ag-2', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-lock-2/retry', status: 'running', diff: null },
+      ],
+    });
 
     const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
-    await fireEvent.input(await findByTestId('editor-split-textarea'), {
+    await fireEvent.input(await findByTestId('persona-textarea'), {
       target: { value: 'Draft with no baseline.' },
     });
     await fireEvent.click(await findByText('Select All'));
@@ -1340,22 +1354,30 @@ describe('MetaSpecs -- workspace scope', () => {
     // Empty baseline → no diff markers, verbatim draft
     expect(queryByTestId('locked-diff')).toBeNull();
     expect(locked.textContent).toContain('Draft with no baseline.');
+    vi.useRealTimers();
   });
 
   it('refreshes the diff baseline after an in-session publish — no pending diff without further edits (§9 publish → preview)', async () => {
     vi.useFakeTimers();
     api.publishPersona.mockResolvedValue({});
-    api.previewPersona.mockResolvedValue(
-      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
-    );
-    api.previewPersonaStatus.mockResolvedValue(
-      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
-    );
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-lock-3',
+      agents: [
+        { agent_id: 'ag-3', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-lock-3/retry' },
+      ],
+    });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-lock-3',
+      state: 'running',
+      agents: [
+        { agent_id: 'ag-3', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-lock-3/retry', status: 'running', diff: null },
+      ],
+    });
 
     const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
 
     // Edit the draft beyond the published registry prompt (persona-1).
-    const textarea = await findByTestId('editor-split-textarea');
+    const textarea = await findByTestId('persona-textarea');
     await fireEvent.input(textarea, {
       target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
     });
@@ -1381,21 +1403,29 @@ describe('MetaSpecs -- workspace scope', () => {
     expect(locked).toBeTruthy();
     expect(queryByTestId('locked-diff')).toBeNull();
     expect(locked.textContent).toContain('Handle all errors with Result<T, E>.');
+    vi.useRealTimers();
   });
 
   it('diffs post-publish edits against the new baseline — only the newly added line is pending', async () => {
     vi.useFakeTimers();
     api.publishPersona.mockResolvedValue({});
-    api.previewPersona.mockResolvedValue(
-      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
-    );
-    api.previewPersonaStatus.mockResolvedValue(
-      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
-    );
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-lock-4',
+      agents: [
+        { agent_id: 'ag-4', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-lock-4/retry' },
+      ],
+    });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-lock-4',
+      state: 'running',
+      agents: [
+        { agent_id: 'ag-4', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-lock-4/retry', status: 'running', diff: null },
+      ],
+    });
 
     const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
 
-    const textarea = await findByTestId('editor-split-textarea');
+    const textarea = await findByTestId('persona-textarea');
     await fireEvent.input(textarea, {
       target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
     });
@@ -1403,7 +1433,7 @@ describe('MetaSpecs -- workspace scope', () => {
     // Publish, then keep editing beyond the just-published version.
     await fireEvent.click(await findByText('Publish'));
     await waitFor(() => expect(api.publishPersona).toHaveBeenCalled());
-    await fireEvent.input(await findByTestId('editor-split-textarea'), {
+    await fireEvent.input(await findByTestId('persona-textarea'), {
       target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.\nPrefer explicit types in public APIs.' },
     });
 
@@ -1418,6 +1448,7 @@ describe('MetaSpecs -- workspace scope', () => {
     expect(addLine.textContent).toBe('Prefer explicit types in public APIs.');
     expect(diff.querySelectorAll('.locked-diff-add')).toHaveLength(1);
     expect(diff.querySelectorAll('.locked-diff-remove')).toHaveLength(0);
+    vi.useRealTimers();
   });
 });
 
@@ -1478,12 +1509,11 @@ describe('MetaSpecs -- DiffSuggestion accept updates textarea', () => {
     });
 
     const acceptBtn = document.querySelector('.diff-actions button');
-    if (acceptBtn) {
-      await fireEvent.click(acceptBtn);
-      await waitFor(() => {
-        expect(textarea.value.length).toBeGreaterThan(initialValue.length);
-      });
-    }
+    expect(acceptBtn).toBeTruthy();
+    await fireEvent.click(acceptBtn);
+    await waitFor(() => {
+      expect(textarea.value.length).toBeGreaterThan(initialValue.length);
+    });
   });
 });
 

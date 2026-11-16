@@ -637,28 +637,21 @@ describe('EditorSplit', () => {
     vi.useFakeTimers();
     try {
       const { api } = await import('../lib/api.js');
-      // Real PreviewResponse / PreviewStatusResponse shapes (meta_specs.rs).
-      const blast = {
-        affected_workspaces: [{ id: 'ws-1' }],
-        affected_repos: [
-          { id: 'repo-9', workspace_id: 'ws-1', reason: 'specs/payment/retry.md pinned in meta-spec set' },
-        ],
-        affected_workspace_count: 1,
-      };
-      const structural = { scope: 'workspace', affected_spec_count: 1 };
-      api.previewPersona.mockResolvedValueOnce({
+      // Real §5 PreviewResponse / PreviewStatusResponse shapes (meta_specs.rs):
+      // { preview_id, agents: [{ agent_id, repo_id, spec_path, branch }] } and
+      // the polled status adds { status, diff } per agent.
+      api.previewMetaSpec.mockResolvedValueOnce({
         preview_id: 'pv-iter-1',
-        state: 'running',
-        specs: [{ path: 'specs/payment/retry.md', status: 'running' }],
-        blast_radius: blast,
-        structural_impact: structural,
+        agents: [
+          { agent_id: 'ag-iter-1', repo_id: 'repo-9', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-iter-1/retry' },
+        ],
       });
-      api.previewPersonaStatus.mockResolvedValue({
+      api.previewMetaSpecStatus.mockResolvedValue({
         preview_id: 'pv-iter-1',
         state: 'complete',
-        specs: [{ path: 'specs/payment/retry.md', status: 'complete' }],
-        blast_radius: blast,
-        structural_impact: structural,
+        agents: [
+          { agent_id: 'ag-iter-1', repo_id: 'repo-9', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-iter-1/retry', status: 'complete', diff: null },
+        ],
       });
       render(EditorSplit, {
         props: {
@@ -666,15 +659,15 @@ describe('EditorSplit', () => {
           context: 'meta-spec',
           workspaceId: 'ws-1',
           specPath: 'persona/backend-dev',
-          targetSpecs: [{ path: 'specs/payment/retry.md' }],
+          targetSpecs: [{ path: 'specs/payment/retry.md', repo_id: 'repo-9' }],
         },
       });
       await fireEvent.click(await screen.findByText('Select All'));
       await fireEvent.click(screen.getByTestId('preview-btn'));
       await vi.advanceTimersByTimeAsync(2000);
       await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
-      // State 3: tabs render the server-computed impact; no selector yet.
-      expect(screen.getByTestId('meta-impact').textContent).toContain('workspace');
+      // State 3: tabs render the real §5 per-agent summary; no selector yet.
+      expect(screen.getByTestId('meta-impact').textContent).toContain('specs/payment/retry.md');
       expect(screen.queryByTestId('spec-selector')).toBeNull();
 
       await fireEvent.click(screen.getByTestId('iterate-btn'));
@@ -688,12 +681,12 @@ describe('EditorSplit', () => {
       // ...AND the last preview results remain visible (§9 Iterate):
       // Architecture impact + Code Diff tab with the per-spec statuses.
       expect(screen.getByTestId('tab-architecture')).toBeTruthy();
-      expect(screen.getByTestId('meta-impact').textContent).toContain('workspace');
-      expect(screen.getByTestId('meta-impact').textContent).toContain('repo-9');
+      expect(screen.getByTestId('meta-impact').textContent).toContain('specs/payment/retry.md');
+      expect(screen.getByTestId('meta-impact').textContent).toContain('preview/pv-iter-1/retry');
       await fireEvent.click(screen.getByTestId('tab-code-diff'));
       const statuses = await screen.findByTestId('meta-spec-statuses');
       expect(statuses.textContent).toContain('specs/payment/retry.md');
-      expect(statuses.textContent).toContain('complete');
+      expect(statuses.textContent).toContain('Complete');
     } finally {
       vi.useRealTimers();
     }

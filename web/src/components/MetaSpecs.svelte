@@ -28,6 +28,7 @@
   import InlineChat from '../lib/InlineChat.svelte';
   import DiffSuggestion from '../lib/DiffSuggestion.svelte';
   import { toastSuccess, toastError, toastInfo } from '../lib/toast.svelte.js';
+  import { lineDiff, diffSummary } from '../lib/lineDiff.js';
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
@@ -353,6 +354,19 @@
   // editor diffs pending changes against during a preview (§9 State 2).
   let selectedMsBaseline = $state('');
 
+  // Pending-changes diff for the locked editor (§9 State 2): the draft
+  // against the published baseline. Only meaningful while a preview runs;
+  // null when no baseline is available or the draft is unchanged — the
+  // locked pane then shows the draft verbatim.
+  let msLockedDiffRows = $derived.by(() => {
+    if (previewState !== 'running') return null;
+    if (!selectedMsBaseline || selectedMsBaseline === selectedMsContent) return null;
+    return lineDiff(selectedMsBaseline, selectedMsContent);
+  });
+  let msLockedDiffStats = $derived(
+    msLockedDiffRows ? diffSummary(msLockedDiffRows) : null,
+  );
+
   let targetSpecs       = $state([]);
   let selectedSpecPaths = $state([]);
 
@@ -409,7 +423,6 @@
     selectedMsId = id;
     const ms = wsMetaSpecs.find(m => m.id === id);
     selectedMsContent = ms?.prompt || '';
-<<<<<<< HEAD
     wsSuggestions = [];
     previewState = 'editing';
     stopPreview();
@@ -603,9 +616,6 @@
     } finally {
       clearing = false;
     }
-=======
-    selectedMsBaseline = ms?.prompt || '';
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
   }
 
   async function publish() {
@@ -731,10 +741,30 @@
           </div>
 
           {#if previewState === 'running'}
-            <div class="persona-diff" role="region" aria-label={$t('meta_specs.workspace.diff_readonly_aria')}>
-              {#each selectedMsContent.split('\n') as line}
-                <div class="diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
-              {/each}
+            <!-- Editor locked while the preview runs (§9 State 2): with a
+                 baseline available the pane shows the diff of pending changes
+                 (draft vs published prompt); without one, the draft verbatim. -->
+            <div class="locked-editor" role="region" aria-label={$t('meta_specs.workspace.diff_readonly_aria')} data-testid="editor-locked">
+              {#if msLockedDiffRows}
+                <div class="locked-diff" data-testid="locked-diff">
+                  <div class="locked-diff-header">
+                    <span class="locked-diff-title">{$t('editor_split.pending_changes')}</span>
+                    <span class="locked-diff-summary" data-testid="locked-diff-summary" aria-live="polite">
+                      +{msLockedDiffStats.added} -{msLockedDiffStats.removed}
+                    </span>
+                  </div>
+                  {#each msLockedDiffRows as row}
+                    <div class="locked-line locked-diff-line locked-diff-{row.op}">
+                      <span class="locked-diff-marker" aria-hidden="true">{row.op === 'add' ? '+' : row.op === 'remove' ? '-' : ' '}</span>
+                      <span class="locked-diff-text">{row.text}</span>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                {#each selectedMsContent.split('\n') as line}
+                  <div class="locked-line">{line}</div>
+                {/each}
+              {/if}
             </div>
           {:else}
             <textarea
@@ -764,13 +794,12 @@
               {#if previewState === 'complete'}
                 <Button variant="secondary" onclick={iterate}>{$t('meta_specs.workspace.iterate')}</Button>
               {:else}
-                <Button variant="secondary" onclick={startPreview} disabled={!canPreview}>{$t('meta_specs.workspace.preview')}</Button>
+                <Button variant="secondary" onclick={startPreview} disabled={!canPreview} data-testid="preview-btn">{$t('meta_specs.workspace.preview')}</Button>
               {/if}
               <Button variant="primary" onclick={publish} disabled={publishSaving}>{publishSaving ? $t('meta_specs.workspace.publishing') : $t('meta_specs.workspace.publish')}</Button>
             </div>
           {/if}
         </div>
-<<<<<<< HEAD
 
         <!-- RIGHT: Spec selector / progress / impact -->
         <div class="split-right">
@@ -874,20 +903,6 @@
               </div>
             </div>
           {/if}
-=======
-        <div class="editor-split-host">
-          <EditorSplit
-            bind:content={selectedMsContent}
-            repoId={repoId}
-            specPath={selectedMsId}
-            context="meta-spec"
-            workspaceId={workspaceId}
-            targetSpecs={targetSpecs}
-            baselineContent={selectedMsBaseline}
-            onpublish={publish}
-            onPreviewStateChange={(s) => (msLocked = s === 'preview_running')}
-          />
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
         </div>
       </div>
     {/if}
@@ -1678,16 +1693,47 @@
   }
   .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-border-strong); }
   .persona-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
-  .persona-diff {
-    min-height: 280px; padding: var(--space-3);
+  .locked-editor {
+    flex: 1;
+    min-height: 280px;
+    overflow: auto;
+    padding: var(--space-4);
     background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border); border-radius: var(--radius);
-    font-family: var(--font-mono); font-size: var(--text-sm); overflow-x: auto;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.6;
   }
-  .diff-line { padding: 0 var(--space-1); line-height: 1.5; }
-  .diff-line.add { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
-  .diff-line.remove { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
-  .diff-line.ctx { color: var(--color-text-muted); }
+
+  .locked-line { white-space: pre-wrap; color: var(--color-text-secondary); }
+
+  /* Pending-changes diff in the locked editor (§9 State 2) */
+  .locked-diff { display: flex; flex-direction: column; min-height: 100%; }
+  .locked-diff-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2);
+    margin-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .locked-diff-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .locked-diff-summary { font-family: var(--font-mono, monospace); font-size: var(--text-xs); color: var(--color-text-muted); }
+  .locked-diff-line { display: flex; gap: var(--space-2); }
+  .locked-diff-marker { flex-shrink: 0; width: 1ch; font-family: var(--font-mono); }
+  .locked-diff-text { min-width: 0; }
+  .locked-diff-add .locked-diff-marker { color: var(--color-success, #2e9e5b); font-weight: 600; }
+  .locked-diff-add .locked-diff-text { color: var(--color-success, #2e9e5b); }
+  .locked-diff-remove .locked-diff-marker { color: var(--color-danger, #cc3340); font-weight: 600; }
+  .locked-diff-remove .locked-diff-text { color: var(--color-danger, #cc3340); text-decoration: line-through; }
   .editor-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
 
   .spec-selector { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
