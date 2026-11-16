@@ -254,11 +254,23 @@ async fn ensure_workspace_orchestrator(
     if let Some(existing) = find_live_workspace_orchestrator(state, workspace_id).await? {
         return Ok(existing);
     }
+    // The signal chain is a server-originated (system) spawn — there is no
+    // authenticated caller whose tenant scope could be compared. Mirror the
+    // HTTP handler's system-principal bypass: resolve the REAL tenant of the
+    // workspace being spawned into (fail-closed when the row is missing —
+    // the same lookup the core repeats for containment) and pass it as the
+    // caller tenant, never a fabricated identity.
+    let ws = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} not found"))?;
     let (agent, _token, _launch) = crate::api::orchestrator::spawn_workspace_orchestrator_core(
         state,
         &workspace_id.to_string(),
         crate::api::orchestrator::SpawnOrchestratorRequest::default(),
         "system",
+        ws.tenant_id.as_str(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("workspace orchestrator spawn: {e:?}"))?;
@@ -534,11 +546,14 @@ async fn notify_cross_workspace_change(
             &tenant_id,
             now as i64,
         );
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(
                 user_id = %member.user_id,
                 "signal-chain: failed to create CrossWorkspaceSpecChange notification: {e}"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 }
@@ -628,6 +643,7 @@ pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
         // Backlog→InProgress is the fresh claim; Blocked→InProgress and a
         // stale InProgress re-claim use the same terminal state.
         if task.status != TaskStatus::InProgress {
+            let old_status = task.status.clone();
             if let Err(e) = task.transition_status(TaskStatus::InProgress) {
                 tracing::warn!(
                     task_id = %task.id,
@@ -640,6 +656,10 @@ pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 tracing::warn!(task_id = %task.id, "signal-chain scheduler: claim failed: {e}");
                 continue;
             }
+            // Auto-track the persisted claim transition (analytics.md
+            // §Auto-Emitted Events — task-146 review R4: every persisted
+            // task status transition records a task.status_changed event).
+            crate::api::analytics::record_task_status_changed(state, &task, &old_status).await;
         }
 
         // Serialize per repo: a second Delegation for the same repo waits
@@ -688,6 +708,7 @@ pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
             // stranded InProgress forever with no retry and no surfaced
             // error). Blocked candidates are re-selected by the scan
             // above, so the retry actually happens.
+            let old_status = task.status.clone();
             let released = match task.transition_status(TaskStatus::Blocked) {
                 Err(te) => {
                     tracing::error!(
@@ -705,6 +726,15 @@ pub async fn scheduler_run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         );
                         false
                     } else {
+                        // Auto-track the persisted release transition
+                        // (analytics.md §Auto-Emitted Events — task-146
+                        // review R4).
+                        crate::api::analytics::record_task_status_changed(
+                            state,
+                            &task,
+                            &old_status,
+                        )
+                        .await;
                         true
                     }
                 }
@@ -824,9 +854,14 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
         // Backlog with the BudgetExhausted flag (a label on the task —
         // the observable marker the spec calls for), cleared on the
         // successful spawn of a later cycle.
-        if let Err(reason) =
-            crate::api::budget::check_spawn_budget(state, &repo.workspace_id.to_string()).await
-        {
+        let budget_check =
+            match crate::api::budget::check_spawn_budget(state, &repo.workspace_id.to_string())
+                .await
+            {
+                Ok(()) => crate::api::budget::check_repo_spawn_budget(state, &repo).await,
+                Err(reason) => Err(reason),
+            };
+        if let Err(reason) = budget_check {
             // Flag the FRESHEST row (same stale-snapshot defense as the
             // claim below): persisting the snapshot taken at
             // list_by_status could revert a concurrent status change
@@ -896,6 +931,7 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
         // retry task keeps the claim fresh (each attempt touches the task)
         // so the stale-claim recovery never re-claims mid-retry.
         let mut claimed = task.clone();
+        let pre_claim_status = task.status.clone();
         if let Err(e) = claimed.transition_status(TaskStatus::InProgress) {
             tracing::warn!(task_id = %task.id, "signal-chain: worker claim failed: {e}");
             continue;
@@ -907,6 +943,9 @@ async fn spawn_implementation_workers(state: &Arc<AppState>) {
             tracing::warn!(task_id = %task.id, "signal-chain: worker claim persist failed: {e}");
             continue;
         }
+        // Auto-track the persisted worker claim transition (analytics.md
+        // §Auto-Emitted Events — task-146 review R4).
+        crate::api::analytics::record_task_status_changed(state, &claimed, &pre_claim_status).await;
 
         // First spawn attempt synchronously in the cycle (its effect —
         // agent record, worktree, task assignment — is the cycle's
@@ -1121,6 +1160,9 @@ fn scheduler_system_auth() -> crate::auth::AuthenticatedAgent {
         user_id: None,
         roles: vec![gyre_domain::UserRole::Admin],
         tenant_id: crate::auth::system_principal_tenant(),
+        workspace_id: None,
+        repo_id: None,
+        scope: Vec::new(),
         jwt_claims: None,
         bearer_token: None,
         deprecated_token_auth: false,
@@ -1208,6 +1250,7 @@ async fn try_spawn_worker(
         loop_config: None,
         agent_type: None,
         conversation_sha: None,
+        persona: None,
         persona_slug: None, // scheduler spawns carry no persona request
     };
     match crate::api::spawn::spawn_agent_core(
@@ -1222,7 +1265,7 @@ async fn try_spawn_worker(
         Ok(resp) => {
             let reason =
                 "compute target spawn_process failed (agent-runtime.md §1 Phase 7)".to_string();
-            teardown_failed_spawn(state, &Id::new(&resp.agent.id), repo).await;
+            teardown_failed_spawn(state, &Id::new(&resp.agent.id), repo, &reason).await;
             WorkerSpawnOutcome::LaunchFailed(reason)
         }
         // Budget exhausted mid-flight (race between the pre-check and the
@@ -1236,10 +1279,19 @@ async fn try_spawn_worker(
 
 /// Tear down the agent record a failed launch left behind: Failed status,
 /// token removed, budget counter released.
-async fn teardown_failed_spawn(state: &Arc<AppState>, agent_id: &Id, repo: &Repository) {
+async fn teardown_failed_spawn(
+    state: &Arc<AppState>,
+    agent_id: &Id,
+    repo: &Repository,
+    reason: &str,
+) {
     if let Ok(Some(mut agent)) = state.agents.find_by_id(agent_id).await {
         let _ = agent.transition_status(AgentStatus::Failed);
         let _ = state.agents.update(&agent).await;
+        // Auto-track agent.failed (analytics.md §Auto-Emitted Events):
+        // the launch failed, so the freshly-created agent record dies
+        // with it — the trigger is a real agent death, not a no-op status.
+        crate::api::analytics::record_agent_failed(state, &agent, reason).await;
     }
     let _ = state
         .kv_store
@@ -1275,6 +1327,7 @@ async fn release_claim(state: &Arc<AppState>, task: &Task, reason: &str) {
         return;
     }
     let now = crate::api::now_secs();
+    let old_status = t.status.clone();
     if let Err(e) = t.release_claim(now) {
         tracing::error!(
             task_id = %task.id,
@@ -1299,6 +1352,10 @@ async fn release_claim(state: &Arc<AppState>, task: &Task, reason: &str) {
         );
         return;
     }
+    // Auto-track the persisted claim release (analytics.md
+    // §Auto-Emitted Events — task-146 review R4: InProgress→Backlog via
+    // `release_claim` is a persisted production transition).
+    crate::api::analytics::record_task_status_changed(state, &t, &old_status).await;
     tracing::info!(
         task_id = %task.id,
         reason,
@@ -1324,9 +1381,13 @@ pub(crate) async fn touch_task(state: &Arc<AppState>, task_id: &Id) {
 async fn final_spawn_failure(state: &Arc<AppState>, repo: &Repository, task: &Task, reason: &str) {
     let now = crate::api::now_secs();
     let mut blocked = task.clone();
+    let old_status = task.status.clone();
     let _ = blocked.transition_status(TaskStatus::Blocked);
     blocked.updated_at = now;
     let _ = state.tasks.update(&blocked).await;
+    // Auto-track the persisted Block (analytics.md §Auto-Emitted Events —
+    // task-146 review R4).
+    crate::api::analytics::record_task_status_changed(state, &blocked, &old_status).await;
 
     // TaskBlocked → repo orchestrator inbox (spawning one when none is
     // live — same routing as SpecApproved).
@@ -1426,11 +1487,35 @@ pub async fn ensure_repo_orchestrator_for_failure(
     if let Ok(Some(existing)) = find_live_repo_orchestrator(state, repo).await {
         return Some(existing);
     }
+    // §1/task-093 F3 containment: the spawn core compares the repo's
+    // workspace tenant against the caller's — resolve it here, fail closed
+    // (no orchestrator → caller falls back to workspace routing) when the
+    // workspace cannot be loaded; never fabricate a tenant identity.
+    let ws_tenant = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id,
+        Ok(None) => {
+            tracing::warn!(
+                repo_id = %repo.id,
+                "signal-chain: repo references missing workspace {}; tenant scope \
+                 for failure orchestrator cannot be determined",
+                repo.workspace_id
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                repo_id = %repo.id,
+                "signal-chain: workspace lookup failed: {e}"
+            );
+            return None;
+        }
+    };
     match crate::api::orchestrator::spawn_repo_orchestrator_core(
         state,
         &repo.id.to_string(),
         crate::api::orchestrator::SpawnOrchestratorRequest::default(),
         "system",
+        ws_tenant.as_str(),
     )
     .await
     {
@@ -1458,6 +1543,23 @@ async fn run_repo_orchestrator(
     // durable one-live check and the per-repo registry lock (held by the
     // caller) serializes concurrent signals.
     if find_live_repo_orchestrator(state, repo).await?.is_none() {
+        // Server-originated (system) spawn — no authenticated caller to
+        // compare against. Pass the REAL tenant of the repo's workspace
+        // (fail-closed on a dangling reference, mirroring the core's own
+        // containment lookup) so the comparison never sees a fabricated
+        // identity.
+        let ws_tenant = match state.workspaces.find_by_id(&repo.workspace_id).await {
+            Ok(Some(ws)) => ws.tenant_id,
+            Ok(None) => {
+                anyhow::bail!(
+                    "repo {} references workspace {} which does not exist — the tenant \
+                     scope for the orchestrator token cannot be determined",
+                    repo.id,
+                    repo.workspace_id
+                )
+            }
+            Err(e) => return Err(e),
+        };
         let (agent, _token, _launch) = crate::api::orchestrator::spawn_repo_orchestrator_core(
             state,
             &repo.id.to_string(),
@@ -1466,6 +1568,7 @@ async fn run_repo_orchestrator(
                 parent_id: task.assigned_to.as_ref().map(|a| a.to_string()),
             },
             "system",
+            ws_tenant.as_str(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("repo orchestrator spawn: {e:?}"))?;
@@ -1539,10 +1642,14 @@ async fn decompose_delegation(
                 // the delegation as a no-op rather than leaving it
                 // InProgress forever, and record why in the log.
                 let mut done = task.clone();
+                let old_status = task.status.clone();
                 done.transition_status(TaskStatus::Review)?;
                 done.transition_status(TaskStatus::Done)?;
                 done.updated_at = now;
                 state.tasks.update(&done).await?;
+                // Auto-track the persisted completion (analytics.md
+                // §Auto-Emitted Events — task-146 review R4).
+                crate::api::analytics::record_task_status_changed(state, &done, &old_status).await;
                 tracing::warn!(
                     task_id = %task.id,
                     "signal-chain: delegation task has no spec reference; marked Done without decomposition"
@@ -1601,10 +1708,14 @@ async fn decompose_delegation(
 
     // 4. Mark the delegation task Completed (Backlog→InProgress→Review→Done).
     let mut done = task.clone();
+    let old_status = task.status.clone();
     done.transition_status(TaskStatus::Review)?;
     done.transition_status(TaskStatus::Done)?;
     done.updated_at = now;
     state.tasks.update(&done).await?;
+    // Auto-track the persisted completion (analytics.md
+    // §Auto-Emitted Events — task-146 review R4).
+    crate::api::analytics::record_task_status_changed(state, &done, &old_status).await;
     tracing::info!(
         task_id = %task.id,
         subtasks = subtasks.len(),
@@ -1648,10 +1759,14 @@ async fn assess_coordination(
     }
 
     let mut done = task.clone();
+    let old_status = task.status.clone();
     done.transition_status(TaskStatus::Review)?;
     done.transition_status(TaskStatus::Done)?;
     done.updated_at = now;
     state.tasks.update(&done).await?;
+    // Auto-track the persisted completion (analytics.md
+    // §Auto-Emitted Events — task-146 review R4).
+    crate::api::analytics::record_task_status_changed(state, &done, &old_status).await;
     tracing::info!(
         task_id = %task.id,
         subtask_created = assessment.create_subtask,
@@ -2042,6 +2157,92 @@ mod tests {
 
     // Registry semantics: distinct locks per scope, stable identity across
     // calls, no cross-contamination between workspaces/repos.
+    #[tokio::test]
+    async fn cross_workspace_change_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: the cross-workspace spec-change notification
+        // creation must go through the channel dispatcher — a configured
+        // email channel queues an outbox entry for the dependent
+        // workspace's Admin.
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(Id::new("ws-dep"), Id::new("t1"), "Dep", "dep", 0);
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            Id::new("r-dep"),
+            Id::new("ws-dep"),
+            "r-dep",
+            "/tmp/gyre-test-r-dep",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let m = gyre_domain::WorkspaceMembership::new(
+            Id::new("mem-dep-chan"),
+            Id::new("user-dep-chan"),
+            Id::new("ws-dep"),
+            gyre_domain::WorkspaceRole::Admin,
+            Id::new("inviter"),
+            0,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-dep-chan"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        notify_cross_workspace_change(
+            &state,
+            &Id::new("ws-src"),
+            &repo,
+            "specs/system/auth.md",
+            "abc123",
+        )
+        .await;
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-dep-chan"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::CrossWorkspaceSpecChange),
+            "expected in-app CrossWorkspaceSpecChange notification"
+        );
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-dep-chan:")),
+            "cross-workspace change notification must reach the configured email channel"
+        );
+    }
+
     #[tokio::test]
     async fn registry_locks_are_per_scope_and_stable() {
         let reg = OrchestratorRegistry::new();
@@ -2442,6 +2643,40 @@ mod tests {
             .unwrap()
             .expect("worker agent record exists");
         assert_eq!(worker.current_task_id, Some(sub.id.clone()));
+
+        // task-146 review R4: every persisted scheduler transition records
+        // a task.status_changed analytics event — the delegation claim
+        // (Backlog→InProgress), its completion (InProgress→Done), and the
+        // Phase 4 worker claim of the sub-task (Backlog→InProgress).
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 50)
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.properties["task_id"] == delegation.id.to_string()
+                    && e.properties["old_status"] == "Backlog"
+                    && e.properties["new_status"] == "InProgress"),
+            "delegation claim must record task.status_changed: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.properties["task_id"] == delegation.id.to_string()
+                    && e.properties["old_status"] == "InProgress"
+                    && e.properties["new_status"] == "Done"),
+            "delegation completion must record task.status_changed: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.properties["task_id"] == sub.id.to_string()
+                    && e.properties["old_status"] == "Backlog"
+                    && e.properties["new_status"] == "InProgress"),
+            "worker claim must record task.status_changed: {events:?}"
+        );
     }
 
     // Phase 2 coordination processing: the scheduler runs the repo
@@ -2746,6 +2981,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: Some(0),
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -2771,6 +3007,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: None,
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -2822,6 +3059,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: Some(0),
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -2865,6 +3103,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: None,
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -3085,7 +3324,17 @@ mod tests {
         // Priority-1 notification for the workspace admin.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-user"), None, None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("admin-user"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -3108,6 +3357,22 @@ mod tests {
                 .any(|m| m.payload.as_ref().and_then(|p| p["task_id"].as_str())
                     == Some(task.id.as_str())),
             "TaskBlocked message emitted for the blocked task: {ws_msgs:?}"
+        );
+
+        // task-146 review R4: the persisted InProgress→Blocked terminal
+        // transition records a task.status_changed analytics event.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.properties["task_id"] == task_id.to_string()
+                    && e.properties["old_status"] == "InProgress"
+                    && e.properties["new_status"] == "Blocked"),
+            "final spawn failure must record task.status_changed: {events:?}"
         );
     }
 
@@ -3167,6 +3432,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: Some(0),
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await
@@ -3218,6 +3484,7 @@ mod tests {
                     max_cost_per_day: None,
                     max_concurrent_agents: Some(10),
                     max_agent_lifetime_secs: None,
+                    enforcement_action: None,
                 },
             )
             .await

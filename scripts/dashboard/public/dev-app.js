@@ -227,6 +227,10 @@ function renderOverview() {
     e("h2", { text: "Independent reconcilers" }),
     e("p", { text: s.online ? `${s.supervisor_online ? "Supervisor online" : "Independent stage workers active"} · ${gate.condition || "Reconciling"}` : "Run: python3 scripts/dev-pipeline.py serve. Stages can also run independently with tick." }),
     gate.capacity && !gate.capacity.allowed ? e("p", { class: "muted", text: gate.capacity.message }) : null,
+    gate.delivery ? e("p", { class: gate.delivery.condition === "Stalled" ? "dev-health-error" : "muted", text:
+      `Delivery ${gate.delivery.condition.toLowerCase()} · ${gate.delivery.unfinished} unfinished tasks` +
+      (gate.delivery.last_merge_at ? ` · last merge ${new Date(gate.delivery.last_merge_at * 1000).toLocaleString()}` : "") +
+      (Object.keys(gate.delivery.blockers || {}).length ? ` · blockers: ${Object.entries(gate.delivery.blockers).map(([name, count]) => `${name.replaceAll("_", " ")} (${count})`).join(", ")}` : "") }) : null,
     gate.stress_guard ? e("p", { class: "dev-health-error", text: `Stress guard paused new admissions: ${gate.stress_guard.reason}. Tasks: ${(gate.stress_guard.tasks || []).join(", ")}. Active work continues; inspect the fault before resuming.` }) : null,
     ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} ${stage === "observe" ? "waiting for CI" : "backing off"} · ${count.succeeded || 0} completed` })),
     e("p", { class: "muted", text: s.dispatch?.integration

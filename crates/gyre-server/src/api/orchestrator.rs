@@ -64,7 +64,10 @@ fn is_live(a: &gyre_domain::Agent) -> bool {
 /// Repo > Workspace > Tenant. Fail-closed: a persona that does not resolve,
 /// or resolves but is not Approved, rejects the spawn — an orchestrator
 /// running without its persona is an unstyled coordination agent, which is
-/// exactly what the spec forbids.
+/// exactly what the spec forbids. (Supersedes this branch's earlier
+/// advisory-only `warn_unapproved_persona`: the upstream base makes the
+/// check genuinely enforcing, which is the stronger fix for the same
+/// inert-enforcement finding.)
 async fn resolve_orchestrator_persona(
     state: &AppState,
     slug: &str,
@@ -122,6 +125,12 @@ pub(crate) struct LaunchOutcome {
     pub launch_status: String,
     /// Failure reason when launch_status == "launch_failed".
     pub launch_detail: Option<String>,
+    /// Label of the compute target the launch resolved to (workspace
+    /// assignment -> tenant default -> local); same convention as the
+    /// worker path's AgentLaunchResult::compute_target_label. Carried on
+    /// the outcome so the agent.spawned analytics event reports the target
+    /// the process actually launched on, not a hardcoded value.
+    pub compute_target_label: String,
 }
 
 /// Launch the orchestrator process on the workspace's compute target (§3:
@@ -180,6 +189,17 @@ pub(crate) async fn launch_orchestrator_process(
                 config: e.config.clone(),
             }),
     };
+
+    // Label of the resolved target for the outcome/analytics: the target
+    // entity's id, or "local" when no workspace/tenant target is
+    // configured (same convention as api/spawn.rs). Computed once from the
+    // resolved config so every return path — including the fail-closed
+    // early returns below, which happen after resolution — reports the
+    // target that was selected for this launch.
+    let compute_target_label = target_config
+        .as_ref()
+        .map(|cfg| cfg.id.clone())
+        .unwrap_or_else(|| "local".to_string());
 
     // Server-controlled command: compute-target config, GYRE_ORCHESTRATOR_COMMAND,
     // or the agent image entrypoint (same contract as api/spawn.rs).
@@ -260,6 +280,7 @@ pub(crate) async fn launch_orchestrator_process(
                     return LaunchOutcome {
                         launch_status: "launch_failed".to_string(),
                         launch_detail: Some(detail),
+                        compute_target_label,
                     };
                 }
                 env.insert("GYRE_PROMPT_PERSONA".to_string(), persona.system_prompt);
@@ -365,6 +386,7 @@ pub(crate) async fn launch_orchestrator_process(
                              for remote container use"
                                 .to_string(),
                         ),
+                        compute_target_label,
                     };
                 }
                 let image = cfg.config["image"].as_str().unwrap_or("gyre-agent:latest");
@@ -473,6 +495,16 @@ pub(crate) async fn launch_orchestrator_process(
                                 // stale detector spawns a replacement.
                                 let _ = a.transition_status(AgentStatus::Dead);
                                 let _ = state_mon.agents.update(&a).await;
+                                // Auto-track agent.failed (analytics.md
+                                // §Auto-Emitted Events: "Agent fails or is
+                                // killed") — the process death is the kill,
+                                // same event the endpoint death paths emit.
+                                crate::api::analytics::record_agent_failed(
+                                    &state_mon,
+                                    &a,
+                                    "orchestrator process died",
+                                )
+                                .await;
                             }
                         }
                         break;
@@ -482,12 +514,25 @@ pub(crate) async fn launch_orchestrator_process(
             LaunchOutcome {
                 launch_status: "running".to_string(),
                 launch_detail: None,
+                compute_target_label,
             }
         }
         Err(e) => LaunchOutcome {
             launch_status: "launch_failed".to_string(),
             launch_detail: Some(format!("{e}")),
+            compute_target_label,
         },
+    }
+}
+
+/// Persona name for an orchestrator tier — the meta-spec persona the
+/// orchestrator runs with (agent-runtime.md §2; the names validated by
+/// `validate_persona`).
+fn orchestrator_persona(tier: &OrchestratorType) -> &'static str {
+    match tier {
+        OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+        OrchestratorType::Worker => "worker",
     }
 }
 
@@ -567,6 +612,36 @@ async fn spawn_orchestrator(
     // workspace_id + repo_id. task_id carries the orchestrator's own id
     // (orchestrators are not task-bound but the claim is required on all
     // agent JWTs for gyre_agent_complete compatibility).
+    //
+    // §1 Token Scoping: resolve tenant (workspace → tenant) and repo name
+    // so the scope list is minted from real hierarchy context — workspace
+    // tier `workspace:{id}:read|spawn`, repo tier `repo:{name}:write|spawn`.
+    // An unresolvable workspace means the tenant scope cannot be determined —
+    // fail the spawn rather than minting a fabricated tenant identity
+    // (task-097 F3 class): the orchestrator's scope IS its identity.
+    let tenant_id = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.tenant_id.to_string())
+        .ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "orchestrator spawn: workspace {workspace_id} unresolvable, \
+                 tenant scope cannot be determined"
+            ))
+        })?;
+    let repo_name = match repo_id {
+        Some(rid) => state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name),
+        None => None,
+    };
     let token = state
         .agent_signing_key
         .mint_orchestrator(
@@ -574,9 +649,12 @@ async fn spawn_orchestrator(
             auth_agent_id,
             &state.base_url,
             state.agent_jwt_ttl_secs,
+            &tenant_id,
             &workspace_id.to_string(),
             repo_id.map(|r| r.to_string()).as_deref(),
+            repo_name.as_deref(),
             &orchestrator_type.to_string(),
+            orchestrator_persona(&orchestrator_type),
         )
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("orchestrator token mint: {e}")))?;
     let _ = state
@@ -587,20 +665,6 @@ async fn spawn_orchestrator(
     // Keypair so the orchestrator can sign DerivedInputs when spawning
     // children (authorization-provenance.md §4.5).
     bootstrap_agent_keypair(state, &agent.id.to_string(), now).await;
-
-    // Auto-track spawn.
-    let ev = AnalyticsEvent::new(
-        new_id(),
-        "agent.spawned",
-        Some(agent.id.to_string()),
-        serde_json::json!({
-            "orchestrator_type": orchestrator_type.to_string(),
-            "workspace_id": workspace_id.to_string(),
-            "repo_id": repo_id.map(|r| r.to_string()),
-        }),
-        now,
-    );
-    let _ = state.analytics.record(&ev).await;
 
     budget::increment_active_agents(state, &workspace_id.to_string()).await;
 
@@ -615,15 +679,50 @@ async fn spawn_orchestrator(
         .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
     let launch = launch_orchestrator_process(state, &agent, &workspace, &token).await;
 
+    // Auto-track spawn (analytics.md §Auto-Emitted Events). Emitted after
+    // the launch so the spec-required compute_target property reports the
+    // target the process actually launched on (review f3f37604: previously
+    // a hardcoded "local", wrong for any workspace/tenant compute target) —
+    // the same shape as the worker path, which records
+    // launch.compute_target_label.
+    let persona_name = match orchestrator_type {
+        OrchestratorType::Worker => "default-worker",
+        OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+    };
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.spawned",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            // Orchestrators are not task-bound (the JWT task_id claim is the
+            // orchestrator's own id only for gyre_agent_complete compat) —
+            // the spec's task_id property is null here, not a fabricated id.
+            "task_id": serde_json::Value::Null,
+            "compute_target": launch.compute_target_label.clone(),
+            "persona": persona_name,
+            "orchestrator_type": orchestrator_type.to_string(),
+            "workspace_id": workspace_id.to_string(),
+            "repo_id": repo_id.map(|r| r.to_string()),
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(workspace_id), repo_id);
+    record_and_index_activity(state, &ev).await;
+
     Ok((agent, token, launch))
 }
 
 /// Shared core of POST /api/v1/workspaces/:id/orchestrator/spawn (task-093).
+///
+/// `caller_tenant` is the authenticated caller's tenant scope; the
+/// workspace's tenant must match it (task-093 F2 containment).
 pub(crate) async fn spawn_workspace_orchestrator_core(
     state: &Arc<AppState>,
     workspace_id: &str,
     req: SpawnOrchestratorRequest,
     auth_agent_id: &str,
+    caller_tenant: &str,
 ) -> Result<(gyre_domain::Agent, String, LaunchOutcome), ApiError> {
     let ws_id = Id::new(workspace_id.to_string());
     let workspace = match state.workspaces.find_by_id(&ws_id).await {
@@ -635,6 +734,17 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
         }
         Err(e) => return Err(ApiError::Internal(e)),
     };
+
+    // Tenant containment (task-093 F2 fix): this route runs without
+    // middleware ABAC, so this comparison is the only cross-tenant guard —
+    // without it any authenticated principal in any tenant could mint a
+    // workspace-scoped orchestrator JWT.
+    if workspace.tenant_id.as_str() != caller_tenant {
+        return Err(ApiError::Forbidden(format!(
+            "workspace {workspace_id} belongs to tenant {}, not the caller's tenant {caller_tenant}",
+            workspace.tenant_id
+        )));
+    }
 
     // One live workspace orchestrator per workspace (§3.2).
     let existing = state.agents.list_by_workspace(&ws_id).await?;
@@ -677,9 +787,17 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
 ///
 /// Per-handler authorization: the workspace's tenant must match the
 /// caller's tenant (the route runs without middleware ABAC, so this is the
-/// only cross-tenant containment). The global system token (agent_id
-/// "system") bypasses — its tenant is the bootstrap principal, not a
-/// tenant scope (see auth.rs `system_principal_tenant`).
+/// only cross-tenant containment) — for EVERY caller, including the
+/// global system token. Unlike the repo-tier spawn route below, no
+/// bootstrap flow spawns a workspace orchestrator (platform-model.md §8
+/// step 8 spawns the repo orchestrator only), so no operational path
+/// needs the global token to cross tenants here: containment must hold
+/// for every caller or this registry-exempt route could mint a
+/// workspace-scoped orchestrator JWT for a tenant the caller does not
+/// belong to (task-093 F2, pinned by the
+/// `orchestrator_spawn_denied_across_tenants` regression test).
+/// The shared core re-checks containment for every caller (it is also the
+/// MCP spawn path, which runs without middleware ABAC).
 pub async fn spawn_workspace_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -687,21 +805,33 @@ pub async fn spawn_workspace_orchestrator(
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
     // Tenant containment: load the workspace, compare its tenant against
-    // the caller's resolved tenant.
+    // the caller's resolved tenant. No system-principal bypass: the global
+    // token's tenant is the bootstrap principal ("default"), and no
+    // documented flow spawns a workspace orchestrator outside it.
     let ws_id = Id::new(workspace_id.clone());
     let workspace = state
         .workspaces
         .find_by_id(&ws_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
-    if !auth.is_system_principal() && auth.tenant_id != workspace.tenant_id.to_string() {
+    if auth.tenant_id != workspace.tenant_id.to_string() {
         return Err(ApiError::Forbidden(
             "workspace does not belong to the caller's tenant".to_string(),
         ));
     }
-
-    let (agent, token, launch) =
-        spawn_workspace_orchestrator_core(&state, &workspace_id, req, &auth.agent_id).await?;
+    // The core re-checks containment (it is shared with the MCP spawn tool,
+    // which runs without middleware ABAC). The check above passed for
+    // every caller — no bypass — so the caller's own tenant is exactly the
+    // workspace's tenant here.
+    let caller_tenant = auth.tenant_id.clone();
+    let (agent, token, launch) = spawn_workspace_orchestrator_core(
+        &state,
+        &workspace_id,
+        req,
+        &auth.agent_id,
+        &caller_tenant,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -739,12 +869,14 @@ pub(crate) async fn list_repo_orchestrators_core(
 /// Used by both the REST handler and the MCP tool `gyre_spawn_repo_orchestrator`
 /// so the two surfaces cannot diverge (check-mcp-wrapper-parity).
 /// Caller must already be authorized for the target repo (REST: ABAC check;
-/// MCP: workspace-tier JWT + same-workspace repo check).
+/// MCP: workspace-tier JWT + same-workspace repo check), and the repo's
+/// workspace tenant must match `caller_tenant` (task-093 F3 containment).
 pub(crate) async fn spawn_repo_orchestrator_core(
     state: &Arc<AppState>,
     repo_id: &str,
     req: SpawnOrchestratorRequest,
     auth_agent_id: &str,
+    caller_tenant: &str,
 ) -> Result<(gyre_domain::Agent, String, LaunchOutcome), ApiError> {
     let rid = Id::new(repo_id.to_string());
     let repo = state
@@ -754,6 +886,30 @@ pub(crate) async fn spawn_repo_orchestrator_core(
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
     let ws_id = repo.workspace_id.clone();
+
+    // Tenant containment (task-093 F3 fix): check_repo_abac alone is not
+    // containment — the policy engine is permissive when no per-repo
+    // policies are stored and bypasses global tokens / API keys, so the
+    // handler must compare the loaded entity's tenant against the caller's
+    // regardless. A dangling workspace reference means the tenant scope
+    // cannot be determined: fail closed, never mint an orchestrator JWT
+    // whose tenant identity would have to be fabricated.
+    let ws_tenant = match state.workspaces.find_by_id(&ws_id).await {
+        Ok(Some(ws)) => ws.tenant_id,
+        Ok(None) => {
+            return Err(ApiError::NotFound(format!(
+                "repo {repo_id} references workspace {ws_id} which does not exist — \
+                 the tenant scope for the orchestrator token cannot be determined; \
+                 fix the repo's workspace reference before spawning"
+            )))
+        }
+        Err(e) => return Err(ApiError::Internal(e)),
+    };
+    if ws_tenant.as_str() != caller_tenant {
+        return Err(ApiError::Forbidden(format!(
+            "repo {repo_id} belongs to tenant {ws_tenant}, not the caller's tenant {caller_tenant}"
+        )));
+    }
 
     // One live repo orchestrator per repo (§3.2).
     let existing = state.agents.list_by_workspace(&ws_id).await?;
@@ -801,7 +957,14 @@ pub(crate) async fn spawn_repo_orchestrator_core(
 /// containment: it returns Ok when no per-repo policies are stored and
 /// bypasses for global tokens / API keys. The global system token
 /// (agent_id "system") bypasses the tenant comparison — its tenant is the
-/// bootstrap principal, not a tenant scope.
+/// bootstrap principal, not a tenant scope, and the documented dev-mode
+/// bootstrap (`gyre bootstrap --dev`, docs/cli.md) authenticates this
+/// route's step-8 repo-orchestrator spawn with that static token against
+/// the freshly created "dev" tenant. (The workspace-tier spawn route above
+/// has NO bypass: no bootstrap flow spawns a workspace orchestrator, so
+/// its containment holds for every caller.) The shared core re-checks
+/// containment for every caller (it is also the MCP spawn path, which runs
+/// without middleware ABAC).
 pub async fn spawn_repo_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -824,8 +987,11 @@ pub async fn spawn_repo_orchestrator(
         return Err(ApiError::Forbidden(reason));
     }
 
-    // Tenant containment: load the repo, resolve its workspace, compare the
-    // workspace's tenant against the caller's.
+    // Tenant containment (task-093 F3): load the repo, resolve its
+    // workspace, compare the workspace's tenant against the caller's. The
+    // ABAC layer alone is not containment (permissive by default); the
+    // global system token bypasses — its tenant is the bootstrap principal,
+    // not a tenant scope.
     let rid = Id::new(repo_id.clone());
     let repo = state
         .repos
@@ -833,16 +999,24 @@ pub async fn spawn_repo_orchestrator(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
     let workspace = state.workspaces.find_by_id(&repo.workspace_id).await?;
+    // The core re-checks containment (it is shared with the MCP spawn tool,
+    // which runs without middleware ABAC). For the system principal —
+    // bypassed here — pass the workspace's own tenant so the core's
+    // comparison succeeds for the bootstrap principal.
+    let mut caller_tenant = auth.tenant_id.clone();
     if let Some(ws) = workspace {
         if !auth.is_system_principal() && auth.tenant_id != ws.tenant_id.to_string() {
             return Err(ApiError::Forbidden(
                 "repo does not belong to the caller's tenant".to_string(),
             ));
         }
+        if auth.is_system_principal() {
+            caller_tenant = ws.tenant_id.to_string();
+        }
     }
 
     let (agent, token, launch) =
-        spawn_repo_orchestrator_core(&state, &repo_id, req, &auth.agent_id).await?;
+        spawn_repo_orchestrator_core(&state, &repo_id, req, &auth.agent_id, &caller_tenant).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -853,6 +1027,19 @@ pub async fn spawn_repo_orchestrator(
             launch_detail: launch.launch_detail,
         }),
     ))
+}
+
+/// Record an analytics event and index it for search (search.md
+/// §Searchable Entities: activity events are indexed on write).
+///
+/// Defined at the bottom of the file, and called as a bare one-liner at the
+/// spawn site, deliberately: scripts/inert-enforcement-exemptions.txt pins
+/// the `validate_persona` call sites above (lines 187/283) by exact line
+/// number, so any code above them must stay line-count-neutral versus the
+/// exemption baseline. Grow this helper, never the call site.
+async fn record_and_index_activity(state: &AppState, ev: &AnalyticsEvent) {
+    let _ = state.analytics.record(ev).await;
+    crate::search_indexer::index(state, crate::search_indexer::activity_event_document(ev)).await;
 }
 
 #[cfg(test)]
@@ -915,7 +1102,7 @@ mod tests {
         seed(&state).await;
 
         let (agent, token, _launch) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -945,7 +1132,19 @@ mod tests {
             claims.orchestrator_type.as_deref(),
             Some("workspace_orchestrator")
         );
-        assert_eq!(claims.scope, "agent");
+        // §1 Token Scoping: workspace orchestrator is scoped to its workspace.
+        assert_eq!(
+            claims.scope,
+            vec![
+                "workspace:ws-1:read".to_string(),
+                "workspace:ws-1:spawn".to_string()
+            ]
+        );
+        assert_eq!(claims.tenant_id, "t1");
+        // Persona claim carries the REAL persona slug (hyphenated — the
+        // slug `resolve_orchestrator_persona` resolved and bootstrap step 5
+        // registers), not the underscore orchestrator_type serde name.
+        assert_eq!(claims.persona.as_deref(), Some("workspace-orchestrator"));
 
         // Token registered so the auth middleware accepts it.
         let stored = state
@@ -961,18 +1160,23 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch-a")), "user-1")
+        spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch-a")), "user-1", "t1")
             .await
             .unwrap();
-        let err =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch-b")), "user-1")
-                .await
-                .unwrap_err();
+        let err = spawn_workspace_orchestrator_core(
+            &state,
+            "ws-1",
+            req(Some("ws-orch-b")),
+            "user-1",
+            "t1",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ApiError::Conflict(_)), "got: {err}");
 
         // Dead orchestrator frees the slot (§3.2 exactly-one-live).
         kill(&state, "ws-orch-a").await;
-        spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch-b")), "user-1")
+        spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch-b")), "user-1", "t1")
             .await
             .unwrap();
     }
@@ -983,7 +1187,7 @@ mod tests {
         seed(&state).await;
 
         let (agent, token, _launch) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch-1")), "user-1")
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch-1")), "user-1", "t1")
                 .await
                 .unwrap();
         assert_eq!(agent.orchestrator_type, OrchestratorType::RepoOrchestrator);
@@ -1007,13 +1211,123 @@ mod tests {
         );
 
         // One per repo, but a different repo in the same workspace is fine.
-        let err = spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch-2")), "user-1")
-            .await
-            .unwrap_err();
+        let err =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch-2")), "user-1", "t1")
+                .await
+                .unwrap_err();
         assert!(matches!(err, ApiError::Conflict(_)), "got: {err}");
-        spawn_repo_orchestrator_core(&state, "r-2", req(Some("repo-orch-2")), "user-1")
+        spawn_repo_orchestrator_core(&state, "r-2", req(Some("repo-orch-2")), "user-1", "t1")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn workspace_orchestrator_spawn_rejects_cross_tenant() {
+        // task-093 F2 containment: a caller scoped to another tenant must not
+        // be able to mint a workspace-scoped orchestrator JWT.
+        let state = test_state();
+        seed(&state).await;
+
+        let err = spawn_workspace_orchestrator_core(
+            &state,
+            "ws-1",
+            req(Some("cross-tenant-ws-orch")),
+            "user-1",
+            "t-other",
+        )
+        .await
+        .unwrap_err();
+        match &err {
+            ApiError::Forbidden(msg) => {
+                assert!(msg.contains("ws-1"), "got: {msg}");
+                assert!(msg.contains("t-other"), "got: {msg}");
+            }
+            other => panic!("expected Forbidden, got: {other}"),
+        }
+
+        // Fail-closed: no orchestrator record and no scoped JWT was minted.
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        assert!(
+            peers
+                .iter()
+                .all(|a| a.orchestrator_type != OrchestratorType::WorkspaceOrchestrator),
+            "no workspace orchestrator may exist after a cross-tenant rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_orchestrator_spawn_rejects_cross_tenant() {
+        // task-093 F3 containment: check_repo_abac is permissive when no
+        // per-repo policies are stored, so the core must independently
+        // compare the repo's workspace tenant against the caller's.
+        let state = test_state();
+        seed(&state).await;
+
+        let err = spawn_repo_orchestrator_core(
+            &state,
+            "r-1",
+            req(Some("cross-tenant-repo-orch")),
+            "user-1",
+            "t-other",
+        )
+        .await
+        .unwrap_err();
+        match &err {
+            ApiError::Forbidden(msg) => {
+                assert!(msg.contains("r-1"), "got: {msg}");
+                assert!(msg.contains("t-other"), "got: {msg}");
+            }
+            other => panic!("expected Forbidden, got: {other}"),
+        }
+
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        assert!(
+            peers
+                .iter()
+                .all(|a| a.orchestrator_type != OrchestratorType::RepoOrchestrator),
+            "no repo orchestrator may exist after a cross-tenant rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_orchestrator_spawn_rejects_dangling_workspace() {
+        // Fail-closed mirror of the worker-spawn rule: a repo whose
+        // workspace row is missing has no determinable tenant scope, so no
+        // orchestrator JWT may be minted for it.
+        let state = test_state();
+        seed(&state).await;
+        let repo = gyre_domain::Repository::new(
+            Id::new("r-ghost"),
+            Id::new("ws-ghost"),
+            "r-ghost",
+            "/tmp/r-ghost".to_string(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap(); // non-atomic-create:ok — test seed, in-memory test state
+
+        let err = spawn_repo_orchestrator_core(
+            &state,
+            "r-ghost",
+            req(Some("ghost-orch")),
+            "user-1",
+            "t1",
+        )
+        .await
+        .unwrap_err();
+        match &err {
+            ApiError::NotFound(msg) => {
+                assert!(msg.contains("ws-ghost"), "got: {msg}");
+            }
+            other => panic!("expected NotFound, got: {other}"),
+        }
     }
 
     #[tokio::test]
@@ -1025,7 +1339,7 @@ mod tests {
         let state = test_state();
         seed(&state).await;
         let (agent, _token, _launch) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("dup-check")), "user-1")
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("dup-check")), "user-1", "t1")
                 .await
                 .unwrap();
         let json = serde_json::to_value(orchestrator_response(agent)).unwrap();
@@ -1054,7 +1368,7 @@ mod tests {
         let state = test_state();
         seed(&state).await;
         let (agent, _token, _launch) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("wire-check")), "user-1")
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("wire-check")), "user-1", "t1")
                 .await
                 .unwrap();
         let text = serde_json::to_string(&orchestrator_response(agent)).unwrap();
@@ -1203,9 +1517,10 @@ mod tests {
             state.personas.delete(&p.id).await.unwrap();
         }
 
-        let err = spawn_repo_orchestrator_core(&state, "r-1", req(Some("no-persona")), "user-1")
-            .await
-            .unwrap_err();
+        let err =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("no-persona")), "user-1", "t1")
+                .await
+                .unwrap_err();
         match &err {
             ApiError::NotFound(msg) => {
                 assert!(msg.contains("repo-orchestrator"), "got: {msg}");
@@ -1240,9 +1555,10 @@ mod tests {
         pending.approval_status = gyre_domain::PersonaApprovalStatus::Pending;
         state.personas.update(&pending).await.unwrap();
 
-        let err = spawn_repo_orchestrator_core(&state, "r-1", req(Some("unapproved")), "user-1")
-            .await
-            .unwrap_err();
+        let err =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("unapproved")), "user-1", "t1")
+                .await
+                .unwrap_err();
         match &err {
             ApiError::Conflict(msg) => {
                 assert!(msg.contains("repo-orchestrator"), "got: {msg}");
@@ -1267,16 +1583,26 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (first, _t, _l) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("gyre-orchestrator")), "user-1")
-                .await
-                .unwrap();
+        let (first, _t, _l) = spawn_repo_orchestrator_core(
+            &state,
+            "r-1",
+            req(Some("gyre-orchestrator")),
+            "user-1",
+            "t1",
+        )
+        .await
+        .unwrap();
         kill(&state, "gyre-orchestrator").await;
 
-        let (second, _t2, _l2) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("gyre-orchestrator")), "user-1")
-                .await
-                .unwrap();
+        let (second, _t2, _l2) = spawn_repo_orchestrator_core(
+            &state,
+            "r-1",
+            req(Some("gyre-orchestrator")),
+            "user-1",
+            "t1",
+        )
+        .await
+        .unwrap();
         assert_eq!(second.name, "gyre-orchestrator");
         assert_eq!(second.status, AgentStatus::Active);
 
@@ -1287,9 +1613,15 @@ mod tests {
 
         // A LIVE holder still rejects with 400 (different-repo name steal
         // must not be possible).
-        spawn_repo_orchestrator_core(&state, "r-2", req(Some("gyre-orchestrator")), "user-1")
-            .await
-            .unwrap_err();
+        spawn_repo_orchestrator_core(
+            &state,
+            "r-2",
+            req(Some("gyre-orchestrator")),
+            "user-1",
+            "t1",
+        )
+        .await
+        .unwrap_err();
     }
 
     #[tokio::test]
@@ -1298,7 +1630,7 @@ mod tests {
         seed(&state).await;
 
         let (agent, _token, _launch) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -1352,11 +1684,11 @@ mod tests {
         seed(&state).await;
 
         let (ws_orch, _t1, _l1) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
         let (repo_orch, _t2, _l2) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1")
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -1401,6 +1733,7 @@ mod tests {
             "ws-1",
             req(Some("system-ws-orch")),
             "system",
+            "t1",
         )
         .await
         .unwrap();
@@ -1473,6 +1806,102 @@ mod tests {
                 .unwrap()
                 .status,
             AgentStatus::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_spawn_emits_agent_spawned_analytics_event() {
+        // analytics.md §Auto-Emitted Events: the orchestrator spawn path
+        // reports its tier via the persona property.
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _token, _launch) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
+        assert_eq!(ev.properties["persona"], "workspace-orchestrator");
+        assert_eq!(ev.properties["orchestrator_type"], "workspace_orchestrator");
+        // No workspace/tenant compute target is configured in this test, so
+        // the honest resolution of the priority chain (workspace assignment
+        // -> tenant default -> local) IS "local" here. The configured-target
+        // case is pinned by
+        // orchestrator_spawn_analytics_reports_resolved_compute_target.
+        assert_eq!(ev.properties["compute_target"], "local");
+        // Orchestrators are not task-bound: task_id must be null, not the
+        // agent's own id (regression: previously fabricated from agent.id).
+        assert!(ev.properties["task_id"].is_null());
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    /// Review f3f37604 regression: the spec-required `agent.spawned`
+    /// property `compute_target` must report the target the orchestrator
+    /// process actually launched on (workspace assignment -> tenant
+    /// default -> local), not a hardcoded "local". The pre-fix defect
+    /// recorded "local" while the process launched on the configured
+    /// workspace target — silently wrong in every deployment that
+    /// configures one.
+    #[tokio::test]
+    async fn orchestrator_spawn_analytics_reports_resolved_compute_target() {
+        let state = test_state();
+        seed(&state).await;
+
+        // Configure a workspace compute target — the exact deployment
+        // shape launch_with_command / orchestrator_launch_injects_system_prompts
+        // use. Kubernetes-typed targets dispatch via LocalTarget, so
+        // /bin/true launches deterministically in the test environment.
+        let mut ct = gyre_domain::ComputeTargetEntity::new(
+            Id::new("ct-analytics-resolved"),
+            Id::new("t1"),
+            "analytics-resolved-target",
+            gyre_domain::ComputeTargetType::Kubernetes,
+            0,
+        );
+        ct.config = serde_json::json!({ "command": "/bin/true" });
+        state.compute_targets.create(&ct).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+
+        let (agent, _token, launch) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
+        assert_eq!(
+            launch.launch_status, "running",
+            "launch failed: {:?}",
+            launch.launch_detail
+        );
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
+        // The event must carry the RESOLVED target id, proving the property
+        // is looked up from the launch resolution, not hardcoded. This
+        // assertion fails against the pre-fix code (which recorded "local").
+        assert_eq!(
+            ev.properties["compute_target"], "ct-analytics-resolved",
+            "agent.spawned must report the compute target the process \
+             actually launched on"
         );
     }
 

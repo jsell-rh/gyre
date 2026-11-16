@@ -213,6 +213,28 @@ pub async fn compose_teardown(
                 let _ = agent.transition_status(AgentStatus::Dead);
                 agent.last_heartbeat = Some(now);
                 let _ = state.agents.update(&agent).await;
+                // agent.failed analytics event (analytics.md §Auto-Emitted
+                // Events: "Agent fails or is killed") — tearing down a
+                // compose session kills its agents, same as the admin kill
+                // and stale-abort paths; same spec-required properties.
+                let ev = gyre_domain::AnalyticsEvent::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    "agent.failed",
+                    Some(agent.id.to_string()),
+                    serde_json::json!({
+                        "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                        "reason": "compose session torn down",
+                        "duration_secs": now.saturating_sub(agent.spawned_at),
+                    }),
+                    now,
+                )
+                .with_scope(
+                    None,
+                    None,
+                    Some(&agent.workspace_id),
+                    agent.repo_id.as_ref(),
+                );
+                let _ = state.analytics.record(&ev).await;
 
                 // Platform Model §7: compose teardown kills the agent —
                 // revoke its task-scoped ephemeral secrets (teardown; logs
@@ -393,7 +415,8 @@ mod tests {
 
     #[tokio::test]
     async fn compose_teardown_stops_all_agents() {
-        let app = app();
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
         let (app, _workspace_id, repo_id) = create_project_and_repo(app).await;
 
         let compose = serde_json::json!({
@@ -463,6 +486,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // analytics.md §Auto-Emitted Events: agent.failed ("Agent fails or
+        // is killed") — tearing down a compose session kills its agents.
+        // Regression: this path previously marked agents Dead with no
+        // analytics event.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "teardown must record agent.failed for every killed session agent"
+        );
+        for ev in &events {
+            assert_eq!(ev.event_name, "agent.failed");
+            assert_eq!(ev.properties["reason"], "compose session torn down");
+            assert!(
+                ev.properties["duration_secs"].as_u64().is_some(),
+                "duration_secs must be present"
+            );
+            assert!(
+                ev.agent_id.is_some(),
+                "agent_id (spec-required) must be present"
+            );
+        }
+        let agent_ids: std::collections::HashSet<&str> = events
+            .iter()
+            .map(|ev| ev.agent_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(agent_ids.len(), 2, "one event per distinct session agent");
     }
 
     #[tokio::test]

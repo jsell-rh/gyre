@@ -162,6 +162,8 @@ describe('Explorer default views selector (HSI §3)', () => {
       // Trace flows section (system-explorer.md §5 predefined flows)
       'Agent spawn flow', 'MR merge flow', 'Spec approval flow',
       'Generate view…',
+      // Conversational exploration entry (system-explorer.md §8)
+      'Ask the graph…',
     ]);
     const boundary = options.find((t) => t.textContent === 'Boundary');
     expect(boundary.getAttribute('aria-selected')).toBe('true');

@@ -570,7 +570,28 @@ export const api = {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/users/me/notifications/count${qs}`).then(r => r?.count ?? 0);
   },
+  // Task-113 (user-management.md §In-App Notification UI / §API >
+  // Notifications): spec-path listing, unread count, read/unread marking.
+  notifications: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/notifications${qs ? '?' + qs : ''}`);
+  },
+  unreadNotificationCount: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/unread-count${qs}`).then(r => r?.count ?? 0);
+  },
   markNotificationRead: (id) =>
+    request(`/notifications/${id}/read`, { method: 'PUT' }),
+  markNotificationUnread: (id) =>
+    request(`/notifications/${id}/unread`, { method: 'POST' }),
+  markAllNotificationsRead: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/mark-all-read${qs}`, { method: 'POST' });
+  },
+  notificationChannels: () => request('/notifications/preferences'),
+  updateNotificationChannels: (body) =>
+    request('/notifications/preferences', { method: 'PUT', body: JSON.stringify(body) }),
+  dismissNotification: (id) =>
     request(`/notifications/${id}/dismiss`, { method: 'POST' }),
   resolveNotification: (id) =>
     request(`/notifications/${id}/resolve`, { method: 'POST' }),
@@ -582,6 +603,15 @@ export const api = {
     const qs = params ? new URLSearchParams(params).toString() : '';
     return request(`/users/me/judgments${qs ? '?' + qs : ''}`);
   },
+  // Public user profile (user-management.md §User Profile Page, /@{username}):
+  // tenant-scoped profile, activity feed (public actions only), and
+  // aggregate stats. Cross-tenant or unknown handles 404.
+  publicUserProfile: (username) => request(`/users/${encodeURIComponent(username)}`),
+  publicUserActivity: (username, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/users/${encodeURIComponent(username)}/activity${qs ? '?' + qs : ''}`);
+  },
+  publicUserStats: (username) => request(`/users/${encodeURIComponent(username)}/stats`),
   // Knowledge graph (TASK-174/TASK-175)
   repoGraph: (id) => request(`/repos/${id}/graph`),
   repoGraphNode: (repoId, nodeId) => request(`/repos/${repoId}/graph/node/${nodeId}`),
@@ -589,12 +619,24 @@ export const api = {
   repoGraphModules: (id) => request(`/repos/${id}/graph/modules`),
   repoGraphRisks: (id) => request(`/repos/${id}/graph/risks`),
   getGraphConcept: (repoId, name) => request(`/repos/${repoId}/graph/concept/${encodeURIComponent(name)}`),
+  repoGraphConcepts: (repoId) => request(`/repos/${repoId}/graph/concepts`),
   repoGraphTimeline: (id, since, until) => {
     const params = new URLSearchParams();
     if (since != null) params.set('since', since);
     if (until != null) params.set('until', until);
     const qs = params.toString();
     return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
+  },
+  // Point-in-time knowledge graph (system-explorer.md §6 Architectural
+  // Timeline): `at` is unix epoch seconds or an RFC 3339 timestamp. The
+  // server reconstructs nodes/edges that existed at that instant,
+  // including ones soft-deleted since.
+  repoGraphAt: (id, at) => request(`/repos/${id}/graph?at=${encodeURIComponent(at)}`),
+  // Workspace message bus — GET lists messages, optionally filtered by
+  // kind (?kind=reconciliation_completed for timeline key moments).
+  workspaceMessages: (workspaceId, params) => {
+    const qs = params ? new URLSearchParams(params).toString() : '';
+    return request(`/workspaces/${workspaceId}/messages${qs ? '?' + qs : ''}`);
   },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
   // Meta-spec preview loop (S4.6)
@@ -607,10 +649,18 @@ export const api = {
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  // Tenant-level ABAC policies
-  policies: () => request('/policies'),
+  // Tenant-level ABAC policies. `params` carries the §UI scope filter
+  // (`?scope=Workspace&scope_id=<id>` — the GLOBAL policy endpoints;
+  // workspace scoping is a query filter, never a workspace-prefixed URL).
+  policies: (params = {}) => {
+    if (params == null) return request('/policies');
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies${qs ? '?' + qs : ''}`);
+  },
   createPolicy: (data) =>
     request('/policies', { method: 'POST', body: JSON.stringify(data) }),
+  updatePolicy: (id, data) =>
+    request(`/policies/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deletePolicy: (id) =>
     request(`/policies/${id}`, { method: 'DELETE' }),
   policyDecisions: (params = {}) => {
@@ -624,6 +674,19 @@ export const api = {
     request(`/policies/${policyId}`, { method: 'DELETE' }),
   simulateAbacPolicy: (id, data) =>
     request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
+  // Dry-run simulator — POST /api/v1/policies/evaluate (global endpoint,
+  // never workspace-prefixed; the id parameter of simulateAbacPolicy is
+  // ignored server-side and kept only for call-site compatibility).
+  evaluatePolicy: (data) =>
+    request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
+  // Effective permissions — GET /api/v1/policies/effective?subject={id}
+  // (the documented `subject` spelling; the server accepts `subject_id`
+  // as an alias). Optional resource_type/workspace_id/repo_id/tenant_id
+  // scope the answer.
+  effectivePermissions: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies/effective${qs ? '?' + qs : ''}`);
+  },
   // Explorer saved views — repo-scoped (canonical, via WS or REST)
   savedViews: (repoId) => request(`/repos/${repoId}/views`),
   createSavedView: (repoId, data) =>
@@ -645,6 +708,14 @@ export const api = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${getAuthToken()}`,
       },
+      body: JSON.stringify(body),
+    }),
+  // Conversational exploration Q&A (system-explorer.md §8): grounded text
+  // answer with server-validated entity refs, optional view spec ("show me
+  // X") and structural prediction ("what would happen if…").
+  explorerAsk: (workspaceId, body) =>
+    request(`/workspaces/${workspaceId}/explorer-views/ask`, {
+      method: 'POST',
       body: JSON.stringify(body),
     }),
   // Specs View (S4.5)
@@ -724,6 +795,32 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/analytics/events${qs ? '?' + qs : ''}`);
   },
+  // Analytics daily event counts (analytics.md §Analytics Dashboard bar chart)
+  analyticsDaily: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/daily${qs ? '?' + qs : ''}`);
+  },
+  // Analytics event count, optionally property-filtered for funnel steps
+  // (analytics.md §Analytics Dashboard funnel view)
+  analyticsCount: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/analytics/count${qs ? '?' + qs : ''}`);
+  },
+  // Decision API (analytics.md §Decision API) — interactive evaluator
+  analyticsDecide: (decision, context = {}) => {
+    const qs = new URLSearchParams({
+      decision,
+      context: JSON.stringify(context),
+    }).toString();
+    return request(`/analytics/decide?${qs}`);
+  },
+  // Retention policies (analytics.md §Data Retention) — adminRetention is
+  // defined alongside the other admin endpoints above.
+  setAnalyticsRetention: (retentionDays) =>
+    request('/admin/retention', {
+      method: 'PUT',
+      body: JSON.stringify({ retention_days: retentionDays }),
+    }),
   // Presence
   workspacePresence: (workspaceId) =>
     request(`/workspaces/${workspaceId}/presence`),
@@ -769,6 +866,7 @@ export const api = {
   // Workspace-scope concept search
   workspaceGraphConcept: (wsId, name) =>
     request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),
+  workspaceGraphConcepts: (wsId) => request(`/workspaces/${wsId}/graph/concepts`),
   // API token management
   createApiToken: (data) =>
     request('/users/me/tokens', { method: 'POST', body: JSON.stringify(data) }),
@@ -812,3 +910,22 @@ export const api = {
       body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
     }),
 };
+
+// Reviewer identity binding (spec-registry.md §16 manifest gates): a human
+// caller may record an MR review only under their own verified identity —
+// the server rejects a request-body reviewer_agent_id naming anyone else for
+// non-admin principals. Resolves the caller's user id once per session and
+// caches it. Falls back to the legacy pseudo-id, which the server rejects
+// (fail closed, surfaced as an error toast) rather than silently
+// re-attributing the review; a failed lookup is not cached so a transient
+// error can recover on the next submission.
+let selfReviewerIdPromise = null;
+export async function selfReviewerId() {
+  if (!selfReviewerIdPromise) {
+    selfReviewerIdPromise = api.me().then(me => me?.id ?? null).catch(() => null);
+  }
+  const id = await selfReviewerIdPromise;
+  if (id) return id;
+  selfReviewerIdPromise = null;
+  return 'human-reviewer';
+}

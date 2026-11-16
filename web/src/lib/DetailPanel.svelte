@@ -10,7 +10,7 @@
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import ConstraintEditor from './ConstraintEditor.svelte';
   import InlineChat from './InlineChat.svelte';
-  import { api } from './api.js';
+  import { api, selfReviewerId } from './api.js';
   import { entityName as sharedEntityName, shortId as sharedShortId, formatSha, formatId as sharedFormatId } from './entityNames.svelte.js';
   import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
   import { mrStatusJourney } from './statusTooltips.js';
@@ -1581,7 +1581,7 @@
     submittingReview = true;
     try {
       await api.submitReview(entity.id, {
-        reviewer_agent_id: 'human-reviewer',
+        reviewer_agent_id: await selfReviewerId(),
         decision: newReviewDecision,
         body: newReviewBody.trim() || undefined,
       });

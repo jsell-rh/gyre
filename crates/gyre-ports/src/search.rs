@@ -5,6 +5,19 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// The query-language types live in gyre-domain (pure logic, hexagonal
+// layering: ports describes the protocol, domain owns the parsing) and are
+// re-exported here so port consumers see one search module.
+pub use gyre_domain::search_query::{parse_query, FacetFilter, ParsedQuery, TimeBounds};
+
+/// Metadata-facet key under which the SQL adapters persist a document's
+/// timestamp inside the specced `metadata` JSON column. The FTS5 index
+/// schema (search.md §Index Schema) has no timestamp column and SQLite
+/// forbids ALTER on virtual tables, so `since:`/`until:` filtering reads
+/// this key via `json_extract`. Adapters strip it from result facet maps
+/// and facet-count aggregations — it is storage, not a user-facing facet.
+pub const UPDATED_AT_KEY: &str = "updated_at";
+
 /// A document to be indexed for search.
 #[derive(Debug, Clone)]
 pub struct SearchDocument {
@@ -21,9 +34,20 @@ pub struct SearchDocument {
     pub tenant_id: Option<String>,
     /// Arbitrary key-value facets (status, priority, assigned_to, etc.)
     pub facets: HashMap<String, String>,
+    /// Document timestamp (unix epoch seconds) the `since:`/`until:` facets
+    /// filter on (search.md §Query Language). `None` — the adapter stamps
+    /// index time.
+    pub updated_at: Option<i64>,
 }
 
 /// Parameters for a search query.
+///
+/// `query` is the raw query text (echoed back in responses); `parsed` is its
+/// query-language parse (search.md §Query Language) and is what the adapters
+/// execute — build via [`SearchQuery::parse`] so the two stay consistent.
+/// `entity_type`/`workspace_id` are backward-compatible filter shortcuts
+/// equivalent to `type:{value}` / `workspace:{value}`; callers resolve
+/// precedence (query-string facets win) before constructing the query.
 ///
 /// Scope fields (`tenant_id`, `accessible_workspace_ids`,
 /// `accessible_repo_ids`) carry the caller's resolved access (search.md
@@ -36,6 +60,7 @@ pub struct SearchDocument {
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
     pub query: String,
+    pub parsed: ParsedQuery,
     pub entity_type: Option<String>,
     pub workspace_id: Option<String>,
     pub limit: usize,
@@ -49,6 +74,65 @@ pub struct SearchQuery {
     /// Repos the caller may see within the accessible workspaces. `None` =
     /// all. `Some(set)` also admits repo-less (workspace-level) documents.
     pub accessible_repo_ids: Option<Vec<String>>,
+}
+
+impl SearchQuery {
+    /// Build a query from raw query text, parsing it with the query
+    /// language (terms, quoted phrases, facets). Default limit 20.
+    ///
+    /// The access scope starts fail-closed (no tenant, no accessible
+    /// workspaces/repos — zero results) and MUST be set via [`
+    /// SearchQuery::with_scope`] from the authenticated caller before the
+    /// query is executed; scope is never derived from the query text.
+    pub fn parse(query: impl Into<String>) -> Self {
+        let query = query.into();
+        let parsed = parse_query(&query);
+        Self {
+            parsed,
+            query,
+            entity_type: None,
+            workspace_id: None,
+            limit: 20,
+            tenant_id: String::new(),
+            accessible_workspace_ids: Some(vec![]),
+            accessible_repo_ids: Some(vec![]),
+        }
+    }
+
+    /// Set the caller's resolved access scope (search.md §Access Scoping):
+    /// every result must belong to `tenant_id`, be within
+    /// `accessible_workspace_ids` (`None` = unscoped within the tenant,
+    /// Admin), and within `accessible_repo_ids` (`None` = all repos;
+    /// repo-less workspace documents stay visible).
+    pub fn with_scope(
+        mut self,
+        tenant_id: String,
+        accessible_workspace_ids: Option<Vec<String>>,
+        accessible_repo_ids: Option<Vec<String>>,
+    ) -> Self {
+        self.tenant_id = tenant_id;
+        self.accessible_workspace_ids = accessible_workspace_ids;
+        self.accessible_repo_ids = accessible_repo_ids;
+        self
+    }
+
+    /// Set the backward-compatible entity-type filter shortcut.
+    pub fn with_entity_type(mut self, entity_type: Option<String>) -> Self {
+        self.entity_type = entity_type;
+        self
+    }
+
+    /// Set the backward-compatible workspace filter shortcut.
+    pub fn with_workspace_id(mut self, workspace_id: Option<String>) -> Self {
+        self.workspace_id = workspace_id;
+        self
+    }
+
+    /// Set the result-page limit.
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
 }
 
 /// A single search result.
@@ -96,12 +180,14 @@ pub trait SearchPort: Send + Sync {
     /// cannot access. `entity_type`/`workspace_id` narrow within that scope.
     async fn suggest(&self, query: SearchQuery) -> Result<Vec<SearchSuggestion>>;
     /// Aggregate facet counts over the index (spec §API `GET /search/facets`
+    /// Aggregate facet counts over the index (spec §API `GET /search/facets`
     /// and §Response Format `facet_counts`). The scope fields are enforced
     /// exactly like `search()` — counts never include documents the caller
     /// cannot access. A blank `query.query` aggregates the caller's entire
     /// accessible set; otherwise the aggregation is restricted to the same
-    /// filtered match set `search()` uses (text terms plus
-    /// `entity_type`/`workspace_id` filters, ignoring `limit`) — counts must
-    /// describe the full filtered set, not the truncated result page.
+    /// filtered match set `search()` uses (text terms, quoted phrases, and
+    /// facet filters — including the `entity_type`/`workspace_id` shortcuts —
+    /// ignoring `limit`) — counts must describe the full filtered set, not
+    /// the truncated result page.
     async fn facet_counts(&self, query: SearchQuery) -> Result<FacetCounts>;
 }

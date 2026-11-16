@@ -11,6 +11,7 @@
   import { toastError } from '../lib/toast.svelte.js';
   import { shortId, entityName } from '../lib/entityNames.svelte.js';
   import SecretsPanel from './SecretsPanel.svelte';
+  import PolicyManager from './abac/PolicyManager.svelte';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
@@ -1028,7 +1029,7 @@
               <label class="toggle-row">
                 <input
                   type="checkbox"
-                  bind:checked={specPolicy.require_approval}
+                  bind:checked={specPolicy.require_approved_spec}
                   data-testid="toggle-require-approval"
                 />
                 <span class="toggle-label">
@@ -1042,12 +1043,40 @@
               <label class="toggle-row">
                 <input
                   type="checkbox"
-                  bind:checked={specPolicy.stale_spec_warning}
+                  bind:checked={specPolicy.warn_stale_spec}
                   data-testid="toggle-stale-warning"
                 />
                 <span class="toggle-label">
                   <span class="toggle-name">{$t('repo_settings.policies.stale_warning')}</span>
                   <span class="toggle-hint">{$t('repo_settings.policies.stale_warning_hint')}</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  bind:checked={specPolicy.require_current_spec}
+                  data-testid="toggle-require-current-spec"
+                />
+                <span class="toggle-label">
+                  <span class="toggle-name">{$t('repo_settings.policies.require_current_spec')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.policies.require_current_spec_hint')}</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  bind:checked={specPolicy.require_signed_approval}
+                  data-testid="toggle-require-signed-approval"
+                />
+                <span class="toggle-label">
+                  <span class="toggle-name">{$t('repo_settings.policies.require_signed_approval')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.policies.require_signed_approval_hint')}</span>
                 </span>
               </label>
             </div>
@@ -1064,6 +1093,18 @@
             </button>
           </div>
         {/if}
+
+        <!-- ABAC policies (abac-policy-engine.md §UI, task-132): full
+             management surface on the GLOBAL /api/v1/policies endpoints,
+             repo-scoped via ?scope=Repo&scope_id=<repo id> query
+             parameters — a filter on the global CRUD, not a repo-prefixed
+             resource hierarchy. -->
+        <PolicyManager
+          heading="Repo ABAC Policies"
+          initialScope="repo"
+          initialScopeId={repo?.id ?? null}
+          lockScope={true}
+        />
       </div>
 
 

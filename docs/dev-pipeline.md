@@ -24,6 +24,27 @@ The stages are triage, implementation, independent review, verification,
 publication/merge, CI observation, and cleanup. Review and verification bind to an exact candidate
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
+Verifier readiness uses the authorized verification timeout (four hours by
+default). Pinned Fullsend 0.50.0 constrains its readiness polling and create
+subprocess to 600 seconds; both its harness and CLI boundary stay within that
+supported bound (and any shorter authorized model budget). Readiness expiry is reported as provisioning failure,
+including to the stress guard.
+When the owned pod's latest scoped scheduler evidence confirms insufficient
+CPU/memory, provisioning failure instead becomes a backend-capacity retry.
+Its backoff grows from one to fifteen minutes across work identities and main
+advances, scoped to the task/stage/requirements generation. Successful stage
+completion clears that backoff. Confirmed capacity shortage does not trip the
+structural-fault guard; missing, foreign, stale or superseded scheduling evidence
+cannot downgrade a provisioning fault.
+
+Discovery reconciles obsolete runtime holds against installed recovery policy.
+An owned, current-generation 4 GiB OOM hold is released once when its evidence
+qualifies for the authorized 6 GiB profile. Historical unknown-verifier-health
+holds recover once after fresh gateway health and inventory observations.
+Manual task pauses, 6 GiB OOMs, storage failures, spec conflicts and unrelated
+stalled repairs remain held. Recovery records the original reason and policy;
+source receipts, historical attempts and exact-source review/verification stay
+intact. Desired slots remain an upper bound on useful dependency-ready work.
 
 ## Thin workers and runtime recovery
 
@@ -70,6 +91,13 @@ compilation, no dev/test DWARF symbols, and one mold linker thread. Debug
 assertions, test selection, and required verification checks stay enabled.
 The coding agent's JavaScript heap is bounded separately from build tools.
 
+The trusted implementation finalizer restores accidentally toggled task
+checkbox markers only when every protected requirement otherwise matches the
+assignment exactly. It commits the restoration before publishing the checkpoint;
+normative edits still fail the contract guard. A repair specifically reviewed
+in the task's own document may advance to fresh review without an unrelated
+production edit. Only old holds matching these corrected cases recover once.
+
 Source/checkpoints and the agent spool remain on the gateway-provided workspace.
 Rebuildable Cargo target/registry and npm caches use disk-backed
 `/tmp/gyre-build`, which survives transport reconnects but may require rebuilding
@@ -101,6 +129,10 @@ a stop. Another stop requires
 attention. OOM recovery can salvage source before retiring the failed allocation;
 it does not restart the coding process at the insufficient tier. Verification
 also reconnects to its detached process and may resume after an owned restart.
+Unknown health during a control-plane outage keeps that same verifier and its
+output offsets within the assignment deadline; it does not purge the build or
+create a permanent hold after six failed polls. Authoritatively terminal
+sandboxes and the verification deadline still enforce safety stops.
 Infrastructure backoff retains its task checkpoint without blocking other
 candidates; claims and exact-source checks still gate publication.
 Cleanup salvages source only from implementation assignments; reviewers and
@@ -779,3 +811,46 @@ Hosted CI installs the checksum-pinned upstream mold 2.40.4 release instead of
 resolving distro packages for every job. Download retries remain bounded and a
 checksum mismatch fails setup; linker availability and all build/test gates are
 still required.
+
+## Delivery recovery and progress reporting
+
+A task can have a previous-generation merged PR and a new verified candidate.
+Publication detaches that association only when the merged head and commit match
+its recorded previous delivery. The historical receipt remains; a generation-
+scoped delivery branch gets a new PR through normal checks. An unexplained merged
+head/tree mismatch instead becomes a durable attention condition, with observed
+and verified identities, rather than an unbounded execution retry.
+
+Completed source rejected solely for acceptance-checkbox markers can be repaired
+without a model round. The reconciler requires the original successful published
+receipt and exact protected-contract equality after marker restoration. It
+commits the restored task markers and attribution on the saved source, then
+requires fresh independent review, remote verification and CI. Changed requirement
+wording or a failed/incomplete agent receipt never qualifies.
+
+Malformed assessment reports get one fresh automatic report attempt for an exact
+candidate and requirement fingerprint. Repeated schema errors require diagnosis;
+contradictory task/spec requirements require a reviewed authoritative correction.
+A narrowly scoped policy retries legacy malformed reports once without clearing
+semantic conflicts, operator pauses or completed assessments.
+
+Provider cleanup waits for its owned sandbox to disappear before attempting
+provider deletion. Stuck sandbox deletion remains visible and charged according
+to observed compute occupancy; it never silently releases a potentially live pod.
+
+The cockpit distinguishes gateway/controller readiness from delivery progress.
+It reports the last confirmed merge and current task blockers, including named
+unfinished dependencies. A live scheduler with unfinished work and no merge for
+an hour reports delivery as stalled instead of implying healthy throughput.
+
+A deleting sandbox whose pod is proven absent may leave gateway metadata behind.
+That debt does not block another read-only attempt of the same task. A coding
+attempt may proceed only when source recovery was explicitly recorded as
+never-started, or the old resource has been deleted. Absence evidence must be
+fresh and match namespace, context, work identity and fencing token. An unknown
+or still-live pod and uncaptured implementation source continue to block safely;
+cleanup retries and provider tracking remain independent.
+
+A consumed implementation receipt that already produced the task's current
+repair is a source seed, never that repair's solution. Adoption skips that
+receipt and executes the recorded repair instead of replaying the same outcome.

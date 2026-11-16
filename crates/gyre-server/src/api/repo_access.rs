@@ -812,6 +812,34 @@ mod tests {
             .unwrap();
         assert_eq!(
             resp.status(),
+            StatusCode::FORBIDDEN,
+            "a member of another workspace must be denied by the ABAC layer \
+             before the handler runs — the dangling workspace resolves no \
+             membership, so workspace-membership-required fails closed"
+        );
+
+        // The HANDLER's own fail-closed gate is reachable by a principal
+        // the policy layer admits (the global system token, allowed by
+        // `system-full-access` — it carries no user membership, so the
+        // membership Deny cannot key on it): a repo whose workspace row
+        // is missing must still be denied (404), never passed through.
+        let resp = f
+            .app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/repos/{}/access/{}",
+                        dangling_repo.id, f.target_id
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
             StatusCode::NOT_FOUND,
             "a repo with an unresolvable workspace scope must be denied, not passed through"
         );

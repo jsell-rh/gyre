@@ -16,9 +16,14 @@
 
 use crate::auth::AuthenticatedAgent;
 use crate::AppState;
+use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::UserRole;
-use gyre_ports::search::SearchDocument;
+use gyre_ports::search::{
+    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+};
+use gyre_ports::WorkspaceRepository;
+use std::sync::Arc;
 
 /// The caller's resolved search scope (§Access Scoping steps 1–3).
 #[derive(Debug, Clone)]
@@ -33,14 +38,20 @@ pub struct SearchScope {
     pub accessible_repo_ids: Option<Vec<String>>,
 }
 
-/// True when the caller authenticated via a Gyre-minted agent JWT
-/// (`scope == "agent"` in the claims). Mirrors the MCP-side `is_agent_jwt`.
+/// True when the caller authenticated via a Gyre-minted agent JWT — the
+/// claims carry a non-empty fine-grained `scope` list (platform-model.md §1
+/// Token Scoping). Global tokens, API keys, and Keycloak JWTs carry no such
+/// list. Mirrors the MCP-side `is_agent_jwt` (array form); the legacy
+/// `scope: "agent"` string form is accepted for tokens minted before §1.
 fn is_agent_jwt(auth: &AuthenticatedAgent) -> bool {
-    auth.jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
-        == Some("agent")
+    let Some(scope) = auth.jwt_claims.as_ref().and_then(|c| c.get("scope")) else {
+        return false;
+    };
+    match scope {
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::String(s) => s == "agent",
+        _ => false,
+    }
 }
 
 /// Claim helper: string value of `key` in the caller's JWT claims.
@@ -104,9 +115,34 @@ pub async fn derive_search_scope(state: &AppState, auth: &AuthenticatedAgent) ->
                 }
                 _ => {}
             }
+            // Worker agent (§1 Token Scoping): workers carry `workspace_id` +
+            // `repo_id` claims on their JWT — the signed claims are the
+            // scope. The agent record must still exist: an unknown caller
+            // fails closed even with a signed token (a deleted agent whose
+            // token is still live is an inconsistent state, never widened
+            // access). Pre-§1 worker tokens (no hierarchy claims) fall
+            // through to the agent record below.
+            if let Some(ws) = claim_str(claims, "workspace_id") {
+                let repo = claim_str(claims, "repo_id");
+                let known = matches!(
+                    state.agents.find_by_id(&Id::new(&auth.agent_id)).await,
+                    Ok(Some(_))
+                );
+                return if known {
+                    SearchScope {
+                        tenant_id,
+                        accessible_workspace_ids: Some(vec![ws]),
+                        accessible_repo_ids: repo.map(|r| vec![r]),
+                    }
+                } else {
+                    SearchScope {
+                        tenant_id,
+                        accessible_workspace_ids: Some(vec![]),
+                        accessible_repo_ids: Some(vec![]),
+                    }
+                };
+            }
         }
-        // Worker agent (no orchestrator claims): fall through to the agent
-        // record — workers carry no workspace/repo claims on their JWT.
     }
 
     // Human users: workspace membership (accepted invitations only).
@@ -144,25 +180,64 @@ pub async fn derive_search_scope(state: &AppState, auth: &AuthenticatedAgent) ->
     }
 }
 
-/// Index a document with server-side tenant resolution.
+/// Wrap a search port so every indexed document carries its tenant scope.
 ///
 /// Storage-backed adapters derive a document's tenant from its workspace row
 /// at index time; the mem fallback has no workspace table to consult, so the
 /// tenant is resolved here (from the workspace's real scope row) and carried
-/// on the document. A workspace that does not resolve leaves the tenant
-/// unset — the document is then visible to no tenant-scoped query, never
-/// mis-attributed to a fabricated scope.
-pub async fn index_doc(state: &AppState, mut doc: SearchDocument) {
-    if doc.tenant_id.is_none() {
-        if let Some(ws) = doc.workspace_id.as_deref() {
-            if !ws.is_empty() {
-                if let Ok(Some(ws_row)) = state.workspaces.find_by_id(&Id::new(ws)).await {
-                    doc.tenant_id = Some(ws_row.tenant_id.to_string());
+/// on the document before it reaches the inner port. A workspace that does
+/// not resolve leaves the tenant unset — the document is then visible to no
+/// tenant-scoped query, never mis-attributed to a fabricated scope.
+///
+/// Wrapping the port itself (rather than resolving at individual index
+/// callsites) means every write path — REST handlers, the search-sync
+/// repository decorators, background jobs, the full-reindex coordinator —
+/// resolves the tenant uniformly, with no per-callsite discipline to forget.
+pub fn with_tenant_resolution(
+    inner: Arc<dyn SearchPort>,
+    workspaces: Arc<dyn WorkspaceRepository>,
+) -> Arc<dyn SearchPort> {
+    Arc::new(TenantResolvingSearchPort { inner, workspaces })
+}
+
+struct TenantResolvingSearchPort {
+    inner: Arc<dyn SearchPort>,
+    workspaces: Arc<dyn WorkspaceRepository>,
+}
+
+#[async_trait]
+impl SearchPort for TenantResolvingSearchPort {
+    async fn index(&self, mut doc: SearchDocument) -> anyhow::Result<()> {
+        let unset = doc.tenant_id.as_deref().is_none_or(|t| t.is_empty());
+        if unset {
+            if let Some(ws) = doc.workspace_id.as_deref() {
+                if !ws.is_empty() {
+                    if let Ok(Some(ws_row)) = self.workspaces.find_by_id(&Id::new(ws)).await {
+                        doc.tenant_id = Some(ws_row.tenant_id.to_string());
+                    }
                 }
             }
         }
+        self.inner.index(doc).await
     }
-    if let Err(e) = state.search.index(doc).await {
-        tracing::warn!("search index write failed: {e}");
+
+    async fn search(&self, query: SearchQuery) -> anyhow::Result<Vec<SearchResult>> {
+        self.inner.search(query).await
+    }
+
+    async fn delete(&self, entity_type: &str, entity_id: &str) -> anyhow::Result<()> {
+        self.inner.delete(entity_type, entity_id).await
+    }
+
+    async fn reindex_all(&self) -> anyhow::Result<u64> {
+        self.inner.reindex_all().await
+    }
+
+    async fn suggest(&self, query: SearchQuery) -> anyhow::Result<Vec<SearchSuggestion>> {
+        self.inner.suggest(query).await
+    }
+
+    async fn facet_counts(&self, query: SearchQuery) -> anyhow::Result<FacetCounts> {
+        self.inner.facet_counts(query).await
     }
 }

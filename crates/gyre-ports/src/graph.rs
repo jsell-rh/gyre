@@ -14,6 +14,10 @@ use gyre_common::{
 /// deleted_at) but preserves the immutable `first_seen_at` from the original
 /// insert.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async-trait 0.1.89 injects #[must_use] into every
+                                  // expanded method while the boxed-future return type is
+                                  // already #[must_use] (Future); upstream-suppressed set
+                                  // (lint_suppress_without_body) does not cover this lint.
 pub trait GraphPort: Send + Sync {
     /// Persist a new graph node.
     async fn create_node(&self, node: GraphNode) -> Result<GraphNode>;
@@ -25,12 +29,26 @@ pub trait GraphPort: Send + Sync {
     async fn list_nodes(&self, repo_id: &Id, node_type: Option<NodeType>)
         -> Result<Vec<GraphNode>>;
 
+    /// List nodes for a repo that existed at the given unix-epoch second
+    /// (point-in-time reconstruction, system-explorer.md §6).
+    ///
+    /// Contract: a node existed at `at` iff `first_seen_at <= at` AND
+    /// (`deleted_at` is `None` OR `deleted_at > at`). This deliberately
+    /// INCLUDES nodes that have since been soft-deleted (`list_nodes`
+    /// always excludes them) — a node removed yesterday existed last week.
+    async fn list_nodes_at(&self, repo_id: &Id, at: u64) -> Result<Vec<GraphNode>>;
+
     /// Persist a new graph edge.
     async fn create_edge(&self, edge: GraphEdge) -> Result<GraphEdge>;
 
     /// List edges for a repo, optionally filtered by edge type.
     async fn list_edges(&self, repo_id: &Id, edge_type: Option<EdgeType>)
         -> Result<Vec<GraphEdge>>;
+
+    /// List edges for a repo that existed at the given unix-epoch second,
+    /// using the same existed-at contract as [`GraphPort::list_nodes_at`]
+    /// (`first_seen_at <= at` AND not deleted at or before `at`).
+    async fn list_edges_at(&self, repo_id: &Id, at: u64) -> Result<Vec<GraphEdge>>;
 
     /// Delete a single node by ID (used during incremental graph updates).
     async fn delete_node(&self, id: &Id) -> Result<()>;

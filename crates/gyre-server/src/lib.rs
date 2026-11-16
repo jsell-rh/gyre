@@ -13,6 +13,7 @@ pub(crate) mod constraint_check;
 pub mod container_audit;
 pub mod dep_staleness;
 pub mod domain_events;
+pub mod email;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
@@ -29,9 +30,10 @@ pub mod llm_rate_limit;
 pub mod log_compression;
 pub(crate) mod mcp;
 pub(crate) mod mem;
+pub mod merge_attestation;
+pub mod merge_policy;
 pub mod merge_processor;
 pub mod message_dispatcher;
-pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
 pub mod mirror_sync;
@@ -43,7 +45,9 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod reconciliation;
 pub mod retention;
+pub mod search_indexer;
 pub mod search_scope;
+pub mod search_sync;
 pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
@@ -56,8 +60,10 @@ pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub(crate) mod explorer_ws;
+pub mod notification_dispatcher;
 pub mod notifications;
 pub mod otlp_receiver;
+pub mod policy_cache;
 pub mod policy_engine;
 pub mod signal_chain;
 pub mod stale_agents;
@@ -78,18 +84,19 @@ use gyre_common::Id;
 use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetCallRepository,
-    BudgetRepository, BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
-    ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
-    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
-    MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
-    MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
-    PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
-    RepoAccessOverrideRepository, RepoRepository, ReviewRepository, RolloutPolicyRepository,
-    SpawnLogRepository, SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecLifecycleRepository, SpecPolicyRepository, TaskRepository, TeamRepository,
-    TenantMetaSpecSetRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
-    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
+    AttestationRepository, AttestationStorage, AuditRepository, BreakingChangeRepository,
+    BudgetCallRepository, BudgetRepository, BudgetUsageRepository, ComputeTargetRepository,
+    ContainerAuditRepository, ConversationRepository, CostRepository, DependencyPolicyRepository,
+    DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
+    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository,
+    MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
+    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
+    QualityGateRepository, RekorClient, RepoAccessOverrideRepository, RepoRepository,
+    ReviewRepository, RolloutPolicyRepository, SpawnLogRepository, SpecApprovalEventRepository,
+    SpecApprovalRepository, SpecLedgerRepository, SpecLifecycleRepository, SpecPolicyRepository,
+    TaskRepository, TeamRepository, TenantMetaSpecSetRepository, TraceRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -228,13 +235,16 @@ pub struct AppState {
     /// Unified broadcast channel for WebSocket message delivery (replaces broadcast_tx + event_tx).
     pub message_broadcast_tx: broadcast::Sender<Message>,
     /// Generic key-value JSON store for server-internal HashMap stores (M29.5B).
-    /// Persists: agent_messages, agent_tokens, agent_cards, compute_targets,
+    /// Persists: agent_tokens, agent_cards, compute_targets,
     /// agent_stacks, repo_stack_policies, workload_attestations, workspace_repos,
     /// abac_policies — all keyed by (namespace, key).
     pub kv_store: Arc<dyn KvJsonStore>,
     /// Ed25519 signing key for Gyre's built-in OIDC provider (M18).
     /// Used to mint and verify agent JWTs returned by POST /api/v1/agents/spawn.
     pub agent_signing_key: Arc<auth::AgentSigningKey>,
+    /// Merge attestation bundle verification (agent-gates.md §Part 3
+    /// Verification). Stateless — holds only the forge key handle.
+    pub attestation_verifier: Arc<dyn gyre_ports::AttestationVerifier>,
     /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 300, M27.5).
     pub agent_jwt_ttl_secs: u64,
     /// User repository for JWT/SSO user management.
@@ -260,16 +270,34 @@ pub struct AppState {
     pub retention_store: RetentionStore,
     /// Background job registry.
     pub job_registry: Arc<JobRegistry>,
+    /// Workspaces with a live budget-exhaustion grace timer running
+    /// (agent-runtime.md §4 Enforcement Levels: 100% → 60s grace). Purely
+    /// process-local synchronization — a restart drops the timer, and the
+    /// next usage report re-enters enforcement because usage is still at
+    /// or above the limit. Not durable state; deliberately not port-backed.
+    pub budget_grace_in_progress: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
     /// Product analytics event store.
     pub analytics: Arc<dyn AnalyticsRepository>,
     /// Cost tracking store.
     pub costs: Arc<dyn CostRepository>,
     /// Audit event store.
     pub audit: Arc<dyn AuditRepository>,
+    /// Merge attestation bundle storage (agent-gates.md §Part 3
+    /// Storage): git note on the merge commit + `merge_attestation_bundle`
+    /// audit event, queryable by MR id and commit SHA.
+    pub attestation_storage: Arc<dyn AttestationStorage>,
+    /// Rekor transparency log for merge attestation non-repudiation
+    /// (no-op until a Rekor backend is configured).
+    pub rekor: Arc<dyn RekorClient>,
     /// SIEM target store and forwarding state.
     pub siem_store: SiemStore,
     /// Broadcast channel for live audit event SSE stream.
     pub audit_broadcast_tx: broadcast::Sender<String>,
+    /// Broadcast channel for live notification SSE stream
+    /// (user-management.md §API > Notifications: `/notifications/stream`).
+    /// Carries serialized `Notification` JSON; per-stream filtering by
+    /// user/tenant/workspace happens in the SSE handler.
+    pub notification_broadcast_tx: broadcast::Sender<String>,
     /// WireGuard network peer registry.
     pub network_peers: Arc<dyn NetworkPeerRepository>,
     /// Cross-repo dependency graph (M22.4).
@@ -384,6 +412,11 @@ pub struct AppState {
     pub personas: Arc<dyn PersonaRepository>,
     /// Full declarative ABAC policy engine (M22.6).
     pub policies: Arc<dyn PolicyRepository>,
+    /// Shared policy-set cache handle (§Performance): `policies` is wrapped
+    /// in a read-through [`policy_cache::CachedPolicyRepository`]; this handle
+    /// is the invalidation entry point for writers that persist policies
+    /// WITHOUT the `PolicyRepository` port (`apply_trust_transition`).
+    pub policy_cache: Arc<policy_cache::PolicyCache>,
     /// Workspace membership repository (M22.8).
     pub workspace_memberships: Arc<dyn WorkspaceMembershipRepository>,
     /// Per-repo access override repository (user-management.md §Repo Access).
@@ -392,6 +425,10 @@ pub struct AppState {
     pub teams: Arc<dyn TeamRepository>,
     /// Notification repository (M22.8).
     pub notifications: Arc<dyn NotificationRepository>,
+    /// Tenant invitation repository (task-110, user-management.md).
+    pub tenant_invitations: Arc<dyn gyre_ports::TenantInvitationRepository>,
+    /// Workspace invitation repository (task-110, user-management.md).
+    pub workspace_invitations: Arc<dyn gyre_ports::WorkspaceInvitationRepository>,
     /// WireGuard coordination plane configuration (M26.1).
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
@@ -466,8 +503,14 @@ pub struct AppState {
     pub llm: Option<Arc<dyn gyre_ports::LlmPortFactory>>,
     /// Per-user notification preferences (HSI §12).
     pub user_notification_prefs: Arc<dyn gyre_ports::UserNotificationPreferenceRepository>,
+    /// Per-user delivery-channel preferences (user-management.md §Delivery Channels).
+    pub user_channel_prefs: Arc<dyn gyre_ports::UserChannelPreferenceRepository>,
     /// Per-user API tokens (HSI §12). Hashed at rest; plaintext never stored.
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
+    /// Authenticated user sessions (user-management.md §Session Management).
+    /// Created on successful API-key auth, one per (credential, device);
+    /// revocable individually or in bulk ("sign out everywhere").
+    pub sessions: Arc<dyn gyre_ports::SessionRepository>,
     /// Secret repository (platform-model.md §7): scoped credential storage,
     /// encrypted at rest in the adapter. Agent spawn resolves secrets through
     /// this and injects them as GYRE_CRED_* env vars for the cred-proxy sidecar.
@@ -577,6 +620,25 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
+    /// Persist a notification and fan it out to both realtime channels
+    /// (user-management.md §API > Notifications): the `/notifications/stream`
+    /// SSE subscribers and the live `/ws` connections authenticated as the
+    /// notification's owner (the in-app bell).
+    ///
+    /// Single fan-out point for notification creation: every production
+    /// emitter goes through here (or through the
+    /// [`BroadcastingNotificationRepo`](crate::notifications::BroadcastingNotificationRepo)
+    /// this delegates to, which background paths without an `&AppState` use)
+    /// so a connected client sees every notification the moment it is
+    /// stored. Fan-out is fire-and-forget (no subscribers, a lagged one, or
+    /// an offline owner must never fail the persist).
+    pub async fn create_notification(
+        &self,
+        notification: &gyre_common::Notification,
+    ) -> anyhow::Result<()> {
+        self.broadcasting_notifications().create(notification).await
+    }
+
     /// Resolve the tenant scope for a server-originated message about a
     /// workspace: the workspace record's tenant. Skips the emission and
     /// logs when the workspace cannot be resolved (same contract as
@@ -884,6 +946,27 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // WebSocket ticket endpoint: issues short-lived, single-use tokens.
         // Prevents leaking real auth tokens in WebSocket URL query parameters.
         .route("/api/v1/ws-ticket", post(explorer_ws::issue_ws_ticket))
+        // Invitation magic-link acceptance (task-110, user-management.md
+        // §Tenant-Level User Onboarding): the 256-bit CSPRNG token in the
+        // URL is the auth factor — the invitee has no credentials yet, so
+        // these cannot run behind require_auth_middleware. The handler
+        // validates the token hash, single-use status, and expiry.
+        .route(
+            "/api/v1/invite/:token/accept",
+            post(api::invitations::accept_tenant_invitation),
+        )
+        .route(
+            "/api/v1/invite/:token/decline",
+            post(api::invitations::decline_tenant_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/invitations/:token/accept",
+            post(api::invitations::accept_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/invitations/:token/decline",
+            post(api::invitations::decline_workspace_invitation),
+        )
         // Explorer WebSocket (explorer-implementation.md).
         // WebSocket upgrades cannot go through body-reading ABAC middleware,
         // so auth + repo-scoped tenant checks are enforced inside the handler.
@@ -1110,6 +1193,7 @@ pub fn build_state(
     let (message_dispatch_tx, message_dispatch_rx) = tokio::sync::mpsc::channel(256);
     let (message_broadcast_tx, _) = broadcast::channel(256);
     let (audit_broadcast_tx, _) = broadcast::channel(1024);
+    let (notification_broadcast_tx, _) = broadcast::channel(1024);
     let telemetry_buffer = Arc::new(TelemetryBuffer::new(
         std::env::var("GYRE_TELEMETRY_BUFFER_SIZE")
             .ok()
@@ -1181,6 +1265,10 @@ pub fn build_state(
     // ABAC engine (which reads through `state.policies`). In DB-backed mode both
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
+    // Shared policy-set cache (§Performance): assigned into AppState both as
+    // the `policies` wrapper's backing cache and as the `policy_cache`
+    // invalidation handle.
+    let policy_cache = Arc::new(policy_cache::PolicyCache::default());
     // Shared workspace store for pure-mem mode: `MemComputeTargetRepository`
     // pairs with `MemWorkspaceRepository` so `has_workspace_references`
     // (agent-runtime.md §3 delete guard) sees real workspace assignments
@@ -1197,6 +1285,95 @@ pub fn build_state(
     let mem_meta_spec_binding_store =
         Arc::new(RwLock::new(Vec::<gyre_domain::MetaSpecBinding>::new()));
 
+    // In pure in-memory mode (no DB), the judgment ledger (HSI §12) aggregates
+    // the SAME audit / spec-approval / spec-ledger stores these repos write
+    // through. In DB-backed mode these stores are unused.
+    let mem_audit = Arc::new(mem::MemAuditRepository::default());
+    let mem_spec_approvals = Arc::new(mem::MemSpecApprovalRepository::default());
+    let mem_spec_ledger = Arc::new(mem::MemSpecLedgerRepository::default());
+
+    // Same as `store!` but the mem branch shares a pre-constructed store.
+    macro_rules! store_shared {
+        ($trait:ty, $arc:expr) => {
+            if let Some(d) = &pg_db {
+                Arc::clone(d) as Arc<$trait>
+            } else if let Some(d) = &sqlite_db {
+                Arc::clone(d) as Arc<$trait>
+            } else {
+                Arc::clone(&$arc) as Arc<$trait>
+            }
+        };
+    }
+
+    // search.md §Index Updates: entity repositories are wrapped in
+    // search-sync decorators so every write path (REST, MCP, background
+    // jobs) keeps the search index in sync. The search port must be resolved
+    // first because the decorators hold a clone of it. It is wrapped in the
+    // tenant-resolution decorator (search_scope) so every indexed document
+    // carries its tenant scope — the mem fallback has no workspace table to
+    // derive it from, so resolution happens server-side, uniformly for every
+    // index path (§Access Scoping step 1).
+    let workspaces: Arc<dyn WorkspaceRepository> = store!(
+        dyn WorkspaceRepository,
+        mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
+            .with_workspace_store(Arc::clone(&mem_workspace_store))
+    );
+    let search: Arc<dyn gyre_ports::SearchPort> = search_scope::with_tenant_resolution(
+        store!(
+            dyn gyre_ports::SearchPort,
+            gyre_adapters::MemSearchAdapter::new()
+        ),
+        Arc::clone(&workspaces),
+    );
+    let agents: Arc<dyn AgentRepository> = search_sync::wrap_agents(
+        store!(dyn AgentRepository, mem::MemAgentRepository::default()),
+        Arc::clone(&search),
+    );
+    let tasks: Arc<dyn TaskRepository> = search_sync::wrap_tasks(
+        store!(dyn TaskRepository, mem::MemTaskRepository::default()),
+        Arc::clone(&search),
+    );
+    let merge_requests: Arc<dyn MergeRequestRepository> = search_sync::wrap_mrs(
+        store!(dyn MergeRequestRepository, mem::MemMrRepository::default()),
+        Arc::clone(&search),
+    );
+    let reviews: Arc<dyn ReviewRepository> = search_sync::wrap_reviews(
+        store!(dyn ReviewRepository, mem::MemReviewRepository::default()),
+        Arc::clone(&merge_requests),
+        Arc::clone(&search),
+    );
+    let personas: Arc<dyn PersonaRepository> = search_sync::wrap_personas(
+        store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
+        Arc::clone(&search),
+    );
+    let analytics: Arc<dyn AnalyticsRepository> = search_sync::wrap_analytics(
+        store!(
+            dyn AnalyticsRepository,
+            mem::MemAnalyticsRepository::default()
+        ),
+        Arc::clone(&search),
+    );
+    // The audit repo keeps both concerns: search-sync indexing on every
+    // recorded event (task-202) AND store sharing with the judgment ledger
+    // in pure-mem mode (task-209, HSI §12) — the decorator wraps the shared
+    // store instead of constructing its own.
+    let audit: Arc<dyn AuditRepository> = search_sync::wrap_audit(
+        store_shared!(dyn AuditRepository, mem_audit),
+        Arc::clone(&search),
+    );
+
+    // agent-gates.md §Part 3 Storage: merge attestation bundles stored
+    // as git notes on the merge commit + `merge_attestation_bundle`
+    // audit events (queryable by MR id and commit SHA). Wraps the same
+    // audit repository so bundles flow through the identical store
+    // (SQLite/PG/mem) and search-sync path as every other audit event.
+    // Rekor transparency-log publication is stubbed until a backend is
+    // configured (no-op adapter warns on every submission).
+    let attestation_storage: Arc<dyn AttestationStorage> = Arc::new(
+        gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
+    );
+    let rekor: Arc<dyn RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
+
     // Spec-link graph persistence (spec-links.md §Forge-Maintained Spec Graph).
     // The SQL table is authoritative; the in-memory store is a hot cache,
     // loaded here at boot so the graph survives restarts without re-push.
@@ -1207,14 +1384,19 @@ pub fn build_state(
     let spec_links_store: spec_registry::SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
     load_spec_links_into_store(&spec_link_repo, &spec_links_store);
 
+    // Load or persist the forge's Ed25519 signing key first: both the
+    // AppState field and the attestation verifier (which re-derives the
+    // gate agents' keys from the same material) share it.
+    let agent_signing_key = load_or_persist_agent_signing_key(&sqlite_db, &pg_db);
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
         repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
-        agents: store!(dyn AgentRepository, mem::MemAgentRepository::default()),
-        tasks: store!(dyn TaskRepository, mem::MemTaskRepository::default()),
-        merge_requests: store!(dyn MergeRequestRepository, mem::MemMrRepository::default()),
-        reviews: store!(dyn ReviewRepository, mem::MemReviewRepository::default()),
+        agents,
+        tasks,
+        merge_requests,
+        reviews,
         merge_queue: store!(
             dyn MergeQueueRepository,
             mem::MemMergeQueueRepository::default()
@@ -1232,7 +1414,13 @@ pub fn build_state(
         telemetry_buffer,
         message_broadcast_tx,
         kv_store: store!(dyn KvJsonStore, mem::MemKvStore::default()),
-        agent_signing_key: load_or_persist_agent_signing_key(&sqlite_db, &pg_db),
+        agent_signing_key: agent_signing_key.clone(),
+        // Attestation bundle verification protocol (agent-gates.md §Part 3
+        // Verification): the forge-key verifier backing
+        // POST /api/v1/attestations/verify and `gyre verify-attestation`.
+        attestation_verifier: Arc::new(crate::merge_attestation::ForgeAttestationVerifier::new(
+            agent_signing_key.clone(),
+        )),
         // M27.5: Default reduced from 3600 to 300 s (5 min) to limit JWT exposure window.
         agent_jwt_ttl_secs: std::env::var("GYRE_AGENT_JWT_TTL")
             .ok()
@@ -1251,14 +1439,17 @@ pub fn build_state(
         explorer_sessions: Arc::new(explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
-        analytics: store!(
-            dyn AnalyticsRepository,
-            mem::MemAnalyticsRepository::default()
-        ),
+        budget_grace_in_progress: Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )),
+        analytics,
         costs: store!(dyn CostRepository, mem::MemCostRepository::default()),
-        audit: store!(dyn AuditRepository, mem::MemAuditRepository::default()),
+        audit,
+        attestation_storage,
+        rekor,
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
+        notification_broadcast_tx,
         network_peers: store!(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
@@ -1300,10 +1491,7 @@ pub fn build_state(
         ),
         db_storage,
         storage,
-        spec_approvals: store!(
-            dyn SpecApprovalRepository,
-            mem::MemSpecApprovalRepository::default()
-        ),
+        spec_approvals: store_shared!(dyn SpecApprovalRepository, mem_spec_approvals),
         spec_policies: store!(
             dyn SpecPolicyRepository,
             mem::MemSpecPolicyRepository::default()
@@ -1349,10 +1537,7 @@ pub fn build_state(
             dyn ContainerAuditRepository,
             mem::MemContainerAuditRepository::default()
         ),
-        spec_ledger: store!(
-            dyn SpecLedgerRepository,
-            mem::MemSpecLedgerRepository::default()
-        ),
+        spec_ledger: store_shared!(dyn SpecLedgerRepository, mem_spec_ledger),
         spec_approval_history: store!(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
@@ -1367,6 +1552,14 @@ pub fn build_state(
             dyn BudgetRepository,
             mem::MemBudgetConfigRepository::default()
         ),
+        tenant_invitations: store!(
+            dyn gyre_ports::TenantInvitationRepository,
+            mem::MemTenantInvitationRepository::default()
+        ),
+        workspace_invitations: store!(
+            dyn gyre_ports::WorkspaceInvitationRepository,
+            mem::MemWorkspaceInvitationRepository::default()
+        ),
         budget_usages: store!(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
@@ -1375,24 +1568,27 @@ pub fn build_state(
             dyn BudgetCallRepository,
             mem::MemBudgetCallRepository::default()
         ),
-        search: store!(
-            dyn gyre_ports::SearchPort,
-            gyre_adapters::MemSearchAdapter::new()
-        ),
+        search,
         tenants: store!(
             dyn gyre_ports::TenantRepository,
             mem::MemTenantRepository::default()
         ),
-        workspaces: store!(
-            dyn WorkspaceRepository,
-            mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
-                .with_workspace_store(Arc::clone(&mem_workspace_store))
-        ),
-        personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
-        policies: store!(
-            dyn PolicyRepository,
-            mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
-        ),
+        workspaces,
+        personas,
+        // §Performance: the policy repository is wrapped in a read-through
+        // cache — policy evaluation happens on every request and must not
+        // hit the store each time. Mutations through the port invalidate
+        // the cache; `apply_trust_transition` (the one out-of-band policy
+        // writer) is invalidated explicitly by its handlers via
+        // `policy_cache`.
+        policies: Arc::new(policy_cache::CachedPolicyRepository::new(
+            store!(
+                dyn PolicyRepository,
+                mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
+            ),
+            Arc::clone(&policy_cache),
+        )) as Arc<dyn PolicyRepository>,
+        policy_cache,
         // Workspace memberships are durable: SQLite/PostgreSQL adapters
         // implement the port (M22.8 schema); mem mode keeps the in-code
         // store. Before task-121 this was unconditionally the mem adapter,
@@ -1483,13 +1679,21 @@ pub fn build_state(
             dyn ComputeTargetRepository,
             mem::MemComputeTargetRepository::with_workspace_store(Arc::clone(&mem_workspace_store))
         ),
+        user_tokens: store!(
+            dyn gyre_ports::UserTokenRepository,
+            mem::MemUserTokenRepository::default()
+        ),
         user_notification_prefs: store!(
             dyn gyre_ports::UserNotificationPreferenceRepository,
             mem::MemUserNotificationPreferenceRepository::default()
         ),
-        user_tokens: store!(
-            dyn gyre_ports::UserTokenRepository,
-            mem::MemUserTokenRepository::default()
+        sessions: store!(
+            dyn gyre_ports::SessionRepository,
+            mem::MemSessionRepository::default()
+        ),
+        user_channel_prefs: store!(
+            dyn gyre_ports::UserChannelPreferenceRepository,
+            mem::MemUserChannelPreferenceRepository::default()
         ),
         secrets: store!(
             dyn gyre_ports::SecretRepository,
@@ -1497,7 +1701,11 @@ pub fn build_state(
         ),
         judgment_ledger: store!(
             dyn gyre_ports::JudgmentLedgerRepository,
-            mem::MemJudgmentLedgerRepository
+            mem::MemJudgmentLedgerRepository::with_sources(
+                &mem_audit,
+                &mem_spec_approvals,
+                &mem_spec_ledger
+            )
         ),
         orchestrator_registry: signal_chain::OrchestratorRegistry::new(),
         ws_tickets: auth::WsTicketStore::new(),
@@ -1761,7 +1969,14 @@ pub fn spawn_llm_rate_limiter_cleanup(state: Arc<AppState>) {
     });
 }
 
-/// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).
+/// Spawn the budget rolling-window background job (agent-runtime.md §4
+/// Budget Reset): runs hourly and re-syncs every entity's token/cost
+/// counters to the per-call records inside the last 24 hours, so
+/// time-based budgets (`max_tokens_per_day`, `max_cost_per_day`) reset on
+/// a rolling window. Replaces the pre-task-119 midnight-UTC counter reset.
+/// The same cycle enforces the per-agent lifetime ceilings
+/// (`max_agent_lifetime_secs`, repo override → effective workspace limit)
+/// so agents that stopped reporting usage are still bounded.
 pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
     tokio::spawn(async move {
         state
@@ -1769,21 +1984,55 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
             .mark_scheduled("spawn_budget_reset")
             .await;
         loop {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let secs_until_midnight = 86400 - (now % 86400);
-            tokio::time::sleep(tokio::time::Duration::from_secs(secs_until_midnight)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
             let started_at = jobs::now_secs();
-            let result = api::budget::reset_daily_counters(&state).await;
+            let result = api::budget::apply_rolling_24h_window(&state).await;
             if let Err(error) = &result {
-                tracing::error!(%error, "failed to reset budget daily counters");
+                tracing::error!(%error, "failed to apply budget rolling 24h window");
             }
+            // Lifetime enforcement is best-effort alongside the reset —
+            // its failures are logged inside, never fail the job cycle.
+            api::budget::enforce_agent_lifetimes(&state).await;
             state
                 .job_registry
                 .record_cycle("spawn_budget_reset", started_at, &result)
                 .await;
+        }
+    });
+}
+
+/// Spawn a background task that deletes long-expired user sessions
+/// (user-management.md §Session Management — task-111 plan §6).
+///
+/// Sessions whose `expires_at` is more than 30 days in the past are
+/// deleted. Revoked rows are NEVER deleted, whatever their age (the
+/// `SessionRepository::delete_expired_before` port contract): a revoked row
+/// is the durable record that keeps a signed-out credential rejected
+/// ("sign out everywhere") — deleting one would silently re-authorize the
+/// API key it belonged to.
+pub fn spawn_session_cleanup(state: Arc<AppState>) {
+    const INTERVAL_SECS: u64 = 24 * 3600; // daily
+    const RETENTION_PAST_EXPIRY_SECS: u64 = 30 * 24 * 3600; // 30 days
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(INTERVAL_SECS)).await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let cutoff = now.saturating_sub(RETENTION_PAST_EXPIRY_SECS);
+            match state.sessions.delete_expired_before(cutoff).await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(
+                        deleted = n,
+                        "session retention cleanup removed expired sessions"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("session retention cleanup failed: {e}");
+                }
+            }
         }
     });
 }

@@ -231,6 +231,11 @@ impl NotificationBridge {
     /// human-notification trigger — the Agent-directed copy is the agent's
     /// inbox record, so consuming it would duplicate the p3 notification
     /// for the MR author's spawning user (HSI §8 p3 "single creation path").
+    /// The GateResult payload (gate name/type, failure output, spec_ref,
+    /// attempt, gate agent) is forwarded to the shared creation helper
+    /// (`notifications::notify_gate_failure`), so the bus path and any
+    /// synchronous caller produce identical notifications — one creation
+    /// path (notify_rich) per HSI §8 p3 amendment.
     async fn on_gate_failure(&self, msg: &Message) {
         if !matches!(msg.to, Destination::Workspace(_) | Destination::Broadcast) {
             tracing::debug!(
@@ -250,63 +255,48 @@ impl NotificationBridge {
             .get("gate_name")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
+        let gate_type = payload
+            .get("gate_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        let spec_ref = payload.get("spec_ref").and_then(|v| v.as_str());
+        let attempt = payload.get("attempt").and_then(|v| v.as_u64()).unwrap_or(1);
+        let gate_agent_id = payload
+            .get("gate_agent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
-        let Some(tenant_id) = self.tenant_for_workspace(&ws_id).await else {
-            return;
-        };
-
-        // Resolve the MR's author agent, then its spawning user. If either
-        // lookup fails there is no human to notify — skip rather than notify
-        // a fabricated identity. The MR lookup also yields the repo for the
-        // notification's deep link.
-        let mr = self
+        // Resolve the MR's author agent — the recipient chain (author agent
+        // → spawning user) and the tenant-scope guards live in the shared
+        // helper. No author agent means no human to notify.
+        let author_agent_id = self
             .state
             .merge_requests
             .find_by_id(&Id::new(mr_id.to_string()))
             .await
             .ok()
-            .flatten();
-        let author_agent_id = mr.as_ref().and_then(|mr| mr.author_agent_id.clone());
+            .flatten()
+            .and_then(|mr| mr.author_agent_id);
         let Some(author_agent_id) = author_agent_id else {
             tracing::debug!(
                 "NotificationBridge: GateFailure for MR {mr_id} with no author agent; skipping"
             );
             return;
         };
-        let spawned_by = self
-            .state
-            .agents
-            .find_by_id(&author_agent_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|a| a.spawned_by);
-        let Some(spawned_by) = spawned_by else {
-            tracing::debug!(
-                "NotificationBridge: GateFailure author agent {author_agent_id} has no spawning \
-                 user; skipping"
-            );
-            return;
-        };
 
-        let body = serde_json::json!({
-            "mr_id": mr_id,
-            "gate_name": gate_name,
-            "agent_id": author_agent_id.as_str(),
-        })
-        .to_string();
-
-        self.create(NotificationDraft {
-            workspace_id: ws_id,
-            user_id: Id::new(spawned_by),
-            notification_type: NotificationType::GateFailure,
-            title: format!("Gate '{gate_name}' failed on MR {mr_id}"),
-            tenant_id,
-            body: Some(body),
-            entity_type: "gate",
-            entity_ref: Some(mr_id.to_string()),
-            repo_id: mr.as_ref().map(|m| m.repository_id.to_string()),
-        })
+        crate::notifications::notify_gate_failure(
+            &self.state,
+            &author_agent_id,
+            &ws_id,
+            mr_id,
+            gate_name,
+            gate_type,
+            output,
+            spec_ref,
+            attempt,
+            gate_agent_id,
+        )
         .await;
     }
 
@@ -547,7 +537,17 @@ mod tests {
     async fn list_notifications(state: &AppState, user: &str) -> Vec<Notification> {
         state
             .notifications
-            .list_for_user(&Id::new(user.to_string()), None, None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new(user.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap()
     }
@@ -562,12 +562,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-1".to_string()),
             Id::new("repo-1".to_string()),
-            "Feature".to_string(),
-            "feature".to_string(),
-            "main".to_string(),
+            Id::new("ws-1".to_string()),
+            "Feature",
+            "feature",
+            "main",
             0,
         );
-        mr.workspace_id = Id::new("ws-1".to_string());
         mr.author_agent_id = Some(Id::new("agent-1".to_string()));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -615,12 +615,12 @@ mod tests {
         let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-1".to_string()),
             Id::new("repo-1".to_string()),
-            "Feature".to_string(),
-            "feature".to_string(),
-            "main".to_string(),
+            Id::new("ws-1".to_string()),
+            "Feature",
+            "feature",
+            "main",
             0,
         );
-        mr.workspace_id = Id::new("ws-1".to_string());
         mr.author_agent_id = Some(Id::new("agent-1".to_string()));
         state.merge_requests.create(&mr).await.unwrap();
 
