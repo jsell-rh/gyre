@@ -31,6 +31,10 @@ def eligible(store, work):
             task_priority(store,task)
         except PriorityError:
             return False
+    if stage == 'triage' and inputs.get('decision_request'):
+        from .decisions import request, exists
+        decision=request(store,task)
+        return decision==inputs['decision_request'] and (work.get('state')=='claimed' or not exists(store,decision['id']))
     requirements = data.get('requirements') or {}
     if requirements.get('errors'):
         return stage == 'triage' and inputs.get('binding_errors') == requirements['errors']
@@ -91,5 +95,7 @@ def eligible(store, work):
         return verified.get('candidate') != candidate or verified.get('passed') is not True
     if stage == 'publish':
         verified = data.get('verified') or {}
-        return data.get('verified') == inputs['verified'] and verified.get('passed') is True and store.integration_available(work)
+        return (data.get('verified') == inputs['verified'] and verified.get('passed') is True
+                and inputs.get('publication_epoch') == data.get('publication_epoch')
+                and store.integration_available(work))
     return False

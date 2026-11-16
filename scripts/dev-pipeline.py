@@ -43,6 +43,8 @@ def source(store):
         reconcile_generated(store)
         from pipeline.integration import resolve_upstream_assessments
         resolve_upstream_assessments(store,path,revision)
+        from pipeline.recovery_policy import reconcile as recover_holds
+        recover_holds(store)
         store.set_setting('observed_main', revision)
         return revision
 
@@ -168,11 +170,13 @@ def run_claim(store, claim):
             category = getattr(exc, 'category', None) or ('observation' if isinstance(exc, Wait) else
                        stage if getattr(exc, 'fresh_model', False) else
                        'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution')
+            from pipeline.backend_capacity import classify as capacity_failure
+            reason=capacity_failure(execution,{'category':category,'message':str(exc)[-4000:],
+                'fresh_model':getattr(exc,'fresh_model',False),'diagnostic':getattr(exc,'diagnostic',None)})
             store.retry(claim['id'], claim['token'],
-                        {'category': category, 'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False),
-                         'diagnostic': getattr(exc, 'diagnostic', None)},
+                        reason,
                         delay=getattr(exc, 'retry_delay', None), count_failure=not isinstance(exc, Wait), attention=getattr(exc,'attention',False))
-            execution.phase('NeedsAttention' if getattr(exc,'attention',False) else 'RetryScheduled', reason=str(exc)[-1000:], category=getattr(exc, 'category', None))
+            execution.phase('NeedsAttention' if getattr(exc,'attention',False) else 'RetryScheduled', reason=reason['message'][-1000:], category=reason['category'])
         except StaleClaim:
             pass
         except Exception as recovery_error:
@@ -229,6 +233,10 @@ def main():
     commands.add_parser('resume')
     commands.add_parser('slots').add_argument('count', type=int)
     commands.add_parser('reserve-verification').add_argument('count',type=int)
+    commands.add_parser('decisions')
+    command=commands.add_parser('decide')
+    command.add_argument('id');command.add_argument('option')
+    command.add_argument('--source',default='local CLI');command.add_argument('--instruction')
     commands.add_parser('priority-classes')
     command=commands.add_parser('priority-class')
     command.add_argument('name');command.add_argument('value',type=int)
@@ -249,6 +257,15 @@ def main():
         if args.command == 'status':
             from pipeline.cockpit import snapshot
             print(json.dumps(snapshot(store)))
+        elif args.command == 'decisions':
+            from pipeline.decisions import list_decisions
+            print(json.dumps(list_decisions(store)))
+        elif args.command == 'decide':
+            from pipeline.decisions import choose
+            try:
+                print(json.dumps(choose(store,args.id,args.option,source=args.source,instruction=args.instruction)))
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from None
         elif args.command in ('retry', 'retry-all'):
             with store.transaction():
                 query = "UPDATE work SET state='ready',retry_at=0,ready_since=? WHERE state IN ('attention','retry')"

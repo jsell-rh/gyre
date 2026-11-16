@@ -25,6 +25,7 @@ let streamExpansion = "default";
 let errorText = "";
 let retryAllPending = false;
 let slotsDraft = null;
+let decisionPending = null;
 
 function e(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -227,6 +228,10 @@ function renderOverview() {
     e("h2", { text: "Independent reconcilers" }),
     e("p", { text: s.online ? `${s.supervisor_online ? "Supervisor online" : "Independent stage workers active"} · ${gate.condition || "Reconciling"}` : "Run: python3 scripts/dev-pipeline.py serve. Stages can also run independently with tick." }),
     gate.capacity && !gate.capacity.allowed ? e("p", { class: "muted", text: gate.capacity.message }) : null,
+    gate.delivery ? e("p", { class: gate.delivery.condition === "Stalled" ? "dev-health-error" : "muted", text:
+      `Delivery ${gate.delivery.condition.toLowerCase()} · ${gate.delivery.unfinished} unfinished tasks` +
+      (gate.delivery.last_merge_at ? ` · last merge ${new Date(gate.delivery.last_merge_at * 1000).toLocaleString()}` : "") +
+      (Object.keys(gate.delivery.blockers || {}).length ? ` · blockers: ${Object.entries(gate.delivery.blockers).map(([name, count]) => `${name.replaceAll("_", " ")} (${count})`).join(", ")}` : "") }) : null,
     gate.stress_guard ? e("p", { class: "dev-health-error", text: `Stress guard paused new admissions: ${gate.stress_guard.reason}. Tasks: ${(gate.stress_guard.tasks || []).join(", ")}. Active work continues; inspect the fault before resuming.` }) : null,
     ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} ${stage === "observe" ? "waiting for CI" : "backing off"} · ${count.succeeded || 0} completed` })),
     e("p", { class: "muted", text: s.dispatch?.integration
@@ -257,7 +262,29 @@ function renderOverview() {
   const waiting = e("section", { class: "dev-panel" }, e("h2", { text: `Stage retry queue · ${deferred.length}` }),
     deferred.length ? deferred.slice(0, 12).map((task) => taskButton(task, infrastructureQueueReason(task)))
       : e("p", { class: "muted", text: "No stage is waiting for a retry." }));
-  nodes.overview.replaceChildren(coverageBar, metrics, errorText || s.error ? e("div", { class: "dev-error", text: errorText || s.error }) : "",
+  const decisions = (s.decisions || []).filter((d) => d.current || d.selection);
+  const decisionPanel = e("section", { class: "dev-panel dev-decisions", id: "decisions" },
+    e("h2", { text: `Decisions · ${decisions.filter((d) => !d.selection).length} awaiting you` }),
+    ...decisions.map((d) => e("article", { class: "dev-decision" },
+      e("h3", { text: `${d.task} · ${d.question}` }),
+      e("p", { class: "muted", text: d.context }),
+      e("div", { class: "dev-decision-options" }, ...d.options.map((o, i) =>
+        e("section", { class: "dev-decision-option" },
+          e("strong", { text: `${i + 1}. ${o.title}${d.recommendation === o.id ? " · Recommended" : ""}` }),
+          e("p", { text: o.summary }), e("p", { class: "muted", text: `Tradeoffs: ${o.tradeoffs}` }),
+          e("p", { text: `Next: ${o.next_step}` }),
+          d.selection ? null : e("button", { class: "dev-action", text: "Choose this direction", disabled: decisionPending === d.id, onclick: async () => {
+            decisionPending = d.id; renderOverview();
+            try { await post("/api/decision", { id: d.id, option: o.id }); await poll(); }
+            catch (error) { errorText = error.message; render(); }
+            finally { decisionPending = null; renderOverview(); }
+          } })))),
+      d.selection ? e("p", { text: `Recorded: ${d.options.find((o) => o.id === d.selection.option)?.title} · ${d.selection.actor} via ${d.selection.source}. Amendment task: ${d.application_task}.` }) :
+        e("p", { class: "muted", text: "Nothing is selected automatically. Your choice is recorded and queues a reviewed spec amendment before implementation resumes." }),
+      ...(d.sources || []).map((source) => source.startsWith("https://")
+        ? e("a", { href: source, target: "_blank", rel: "noopener noreferrer", text: source })
+        : e("div", { class: "muted", text: source })))));
+  nodes.overview.replaceChildren(coverageBar, ...(decisions.length ? [decisionPanel] : []), metrics, errorText || s.error ? e("div", { class: "dev-error", text: errorText || s.error }) : "",
     published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests under reconciliation · ${published.length}` }),
       published.map((task) => e("div", {}, taskButton(task, task.condition || "Waiting for GitHub checks"), prLinks(task)))) : null,
     e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),

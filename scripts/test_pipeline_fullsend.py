@@ -203,9 +203,11 @@ class FullsendContracts(FullsendFixture):
         self.assertIn('/tmp/stage/findings.log', [item['dest'] for item in harness['host_files']])
 
     def test_actual_checkpoint_publishes_fixture_source_to_bare_remote(self):
+        self.body += '\n## Acceptance Criteria\n\n- [ ] Arithmetic performs real addition.\n'
+        self.store.put_task('task-9999','g',self.body,{})
         _, repo, _ = self.prepare()
         (repo / 'code.py').write_text('def add(a, b):\n    return a + b\n')
-        (repo / 'specs/tasks/task-9999.md').write_text(self.body.replace('not-started','ready-for-review'))
+        (repo / 'specs/tasks/task-9999.md').write_text(self.body.replace('not-started','ready-for-review').replace('- [ ]','- [x]'))
         stage = self.execution.directory / 'bundle'
         job = json.loads((stage / 'job.json').read_text());job['checkout'] = str(repo)
         (stage / 'job.json').write_text(json.dumps(job))
@@ -218,6 +220,9 @@ class FullsendContracts(FullsendFixture):
         receipt = json.loads((stage / 'outcome.json').read_text())
         actual = self.call('git', 'rev-parse', 'refs/heads/' + self.execution.branch, cwd=self.repo).strip()
         self.assertEqual(actual, receipt['head'])
+        published_task=self.call('git','show',actual+':specs/tasks/task-9999.md',cwd=self.repo)
+        self.assertIn('- [ ] Arithmetic performs real addition.',published_task)
+        self.assertNotIn('- [x]',published_task)
         self.assertEqual(receipt['tree'], self.call('git', 'rev-parse', actual + '^{tree}', cwd=self.repo).strip())
         self.assertIn('a + b', self.call('git','show',actual+':code.py',cwd=self.repo))
         self.assertTrue(receipt['published'] and receipt['valid'])
@@ -306,6 +311,9 @@ if a[:2]==['sandbox','create']:
 elif a[:2]==['sandbox','delete'] and not os.environ.get('HOLD_DELETE'):
  v['pods']=[x for x in v['pods'] if x['name']!=a[2]]
 p.write_text(json.dumps(v))
+if a[:2]==['sandbox','create'] and os.environ.get('HOLD_CREATE'):
+ import time
+ time.sleep(2)
 if a[:2]==['sandbox','exec']:
  import time
  p.with_suffix('.pid').write_text(str(os.getpid()))
@@ -361,6 +369,15 @@ else: print('fixture control operation')
         self.assertEqual(sum(c[:2]==['sandbox','create'] for c in state['calls']),1)
         self.assertEqual(len(state['pods']),1)
         self.assertEqual(self.store.compute_used(),1)
+
+    def test_create_uses_authorized_budget_and_adopts_after_uncertain_timeout(self):
+        self.store.set_setting('model_timeout',1)
+        result=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity',extra={'HOLD_CREATE':'1'})
+        self.assertEqual(result.returncode,75,result.stderr)
+        adopted=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
+        self.assertEqual(adopted.returncode,0,adopted.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        self.assertEqual(sum(c[:2]==['sandbox','create'] for c in calls),1)
 
     def test_streaming_deadline_targets_the_real_cli_without_an_orphan_parent(self):
         process = subprocess.Popen([str(self.shim / 'openshell'), 'sandbox', 'exec',
@@ -543,3 +560,25 @@ else: print('fixture control operation')
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ValidatorOwnershipTests(FullsendFixture):
+    def test_previous_token_cleanup_debt_is_excluded_from_current_receipt(self):
+        from pipeline.fullsend import owned_sandbox
+        for name,token,state in [('previous',self.claim['token']-1,'deleting'),('current',self.claim['token'],'present')]:
+            self.store.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
+                (name,self.work,token,'sandbox',state,'{}',time.time()))
+        self.assertEqual(owned_sandbox(self.execution),'current')
+        self.store.resource_state('current','absent')
+        with self.assertRaisesRegex(ValueError,'exactly one'):
+            owned_sandbox(self.execution)
+        self.store.resource_state('previous','present')
+        with self.assertRaises(ValueError):owned_sandbox(self.execution)
+
+    def test_multiple_current_attempt_sandboxes_still_fail_closed(self):
+        from pipeline.fullsend import owned_sandbox
+        for name in ('first','second'):
+            self.store.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
+                (name,self.work,self.claim['token'],'sandbox','present','{}',time.time()))
+        with self.assertRaisesRegex(ValueError,'exactly one'):
+            owned_sandbox(self.execution)

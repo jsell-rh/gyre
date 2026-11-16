@@ -28,15 +28,20 @@ def prompt(execution, task):
     findings = [finding | {'log_tail': finding['log_tail'][-allowance:]}
                 if finding.get('log_tail') else finding for finding in findings]
     return '\n\n'.join(((ROOT / 'specs/GOAL.md').read_text(),
-                        (ROOT / f'specs/prompts/pipeline-{role}.md').read_text(),
+                        (ROOT / ('specs/prompts/pipeline-decision.md' if execution.claim['input'].get('decision_request') else f'specs/prompts/pipeline-{role}.md')).read_text(),
                         'Assigned task:\n' + bounded,
                         'Exact assignment:\n' + json.dumps(execution.claim['input']),
                         'Current requirement inputs:\n' + json.dumps((task['data'].get('requirements') or {}).get('components', {})),
                         'Previous assignment outcome:\n' + str(execution.claim.get('result') or 'none')[-4000:],
-                        'Durable findings:\n' + json.dumps(findings)))
+                        'Durable findings:\n' + json.dumps(findings),
+                        ('Authorized amendment paths (exact paths; no other edits):\n' +
+                         json.dumps(task['data']['decision_allowed_paths'])) if task['data'].get('source_decision') else ''))
 
 
 def triage(execution, task):
+    if execution.claim['input'].get('decision_request'):
+        from .decisions import prepare
+        return prepare(execution,task)
     if execution.claim['input'].get('baseline_probe'):
         from .repairs import recheck
         return recheck(execution, task)
@@ -72,7 +77,19 @@ def triage(execution, task):
 
 
 def implement(execution, task):
-    result = execution.cloud_step(task, prompt(execution, task))
+    from .contract_recovery import normalize
+    result = normalize(execution, task) or execution.cloud_step(task, prompt(execution, task))
+    if task['data'].get('source_decision'):
+        path=checkout(execution,result['head'])
+        base=execution.claim['input']['base']
+        changed=execution.command('git','diff','--name-only','-z',base,result['head'],cwd=path).stdout.rstrip('\0').split('\0')
+        changed=[name for name in changed if name]
+        allowed=set(task['data']['decision_allowed_paths'])
+        invalid=[name for name in changed if name not in allowed]
+        if invalid:
+            from .execution import Attention
+            error=Attention('Decision amendment changed files outside its approved task/spec scope: '+', '.join(invalid))
+            error.category='decision_scope';error.diagnostic={'head':result['head'],'invalid':invalid};raise error
     # A partial source checkpoint survives inference failures. It is never
     # sent to review as though the agent completed its assignment.
     progress = safe_metadata(result['task_body'])['progress']
@@ -106,6 +123,11 @@ def implement(execution, task):
         changed = execution.command('git', 'diff', '--name-only', seed, result['head'], cwd=path).stdout.splitlines()
         substantive = [name for name in changed if name != f"specs/tasks/{task['name']}.md"
                        and not name.startswith(('web/dist/', 'specs/reviews/'))]
+        from .repair_budget import task_document_repair
+        if complete and task_document_repair(task['name'],repair) and f"specs/tasks/{task['name']}.md" in changed:
+            # Correcting a specifically reviewed Shipped statement is valid
+            # work. It still needs a fresh independent exact-source review.
+            substantive.append(f"specs/tasks/{task['name']}.md")
         if not substantive:
             from .repair_budget import check
             check(execution,task,path,result['head'],{'category':'contract','delta':contract_delta} if contract_changed else
@@ -129,6 +151,10 @@ def implement(execution, task):
 
 
 def review(execution, task):
+    from .review_preflight import check
+    deferred = check(execution, task)
+    if deferred:
+        return deferred
     result = execution.cloud_step(task, prompt(execution, task))
     if result.get('agent_exit') != 0 or result.get('stream_exit') != 0:
         from .diagnostics import diagnose
@@ -298,12 +324,24 @@ def publish(execution, task):
             raise Retry('The associated PR was closed. Await an operator decision before publishing or changing code.')
         if observation['state'] == 'MERGED':
             if observation['headRefOid'] != head:
-                raise RuntimeError('merged PR does not match verified source')
+                from .publication_recovery import superseded, PublicationMismatch
+                updates = superseded(task, observation, verified)
+                if updates:
+                    proof = {'pr': url, 'merged': observation['mergeCommit']['oid'],
+                             'previous_head': observation['headRefOid'], 'pending_head': head}
+                    execution.store.event('historical_publication_detached', proof, task['name'], execution.claim['id'])
+                    return {'historical_publication': proof}, updates, []
+                error = PublicationMismatch('Merged PR head differs from the verified source; inspect the retained publication evidence before retrying')
+                error.diagnostic = {'pr': url, 'observed': observation, 'verified': verified}
+                raise error
             sha = observation['mergeCommit']['oid']
             path = checkout(execution, sha)
             tree = execution.command('git', 'rev-parse', 'HEAD^{tree}', cwd=path).stdout.strip()
             if tree != verified['tree']:
-                raise RuntimeError('upstream merge tree differs from verified tree')
+                from .publication_recovery import PublicationMismatch
+                error = PublicationMismatch('Upstream merge tree differs from the verified tree; inspect before retrying')
+                error.diagnostic = {'pr': url, 'sha': sha, 'observed_tree': tree, 'verified': verified}
+                raise error
             for resource in execution.store.db.execute("SELECT name FROM resources WHERE work=? AND kind='merge'", (execution.claim['id'],)).fetchall():
                 execution.store.resource_state(resource['name'], 'absent')
             return {'merged': sha, 'pr': url}, {'progress': 'complete', 'delivered': {'sha': sha, 'pr': url,
@@ -542,6 +580,15 @@ def cleanup(execution, task):
         return {'merge_observed': observation}, {}, []
     execution.login()
     if record['kind'] == 'provider':
+        # Providers cannot be removed while their owned sandbox is attached.
+        # Wait without a failed CLI delete; cleanup of the sandbox is independent.
+        attached = execution.store.db.execute(
+            "SELECT name FROM resources WHERE work=? AND token=? AND kind='sandbox' AND state<>'absent'",
+            (record['work'], record['token'])).fetchall()
+        if attached:
+            wait = Wait('Waiting for owned sandbox deletion before provider cleanup: ' + ', '.join(row['name'] for row in attached))
+            wait.retry_delay = 900
+            raise wait
         # A paginated list cannot establish this provider's absence.
         observed = execution.os('provider', 'get', resource, timeout=30, check=False)
         if observed.returncode == 0:
@@ -590,6 +637,15 @@ for p in pairs:
 """
         try:
             if item['phase'].lower() != 'ready' and not any(old_directory.parent.glob('*/remote.offset')):
+                try:
+                    diagnostic=json.loads((old_directory/'diagnostic.json').read_text())
+                except (OSError,ValueError):
+                    diagnostic={}
+                if old_work and old_work['stage']=='implement' and diagnostic.get('category')=='sandbox_provisioning':
+                    saved=json.loads(record['data'])
+                    execution.store.resource_state(resource, record['state'], saved|{'source_capture':{
+                        'state':'not_started','reason':'Provisioning failed before agent attachment',
+                        'work':record['work'],'token':record['token']}})
                 raise RuntimeError('No agent was attached; skip unreachable source capture and purge the unready sandbox')
             if old_work and old_work['stage']=='implement':
                 execution.os('sandbox','upload',resource,str(ROOT/'scripts/pipeline-agent.py'),'/tmp/stage/pipeline-agent.py','--no-git-ignore',timeout=60)

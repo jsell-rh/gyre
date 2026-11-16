@@ -14,7 +14,7 @@ COMMANDS = [['bash', '/tmp/stage/checks.sh'], ['cargo', 'test', '--all', '--quie
 
 
 POLICY_FILES=('pipeline-verify.py','dev-static-gate.py','check-rustfmt-diff.py',
-              'check-clippy-diff.py','verifier-script-overlay.py','pipeline-artifacts.py',
+              'check-clippy-diff.py','verifier-script-overlay.py','pipeline-artifacts.py','dev-coverage.py',
               'pipeline-build-env.py','pipeline-cache.py','dev-cargo-clean.py','pipeline-usage.py')
 
 
@@ -116,7 +116,7 @@ def run(execution, path, identity, probe=None):
         image = store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image'])
         bundle = execution.directory / 'verification-input'
         bundle.mkdir(exist_ok=True)
-        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py', 'pipeline-usage.py', 'pipeline-build-env.py', 'pipeline-cache.py', 'dev-cargo-clean.py'):
+        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-usage.py', 'pipeline-build-env.py', 'pipeline-cache.py', 'dev-cargo-clean.py'):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
@@ -247,14 +247,18 @@ def run(execution, path, identity, probe=None):
                             offset=0;failures=0;cache_handled=False
                     elif phase in ('error','failed','deleted','deleting'):
                         error=Attention('Verifier sandbox entered terminal phase '+phase);error.category='sandbox_stopped';raise error
-                    elif failures>=6 and phase!='ready':
-                        error=Attention('Cannot establish verifier health; retaining diagnostics instead of repeating builds blindly');error.category='gateway_transport';raise error
+                    elif phase!='ready':
+                        # An unreachable control plane is not evidence that a
+                        # detached build died. Keep its identity/cache and poll
+                        # within the assignment deadline instead of purging it
+                        # and permanently holding every future main revision.
+                        execution.phase('ReconnectingVerifier',sandbox=name,failures=failures)
 
             except (ValueError, KeyError, TypeError) as exc:
                 failures += 1
                 if failures >= 6:
                     raise Attention('invalid remote verification protocol response; inspect retained diagnostics') from exc
-            execution.cancelled.wait(min(30, 2 ** failures) if failures else 2)
+            execution.cancelled.wait(min(30, 2 ** min(failures,5)) if failures else 2)
         raise deadline_error()
     finally:
         try:

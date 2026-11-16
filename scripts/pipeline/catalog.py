@@ -123,6 +123,13 @@ def discover(store, stage, base):
                 selected.append(store.enqueue('triage',name,task['generation'],
                     {'base':base,'binding_errors':requirements['errors']},priority=20000))
             continue
+        from .decisions import request as decision_request, exists as decision_exists
+        decision = decision_request(store,task)
+        if decision:
+            if stage == 'triage' and not decision_exists(store,decision['id']):
+                selected.append(store.enqueue('triage',name,task['generation'],
+                    {'base':base,'decision_request':decision},priority=25000))
+            continue
         assessment = pending(data)
         if assessment:
             if stage == 'assess':
@@ -225,6 +232,8 @@ def discover(store, stage, base):
                 # a new verified head, refresh a green base, merge, or confirm.
                 if not published or merge_ready:
                     inputs = {'candidate': candidate, 'base': base, 'verified': verified}
+                    if data.get('publication_epoch'):
+                        inputs['publication_epoch'] = data['publication_epoch']
         if inputs is not None:
             priority = 1000 if repair else 0
             selected.append(store.enqueue(stage, name, task['generation'], inputs, priority))

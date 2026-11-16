@@ -7,6 +7,13 @@ from pathlib import PurePosixPath
 from .execution import Attention
 
 
+def task_document_repair(task, repair):
+    findings=repair.get('details')
+    return (repair.get('category')=='review' and isinstance(findings,list) and bool(findings)
+            and all(isinstance(f,dict) and isinstance(f.get('file'),str)
+                    and f['file'].split(':',1)[0]==f"specs/tasks/{task}.md" for f in findings))
+
+
 def source_findings(findings):
     if not isinstance(findings,list):return findings,[]
     source=[];generated=[]
@@ -16,7 +23,8 @@ def source_findings(findings):
         # security or source findings are never suppressed by text matching.
         name=name if isinstance(name,str) else ''
         path=PurePosixPath(name.split(':',1)[0])
-        target=generated if re.fullmatch(r'web/dist/[A-Za-z0-9_.@/-]*(?::[0-9]+(?::[0-9]+)?)?',name) and '..' not in path.parts else source
+        target=generated if ((re.fullmatch(r'web/dist/[A-Za-z0-9_.@/-]*(?::[0-9]+(?::[0-9]+)?)?',name) and '..' not in path.parts)
+                             or re.fullmatch(r'specs/coverage/SUMMARY\.md(?::[0-9]+(?::[0-9]+)?)?',name)) else source
         target.append(finding)
     return source,generated
 
