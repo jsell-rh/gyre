@@ -7,12 +7,16 @@
 use std::path::Path;
 
 // ─── Persona prompts ──────────────────────────────────────────────────────────
+// Prompt content is embedded from the canonical `specs/personas/<slug>.md`
+// spec files (byte-identical to the CLI-private copies they replace, which
+// the assignment base deleted in favor of the specs/ single source).
 
 pub const WORKSPACE_ORCHESTRATOR_PROMPT: &str =
-    include_str!("bootstrap/personas/workspace-orchestrator.md");
-pub const REPO_ORCHESTRATOR_PROMPT: &str = include_str!("bootstrap/personas/repo-orchestrator.md");
-pub const ACCOUNTABILITY_PROMPT: &str = include_str!("bootstrap/personas/accountability.md");
-pub const SECURITY_PROMPT: &str = include_str!("bootstrap/personas/security.md");
+    include_str!("../../../specs/personas/workspace-orchestrator.md");
+pub const REPO_ORCHESTRATOR_PROMPT: &str =
+    include_str!("../../../specs/personas/repo-orchestrator.md");
+pub const ACCOUNTABILITY_PROMPT: &str = include_str!("../../../specs/personas/accountability.md");
+pub const SECURITY_PROMPT: &str = include_str!("../../../specs/personas/security.md");
 
 /// A built-in persona to register during bootstrap (platform-model.md §2).
 pub struct BuiltinPersona {
