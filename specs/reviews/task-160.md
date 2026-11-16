@@ -57,3 +57,36 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — rebase-repair review at base `c66ee2ac` (candidate `28c40bb3`)
+
+Verdict: **complete** (approved). Candidate `28c40bb3e6b8e09abd2f42ca8be3a7eb58ee1388` at branch head, tree clean. This round reviews the rebase repair onto base `c66ee2ac` (the merge `7a9f7419` and the follow-up process commit) plus the full task diff against that base.
+
+**Rebase-repair merge (`7a9f7419`, notification.rs sqlite+pg `list_for_user`):** the merged body keeps BOTH sides — base's `notification_types: Option<&[&str]>` exact-match set filter (with the owned `Vec<String>` copy and empty-set-matches-nothing contract) and the branch's `let tenant = self.tenant_id.clone()` scoping with `.filter(notifications::tenant_id.eq(&tenant))`. Verified by reading the merged bodies and by tests: `cargo test -p gyre-adapters --lib notification` → 13 passed / 0 failed (includes `list_for_user_type_set_filter_matches_persisted_column` and `list_for_user_filters_by_repo`). No conflict-marker residue anywhere in the tree (`git diff --check` clean, `check-tenant-filter.sh` scans the same files).
+
+**Clean-head runs (all under the sandbox's real toolchain — mawk 1.3.4 as `/usr/bin/awk`, GNU grep 3.11):**
+- `scripts/check-hierarchy.sh` → exit 0
+- `scripts/check-tenant-filter.sh` → exit 0 (124 read methods on tenant-column tables checked, 0 violations)
+- `scripts/check-api-auth.sh` → exit 0 (8 non-ABAC mutating handlers checked with auth extractors; Check 3 delegated to `check-abac-route-registry.sh` passes)
+- `cargo check -p gyre-server` (SKIP_WEB_BUILD=1) → exit 0
+- `cargo test -p gyre-adapters --test tenant_isolation` → 2 passed / 0 failed
+- `cargo test -p gyre-adapters --lib analytics` → 17 passed / 0 failed (covers the raw-SQL tenant-predicate binds in `count_grouped`)
+- `scripts/check-arch.sh`, `check-mem-port-contracts.sh`, `check-scope-literal-defaults.sh crates`, `check-task-commit-attribution.sh` → all exit 0
+
+**Mutation kills (each mutation applied, probed, then reverted; `git status` clean after):**
+1. `Task.workspace_id: Id` → `Option<Id>` (sqlite domain task.rs:60) → check-hierarchy exit 1 naming the file:line.
+2. `Workspace.tenant_id` field deleted → check-hierarchy exit 1 ("missing from the struct").
+3. tenant filter stripped from `sqlite/task.rs::find_by_id` → check-tenant-filter exit 1 with file:line.
+4. tenant filter stripped from `postgres/task.rs::find_by_id` → check-tenant-filter exit 1 — the postgres dir is genuinely scanned (historical `src/pg` blind spot stays fixed).
+5. `abac_middleware` layer removed from the api router in lib.rs → check-api-auth exit 1 (Check 1).
+6. `AuthenticatedAgent` extractor stripped from `mcp_handler` → check-api-auth exit 1 (Check 2).
+
+**Skip-list spot check:** `budget_call.rs::list_since` — the only production caller is `apply_rolling_24h_window` (api/budget.rs:1767), which recomputes per-workspace sums for every workspace in the deployment from the base storage handle; a handle-tenant filter would zero non-default tenants' counters hourly. Cross-tenant by construction, rationale accurate. `invitation.rs`/`user.rs`/`tenant.rs`/`message.rs`/`workspace_membership.rs`/`user_workspace_state.rs`/`kv_store.rs` rationales match the spec §3 structural-isolation exemption class (spec itself names MessageRepository/UserWorkspaceStateRepository).
+
+**Wiring:** all three scripts executable, usage-commented, blocking in BOTH pre-commit (`.pre-commit-config.yaml` :46/:62/:70) and CI (`.github/workflows/ci.yml` :72/:74/:76, no `|| true` on any of the three — the remaining `|| true` steps in ci.yml are unrelated pre-existing scripts outside this task's ownership). Commit attribution: all 16 `commits:` frontmatter entries are ancestors of HEAD.
+
+**Deferred to the verifier (build budget):** `SKIP_WEB_BUILD=1 cargo test --all` (full workspace suite), full CI lint sweep, web/dist rebuild.
+
+**Non-findings (checked, not material):** (a) check-api-auth Check 2 counts `Option<AuthenticatedAgent>` as an auth extractor — the invitation token-auth handlers (task-110 design: the 256-bit token is the auth factor, bearer identity optional and matched against the invited email when presented); heuristic grep depth matches the task's "purely static analysis" instruction and the §7 contract's real teeth are in Check 3 (frozen-baseline cross-reference). (b) the is_read name heuristic cannot see read terminals inside helper fns — inherent to grep-based scanning, explicitly permitted by the agent instructions. (c) check-hierarchy's `GYRE_CHECK_HIERARCHY` default-on inversion is spec-conformant (the M34 Slice 3 migration has landed — fields are `Id`).
+
+Evidence: `/tmp/stage/review-evidence/` — check-{hierarchy,tenant-filter,api-auth}.log, check-tenant-filter{,-mutation,-pg-mutation}.log, check-api-auth-mutation{1,2}.log, adapters-notification-tests.log, adapters-analytics-tests.log, tenant-isolation-test.log, cargo-check-server.log, commit-attribution.log, check-arch.log, check-mem-port-contracts.log, check-scope-literal-defaults.log.
