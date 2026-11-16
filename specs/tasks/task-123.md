@@ -3,7 +3,7 @@ title: "Implement notification entity with full type taxonomy and priority model
 spec_ref: "user-management.md §Notification Entity"
 depends_on:
   - task-120
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Notification Entity"
 commits: ["90edbb2fb3e9c9aca75cde3aedfbead0cceedea0", "6b3d464140fa60b5b7b33e91f784fd576558cc80", "d6592051175e4ca81cfe2567582c3e5f049759fa", "12f5495f0461154f1da417295ed7527cddc139d1", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
@@ -114,7 +114,9 @@ Original implementation: 27bfb2a69, deec7953a0, f92a48916 (re-homed across
 base merges 730073ad1/7f0ec2b7c/33ae5e394), lint-gate repair 12f5495f0.
 Priority-band repair (attempt 5d7e43ea gap): 6b3d4641 on base 1ee52c43.
 `?priority=` filter repair (review F1, attempt 0cd05eaa): 90edbb2f on base
-bfc36c9c.
+bfc36c9c. Rebase repair onto base a4c4c012 (published head c52cd64a
+conflicted with main): merge cd558788, composes the task's type-set band
+filter with main's HSI §12 `exclude_types` preference exclusion.
 
 ### Entity model (gyre-common/src/notification.rs)
 
@@ -217,6 +219,16 @@ bfc36c9c.
   `check-clippy-diff.py` both clean; `check-arch.sh` and
   `check-mem-port-contracts.sh` pass. Evidence retained under
   /tmp/stage/review-evidence.
+- Post-merge probes on base a4c4c012 (merge cd558788): `cargo check
+  --all --all-targets` clean; gyre-common notification tests (12) and
+  gyre-adapters notification tests (13, now including the base's
+  `notifications_exclude_types_applies_to_list_and_count`) green;
+  gyre-domain full suite 563 green; `check-migration-versions.sh` (no
+  duplicate versions across the combined migration sets),
+  `check-migration-sql-portability.sh`, `check-arch.sh`,
+  `check-mem-port-contracts.sh`, `check-task-commit-attribution.sh`,
+  and the changed-line rustfmt/clippy gates (vs HEAD^1 = c52cd64a) all
+  pass.
 
 ### Rebase resolutions (durable history)
 
@@ -236,3 +248,21 @@ bfc36c9c.
   channel-routing delegates to the same table.
 - Filter repair 90edbb2f (base bfc36c9c): `?priority=` band filter moved
   from rank-band widening to the type-string set (review F1).
+- Onto a4c4c012 (merge cd558788, this round): five content conflicts.
+  `gyre-ports/notification.rs` — merged both doc blocks for the extended
+  `list_for_user` signature (the task's type-set filter contract + the
+  base's new `exclude_types` parameter carrying HSI §12 disabled
+  preferences). `sqlite/notification.rs` + `postgres/notification.rs` —
+  kept the task's exact-match type-set filter (eq_any, empty set
+  short-circuits) and combined it with the base's `exclude_types`
+  (`ne_all` before limit/offset); the base's obsolete single-type filter
+  dropped; four sqlite test call sites updated for the new argument.
+  `docs/api-reference.md` — took the base's new session endpoints and
+  enriched judgments row; notification rows keep the task-123
+  type-derived-band wording combined with the base's preference-exclusion
+  notes. `specs/coverage/system/user-management.md` — kept row 29's
+  task-123 repair wording, took the base's implemented row 30 (task-126
+  CLI). The base's `disabled_notification_types` exclusion and the task's
+  band filter compose in the shared handler: `?priority=` intersects the
+  type set, disabled types are excluded by the query, and the MCP inbox
+  applies the same exclusion.
