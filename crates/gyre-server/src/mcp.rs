@@ -10775,8 +10775,13 @@ concepts:
         let state = orch_state().await;
 
         // ReadOnly user + API key (auth.rs API-key path: roles come from the
-        // user record; User::new defaults to [ReadOnly]).
-        let user = gyre_domain::User::new(gyre_common::Id::new("ro-user"), "ro-ext", "ro-user", 0);
+        // user record; User::new defaults to [ReadOnly]). The user is bound
+        // to orch_state's tenant t1: the API-key auth path fails closed for
+        // users without a tenant binding (auth.rs F1 — a plain-text 403,
+        // which would never reach the RBAC gate this test asserts).
+        let mut user =
+            gyre_domain::User::new(gyre_common::Id::new("ro-user"), "ro-ext", "ro-user", 0);
+        user.tenant_id = Some(gyre_common::Id::new("t1"));
         state.users.create(&user).await.unwrap();
         let raw_key = "ro-test-api-key";
         let hashed = crate::auth::hash_api_key(raw_key);
