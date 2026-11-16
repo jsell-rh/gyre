@@ -7,7 +7,7 @@ coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
   - "platform-model.md §3 Repo Orchestrator"
-commits: ["dadd8fa461e46b7b35e7159d1625d47e2d331096", "d54224113232c496a3072f1152b5a2a6034099a5", "34baa7370f43cca5bf5aeacfa2e66bca53711aa0", "decfec1b65384fd70cf6a5bbc10716e0afac302e", "0346b089db211c060ff44f08b80d782b94efc405", "6f9af6286c3188657a6746e277777ab818584d14", "b277fff9697fac6b1284131169a99f970c46d055", "45d6d869ac7408a8557975bcb195478c4edb716e", "c9743839d1b784fb7ce4c46f9d536fdd72e1d197", "d7e588d9ffc25b8a5755dc411e4dba650caa599b", "098fe57564253fa29f4d738b16ae5b8ee32f8eae", "73b1c92efc920a9725e0531219b030c3f3ecc22d", "c158eb6853538d989766f84b3f4b236f7fb73ad7", "c83dc841a282381a36a130853c846de4c13e1195", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "2ae69e973fce1e3a316205af1f238c3a457bd458"]
+commits: ["2ae69e973fce1e3a316205af1f238c3a457bd458", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "ebb879f5fc6761bfe7aaed74689fd02b9ba4005b"]
 review: specs/reviews/task-093.md
 ---
 
@@ -87,56 +87,45 @@ Read `specs/system/platform-model.md` §3 "Two-Level Orchestration" for the full
 
 ## Shipped
 
-Product behavior for this task (OrchestratorType domain enum, one-live-per-scope
-spawn endpoints with tenant containment, scoped JWTs per tier, stale-detector
-auto-restart with budget symmetry and death escalation, MCP orchestrator tool
-suite with tier gates) was implemented and review-verified in earlier rounds
-(round-2 verdict: complete — see `specs/reviews/task-093.md`). This round
-repaired the 13 `cargo test --all` failures from verification attempt
-`5164edc7` (run on the merge of the candidate with base `6082be2f`):
+The orchestrator lifecycle product behavior (OrchestratorType domain enum,
+one-live-per-scope spawn endpoints with per-handler tenant containment,
+scoped JWTs per tier, stale-detector auto-restart with budget symmetry and
+death escalation on every terminal path, MCP orchestrator tool suite with
+tier gates) was implemented and review-verified in earlier rounds (round-2
+verdict: complete — `specs/reviews/task-093.md`).
 
-### Root cause
+### This round: verification-failure repair (attempt 3cb8d80b)
 
-All 13 failures were fixture/production parity gaps introduced when main's
-test files (byte-identical to base) met this branch's review-approved
-fail-closed persona enforcement:
+`cargo test --all` on the merge with base `c66ee2ac` failed one test:
+`orchestrator_spawn_denied_across_tenants` got 500 instead of 201 at the
+own-tenant positive control (api_integration.rs:1728).
 
-- **12 failures (signal_chain ×9, api/specs ×2, ralph_loop ×1):** the task-093
-  spawn cores enforce the persona meta-spec layer (`validate_persona` in
-  `api/orchestrator.rs`, approved in rounds 1–3). Production always satisfies
-  it — startup seeds the built-in meta-specs (`main.rs:59`). The fixtures
-  (`chain_state`, `loop_state`, the two specs chain tests) seed only the
-  entity-layer persona, so every orchestrator spawn in the chain failed
-  closed and no phase past Phase 2 ever ran (no orchestrator, no delegation
-  or coordination tasks, no repo orchestrator). Fixed by mirroring startup
-  (`crate::seed_builtin_meta_specs(&state).await`) in the four fixtures — the
-  exact pattern mcp's `orch_state` already uses (its spawn tests passed the
-  failing run; only the tenant-binding test below failed there).
-- **1 failure (`mcp_message_send_denies_readonly_api_key`):** `User::new`
-  leaves `tenant_id: None`, and the API-key auth path now fails closed for
-  tenant-less users with a plain-text 403, panicking the test's response
-  JSON parse before the RBAC assertion. Fixed by binding the ReadOnly user
-  to orch_state's tenant `t1` — restoring exactly the round-2-verified
-  scenario (auth passes, ReadOnly denied at the write-tool gate with
-  JSON-RPC -32603, nothing persisted).
+Root cause — fixture/production parity gap, the same class as the 13
+failures repaired in `dadd8fa4`: the task-093 spawn cores enforce the
+persona meta-spec layer fail-closed (`validate_persona` in
+`api/orchestrator.rs` returns `ApiError::Internal` when the approved
+`workspace-orchestrator` meta-spec is absent from the spec ledger;
+production always satisfies this — `main.rs` seeds the built-in
+meta-specs at startup). The api_integration fixture seeded only the
+entity-layer personas, so the own-tenant spawn failed closed before the
+entity layer was consulted; the cross-tenant 403 assertions still passed
+because tenant containment runs first. Under a fresh mem state the
+failure is deterministic — the test had only ever passed by leaning on
+state another test binary left behind.
 
-No assertions were changed, no production code was changed, no exemptions
-were added.
+Fix (`ebb879f5`): mirror startup via `seed_builtin_meta_specs` in the
+fixture — the exact pattern the chain fixtures already use. Assertions
+untouched; no production code changed.
 
 ### Test evidence
 
-- `cargo check -p gyre-server --tests` (build wrapper): exit 0, 9m14s —
-  all four edited fixtures type-check.
-- `python3 scripts/check-rustfmt-diff.py 6082be2f`: exit 0, changed lines
-  clean.
-- `scripts/check-conditional-test-guards.sh`: exit 0.
-- Root-cause analysis and probe logs: `/tmp/stage/review-evidence/task-093-fixture-repair.md`.
-
-### Deferred to the independent verifier (gyre-server test execution is
-wrapper-blocked in this stage)
-
-- `cargo test -p gyre-server --lib signal_chain::tests`
-- `cargo test -p gyre-server --lib api::specs::tests`
-- `cargo test -p gyre-server --lib ralph_loop::tests`
-- `cargo test -p gyre-server --lib mcp::tests::mcp_message_send`
-- `cargo test --all` (the `cargo test --all passes` acceptance criterion)
+- `/tmp/stage/bin/cargo check -p gyre-server --test api_integration` →
+  exit 0 (server test codegen is wrapper-blocked in the implement stage;
+  execution deferred to the verifier).
+- `python3 scripts/check-rustfmt-diff.py c66ee2ac` → changed lines clean
+  (9 Rust files, including the edited test file).
+- Verifier must run: `cargo test -p gyre-server --test api_integration
+  orchestrator_spawn_denied_across_tenants`, the full
+  `cargo test -p gyre-server --test api_integration` binary, and the
+  failing repair command `cargo test --all --quiet` (details in
+  `/tmp/stage/review-evidence/task-093-api-integration-fixture-repair.md`).
