@@ -113,6 +113,7 @@ use users::{
     notification_stream, remove_member, remove_team_member, resolve_notification,
     revoke_all_my_sessions, revoke_all_user_sessions, revoke_my_session, revoke_user_session,
     update_me, update_member_role, update_notification_preferences, update_team,
+    update_user_role,
 };
 
 use crate::AppState;
@@ -950,6 +951,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users/:username/stats", get(get_user_stats))
         // Deactivate a user (TenantAdmin only, per-handler check)
         .route("/api/v1/users/:id/deactivate", put(deactivate_user))
+        // Change a user's GlobalRole (TenantAdmin only, per-handler check —
+        // user-management.md §UI Pages > Tenant User Management)
+        .route("/api/v1/users/:id/role", put(update_user_role))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",

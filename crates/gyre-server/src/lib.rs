@@ -934,6 +934,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/invite/:token/decline",
             post(api::invitations::decline_tenant_invitation),
         )
+        // Magic-link preview for the /invite/{token} accept page: same
+        // token-as-auth-factor trust model, strictly read-only (no status
+        // transition, no claim, no credentials) — see the handler.
+        .route(
+            "/api/v1/invite/:token/preview",
+            get(api::invitations::preview_invitation),
+        )
         .route(
             "/api/v1/workspaces/invitations/:token/accept",
             post(api::invitations::accept_workspace_invitation),
