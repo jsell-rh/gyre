@@ -5,7 +5,7 @@ depends_on: [task-178, task-185]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §3. Inline Spec Editing with Progressive Preview"
-commits: ["343ff8c8c4d5a55504571c5c3a53abba9280da5f"]
+commits: ["343ff8c8c4d5a55504571c5c3a53abba9280da5f", "44310fa1fcf02864c93460b3496601f12b89d516"]
 ---
 
 ## Spec Excerpt
@@ -207,3 +207,28 @@ budget. Execute:
 - `cargo test -p gyre-server --lib api::graph::tests::thorough_preview_rolls_back_preview_task_when_spawn_fails`
 - `cargo test -p gyre-server --lib api::graph::tests::predict_graph` (pre-existing predict regressions)
 - `cargo test -p gyre-server --lib api::spawn` (spawn-core regressions — the thorough preview delegates to it)
+
+### Repair round (review 74d337d3 — findings F1/F2)
+
+Both findings were test-assertion defects in
+`crates/gyre-server/src/api/graph.rs`; production behavior was correct and is
+unchanged (commit 44310fa1):
+
+- **F1** — the `thorough_preview` spec-stem sanitizer whitelists
+  `[A-Za-z0-9_-]` and maps `.` to `-`, so `specs/system/search.md` yields the
+  throwaway branch `preview/search-md-<id8>`. The test now expects that
+  prefix (verified by direct simulation of the char map; the conservative
+  sanitizer stays).
+- **F2** — axum 0.7.9 (Cargo.lock-pinned) rejects a `Json<T>` body missing a
+  required field with 422 Unprocessable Entity before the handler runs (the
+  contract already asserted in `release.rs`). The missing-`spec_path` case
+  now asserts 422; the in-handler empty-field validations still return 400.
+- The candidate commit also left ten unformatted regions in `graph.rs` that
+  fail the CI `cargo fmt --all -- --check` gate; `cargo fmt -p gyre-server`
+  was applied (mechanical whitespace only, `--check` now clean).
+
+In-sandbox evidence: `cargo check -p gyre-server` clean (build wrapper,
+42 s incremental after the fmt pass); focused web suites green —
+`ghostOverlay.test.js` + `GhostOverlay.test.js` (2 files, 42 tests) and
+`ArchPreviewCanvas.test.js` + `EditorSplit.test.js` (2 files, 98 tests).
+Evidence retained at `/tmp/stage/review-evidence/repair-F1-F2-test-assertions.md`.
