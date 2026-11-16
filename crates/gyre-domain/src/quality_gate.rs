@@ -41,10 +41,14 @@ pub struct QualityGate {
     /// `None` uses the system default (300s).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    /// Execution/display order within the repo (repo-lifecycle.md §3 Gates:
-    /// "drag to reorder — gates execute in order"). Lower runs first.
-    /// `0` for gates created before ordering existed; ties broken by
-    /// `created_at`.
+    /// Position of this gate in the repo's ordered gate chain
+    /// (agent-gates.md §Gate Chains: "repos configure gate chains as
+    /// ordered policies"; repo-lifecycle.md §3 Gates: drag to reorder).
+    /// Lower positions run/are listed first; ties (including all-zero
+    /// rows written before this column existed) fall back to creation
+    /// order. `create_gate` assigns the next free position unless the
+    /// caller supplies one; the gate-chain configuration endpoint
+    /// rewrites the whole chain's positions atomically.
     #[serde(default)]
     pub position: u32,
     pub created_at: u64,

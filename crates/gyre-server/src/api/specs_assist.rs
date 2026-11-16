@@ -12,7 +12,7 @@ use axum::{
     Json,
 };
 use futures_util::stream;
-use gyre_common::{Id, Notification, NotificationType};
+use gyre_common::{Id, NotificationType};
 use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -262,7 +262,6 @@ async fn spec_conflict_response(
         }
     }
 
-    let now = now_secs();
     // Persist the full line diff (and summary) in the notification body so BOTH
     // editors get a diff view in their Inbox (HSI §7 item 3) — not just the
     // second editor who receives the transient 409 response. `to_value` borrows
@@ -279,22 +278,20 @@ async fn spec_conflict_response(
     .to_string();
 
     for uid in &recipients {
-        let mut notif = Notification::new(
-            new_id(),
+        crate::notifications::notify_rich(
+            state,
             repo.workspace_id.clone(),
-            Id::new(uid),
+            Id::new(uid.clone()),
             NotificationType::SpecConflict,
             format!("Spec edit conflict: {spec_path}"),
             &tenant_id,
-            now as i64,
-        );
-        notif.body = Some(body.clone());
-        notif.source.entity_type = "spec".to_string();
-        notif.source.entity_id = spec_path.to_string();
-        notif.source.repo_id = Some(repo.id.clone());
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
-        }
+            Some(body.clone()),
+            Some(spec_path.to_string()),
+            Some(repo.id.to_string()),
+            "spec",
+            None,
+        )
+        .await;
     }
 
     (
@@ -1065,12 +1062,12 @@ pub async fn save_spec(
     let mut mr = MergeRequest::new(
         mr_id.clone(),
         repo_id_typed.clone(),
+        repo.workspace_id.clone(),
         format!("Spec edit: {}", req.spec_path),
         branch_name.clone(),
         repo.default_branch.clone(),
         now,
     );
-    mr.workspace_id = repo.workspace_id.clone();
     mr.author_agent_id = Some(caller_id.clone());
 
     state
@@ -1141,31 +1138,69 @@ pub async fn save_spec(
         })
         .map(|m| m.user_id.clone())
         .collect();
+
+    // Team routing (user-management.md §Team Management — "notify the
+    // platform team"): when the spec's registry manifest names a team in
+    // `human_approvers` (spec ownership, `team:slug`), that team's members
+    // are approval recipients too, resolved from the real team membership.
+    // Best-effort: an unreadable manifest adds no recipients (the
+    // role-based fan-out above already covers the approver-capable roles).
+    if let Some(manifest) = crate::spec_registry::read_manifest(&repo.path, "HEAD").await {
+        // Manifest paths are relative to `specs/` (e.g. "system/owned.md"),
+        // while `spec_path` arrives in the client-facing `specs/...` form —
+        // match both, the same normalization the conflict check above uses.
+        let stripped = req
+            .spec_path
+            .strip_prefix("specs/")
+            .unwrap_or(&req.spec_path)
+            .to_string();
+        let path_matches = |p: &str| p == req.spec_path || p == stripped;
+        if let Some(spec_entry) = manifest.specs.iter().find(|e| path_matches(&e.path)) {
+            if let Some(approval) = spec_entry.approval.as_ref() {
+                for approver in &approval.human_approvers {
+                    if crate::notifications::parse_team_ref(approver).is_some() {
+                        if let Some(team_members) = crate::notifications::resolve_team_members(
+                            state.as_ref(),
+                            &repo.workspace_id,
+                            approver,
+                        )
+                        .await
+                        {
+                            for uid in team_members {
+                                if !recipients.contains(&uid) {
+                                    recipients.push(uid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if recipients.is_empty() {
         // No eligible members — deliver to the system account so the
         // global-admin Inbox still surfaces the pending approval.
         recipients.push(Id::new("system"));
     }
 
+    // Delivery via notify_rich: in-app record + SSE broadcast + channel
+    // fan-out (user-management.md §Delivery Channels) in one path.
     for uid in recipients {
-        let notif_id = new_id();
-        let mut notif = Notification::new(
-            notif_id,
+        crate::notifications::notify_rich(
+            state.as_ref(),
             repo.workspace_id.clone(),
-            uid.clone(),
+            uid,
             NotificationType::SpecApprovalRequested,
             format!("Spec pending approval: {}", req.spec_path),
             &tenant_id,
-            now as i64,
-        );
-        notif.body = Some(notif_body.clone());
-        notif.source.entity_type = "mr".to_string();
-        notif.source.entity_id = mr_id.to_string();
-        notif.source.repo_id = Some(repo.id.clone());
-        // Non-fatal — MR is created even if notification fails.
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(mr_id = %mr_id, user_id = %uid, "Failed to create spec-pending-approval notification: {e}");
-        }
+            Some(notif_body.clone()),
+            Some(mr_id.to_string()),
+            Some(repo.id.to_string()),
+            "mr",
+            None,
+        )
+        .await;
     }
 
     Ok((
@@ -1270,6 +1305,7 @@ mod tests {
     use super::*;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_ports::GitOpsPort as _;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -1527,6 +1563,9 @@ mod tests {
             user_id: Some(Id::new("user-admin")),
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -1554,7 +1593,17 @@ mod tests {
         for uid in ["user-admin", "user-dev"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 100, 0)
+                .list_for_user(
+                    &Id::new(uid),
+                    Some(&ws_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    100,
+                    0,
+                )
                 .await
                 .unwrap();
             let approvals: Vec<_> = notifs
@@ -1579,6 +1628,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                &[],
                 100,
                 0,
             )
@@ -1590,7 +1641,17 @@ mod tests {
         );
         let system_notifs = state
             .notifications
-            .list_for_user(&Id::new("system"), Some(&ws_id), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("system"),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -1818,6 +1879,237 @@ mod tests {
         // SHA should be a valid 40-char hex string
         assert_eq!(sha.len(), 40);
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── End-to-end write-through tests (real Git2OpsAdapter + on-disk repo) ──
+    //
+    // The tests above run against NoopGitOps, proving handler logic (branch
+    // naming, MR bookkeeping, existing-MR matching) but not that the save
+    // actually reaches git. These inject the real git2 adapter and an on-disk
+    // bare repository so the full chain — handler → GitOpsPort → libgit2 —
+    // is exercised: a real `spec-edit/*` branch with the spec content, an
+    // appended commit on re-save, and a direct default-branch commit for
+    // prompts (task-011 acceptance criteria).
+
+    /// Seed a real on-disk bare repo (initial commit on `main`) and register
+    /// it in the given state. Keep the returned TempDir alive for the test.
+    async fn seed_real_git_repo(
+        state: &Arc<AppState>,
+        git: Arc<gyre_adapters::Git2OpsAdapter>,
+        name: &str,
+    ) -> (gyre_domain::Repository, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(format!("{name}.git"));
+        let path_str = path.to_str().unwrap().to_string();
+        git.init_bare(&path_str).await.expect("init_bare");
+        git.create_initial_commit(&path_str, "main")
+            .await
+            .expect("initial commit");
+        let repo = gyre_domain::Repository::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("ws-1"),
+            name,
+            &path_str,
+            0,
+        );
+        state.repos.create(&repo).await.expect("create repo");
+        (repo, dir)
+    }
+
+    async fn post_save(
+        app: &Router,
+        repo_id: &str,
+        uri_suffix: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/{uri_suffix}"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_spec_write_through_creates_real_branch_and_mr() {
+        let git = Arc::new(gyre_adapters::Git2OpsAdapter::new());
+        let state = crate::mem::test_state_with_git_ops(git.clone());
+        let (repo, _dir) = seed_real_git_repo(&state, git.clone(), "spec-e2e").await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = post_save(
+            &app,
+            repo.id.as_str(),
+            "specs/save",
+            serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": "# Vision\n\nReal write-through content.",
+                "message": "e2e spec save",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let branch = json["branch"].as_str().unwrap().to_string();
+        assert!(branch.starts_with("spec-edit/specs-system-vision-"));
+
+        // The branch exists in real git and carries the spec content.
+        assert!(
+            git.branch_exists(&repo.path, &branch).await.unwrap(),
+            "spec-edit branch must exist in the on-disk repo"
+        );
+        let content = git
+            .read_file(&repo.path, &branch, "specs/system/vision.md")
+            .await
+            .unwrap()
+            .expect("spec content must be committed to the feature branch");
+        assert_eq!(content, b"# Vision\n\nReal write-through content.".to_vec());
+
+        // The default branch must NOT carry the change (approval-gated flow:
+        // the spec only lands on main when the MR merges).
+        assert!(
+            git.read_file(&repo.path, "main", "specs/system/vision.md")
+                .await
+                .unwrap()
+                .is_none(),
+            "spec save must not write to the default branch directly"
+        );
+
+        // The MR targets the default branch from the new branch.
+        let mrs = state.merge_requests.list_by_repo(&repo.id).await.unwrap();
+        assert_eq!(mrs.len(), 1);
+        assert_eq!(mrs[0].source_branch, branch);
+        assert_eq!(mrs[0].target_branch, "main");
+        assert_eq!(mrs[0].status, MrStatus::Open);
+    }
+
+    #[tokio::test]
+    async fn save_spec_existing_mr_appends_commit_to_real_branch() {
+        let git = Arc::new(gyre_adapters::Git2OpsAdapter::new());
+        let state = crate::mem::test_state_with_git_ops(git.clone());
+        let (repo, _dir) = seed_real_git_repo(&state, git.clone(), "spec-e2e-append").await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp1 = post_save(
+            &app,
+            repo.id.as_str(),
+            "specs/save",
+            serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": "# Vision v1",
+                "message": "first edit",
+            }),
+        )
+        .await;
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let json1 = body_json(resp1).await;
+        let branch = json1["branch"].as_str().unwrap().to_string();
+        let mr_id = json1["mr_id"].as_str().unwrap().to_string();
+
+        // initial commit + first spec edit
+        let log1 = git.commit_log(&repo.path, &branch, 10).await.unwrap();
+        assert_eq!(log1.len(), 2);
+
+        // Second save for the same spec_path: same MR, appended commit.
+        let resp2 = post_save(
+            &app,
+            repo.id.as_str(),
+            "specs/save",
+            serde_json::json!({
+                "spec_path": "specs/system/vision.md",
+                "content": "# Vision v2",
+                "message": "second edit",
+            }),
+        )
+        .await;
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["branch"].as_str().unwrap(), branch);
+        assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id);
+
+        // Exactly one commit was appended to the SAME branch, which now
+        // carries the new content.
+        let log2 = git.commit_log(&repo.path, &branch, 10).await.unwrap();
+        assert_eq!(log2.len(), 3, "append must add exactly one commit");
+        assert_eq!(log2[0].message, "second edit");
+        let content = git
+            .read_file(&repo.path, &branch, "specs/system/vision.md")
+            .await
+            .unwrap()
+            .expect("spec content must remain on the branch");
+        assert_eq!(content, b"# Vision v2".to_vec());
+
+        // No second MR or branch was created.
+        let mrs = state.merge_requests.list_by_repo(&repo.id).await.unwrap();
+        assert_eq!(mrs.len(), 1);
+        let mut branches: Vec<String> = git
+            .list_branches(&repo.path)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        branches.sort();
+        assert_eq!(branches, vec!["main".to_string(), branch]);
+    }
+
+    #[tokio::test]
+    async fn save_prompt_write_through_commits_to_default_branch() {
+        let git = Arc::new(gyre_adapters::Git2OpsAdapter::new());
+        let state = crate::mem::test_state_with_git_ops(git.clone());
+        let (repo, _dir) = seed_real_git_repo(&state, git.clone(), "prompt-e2e").await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = post_save(
+            &app,
+            repo.id.as_str(),
+            "prompts/save",
+            serde_json::json!({
+                "prompt_path": "specs/prompts/specs-assist.md",
+                "content": "# Updated prompt template",
+                "message": "e2e prompt save",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let sha = json["commit_sha"].as_str().unwrap().to_string();
+
+        // The content is on the DEFAULT branch in real git.
+        let content = git
+            .read_file(&repo.path, "main", "specs/prompts/specs-assist.md")
+            .await
+            .unwrap()
+            .expect("prompt content must be committed to the default branch");
+        assert_eq!(content, b"# Updated prompt template".to_vec());
+
+        // The returned SHA is the real new main tip.
+        let log = git.commit_log(&repo.path, "main", 1).await.unwrap();
+        assert_eq!(log[0].sha, sha);
+        assert_eq!(log[0].message, "e2e prompt save");
+
+        // No feature branch, no MR, no approval notification.
+        let mut branches: Vec<String> = git
+            .list_branches(&repo.path)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        branches.sort();
+        assert_eq!(branches, vec!["main".to_string()]);
+        assert!(state
+            .merge_requests
+            .list_by_repo(&repo.id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2603,6 +2895,9 @@ mod tests {
             user_id: Some(Id::new("user-a")),
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             bearer_token: None,
             deprecated_token_auth: false,
@@ -2633,7 +2928,17 @@ mod tests {
         for uid in ["user-a", "user-b"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws), None, None, None, 100, 0)
+                .list_for_user(
+                    &Id::new(uid),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    100,
+                    0,
+                )
                 .await
                 .unwrap();
             let conflict: Vec<_> = notifs
@@ -2667,6 +2972,314 @@ mod tests {
                 "submitted lines should appear as add ops in the persisted diff"
             );
         }
+    }
+
+    /// user-management.md §Team Management — notification routing ("notify
+    /// the platform team"): a manifest's `team:{slug}` human approvers are
+    /// SpecApprovalRequested recipients, resolved from real team
+    /// membership. The distinguishing recipient is a Viewer team member —
+    /// outside the role-based Admin/Developer/Owner fan-out — so this test
+    /// fails if team routing is dropped, reverted, or stubbed.
+    #[tokio::test]
+    async fn save_spec_notifies_team_members_from_manifest_approvers() {
+        use gyre_domain::{User, Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace + members: an Owner (role-based recipient) and a Viewer
+        // who is on the platform team (team-routed recipient only).
+        let now = 1_700_000_000u64;
+        let ws = Workspace {
+            id: Id::new("ws-team-route"),
+            tenant_id: Id::new("tenant-1"),
+            name: "Team Route WS".to_string(),
+            slug: "team-route-ws".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: now,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut owner = User::new(Id::new("user-tr-owner"), "ext-tr-owner", "tr-owner", now);
+        owner.tenant_id = Some(Id::new("tenant-1"));
+        state.users.create(&owner).await.unwrap();
+        let mut viewer = User::new(Id::new("user-tr-viewer"), "ext-tr-viewer", "tr-viewer", now);
+        viewer.tenant_id = Some(Id::new("tenant-1"));
+        state.users.create(&viewer).await.unwrap();
+
+        for (uid, role) in [
+            ("user-tr-owner", WorkspaceRole::Owner),
+            ("user-tr-viewer", WorkspaceRole::Viewer),
+        ] {
+            let m = WorkspaceMembership::new(
+                Id::new(format!("mem-{uid}")),
+                Id::new(uid),
+                ws.id.clone(),
+                role,
+                Id::new("system"),
+                now,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        // Team + membership through the real team API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-team-route/teams")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "Platform", "lead": "user-tr-owner"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let team = body_json(resp).await;
+        assert_eq!(team["slug"], "platform");
+        let team_id = team["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/ws-team-route/teams/{team_id}/members"
+                    ))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"user_id": "user-tr-viewer"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Repo with a manifest at HEAD naming team:platform as approver.
+        let repo_id = create_repo(&app, "team-route-repo", "ws-team-route").await;
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(repo_id.clone()))
+            .await
+            .unwrap()
+            .expect("repo record");
+
+        let manifest = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/owned.md
+    title: Owned
+    owner: team:platform
+    approval:
+      mode: human_only
+      human_approvers:
+        - team:platform
+"#;
+        commit_to_bare_repo_head(&repo.path, "main", manifest, "owned.md", "# Owned\n");
+
+        state
+            .spec_ledger
+            .save(&ledger_entry("system/owned.md", "sha-x", "ws-team-route"))
+            .await
+            .unwrap();
+
+        let save_body = serde_json::json!({
+            "spec_path": "specs/system/owned.md",
+            "content": "# Owned\n\nEdited.\n",
+            "message": "edit",
+            "base_sha": "sha-x",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The Viewer team member received the approval card — only team
+        // routing can address a Viewer here.
+        let viewer_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-tr-viewer"),
+                Some(&Id::new("ws-team-route")),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            viewer_notifs.iter().any(
+                |n| n.notification_type == gyre_common::NotificationType::SpecApprovalRequested
+            ),
+            "the platform team's Viewer member must receive the SpecApprovalRequested card"
+        );
+
+        // The Owner still receives it through the role-based fan-out (guards
+        // against the notification block silently not running at all).
+        let owner_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-tr-owner"),
+                Some(&Id::new("ws-team-route")),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            owner_notifs.iter().any(
+                |n| n.notification_type == gyre_common::NotificationType::SpecApprovalRequested
+            ),
+            "the workspace Owner must still receive the SpecApprovalRequested card"
+        );
+    }
+
+    /// Commit `specs/manifest.yaml` and `specs/system/<spec_file>` to the
+    /// HEAD branch of a bare git repo (plumbing only — no worktree), so
+    /// `read_manifest(repo_path, "HEAD")` resolves in tests.
+    ///
+    /// The API-created repo record points at a path that `NoopGitOps`
+    /// (test_state's git ops) never initialized on disk, so the bare repo
+    /// is created here — without it both this plumbing and the save flow's
+    /// `read_manifest` would fail against a nonexistent directory.
+    fn commit_to_bare_repo_head(
+        repo_path: &str,
+        branch: &str,
+        manifest: &str,
+        spec_file: &str,
+        spec_content: &str,
+    ) {
+        use std::io::Write;
+
+        if !std::path::Path::new(repo_path).exists() {
+            let out = std::process::Command::new("git")
+                .args(["init", "--bare", "-b", branch])
+                .arg(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git init --bare {repo_path} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let hash_object_stdin = |content: &str| -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["hash-object", "-w", "--stdin"])
+                .current_dir(repo_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(content.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let mktree = |entries: &str| -> String {
+            let mut child = std::process::Command::new("git")
+                .args(["mktree"])
+                .current_dir(repo_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(entries.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "git mktree failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        let manifest_blob = hash_object_stdin(manifest);
+        let spec_blob = hash_object_stdin(spec_content);
+        let system_tree = mktree(&format!("100644 blob {spec_blob}\t{spec_file}"));
+        let specs_tree = mktree(&format!(
+            "100644 blob {manifest_blob}\tmanifest.yaml\n040000 tree {system_tree}\tsystem"
+        ));
+        let root_tree = mktree(&format!("040000 tree {specs_tree}\tspecs"));
+        // `git commit-tree` needs an author identity; the test environment
+        // has no global git config, so pass one explicitly (same identity
+        // `make_manifest_repo`-style tests set via local repo config).
+        let commit = {
+            let out = std::process::Command::new("git")
+                .args(["commit-tree", &root_tree, "-m", "manifest"])
+                .env("GIT_AUTHOR_NAME", "Gyre Test")
+                .env("GIT_AUTHOR_EMAIL", "test@gyre.dev")
+                .env("GIT_COMMITTER_NAME", "Gyre Test")
+                .env("GIT_COMMITTER_EMAIL", "test@gyre.dev")
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git commit-tree failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["update-ref", &format!("refs/heads/{branch}"), &commit]);
     }
 
     // ── POST /workspaces/:id/meta-specs/assist (§9 State 1 chat) ──────────

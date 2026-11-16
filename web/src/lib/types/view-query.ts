@@ -58,6 +58,8 @@ export interface ScopeConcept {
   expand_depth?: number;
   /** "incoming" | "outgoing" | "both". Default: "both". */
   expand_direction?: string;
+  /** Seed matching mode: "exact" (default — each seed names one node) or "substring" (case-insensitive substring seeding all matches). */
+  seed_match?: string;
 }
 
 /** Discriminated union of all scope types. */

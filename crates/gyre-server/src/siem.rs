@@ -186,7 +186,10 @@ pub fn format_cef(event: &AuditEvent) -> String {
         gyre_domain::AuditEventType::AgentSpawned => 3,
         gyre_domain::AuditEventType::AgentCompleted => 3,
         gyre_domain::AuditEventType::AgentHeartbeat => 3,
-        gyre_domain::AuditEventType::Custom(_) => 3,
+        gyre_domain::AuditEventType::Custom(_)
+        | gyre_domain::AuditEventType::TrustChange
+        | gyre_domain::AuditEventType::GateOverride
+        | gyre_domain::AuditEventType::MetaSpecPublish => 3,
     };
     let event_type = event.event_type.as_str();
     let mut extensions = format!(
