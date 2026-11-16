@@ -83,15 +83,15 @@ async fn seed(s: &SqliteStorage, tag: &str, tenant: &Id) -> TenantIds {
     agent.workspace_id = ids.ws.clone();
     AgentRepository::create(s, &agent).await.unwrap();
 
-    let mut mr = MergeRequest::new(
+    let mr = MergeRequest::new(
         ids.mr.clone(),
         ids.repo.clone(),
+        ids.ws.clone(),
         format!("mr {tag}"),
         format!("feature/{tag}"),
         "main",
         1000,
     );
-    mr.workspace_id = ids.ws.clone();
     MergeRequestRepository::create(s, &mr).await.unwrap();
 
     ids
@@ -231,7 +231,15 @@ async fn create_under_tenant_a_is_invisible_to_a_default_scoped_handle() {
     WorkspaceRepository::create(&sa, &ws).await.unwrap();
     let repo = Repository::new(Id::new("repo-x"), Id::new("ws-x"), "x", "/x", 1000);
     RepoRepository::create(&sa, &repo).await.unwrap();
-    let mr = MergeRequest::new(Id::new("mr-x"), Id::new("repo-x"), "x", "b", "main", 1000);
+    let mr = MergeRequest::new(
+        Id::new("mr-x"),
+        Id::new("repo-x"),
+        Id::new("ws-x"),
+        "x",
+        "b",
+        "main",
+        1000,
+    );
     MergeRequestRepository::create(&sa, &mr).await.unwrap();
 
     // Same tenant via a fresh handle: must see it.
