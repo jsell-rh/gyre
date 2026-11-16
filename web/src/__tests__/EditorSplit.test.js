@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, screen, waitFor } from '@testing-library/svelte';
+import { render, fireEvent, screen, waitFor, within } from '@testing-library/svelte';
 import EditorSplit from '../lib/EditorSplit.svelte';
 
 // Mock layout-engines so ArchPreviewCanvas renders without ELK
@@ -956,5 +956,127 @@ describe('EditorSplit', () => {
     await fireEvent.click(screen.getByTestId('dismiss-suggestion'));
     await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
     expect(screen.getByTestId('editor-split-textarea').value).toBe(before);
+  });
+
+  it('renders the partial explanation progressively while the SSE stream is open (§3 step 2)', async () => {
+    const { api } = await import('../lib/api.js');
+    const enc = (s) => new TextEncoder().encode(s);
+    // Gate the second read so the intermediate streaming state is
+    // observable: the partial event is delivered, the complete event is
+    // held back until the test releases it.
+    let releaseComplete;
+    const gate = new Promise((resolve) => { releaseComplete = resolve; });
+    let reads = 0;
+    api.specsAssist.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: () => {
+            reads += 1;
+            if (reads === 1) {
+              return Promise.resolve({
+                value: enc('event: partial\ndata: {"text":"Adding error handling."}\n\n'),
+                done: false,
+              });
+            }
+            if (reads === 2) {
+              return gate.then(() => ({
+                value: enc('event: complete\ndata: {"diff":[{"op":"add","path":"## Existing","content":"## Error Handling"}],"explanation":"Adding error handling."}\n\n'),
+                done: false,
+              }));
+            }
+            return Promise.resolve({ value: undefined, done: true });
+          },
+        }),
+      },
+    });
+    render(EditorSplit, {
+      props: { content: '# Auth\n\n## Existing\nbody\n', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    // While the stream is open the partial explanation renders progressively
+    // and the input is in its loading (disabled) state.
+    await waitFor(() => {
+      expect(screen.getByTestId('llm-streaming').textContent).toContain('Adding error handling.');
+    });
+    expect(screen.getByTestId('llm-input').disabled).toBe(true);
+    releaseComplete();
+    // The complete event turns the stream into a suggestion block.
+    await screen.findByTestId('llm-suggestion');
+    expect(screen.queryByTestId('llm-streaming')).toBeNull();
+    expect(screen.getByTestId('llm-input').disabled).toBe(false);
+  });
+
+  it('multiple suggestions coexist as separate blocks; dismissing one keeps the others (§3)', async () => {
+    const { api } = await import('../lib/api.js');
+    api.specsAssist
+      .mockResolvedValueOnce(sseResponse([
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Error Handling' }],
+          explanation: 'First suggestion.',
+        }],
+      ]))
+      .mockResolvedValueOnce(sseResponse([
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Timeouts' }],
+          explanation: 'Second suggestion.',
+        }],
+      ]));
+    render(EditorSplit, {
+      props: { content: '# Auth\n\n## Existing\nbody\n', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    await screen.findByTestId('llm-suggestion');
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add timeouts' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    // Two requests → two coexisting inline diff blocks, not one replacing
+    // the other (§3 "Multiple suggestions... Each appears as a separate
+    // inline diff block").
+    await waitFor(() => expect(screen.getAllByTestId('llm-suggestion').length).toBe(2));
+    // Dismiss only the first block — the second survives untouched.
+    const blocks = screen.getAllByTestId('llm-suggestion');
+    await fireEvent.click(within(blocks[0]).getByTestId('dismiss-suggestion'));
+    await waitFor(() => expect(screen.getAllByTestId('llm-suggestion').length).toBe(1));
+    expect(screen.getByTestId('llm-suggestion').textContent).toContain('Timeouts');
+    // Dismiss never touches the editor content.
+    expect(screen.getByTestId('editor-split-textarea').value).toBe('# Auth\n\n## Existing\nbody\n');
+  });
+
+  it('accepting one of several suggestions leaves the others curatable (§3)', async () => {
+    const { api } = await import('../lib/api.js');
+    api.specsAssist
+      .mockResolvedValueOnce(sseResponse([
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Error Handling' }],
+          explanation: 'First suggestion.',
+        }],
+      ]))
+      .mockResolvedValueOnce(sseResponse([
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Timeouts' }],
+          explanation: 'Second suggestion.',
+        }],
+      ]));
+    render(EditorSplit, {
+      props: { content: '# Auth\n\n## Existing\nbody\n', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    await screen.findByTestId('llm-suggestion');
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add timeouts' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    await waitFor(() => expect(screen.getAllByTestId('llm-suggestion').length).toBe(2));
+    // Accept the first block: its diff is applied in-memory and only that
+    // block is consumed.
+    const blocks = screen.getAllByTestId('llm-suggestion');
+    await fireEvent.click(within(blocks[0]).getByTestId('accept-suggestion'));
+    await waitFor(() => expect(screen.getAllByTestId('llm-suggestion').length).toBe(1));
+    const ta = screen.getByTestId('editor-split-textarea');
+    expect(ta.value).toContain('## Error Handling');
+    expect(ta.value).not.toContain('## Timeouts');
+    expect(api.specsSave).not.toHaveBeenCalled();
   });
 });

@@ -1,12 +1,15 @@
 <script>
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import ConcurrentEditBanner from './ConcurrentEditBanner.svelte';
+  import SpecChatInput from './SpecChatInput.svelte';
   import SpecConflictDialog from './SpecConflictDialog.svelte';
   import SpecDiffView from './SpecDiffView.svelte';
+  import SpecSuggestion from './SpecSuggestion.svelte';
   import { api } from './api.js';
   import { toastError, toastSuccess, toastInfo } from './toast.svelte.js';
   import { t } from 'svelte-i18n';
   import { lineDiff, diffSummary } from './lineDiff.js';
+  import { applyDiffOps, streamAssist, suggestionText } from './specAssist.js';
 
   /**
    * EditorSplit — full-width editor + architecture preview split layout
@@ -538,21 +541,21 @@
     }
   }
 
-  // ── LLM chat ───────────────────────────────────────────────────────────────
-  let llmInstruction = $state('');
+  // ── LLM chat (§3 LLM-Assisted Spec Editing) ────────────────────────────────
   let llmStreaming = $state(false);
   let llmExplanation = $state('');
-  let llmSuggestion = $state(null); // { diff: [...], explanation: string } | null
+  // Multiple suggestions can be requested (§3 "Multiple suggestions..."):
+  // every completed assist request appends one block; the human curates
+  // them — the LLM never writes directly.
+  let llmSuggestions = $state([]); // [{ id, diff: [...], explanation }]
+  let suggestionSeq = 0;
   let saving = $state(false);
 
-  async function sendLlmInstruction() {
-    if (!llmInstruction.trim() || llmStreaming) return;
+  async function sendLlmInstruction(instruction) {
+    if (!instruction || llmStreaming) return;
     if (!llmChatEnabled) return;
-    const instruction = llmInstruction.trim();
-    llmInstruction = '';
     llmStreaming = true;
     llmExplanation = '';
-    llmSuggestion = null;
 
     try {
       // Repo context: repo-scoped specs/assist. §9 meta-spec context
@@ -570,53 +573,24 @@
             draft_content: content || undefined,
             meta_spec_id: specPath || undefined,
           });
-      if (!resp.ok) throw new Error(`LLM request failed: ${resp.status}`);
-
-      const reader = resp.body?.getReader();
-      if (!reader) throw new Error('No response body');
-      const decoder = new TextDecoder();
-      let buf = '';
-      let done = false;
-
-      while (!done) {
-        const { value, done: streamDone } = await reader.read();
-        done = streamDone;
-        if (value) {
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop() ?? '';
-          let currentEvent = '';
-          for (const line of lines) {
-            // Track the SSE event type from `event:` lines (server format:
-            // `event: partial\ndata: {...}\n\n` — see specs_assist.rs).
-            if (line.startsWith('event:')) {
-              currentEvent = line.slice(6).trim();
-              continue;
-            }
-            if (!line.startsWith('data: ') && !line.startsWith('data:')) continue;
-            const raw = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
-            if (raw === '[DONE]') { done = true; break; }
-            try {
-              const parsed = JSON.parse(raw);
-              const evtType = parsed.event ?? parsed.type ?? currentEvent;
-              if (evtType === 'partial' || (!evtType && parsed.text != null)) {
-                llmExplanation += parsed.text ?? parsed.explanation ?? '';
-              } else if (evtType === 'complete') {
-                llmSuggestion = {
-                  diff: parsed.diff ?? [],
-                  explanation: parsed.explanation ?? llmExplanation,
-                };
-                done = true; break;
-              } else if (evtType === 'error') {
-                throw new Error(parsed.error ?? parsed.message ?? 'LLM error');
-              }
-            } catch (pe) {
-              if (pe.message && !pe.message.startsWith('Unexpected token')) throw pe;
-            }
-            currentEvent = '';
-          }
-        }
-      }
+      // Shared SSE consumer (specAssist.js): `partial` events stream the
+      // explanation progressively; `complete` carries the suggestion diff;
+      // `error` throws. A truncated stream must never masquerade as done.
+      await streamAssist(resp, {
+        onPartial: (text) => {
+          llmExplanation += text;
+        },
+        onComplete: ({ diff, explanation }) => {
+          llmSuggestions = [
+            ...llmSuggestions,
+            {
+              id: `suggestion-${++suggestionSeq}`,
+              diff,
+              explanation: explanation || llmExplanation,
+            },
+          ];
+        },
+      });
     } catch (e) {
       toastError($t('editor_split.llm_assist_failed', { values: { error: e.message } }));
     } finally {
@@ -625,65 +599,39 @@
   }
 
   /**
-   * Apply the LLM's diff ops to the editor content (in-memory only — the
-   * human must still Save; ui-layout.md §3 step 4).
+   * Accept (§3 step 4): apply this suggestion's diff ops to the editor
+   * content — in-memory only, the human must still Save. Shared
+   * `applyDiffOps` (specAssist.js) resolves header paths with the
+   * "L15-L22" line-range fallback.
    */
-  function applyDiffOps(c, diff) {
-    let out = c;
-    for (const op of diff ?? []) {
-      if (op.op === 'add') {
-        const idx = out.indexOf(op.path);
-        if (idx !== -1) {
-          const lineEnd = out.indexOf('\n', idx + op.path.length);
-          const insertAt = lineEnd !== -1 ? lineEnd + 1 : out.length;
-          out = out.slice(0, insertAt) + op.content + '\n' + out.slice(insertAt);
-        } else {
-          out += '\n' + op.content;
-        }
-      } else if (op.op === 'replace') {
-        const idx = out.indexOf(op.path);
-        if (idx !== -1) {
-          const end = findSectionEnd(out, idx + op.path.length);
-          out = out.slice(0, idx) + op.path + '\n' + op.content + out.slice(end);
-        }
-      } else if (op.op === 'remove') {
-        const idx = out.indexOf(op.path);
-        if (idx !== -1) {
-          const end = findSectionEnd(out, idx + op.path.length);
-          out = out.slice(0, idx) + out.slice(end);
-        }
-      }
-    }
-    return out;
-  }
-
-  function acceptSuggestion() {
-    if (!llmSuggestion) return;
-    const c = applyDiffOps(content, llmSuggestion.diff);
+  function acceptSuggestion(suggestion) {
+    const c = applyDiffOps(content, suggestion.diff);
     content = c;
     onChange?.(c);
-    llmSuggestion = null;
+    removeSuggestion(suggestion);
   }
 
-  // Edit: copy the suggested text into the editor for manual refinement
-  // (ui-layout.md §3 LLM-Assisted Spec Editing step 5).
-  function editSuggestion() {
-    if (!llmSuggestion) return;
-    if (llmSuggestion.diff?.length) {
-      const c = content + '\n\n' + llmSuggestion.diff.map((d) => d.content).filter(Boolean).join('\n\n');
+  /**
+   * Edit (§3 step 5): copy the suggested text into the editor for manual
+   * refinement.
+   */
+  function editSuggestion(suggestion) {
+    const text = suggestionText(suggestion);
+    if (text) {
+      const c = content + '\n\n' + text;
       content = c;
       onChange?.(c);
     }
-    llmSuggestion = null;
+    removeSuggestion(suggestion);
   }
 
-  function dismissSuggestion() { llmSuggestion = null; }
+  /** Dismiss (§3 step 6): remove the suggestion block. */
+  function dismissSuggestion(suggestion) {
+    removeSuggestion(suggestion);
+  }
 
-  function findSectionEnd(c, from) {
-    const rest = c.slice(from);
-    const match = rest.match(/\n(#{1,6} )/);
-    if (match?.index !== undefined) return from + match.index + 1;
-    return c.length;
+  function removeSuggestion(suggestion) {
+    llmSuggestions = llmSuggestions.filter((s) => s.id !== suggestion.id);
   }
 
   async function saveSpec({ overwrite = false } = {}) {
@@ -932,86 +880,34 @@
         ></textarea>
       {/if}
 
-      {#if llmSuggestion}
-        <div class="suggestion-block" role="region" aria-label={$t('editor_split.llm_suggestion')} data-testid="llm-suggestion">
-          <div class="suggestion-hdr">
-            <span class="suggestion-lbl">{$t('editor_split.suggested_change')}</span>
-            <button class="dismiss-btn" onclick={dismissSuggestion} aria-label={$t('editor_split.dismiss_suggestion')}>✕</button>
-          </div>
-          {#if llmSuggestion.explanation}
-            <p class="suggestion-expl">{llmSuggestion.explanation}</p>
-          {/if}
-          {#if llmSuggestion.diff?.length}
-            <div class="suggestion-diff">
-              {#each llmSuggestion.diff as op}
-                <div class="diff-op diff-op-{op.op}">
-                  <span class="diff-badge">{op.op}</span>
-                  <span class="diff-path">{op.path}</span>
-                  {#if op.content}
-                    <pre class="diff-content">{op.content}</pre>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-          {/if}
-          <div class="suggestion-btns">
-            <button class="accept-btn" onclick={acceptSuggestion} data-testid="accept-suggestion">{$t('editor_split.accept')}</button>
-            {#if llmSuggestion.diff?.length}
-              <button class="dismiss-btn-sm" onclick={editSuggestion} data-testid="edit-suggestion">{$t('editor_split.edit')}</button>
-            {/if}
-            <button class="dismiss-btn-sm" onclick={dismissSuggestion} data-testid="dismiss-suggestion">{$t('common.dismiss')}</button>
-          </div>
-        </div>
-      {/if}
+      <!-- Each suggestion renders as its own inline "Suggested Change"
+           diff block (§3 "Multiple suggestions... Each appears as a separate
+           inline diff block") with the Accept/Edit/Dismiss curation actions.
+           Accept applies in-memory only; the human saves explicitly. -->
+      {#each llmSuggestions as suggestion (suggestion.id)}
+        <SpecSuggestion
+          {suggestion}
+          onaccept={() => acceptSuggestion(suggestion)}
+          onedit={() => editSuggestion(suggestion)}
+          ondismiss={() => dismissSuggestion(suggestion)}
+        />
+      {/each}
 
-      {#if llmStreaming && llmExplanation}
-        <div class="llm-streaming" aria-live="polite">
-          <span class="streaming-lbl">{$t('editor_split.thinking')}</span>
-          <p class="streaming-txt">{llmExplanation}<span class="blink-cursor" aria-hidden="true"></span></p>
-        </div>
-      {/if}
-
-      <div class="llm-input-area">
-        <div class="recipient-line">
-          {$t('editor_split.edit_label')} {context === 'meta-spec' ? $t('editor_split.meta_spec') : $t('editor_split.spec')}{specPath ? `: "${specPath}" ▸` : ' ▸'}
-        </div>
-        <div class="llm-row">
-          <textarea
-            class="llm-textarea"
-            bind:value={llmInstruction}
-            placeholder={$t('editor_split.llm_placeholder')}
-            rows="2"
-            disabled={llmStreaming || !llmChatEnabled}
-            onkeydown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLlmInstruction(); } }}
-            aria-label={$t('editor_split.llm_instruction')}
-            data-testid="llm-input"
-          ></textarea>
-          <button
-            class="llm-send"
-            onclick={sendLlmInstruction}
-            disabled={!llmInstruction.trim() || llmStreaming || !llmChatEnabled}
-            aria-label={$t('editor_split.send_to_llm')}
-            aria-busy={llmStreaming}
-            data-testid="llm-send-btn"
-          >
-            {#if llmStreaming}
-              <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-              </svg>
-            {:else}
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-              </svg>
-            {/if}
-            <span class="sr-only">{$t('editor_split.send')}</span>
-          </button>
-        </div>
-        {#if !llmChatEnabled}
-          <p class="llm-hint warn">{$t('editor_split.llm_requires_repo')}</p>
-        {:else}
-          <p class="llm-hint">{$t('editor_split.llm_hint')}</p>
-        {/if}
-      </div>
+      <!-- Shared §3 chat input: "Edit spec: ..." recipient indicator,
+           progressive `partial` explanation rendering, loading state. -->
+      <SpecChatInput
+        recipient={`${$t('editor_split.edit_label')} ${context === 'meta-spec' ? $t('editor_split.meta_spec') : $t('editor_split.spec')}${specPath ? `: "${specPath}" ▸` : ' ▸'}`}
+        enabled={llmChatEnabled}
+        streaming={llmStreaming}
+        streamingText={llmExplanation}
+        placeholder={$t('editor_split.llm_placeholder')}
+        instructionAria={$t('editor_split.llm_instruction')}
+        sendAria={$t('editor_split.send_to_llm')}
+        thinking={$t('editor_split.thinking')}
+        hint={llmChatEnabled ? $t('editor_split.llm_hint') : null}
+        warnHint={llmChatEnabled ? null : $t('editor_split.llm_requires_repo')}
+        onsubmit={sendLlmInstruction}
+      />
     </div>
 
     <!-- Divider -->
@@ -1443,117 +1339,9 @@
   .meta-spec-path { font-family: var(--font-mono, monospace); }
   .meta-spec-state { color: var(--color-text-secondary); }
 
-  /* LLM suggestion block */
-  .suggestion-block {
-    margin: var(--space-2) var(--space-3);
-    border: 1px solid var(--color-primary);
-    border-radius: var(--radius);
-    background: color-mix(in srgb, var(--color-primary) 5%, transparent);
-  }
-
-  .suggestion-hdr {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-2) var(--space-3);
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
-  }
-
-  .suggestion-lbl {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .suggestion-expl {
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    margin: 0;
-    line-height: 1.5;
-  }
-
-  .suggestion-diff {
-    padding: 0 var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .diff-op {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    flex-wrap: wrap;
-  }
-
-  .diff-badge {
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
-    font-size: 10px;
-    text-transform: uppercase;
-    font-weight: 600;
-    flex-shrink: 0;
-  }
-
-  .diff-op-add .diff-badge { background: color-mix(in srgb, var(--color-success, #2e9e5b) 20%, transparent); color: var(--color-success, #2e9e5b); }
-  .diff-op-remove .diff-badge { background: color-mix(in srgb, var(--color-danger, #cc3340) 20%, transparent); color: var(--color-danger, #cc3340); }
-  .diff-op-replace .diff-badge { background: color-mix(in srgb, var(--color-warning) 20%, transparent); color: var(--color-warning); }
-
-  .diff-path {
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .diff-content {
-    margin: 0;
-    flex: 1;
-    min-width: 0;
-    white-space: pre-wrap;
-    color: var(--color-text);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--color-surface-elevated);
-    border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-2);
-  }
-
-  .suggestion-btns {
-    display: flex;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .accept-btn {
-    padding: var(--space-1) var(--space-3);
-    background: var(--color-primary);
-    border: none;
-    border-radius: var(--radius-sm);
-    color: var(--color-text-inverse);
-    cursor: pointer;
-    font-size: var(--text-xs);
-    font-family: var(--font-body);
-  }
-
-  .accept-btn:hover { opacity: 0.9; }
-  .accept-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
-  .dismiss-btn {
-    background: none;
-    border: none;
-    color: var(--color-text-muted);
-    cursor: pointer;
-    padding: 0 var(--space-1);
-    font-size: var(--text-xs);
-  }
-
-  .dismiss-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
+  /* Suggestion / LLM-chat visuals live in the shared SpecSuggestion and
+     SpecChatInput components (task-185). Only the small ghost button used
+     by the preview progress list stays here. */
   .dismiss-btn-sm {
     padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated);
@@ -1566,127 +1354,6 @@
   }
 
   .dismiss-btn-sm:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
-  /* LLM streaming */
-  .llm-streaming {
-    margin: var(--space-2) var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-  }
-
-  .streaming-lbl {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-weight: 500;
-    display: block;
-    margin-bottom: var(--space-1);
-  }
-
-  .streaming-txt {
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    margin: 0;
-    line-height: 1.5;
-    white-space: pre-wrap;
-  }
-
-  .blink-cursor {
-    display: inline-block;
-    width: 2px;
-    height: 1em;
-    background: var(--color-primary);
-    margin-left: 2px;
-    vertical-align: text-bottom;
-    animation: blink 1s step-end infinite;
-  }
-
-  @keyframes blink {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0; }
-  }
-
-  /* LLM input */
-  .llm-input-area {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    padding: var(--space-3) var(--space-4);
-    border-top: 1px solid var(--color-border);
-    flex-shrink: 0;
-  }
-
-  .recipient-line {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .llm-row {
-    display: flex;
-    gap: var(--space-2);
-    align-items: flex-end;
-  }
-
-  .llm-textarea {
-    flex: 1;
-    min-height: 44px;
-    max-height: 90px;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    resize: vertical;
-    box-sizing: border-box;
-    transition: border-color var(--transition-fast);
-  }
-
-  .llm-textarea:focus:not(:focus-visible) { outline: none; }
-  .llm-textarea:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-    border-color: var(--color-focus);
-  }
-
-  .llm-textarea:disabled { opacity: 0.6; cursor: not-allowed; }
-
-  .llm-send {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 34px;
-    height: 34px;
-    padding: 0;
-    background: var(--color-primary);
-    border: none;
-    border-radius: var(--radius);
-    color: var(--color-text-inverse);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background var(--transition-fast);
-  }
-
-  .llm-send:hover:not(:disabled) { background: var(--color-primary-hover); }
-  .llm-send:disabled { opacity: 0.4; cursor: not-allowed; }
-  .llm-send:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-
-  .llm-hint {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    margin: 0;
-  }
-
-  .llm-hint.warn { color: var(--color-warning); }
-
-  .spin { animation: spin 1s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* Right pane */
   .pane-header {
@@ -1895,21 +1562,7 @@
     margin: 0;
   }
 
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border-width: 0;
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .spin { animation: none; }
-    .blink-cursor { animation: none; }
-    .back-btn, .save-btn, .llm-send, .llm-textarea { transition: none; }
+    .back-btn, .save-btn { transition: none; }
   }
 </style>
