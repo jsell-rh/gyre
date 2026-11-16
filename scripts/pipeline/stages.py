@@ -135,6 +135,10 @@ def implement(execution, task):
 
 
 def review(execution, task):
+    from .review_preflight import check
+    deferred = check(execution, task)
+    if deferred:
+        return deferred
     result = execution.cloud_step(task, prompt(execution, task))
     if result.get('agent_exit') != 0 or result.get('stream_exit') != 0:
         from .diagnostics import diagnose

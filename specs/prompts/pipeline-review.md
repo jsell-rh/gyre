@@ -53,3 +53,7 @@ bundle regeneration, generated merge conflicts, or lack of an agent-run build.
 The verifier rebuilds remotely after integration, runs all checks, commits the
 resulting assets, and binds publication to that exact tested tree. Record any
 pure generated-output observation separately; real source defects remain blocking.
+
+The verifier rebuilds web/dist and regenerates specs/coverage/SUMMARY.md from
+clean merged matrices. Review source and matrix statuses for real accuracy;
+a stale generated summary alone is not a production-code repair finding.
