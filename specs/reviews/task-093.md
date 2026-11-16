@@ -82,3 +82,61 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Fixture-repair review — task-093 (round 4)
+
+Trigger: verification attempt `5164edc7` (merge of candidate with base `6082be2f`)
+failed `cargo test --all` with 13 gyre-server test failures. Repair commit:
+`dadd8fa461e46b7b35e7159d1625d47e2d331096` (+ three process commits touching only
+the task file). Candidate: `4fb9dd134a7dfd4d49a9d3075fc58bfc2e0ce922`.
+
+Verdict: **complete**.
+
+What this round checked and found:
+
+- **The repair is test-only.** `dadd8fa4` adds `crate::seed_builtin_meta_specs(&state)`
+  to four fixtures (`chain_state` in signal_chain.rs, `loop_state` in ralph_loop.rs,
+  both chain tests in api/specs.rs) and binds the mcp ReadOnly API-key user to
+  orch_state's tenant `t1`. Additions only — no assertion, production code, or
+  exemption file changed; the three follow-up commits touch only the task file's
+  frontmatter.
+- **Root cause of the 12 chain failures verified in source.** Both spawn cores call
+  `validate_persona` fail-closed (orchestrator.rs:812 workspace tier, :978 repo tier);
+  every failing test's orchestrator spawn routes through them
+  (signal_chain.rs:268/1513/1563, ralph_loop.rs:588, api/specs.rs approve chain).
+  Production satisfies the layer via startup seeding (main.rs:59, present in base and
+  candidate); the fixtures did not, so spawns failed closed — matching every recorded
+  panic ("left: 0, right: 1", "delegation task exists", "repo orchestrator spawned
+  for r-1"). The fix mirrors startup and the already-passing `orch_state` fixture
+  (mcp.rs:9970), whose spawn tests passed the failing run. Seeding breaks no other
+  fixture assertion (the only other meta-spec consumer is the soft
+  `load_persona_prompt` fallback).
+- **Root cause of the 13th failure verified in source.** auth.rs:3777 (task-099 F1,
+  merged from base) fail-closes API-key users without a tenant binding with a
+  plain-text 403; `User::new` leaves `tenant_id: None`, so the old fixture panicked
+  at the JSON parse before the RBAC assertion. The fix binds tenant `t1` — the exact
+  pattern of auth.rs's own passing `api_key_auth_works` test — while roles stay
+  `[ReadOnly]` (tenant binding grants no roles), so the test now exercises the
+  round-2-verified F7 scenario: `gyre_message_send` IS in the `needs_write` gate
+  (mcp.rs:4879), ReadOnly denied with JSON-RPC -32603, nothing persisted.
+- **Independent probes (evidence: /tmp/stage/review-evidence/task-093-round4-fixture-repair.md):**
+  `cargo check -p gyre-server --tests` exit 0 (9m16s); check-arch, check-abac-route-registry,
+  check-mcp-write-tools (7 gated), check-abac-exempt-handlers (85),
+  check-conditional-test-guards, check-rustfmt-diff (9 files clean),
+  check-task-commit-attribution all exit 0; all 16 frontmatter commits verified
+  ancestors of the candidate.
+- **Test execution deferred to the verifier** (gyre-server test compilation is
+  budget-deferred per the review assignment; no target cache in the review sandbox).
+  The verifier must run: `cargo test -p gyre-server --lib signal_chain::tests`,
+  `api::specs::tests`, `ralph_loop::tests`, `mcp::tests::mcp_message_send`, and
+  `cargo test --all` (the task's final acceptance criterion).
+
+Non-blocking observations: coverage matrix rows for §3 (platform-model.md rows 15-17)
+still read `task-assigned` with pre-implementation audit notes — matrix flipping is
+owned by the controller/coverage stage; `web/dist/` deltas are generated output owned
+by the verifier.
+
+Rounds 1-3's ten findings remain resolved by the same tree-identical production code;
+this round's repair restores test/production parity without weakening anything.
+
+— Verifier, 2026-11-16
