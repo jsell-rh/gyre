@@ -323,6 +323,11 @@ pub struct ReleasePrepareResponse {
     pub sections: Vec<ChangelogSection>,
     /// Merge request opened for the release, if requested.
     pub mr_id: Option<String>,
+    /// Spec registry manifest state embedded in the release metadata
+    /// (spec-registry.md §Supply Chain): ledger statuses, approval chains,
+    /// the manifest version, and spec-to-code binding status — the same
+    /// section `GET /repos/:id/aibom` embeds in the AIBOM.
+    pub spec_registry: crate::aibom_spec_registry::AibomSpecRegistry,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

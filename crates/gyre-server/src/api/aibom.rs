@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::AppState;
 
 use super::error::ApiError;
+use crate::aibom_spec_registry::AibomSpecRegistry;
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
@@ -75,6 +76,10 @@ pub struct AibomResponse {
     pub attested_percentage: f64,
     /// Total attestation chains found for commits in range.
     pub chain_attested_count: usize,
+    /// Spec registry manifest state (spec-registry.md §Supply Chain):
+    /// ledger statuses, approval chains, manifest version, and spec-to-code
+    /// binding status.
+    pub spec_registry: AibomSpecRegistry,
 }
 
 /// Resolve attestation level: prefer the stored value (M14.2), fall back to heuristic.
@@ -125,11 +130,19 @@ pub async fn get_aibom(
     }
 
     // Verify the repo exists.
-    state
+    let repo = state
         .repos
         .find_by_id(&Id::new(&repo_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Spec registry manifest state (spec-registry.md §Supply Chain): every
+    // ledger status, the approval chain for approved specs, the manifest
+    // version, and spec-to-code binding status. Storage failures propagate —
+    // an AIBOM must not silently under-report spec provenance.
+    let spec_registry = crate::aibom_spec_registry::build_spec_registry_section(&state, &repo)
+        .await
+        .map_err(ApiError::Internal)?;
 
     // Resolve timestamp bounds from from/to SHAs.
     let from_ts = if let Some(ref sha) = params.from {
@@ -289,7 +302,7 @@ pub async fn get_aibom(
     };
 
     Ok(Json(AibomResponse {
-        aibom_version: "1.1".to_string(),
+        aibom_version: "1.2".to_string(),
         repo_id: repo_id.clone(),
         range: AibomRange {
             from: params.from,
@@ -300,6 +313,7 @@ pub async fn get_aibom(
         total_commits: total,
         attested_percentage,
         chain_attested_count,
+        spec_registry,
     }))
 }
 
@@ -358,7 +372,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["aibom_version"], "1.1");
+        assert_eq!(json["aibom_version"], "1.2");
         assert_eq!(json["total_commits"], 0);
         assert_eq!(json["attested_percentage"], 0.0);
         assert!(json["agents"].as_array().unwrap().is_empty());
@@ -467,5 +481,128 @@ mod tests {
         let agents = json["agents"].as_array().unwrap();
         assert_eq!(agents[0]["model"], "claude-opus-4");
         assert_eq!(agents[0]["attestation_level"], "server-verified");
+    }
+
+    #[tokio::test]
+    async fn aibom_includes_spec_registry_section() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+
+        // Seed the spec ledger for this repo: one approved spec with an
+        // approval event, one pending spec.
+        let sha = format!("{:040}", 7);
+        let entry = |path: &str, status: gyre_domain::ApprovalStatus| {
+            gyre_domain::SpecLedgerEntry {
+                path: path.to_string(),
+                title: format!("Spec {path}"),
+                owner: "owner-1".to_string(),
+                kind: None,
+                current_sha: sha.clone(),
+                approval_mode: "human_and_agent".to_string(),
+                approval_status: status,
+                linked_tasks: Vec::new(),
+                linked_mrs: Vec::new(),
+                drift_status: "clean".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                repo_id: Some(repo_id.clone()),
+                workspace_id: None,
+            }
+        };
+        state
+            .spec_ledger
+            .save(&entry("system/auth.md", gyre_domain::ApprovalStatus::Approved))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&entry("system/wip.md", gyre_domain::ApprovalStatus::Pending))
+            .await
+            .unwrap();
+        state
+            .spec_approval_history
+            .record(&gyre_domain::SpecApprovalEvent {
+                id: "evt-1".to_string(),
+                spec_path: "system/auth.md".to_string(),
+                spec_sha: sha.clone(),
+                approver_type: "human".to_string(),
+                approver_id: "user:alice".to_string(),
+                persona: None,
+                attestation_level: None,
+                stack_hash: None,
+                approved_at: 1711324800,
+                revoked_at: None,
+                revoked_by: None,
+                revocation_reason: None,
+            })
+            .await
+            .unwrap();
+
+        // Seed a merged MR with a spec_ref that WAS approved at merge time.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-aibom-1"),
+            Id::new(&repo_id),
+            Id::new("ws-1"),
+            "feat: auth",
+            "feat/auth",
+            "main",
+            10,
+        );
+        mr.spec_ref = Some(format!("system/auth.md@{sha}"));
+        state.merge_requests.create(&mr).await.unwrap();
+        let appr = gyre_domain::SpecApproval::new(
+            Id::new("appr-aibom-1"),
+            "system/auth.md",
+            &sha,
+            "user:alice",
+        );
+        state.spec_approvals.create(&appr).await.unwrap();
+        state
+            .spec_approvals
+            .approve(&Id::new("appr-aibom-1"), 900)
+            .await
+            .expect("approve transition");
+        mr.transition_status(gyre_domain::MrStatus::Approved).unwrap();
+        mr.transition_status(gyre_domain::MrStatus::Merged).unwrap();
+        mr.updated_at = 1000;
+        state.merge_requests.update(&mr).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/aibom"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        // The spec_registry section carries the manifest state.
+        let sr = &json["spec_registry"];
+        assert_eq!(sr["total_specs"], 2);
+        assert_eq!(sr["approved"], 1);
+        assert_eq!(sr["pending"], 1);
+        // No git directory behind the test repo → manifest version absent.
+        assert!(sr["manifest_version"].is_null());
+
+        let specs = sr["specs"].as_array().unwrap();
+        assert_eq!(specs.len(), 2);
+        let auth = specs.iter().find(|s| s["path"] == "system/auth.md").unwrap();
+        assert_eq!(auth["status"], "approved");
+        assert_eq!(auth["approved_at"], 1711324800);
+        assert_eq!(auth["approved_by"], serde_json::json!(["user:alice"]));
+        assert_eq!(auth["approval_chain"][0]["approver_id"], "user:alice");
+        assert_eq!(auth["approval_chain"][0]["approved_at"], 1711324800);
+
+        // Spec-to-code binding: the merged MR's pinned spec was approved
+        // before the merge.
+        let bindings = sr["spec_code_bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0]["mr_id"], "mr-aibom-1");
+        assert_eq!(bindings[0]["approved_at_merge_time"], true);
+        assert_eq!(sr["bindings_summary"]["approved_at_merge_time"], 1);
     }
 }

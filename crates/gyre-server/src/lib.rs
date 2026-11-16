@@ -8,6 +8,7 @@ pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
+pub mod aibom_spec_registry;
 pub mod commit_signatures;
 pub(crate) mod constraint_check;
 pub mod container_audit;
