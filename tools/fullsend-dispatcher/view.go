@@ -221,6 +221,11 @@ type historyDone struct {
 	err   error
 }
 type Model struct {
+	decisions                                     []HumanDecision
+	decisionIndex, decisionChoice, decisionScroll int
+	decisionSaving                                bool
+	decisionError                                 string
+
 	configReturn                             string
 	configIndex, configChoice, configCursor  int
 	configEditing, configSaving              bool
@@ -391,6 +396,24 @@ func (m *Model) restoreSelection(key string, issue *Row) {
 }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
+	case decisionsLoaded:
+		if v.err != nil {
+			m.decisionError = v.err.Error()
+		} else {
+			m.decisions = v.rows
+			m.decisionIndex = min(m.decisionIndex, max(0, len(v.rows)-1))
+			m.decisionError = ""
+		}
+	case decisionRecorded:
+		m.decisionSaving = false
+		m.decisionChoice = -1
+		if v.err != nil {
+			m.decisionError = v.err.Error()
+		} else {
+			m.setNotice("Decision recorded. Requirements update queued as " + v.task)
+			return m, m.loadDecisions()
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = v.Width
 		m.height = v.Height
@@ -492,6 +515,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setNotice("Retry requested for " + v.key + ". Starts when eligible and a worker slot is free.")
 		}
 	case tea.KeyMsg:
+		if m.screen == "decisions" && !m.helpOpen {
+			return m.updateDecisions(v)
+		}
 		if m.screen == "configuration" && !m.helpOpen {
 			return m.updateConfiguration(v)
 		}
@@ -730,6 +756,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, func() tea.Msg { return retryDone{row.Key, m.engine.requestRetry(m.ctx, row.Key)} }
 				}
 			}
+		case "D":
+			m.screen = "decisions"
+			m.decisionChoice = -1
+			m.decisionScroll = 0
+			return m, m.loadDecisions()
 		case "d":
 			m.scroll = 0
 			m.screen = "details"
@@ -1082,6 +1113,9 @@ func (m Model) View() string {
 		lines = append(lines, m.scrollIndicator(start, min(len(content), start+count), len(content)), "", m.style("j/k scroll   h / esc / ? close   q detach", "8", false))
 		return m.frame(lines, w, h)
 	}
+	if m.screen == "decisions" {
+		return m.decisionsView(lines, w, h)
+	}
 	if m.screen == "configuration" {
 		return m.configurationView(lines, w, h)
 	}
@@ -1283,7 +1317,7 @@ func (m Model) View() string {
 		if len(rows) > 0 && rows[m.index].Status == "running" {
 			action = "C cancel"
 		}
-		footer := "j/k select  enter logs  " + action + "  / filter  o sort  O reverse  H history  ? help  q detach"
+		footer := "j/k select  enter logs  " + action + "  D decisions  / filter  o sort  O reverse  H history  ? help  q detach"
 		if m.historyIssue != nil {
 			footer = "j/k select  enter logs  / filter  o sort  O reverse  H refresh  h back  ? help"
 		}
