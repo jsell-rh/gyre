@@ -1,6 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, fireEvent, screen, waitFor } from '@testing-library/svelte';
+import { render, fireEvent, screen, waitFor, within } from '@testing-library/svelte';
 import DetailPanel from '../lib/DetailPanel.svelte';
+
+// Toasts render through the app-level Toast component, not the panel —
+// assert on the store calls instead of the DOM.
+vi.mock('../lib/toast.svelte.js', () => ({
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
+  toastWarning: vi.fn(),
+  toastInfo: vi.fn(),
+}));
 
 const mrEntity = {
   type: 'mr',
@@ -581,5 +590,148 @@ describe('DetailPanel — Trace tab span status casing (HSI §3a)', () => {
   it('still renders legacy lowercase error values red', async () => {
     const styles = await waterfallStyles(traceBody('error', 'ok'));
     expect(styles.filter((s) => s.includes('background: var(--color-danger)'))).toHaveLength(1);
+  });
+});
+
+describe('Spec edit tab — LLM-assisted spec editing (ui-layout.md §3)', () => {
+  const specEntityWithRepo = {
+    type: 'spec',
+    id: 'specs/system/auth.md',
+    data: {
+      name: 'auth.md',
+      repo_id: 'repo-abc',
+      title: 'Auth Spec',
+    },
+  };
+
+  const enc = (s) => new TextEncoder().encode(s);
+
+  /** SSE response body from (event, data) pairs — server wire format. */
+  function sseResponse(events) {
+    const text = events.map(([evt, data]) => `event: ${evt}\ndata: ${JSON.stringify(data)}\n\n`).join('');
+    let sent = false;
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: () => {
+            if (sent) return Promise.resolve({ value: undefined, done: true });
+            sent = true;
+            return Promise.resolve({ value: enc(text), done: false });
+          },
+        }),
+      },
+    };
+  }
+
+  const specContent = '# Auth\n\n## Existing\nBody.\n';
+  const suggestionDiff = [
+    { op: 'add', path: '## Existing', content: '## Error Handling\n\nReturn structured errors.' },
+  ];
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function openEditTab(assistEvents, saveResult) {
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes('/specs/assist')) return sseResponse(assistEvents);
+      if (String(url).includes('/specs/save')) {
+        return { ok: true, status: 200, json: async () => saveResult ?? { branch: 'spec-edit/auth-a1b2', mr_id: 'mr-9' } };
+      }
+      return { ok: true, status: 200, json: async () => ({ content: specContent, current_sha: 'sha-1' }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(DetailPanel, { props: { entity: specEntityWithRepo } });
+    await fireEvent.click(screen.getByRole('tab', { name: /edit/i }));
+    // Wait for the spec content to load into the editor
+    await waitFor(() => {
+      expect(screen.getByRole('textbox', { name: /spec editor/i }).value).toContain('# Auth');
+    });
+    return fetchMock;
+  }
+
+  it('shows the "Edit spec" recipient indicator chat input in the edit tab (§3 step 1)', async () => {
+    await openEditTab([]);
+    expect(await screen.findByText('Edit spec: "Auth Spec" ▸')).toBeTruthy();
+    expect(screen.getByTestId('llm-input')).toBeTruthy();
+    expect(screen.getByTestId('llm-send-btn')).toBeTruthy();
+  });
+
+  it('submits the instruction to specs/assist with the spec path and draft content (§3 step 2)', async () => {
+    const fetchMock = await openEditTab([
+      ['partial', { text: 'Adding error handling.' }],
+      ['complete', { diff: suggestionDiff, explanation: 'Adding error handling.' }],
+    ]);
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    const assistCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/specs/assist'));
+    expect(assistCall).toBeTruthy();
+    expect(assistCall[0]).toBe('/api/v1/repos/repo-abc/specs/assist');
+    expect(JSON.parse(assistCall[1].body)).toEqual({
+      spec_path: 'specs/system/auth.md',
+      instruction: 'add error handling',
+      draft_content: specContent,
+    });
+  });
+
+  it('renders the suggestion as an inline diff block with Accept/Edit/Dismiss (§3 step 3)', async () => {
+    await openEditTab([
+      ['complete', { diff: suggestionDiff, explanation: 'Adding error handling.' }],
+    ]);
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    const block = await screen.findByTestId('llm-suggestion');
+    expect(block.textContent).toContain('Error Handling');
+    expect(within(block).getByTestId('accept-suggestion')).toBeTruthy();
+    expect(within(block).getByTestId('edit-suggestion')).toBeTruthy();
+    expect(within(block).getByTestId('dismiss-suggestion')).toBeTruthy();
+  });
+
+  it('Accept applies the diff to the edit-tab content in-memory (§3 step 4)', async () => {
+    await openEditTab([
+      ['complete', { diff: suggestionDiff, explanation: 'Adding error handling.' }],
+    ]);
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    await screen.findByTestId('llm-suggestion');
+    await fireEvent.click(screen.getByTestId('accept-suggestion'));
+    await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
+    const editor = screen.getByRole('textbox', { name: /spec editor/i });
+    expect(editor.value).toContain('## Error Handling');
+    // In-memory only: no save request until the human clicks Save.
+    const saveCalls = global.fetch.mock.calls.filter((c) => String(c[0]).includes('/specs/save'));
+    expect(saveCalls).toHaveLength(0);
+  });
+
+  it('Dismiss removes the suggestion block without touching the editor (§3 step 6)', async () => {
+    await openEditTab([
+      ['complete', { diff: suggestionDiff, explanation: 'Adding error handling.' }],
+    ]);
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    await screen.findByTestId('llm-suggestion');
+    await fireEvent.click(screen.getByTestId('dismiss-suggestion'));
+    await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
+    expect(screen.getByRole('textbox', { name: /spec editor/i }).value).toBe(specContent);
+  });
+
+  it('Save commits via specs/save and reports the created MR (§3 save workflow)', async () => {
+    await openEditTab([]);
+    const saveBtn = await screen.findByRole('button', { name: /save & create mr/i });
+    await fireEvent.click(saveBtn);
+    await waitFor(() => {
+      const saveCall = global.fetch.mock.calls.find((c) => String(c[0]).includes('/specs/save'));
+      expect(saveCall).toBeTruthy();
+      expect(saveCall[0]).toBe('/api/v1/repos/repo-abc/specs/save');
+      const body = JSON.parse(saveCall[1].body);
+      expect(body.spec_path).toBe('specs/system/auth.md');
+      expect(body.content).toBe(specContent);
+      expect(typeof body.message).toBe('string');
+    });
+    // Success surfaces the created MR (toast with the mr_id from the response).
+    const { toastSuccess } = await import('../lib/toast.svelte.js');
+    await waitFor(() => {
+      expect(toastSuccess).toHaveBeenCalledWith(expect.stringContaining('mr-9'));
+    });
   });
 });
