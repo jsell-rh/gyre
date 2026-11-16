@@ -82,7 +82,17 @@ function applyReplace(content, op) {
   if (idx !== -1) {
     // Header found: substitute the section body, keeping the header line.
     const end = findSectionEnd(content, idx + op.path.length);
-    return content.slice(0, idx) + op.path + '\n' + (op.content ?? '') + content.slice(end);
+    const body = op.content ?? '';
+    const tail = content.slice(end);
+    if (tail) {
+      // A next section follows: `end` is the start of its header line (the
+      // newline before it belonged to the replaced section), so emit a
+      // separator — the substituted body must never fuse with the next
+      // header.
+      return content.slice(0, idx) + op.path + '\n' + body + '\n' + tail;
+    }
+    // Last section: preserve the document's trailing newline if it had one.
+    return content.slice(0, idx) + op.path + '\n' + body + (content.endsWith('\n') ? '\n' : '');
   }
   const range = lineRangeSlice(content, op.path);
   if (range) {

@@ -63,7 +63,7 @@
 </script>
 
 {#if streaming}
-  <div class="llm-streaming" aria-live="polite">
+  <div class="llm-streaming" aria-live="polite" data-testid="llm-streaming">
     <span class="streaming-lbl">{thinking}</span>
     {#if streamingText}
       <p class="streaming-txt">{streamingText}<span class="blink-cursor" aria-hidden="true"></span></p>
