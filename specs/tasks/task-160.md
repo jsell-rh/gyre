@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["06b13c0defde8a92f3dfcc1c333774e448e0c77a", "1724c6a3d38c6086c0d01f198783cd860d4a7787", "55a6c1f2bee9a8c856e6576f6d7c91d6d2ce80c9", "8458f699df0b4b075eea35a31c2a3e32107c1884", "d162c56d01c9b742d17fc1626e2095adb0d64a47", "c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["06b13c0defde8a92f3dfcc1c333774e448e0c77a", "1724c6a3d38c6086c0d01f198783cd860d4a7787", "55a6c1f2bee9a8c856e6576f6d7c91d6d2ce80c9", "8458f699df0b4b075eea35a31c2a3e32107c1884", "d162c56d01c9b742d17fc1626e2095adb0d64a47", "c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3", "531f1bcfe1263ffec480597b838b5eb1ac7a1615", "32a42f7e5590b6f700478739a5f690d588cb8c39", "6f74b1a6ea65d3bb8ca2dd22817b2695b9c13087"]
 ---
 
 ## Spec Excerpt
@@ -60,52 +60,90 @@ Read `specs/system/hierarchy-enforcement.md` §2 (Invariant Enforcement), §3 (E
 
 ## Shipped
 
-All three hierarchy-enforcement scripts exist, are executable, carry usage
-comments, and are wired into `.pre-commit-config.yaml` and
-`.github/workflows/ci.yml` (blocking):
+All three hierarchy-enforcement scripts exist, are executable, carry
+usage comments, and are wired into `.pre-commit-config.yaml` and
+`.github/workflows/ci.yml` (blocking, no `|| true`):
 
-- `scripts/check-hierarchy.sh` — awk state machine over every domain `.rs`
-  file; fails on `Option<...>` hierarchy fields and on deletion of a
-  required field (spec §2). Gated via `GYRE_CHECK_HIERARCHY`
+- `scripts/check-hierarchy.sh` — awk state machine over every domain
+  `.rs` file; fails on `Option<...>` hierarchy fields and on deletion of
+  a required field (spec §2). Gated via `GYRE_CHECK_HIERARCHY`
   (enabled by default, `=0` bypasses).
-- `scripts/check-tenant-filter.sh` — POSIX-awk scan of read query methods
-  in `src/sqlite` + `src/postgres`; the tenant-column table set is derived
-  from the migrations; documented `SKIP_LIST` for structurally-isolated
-  adapters (spec §3); tenant-less tables reported as non-failing backlog.
-- `scripts/check-api-auth.sh` — ABAC middleware chain on the api router,
-  per-handler auth extractors on non-ABAC routes, and the
+- `scripts/check-tenant-filter.sh` — POSIX-awk scan of read query
+  methods in `src/sqlite` + `src/postgres`; the tenant-column table set
+  is derived from the migrations; documented `SKIP_LIST` for
+  structurally-isolated or deliberately cross-tenant adapters (spec
+  §3); tenant-less tables reported as non-failing backlog.
+- `scripts/check-api-auth.sh` — ABAC middleware chain on the api
+  router, per-handler auth extractors on non-ABAC routes, and the
   route↔`RouteResourceMapping` cross-reference delegated to the
   frozen-baseline `check-abac-route-registry.sh` (spec §7).
 
-Scoped-emit compile repairs after earlier base merges (commit 55a6c1f2b:
-`AppState::emit_tenant_event` for `emit_tenant_meta_spec_set_updated`;
-commit 1724c6a3d: patrol escalation emits through the scoped
-`emit_event(ws, ...)` and skips-and-logs workspaceless findings) are part
-of the commit list above.
+### Rebase-repair round (this head)
 
-### Verification on this head (contract-restoration round)
+The rebase of the prior attempt onto base `047d6524` left unresolved
+conflict markers in authored source and re-opened tenant-filter
+violations; this round repaired both (commits `531f1bcf`, `32a42f7e`,
+`6f74b1a6`):
 
-The executor restored the assigned task document to its baseline
-(frontmatter only — the production scripts and their 11 attributed
-commits are untouched and reachable from HEAD). This round re-applied the
-ready-for-review state and re-verified the shipped behavior; no
-production code changed:
+- `merge_processor.rs` (4 conflict regions): the merge-time attestation
+  ABAC gate keeps the base side's fail-closed semantics (a
+  workspace/policy store read failure requeues the entry — task-129
+  review round 6) AND the branch side's audit recording (every Ok
+  decision is appended to the policy-decision audit trail via
+  `record_abac_decision`, subject = MR author / merge-processor,
+  resource_id = attestation id — task-077 F5). The internal
+  `record_decision_audit` append was removed so each decision is
+  recorded exactly once; the relocated
+  `merge_attestation_abac_decision_recorded_in_audit_trail` test pins
+  that. Base-era `emit_event` callers (budget, spawn, gate_executor,
+  ws, report_spec_policy_violation) were adapted to the scoped
+  `emit_event(Id)` signature.
+- `notification.rs` `count_unresolved` (sqlite + pg): restored the
+  tenant filter the pre-rebase head had, keeping base's
+  `exclude_types` parameter.
+- `analytics.rs` `query_filtered`/`count_grouped` (sqlite + pg): added
+  the handle's tenant filter (same scope as the sibling reads in those
+  files); the raw-SQL `count_grouped` binds the tenant first (pg
+  spells its `$1` placeholder literally).
+- `scripts/scope-literal-defaults-exemptions.txt`: resolved the
+  conflict markers (both sides agreed on 0 entries).
+- `check-tenant-filter.sh` SKIP_LIST: documented `budget_call.rs`
+  (list_since is the deliberately cross-tenant rolling-24h resync) and
+  `invitation.rs` (domain-tenant rows, handler-layer scope checks,
+  pre-auth token redemption) with per-file rationales.
 
-- All three scripts pass fresh on this head: `check-hierarchy.sh` exit 0,
-  `check-tenant-filter.sh` exit 0 (118 read methods on tenant-column
-  tables checked), `check-api-auth.sh` exit 0
-  (`/tmp/stage/review-evidence/check-{hierarchy,tenant-filter,api-auth}.log`).
+### Verification on this head
+
+Fresh runs at this head (logs under `/tmp/stage/review-evidence/`):
+
+- `bash scripts/check-hierarchy.sh` → exit 0.
 - Negative test: injecting `workspace_id: Option<Id>` into the domain
-  `Task` struct makes `check-hierarchy.sh` exit 1 with the §2 message;
-  restored, exit 0, worktree clean
+  `Task` struct makes it exit 1 with the §2 message; restored, exit 0
   (`check-hierarchy-negative.log`).
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exit 0 on this head
-  (`cargo-check-server.txt`).
-- `cargo test -p gyre-domain`: 474 + 8 passed, 0 failed
-  (`domain-tests.txt`).
+- `bash scripts/check-tenant-filter.sh` → exit 0: 124 read methods on
+  tenant-column tables checked, 0 violations
+  (`check-tenant-filter.log`).
+- `bash scripts/check-api-auth.sh` → exit 0 (`check-api-auth.log`).
+- `bash scripts/check-scope-literal-defaults.sh crates` → exit 0.
+- `cargo fmt --all -- --check` clean; `check-arch.sh`,
+  `check-mem-port-contracts.sh`, `check-forged-scope-fields.sh`,
+  `check-fabricated-scope-defaults.sh`, `check-inert-enforcement.sh`,
+  `check-fail-open-ref-resolution.sh`,
+  `check-lossy-secret-conversion.sh` all pass.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` → exit 0
+  (`cargo-check-server-tests.txt`); `cargo check -p gyre-adapters` →
+  exit 0.
+- `cargo test -p gyre-adapters --lib` → 571 passed, 0 failed
+  (`adapters-tests.txt`), covering the touched notification/analytics/
+  invitation/budget adapters.
 
-Server suites the verifier must run on this head (per the sandbox build
-budget): `cargo test --all`, all-target clippy, and the frozen-baseline
-script gates in CI — including `cargo test -p gyre-server`
-(`spec_lifecycle_patrol` and `api::specs` patrol-endpoint tests cover the
-commit 1724c6a3d behavior change).
+### Server suites the verifier must run on this head
+
+Per the sandbox build budget, gyre-server test binaries were not
+executed here (type-checked only). The verifier should run
+`cargo test --all` and all-target clippy; the rounds most affected by
+this head: `cargo test -p gyre-server merge_processor`
+(`attestation_abac_tests`, `post_merge_fail_runs_full_recovery_protocol`,
+`merge_time_abac_*`, `merge_attestation_abac_decision_recorded_in_audit_trail`),
+`cargo test -p gyre-server ws`, and the budget/gate_executor
+notification-emission tests.
