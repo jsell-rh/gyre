@@ -492,8 +492,8 @@ mod tests {
         // Seed the spec ledger for this repo: one approved spec with an
         // approval event, one pending spec.
         let sha = format!("{:040}", 7);
-        let entry = |path: &str, status: gyre_domain::ApprovalStatus| {
-            gyre_domain::SpecLedgerEntry {
+        let entry =
+            |path: &str, status: gyre_domain::ApprovalStatus| gyre_domain::SpecLedgerEntry {
                 path: path.to_string(),
                 title: format!("Spec {path}"),
                 owner: "owner-1".to_string(),
@@ -508,16 +508,21 @@ mod tests {
                 updated_at: 100,
                 repo_id: Some(repo_id.clone()),
                 workspace_id: None,
-            }
-        };
+            };
         state
             .spec_ledger
-            .save(&entry("system/auth.md", gyre_domain::ApprovalStatus::Approved))
+            .save(&entry(
+                "system/auth.md",
+                gyre_domain::ApprovalStatus::Approved,
+            ))
             .await
             .unwrap();
         state
             .spec_ledger
-            .save(&entry("system/wip.md", gyre_domain::ApprovalStatus::Pending))
+            .save(&entry(
+                "system/wip.md",
+                gyre_domain::ApprovalStatus::Pending,
+            ))
             .await
             .unwrap();
         state
@@ -563,7 +568,8 @@ mod tests {
             .approve(&Id::new("appr-aibom-1"), 900)
             .await
             .expect("approve transition");
-        mr.transition_status(gyre_domain::MrStatus::Approved).unwrap();
+        mr.transition_status(gyre_domain::MrStatus::Approved)
+            .unwrap();
         mr.transition_status(gyre_domain::MrStatus::Merged).unwrap();
         mr.updated_at = 1000;
         state.merge_requests.update(&mr).await.unwrap();
@@ -590,7 +596,10 @@ mod tests {
 
         let specs = sr["specs"].as_array().unwrap();
         assert_eq!(specs.len(), 2);
-        let auth = specs.iter().find(|s| s["path"] == "system/auth.md").unwrap();
+        let auth = specs
+            .iter()
+            .find(|s| s["path"] == "system/auth.md")
+            .unwrap();
         assert_eq!(auth["status"], "approved");
         assert_eq!(auth["approved_at"], 1711324800);
         assert_eq!(auth["approved_by"], serde_json::json!(["user:alice"]));

@@ -459,30 +459,37 @@ mod tests {
         // Seed the ledger for this repo: one approved spec with an approval
         // event, one pending spec.
         let sha = format!("{:040}", 3);
-        let entry = |path: &str, status: gyre_domain::ApprovalStatus| gyre_domain::SpecLedgerEntry {
-            path: path.to_string(),
-            title: format!("Spec {path}"),
-            owner: "owner-1".to_string(),
-            kind: None,
-            current_sha: sha.clone(),
-            approval_mode: "human_only".to_string(),
-            approval_status: status,
-            linked_tasks: Vec::new(),
-            linked_mrs: Vec::new(),
-            drift_status: "clean".to_string(),
-            created_at: 100,
-            updated_at: 100,
-            repo_id: Some(repo_id.clone()),
-            workspace_id: None,
-        };
+        let entry =
+            |path: &str, status: gyre_domain::ApprovalStatus| gyre_domain::SpecLedgerEntry {
+                path: path.to_string(),
+                title: format!("Spec {path}"),
+                owner: "owner-1".to_string(),
+                kind: None,
+                current_sha: sha.clone(),
+                approval_mode: "human_only".to_string(),
+                approval_status: status,
+                linked_tasks: Vec::new(),
+                linked_mrs: Vec::new(),
+                drift_status: "clean".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                repo_id: Some(repo_id.clone()),
+                workspace_id: None,
+            };
         state
             .spec_ledger
-            .save(&entry("system/auth.md", gyre_domain::ApprovalStatus::Approved))
+            .save(&entry(
+                "system/auth.md",
+                gyre_domain::ApprovalStatus::Approved,
+            ))
             .await
             .unwrap();
         state
             .spec_ledger
-            .save(&entry("system/wip.md", gyre_domain::ApprovalStatus::Pending))
+            .save(&entry(
+                "system/wip.md",
+                gyre_domain::ApprovalStatus::Pending,
+            ))
             .await
             .unwrap();
         state

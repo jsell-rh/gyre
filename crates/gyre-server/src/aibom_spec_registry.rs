@@ -194,8 +194,10 @@ pub async fn build_spec_registry_section(
                     .collect();
                 active.sort_by_key(|e| e.approved_at);
                 let approved_at = active.first().map(|e| e.approved_at);
-                let approved_by =
-                    active.iter().map(|e| e.approver_id.clone()).collect::<Vec<_>>();
+                let approved_by = active
+                    .iter()
+                    .map(|e| e.approver_id.clone())
+                    .collect::<Vec<_>>();
                 let chain = active
                     .into_iter()
                     .map(|e| AibomSpecApproval {
@@ -299,14 +301,15 @@ async fn build_code_bindings(
         // before the merge — i.e. it was active at the moment the gate ran.
         let approved_at_merge_time = match (mr.status, merged_at, spec_sha.as_str()) {
             (MrStatus::Merged, Some(merged_ts), sha) if !sha.is_empty() => {
-                let rows = state.spec_approvals.find_by_spec_sha(&spec_path, sha).await?;
-                Some(
-                    rows.iter().any(|a| {
-                        a.approved_at.map(|t| t <= merged_ts).unwrap_or(false)
-                            && a.revoked_at.map(|t| t > merged_ts).unwrap_or(true)
-                            && a.rejected_at.map(|t| t > merged_ts).unwrap_or(true)
-                    }),
-                )
+                let rows = state
+                    .spec_approvals
+                    .find_by_spec_sha(&spec_path, sha)
+                    .await?;
+                Some(rows.iter().any(|a| {
+                    a.approved_at.map(|t| t <= merged_ts).unwrap_or(false)
+                        && a.revoked_at.map(|t| t > merged_ts).unwrap_or(true)
+                        && a.rejected_at.map(|t| t > merged_ts).unwrap_or(true)
+                }))
             }
             _ => None,
         };
@@ -428,7 +431,8 @@ mod tests {
     /// Merge an MR at timestamp `at` (Open → Approved → Merged, with
     /// updated_at = the merge moment, exactly like the merge processor).
     async fn merge_mr(state: &AppState, mut m: MergeRequest, at: u64) {
-        m.transition_status(gyre_domain::MrStatus::Approved).unwrap();
+        m.transition_status(gyre_domain::MrStatus::Approved)
+            .unwrap();
         m.transition_status(gyre_domain::MrStatus::Merged).unwrap();
         m.updated_at = at;
         state.merge_requests.update(&m).await.unwrap();
@@ -465,7 +469,11 @@ mod tests {
         state.spec_ledger.save(&approved_spec).await.unwrap();
         state
             .spec_ledger
-            .save(&ledger_entry("system/wip.md", ApprovalStatus::Pending, "repo-a"))
+            .save(&ledger_entry(
+                "system/wip.md",
+                ApprovalStatus::Pending,
+                "repo-a",
+            ))
             .await
             .unwrap();
         state
@@ -516,17 +524,32 @@ mod tests {
         // a revoked event must be excluded from the chain.
         state
             .spec_approval_history
-            .record(&approval_event("system/auth.md", &auth_sha, "user:alice", 500))
+            .record(&approval_event(
+                "system/auth.md",
+                &auth_sha,
+                "user:alice",
+                500,
+            ))
             .await
             .unwrap();
         state
             .spec_approval_history
-            .record(&approval_event("system/auth.md", &auth_sha, "agent:worker-1", 600))
+            .record(&approval_event(
+                "system/auth.md",
+                &auth_sha,
+                "agent:worker-1",
+                600,
+            ))
             .await
             .unwrap();
         state
             .spec_approval_history
-            .record(&approval_event("system/auth.md", &sha(99), "user:stale", 700))
+            .record(&approval_event(
+                "system/auth.md",
+                &sha(99),
+                "user:stale",
+                700,
+            ))
             .await
             .unwrap();
         let mut revoked = approval_event("system/auth.md", &auth_sha, "user:bob", 550);
@@ -569,7 +592,10 @@ mod tests {
         assert_eq!(drift.drift_status, "drifted");
 
         // Cross-repo isolation.
-        assert!(section.specs.iter().all(|s| s.path != "system/other-repo.md"));
+        assert!(section
+            .specs
+            .iter()
+            .all(|s| s.path != "system/other-repo.md"));
     }
 
     #[tokio::test]
@@ -647,9 +673,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        reverted
-            .revert(format!("{}", "r".repeat(40)), 3000)
-            .unwrap();
+        reverted.revert("r".repeat(40), 3000).unwrap();
         state.merge_requests.update(&reverted).await.unwrap();
 
         let section = build_spec_registry_section(&state, &repo).await.unwrap();
