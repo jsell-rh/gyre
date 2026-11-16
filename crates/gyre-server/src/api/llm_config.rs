@@ -195,6 +195,8 @@ pub async fn list_tenant_llm_defaults(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<LlmFunctionConfigResponse>>, ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "GET /api/v1/admin/llm/config")
+            .await;
         return Err(ApiError::forbidden("admin role required"));
     }
     let cfgs = state
@@ -214,6 +216,13 @@ pub async fn put_tenant_llm_default(
     Json(body): Json<UpsertLlmConfigRequest>,
 ) -> Result<Json<LlmFunctionConfigResponse>, ApiError> {
     if !auth.roles.contains(&UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/admin/llm/config/:function",
+        )
+        .await;
         return Err(ApiError::forbidden("admin role required"));
     }
     if !is_valid_function_key(&function_key) {

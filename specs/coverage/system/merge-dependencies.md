@@ -2,7 +2,7 @@
 
 **Spec:** [`system/merge-dependencies.md`](../../system/merge-dependencies.md)
 **Last audited:** 2026-09-29 (full code verification — all 16 implemented sections confirmed genuine)
-**Coverage:** 16/17 (3 n/a, 0 not-started, 1 task-assigned, 16 verified, 0 implemented)
+**Coverage:** 17/17 (3 n/a, 0 not-started, 0 task-assigned, 16 verified, 1 implemented)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -13,7 +13,7 @@
 | 5 | Dependency Rules | 3 | verified | - | Self-dep rejected (merge_deps.rs:152). Real BFS cycle detection over stored MR graph — would_create_cycle (merge_deps.rs:102) rebuilds adjacency from state.merge_requests.list() and rejects at declaration (179). Closed-dep reassessment via handle_dep_health_issues (merge_processor.rs:80). |
 | 6 | Three Ways Dependencies Are Established | 2 | verified | - | DependencySource enum {Explicit, BranchLineage, AgentDeclared} (merge_request.rs:31). All three wired: explicit/agent at set_dependencies (merge_deps.rs:188 jwt_claims discriminates), branch-lineage via detect_lineage_deps at MR creation (merge_requests.rs:346). |
 | 7 | 1. Explicit: Orchestrator or Agent Declares | 3 | verified | - | PUT /merge-requests/:id/dependencies (set_dependencies, merge_deps.rs:136) validates dep existence + cycles. REST create_mr depends_on (merge_requests.rs:282) and MCP gyre_create_mr depends_on (mcp.rs:198, handle_create_mr:746) both validate + cycle-check. Tests: create_mr_with_depends_on, nonexistent_rejected. |
-| 8 | 2. Auto-Detected: Branch Lineage | 3 | task-assigned | task-167 | DependencySource::BranchLineage exists as enum variant but no auto-detection logic. No git history analysis at MR creation time to discover parent branches. |
+| 8 | 2. Auto-Detected: Branch Lineage | 3 | implemented | task-167 | detect_lineage_deps (merge_requests.rs:420) runs at MR creation (REST create_mr:346 + MCP handle_create_mr): for each open MR in the repo, resolves the candidate source-branch tip and merge-base with the new source branch; merge-base == candidate tip ⇒ BranchLineage edge. Candidates contained in the default branch are skipped (spec: "not the default branch"). Re-evaluation on push: git_http.rs post-receive calls mrs_needing_lineage_reeval + reevaluate_lineage_deps (both directions — own branch pushed, or parent MR's branch pushed), stale lineage edges dropped, explicit/agent deps preserved, cycle-guarded. 10 integration tests against real on-disk git repos (9 in merge_requests.rs + 1 end-to-end push through git_receive_pack in git_http.rs). |
 | 9 | 3. Agent-Declared: Runtime Discovery | 3 | verified | - | set_dependencies tags DependencySource::AgentDeclared when caller is an agent JWT (jwt_claims.is_some(), merge_deps.rs:188); reason recorded (198). Runtime PUT endpoint + MCP tool both reach this path. |
 | 10 | Atomic Groups | 2 | verified | - | atomic_group: Option<String> on MergeRequest. PUT /merge-requests/:id/atomic-group (set_atomic_group, merge_deps.rs:283). merge_atomic_group (merge_processor.rs:420) merges members as a unit. |
 | 11 | Atomic Group Rules | 3 | verified | - | atomic_group_ready (merge_processor.rs:50) requires all members' gates passed before any merges — proven by selection_skips_atomic_group_not_ready_tries_next_candidate (pending gate on member blocks group). No interleaving (atomic_group_no_interleaving_with_non_group_mr). Rollback+requeue on member failure (rollback_atomic_group). Group implies ordering (atomic_group_implies_dependency_ordering). |

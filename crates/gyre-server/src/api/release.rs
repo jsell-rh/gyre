@@ -55,6 +55,8 @@ pub async fn release_prepare(
     Json(req): Json<ReleasePrepareRequest>,
 ) -> Result<Json<ReleasePrepareResponse>, ApiError> {
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/release/prepare")
+            .await;
         return Err(ApiError::Forbidden(
             "only Admin role may trigger release preparation".to_string(),
         ));
@@ -202,6 +204,7 @@ pub async fn release_prepare(
         let mr = gyre_domain::MergeRequest::new(
             new_id(),
             Id::new(&req.repo_id),
+            repo.workspace_id.clone(),
             title,
             branch.clone(),
             repo.default_branch.clone(),
@@ -280,11 +283,14 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
         });
 
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "rogue-agent",
                 "preferred_username": "rogue-agent",
                 "realm_access": { "roles": ["agent"] }

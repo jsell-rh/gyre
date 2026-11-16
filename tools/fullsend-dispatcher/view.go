@@ -151,6 +151,8 @@ func rowStatus(r Row) string {
 
 	if r.Activity == "history" {
 		switch r.Status {
+		case "attention":
+			return "Needs attention"
 		case "failed":
 			return "Failed"
 		case "succeeded":
@@ -174,7 +176,31 @@ func rowStatus(r Row) string {
 		}
 		return "Ready to retry"
 	case "uncertain":
+		if r.FailureCategory == "gateway_transport" {
+			return "Worker health unknown"
+		}
 		return "Outcome unknown"
+	case "attention":
+		switch r.FailureCategory {
+		case "sandbox_oom":
+			return "Out of memory · needs retry"
+		case "repair_stalled":
+			return "Repair stalled · needs attention"
+		case "requirements_triage":
+			return "Spec/task conflict · needs triage"
+		case "assessment":
+			return "Assessment needs evidence"
+		case "sandbox_stopped":
+			return "Sandbox stopped · needs attention"
+		case "verification_timeout":
+			return "Verification deadline exceeded"
+		case "verification_source_integrity":
+			return "Verification changed source"
+		case "sandbox_storage":
+			return "Build storage exhausted"
+		default:
+			return "Needs attention"
+		}
 	case "succeeded":
 		return completionStatus(r.Finished)
 	default:
@@ -195,39 +221,44 @@ type historyDone struct {
 	err   error
 }
 type Model struct {
-	sortDescending                      bool
-	filter, historyFilter, filterBefore string
-	filtering, helpOpen                 bool
-	helpScroll, sortMode                int
-	gPending                            time.Time
-	confirmScroll                       int
-	signIn                              *signInSession
-	signInActive                        bool
-	signInCancel                        context.CancelFunc
-	signInText, signInInput             string
-	signInScroll                        int
-	signInPending                       string
-	signInPrompt                        *gatewayPrompt
-	signInChoice                        int
-	signInResult                        string
-	signInDiagnostics                   bool
-	pendingCancel                       *Row
-	cancelChoice                        int
-	pendingRetry                        *Row
-	issueGrouping                       bool
-	showCompleted                       bool
-	historyIssue                        *Row
-	historyRows                         []Row
-	historyLoading                      bool
-	engine                              *Engine
-	ctx                                 context.Context
-	cancel                              context.CancelFunc
-	state                               Snapshot
-	width, height, index, scroll        int
-	selected, screen, notice, logText   string
-	noticeUntil                         time.Time
-	plainColor                          bool
-	exit                                int
+	configReturn                             string
+	configIndex, configChoice, configCursor  int
+	configEditing, configSaving              bool
+	configInput, configError, configExpected string
+	sortDescending                           bool
+	filter, historyFilter, filterBefore      string
+	filtering, helpOpen                      bool
+	helpScroll, sortMode                     int
+	gPending                                 time.Time
+	confirmScroll                            int
+	signIn                                   *signInSession
+	signInActive                             bool
+	signInCancel                             context.CancelFunc
+	signInText, signInInput                  string
+	signInScroll                             int
+	signInPending                            string
+	signInPrompt                             *gatewayPrompt
+	signInChoice                             int
+	signInResult                             string
+	signInDiagnostics                        bool
+	pendingCancel                            *Row
+	cancelChoice                             int
+	pendingRetry                             *Row
+	issueGrouping                            bool
+	showCompleted                            bool
+	historyIssue                             *Row
+	historyRows                              []Row
+	historyLoading                           bool
+	engine                                   *Engine
+	ctx                                      context.Context
+	cancel                                   context.CancelFunc
+	state                                    Snapshot
+	width, height, index, scroll             int
+	selected, screen, notice, logText        string
+	logs                                     logViewState
+	noticeUntil                              time.Time
+	plainColor                               bool
+	exit                                     int
 }
 
 func (m Model) Init() tea.Cmd { return tick() }
@@ -248,6 +279,29 @@ func readinessStatus(r Row) string {
 		return ""
 	}
 	switch r.CodeReadiness.Status {
+	case "merged":
+		return "Merged"
+	case "resolved":
+		return "Requirements satisfied upstream"
+	case "verification_blocked":
+		if r.CodeReadiness.Blocker == "sandbox_oom" {
+			return "Verification blocked · out of memory"
+		}
+		return "Verification blocked · needs attention"
+	case "refresh_required":
+		return "Integration refresh required"
+	case "refresh_queued":
+		return "Integration refresh queued"
+	case "refresh_running":
+		return "Integration refresh running"
+	case "repair_pending":
+		return "Implementation repair pending"
+	case "merge_conflict":
+		return "Merge conflict · needs repair"
+	case "artifact_refresh":
+		return "Generated artifacts need refresh"
+	case "merge_confirmation":
+		return "Confirming upstream merge"
 	case "pending", "infrastructure":
 		return "Waiting for CI"
 	case "candidate_failed", "baseline_failed":
@@ -266,6 +320,11 @@ func readinessStatus(r Row) string {
 	return ""
 }
 
+func completedDelivery(r Row) bool {
+	return r.Activity != "history" && r.CodeReadiness != nil &&
+		(r.CodeReadiness.Status == "merged" || r.CodeReadiness.Status == "resolved")
+}
+
 func (m Model) visibleRows() []Row {
 	if m.historyIssue != nil {
 		return m.orderRows(m.filterRows(append([]Row(nil), m.historyRows...)))
@@ -273,7 +332,7 @@ func (m Model) visibleRows() []Row {
 	rows := []Row{}
 	seen := map[string]bool{}
 	for _, r := range m.filterRows(m.scopedRows()) {
-		if r.Status == "succeeded" && readinessStatus(r) == "" && !m.showCompleted && !(m.screen != "" && r.Key == m.selected) {
+		if r.Status == "succeeded" && (readinessStatus(r) == "" || completedDelivery(r)) && !m.showCompleted && !(m.screen != "" && r.Key == m.selected) {
 			continue
 		}
 		group := r.Scope + "\x00" + r.Repo + "\x00" + r.Item
@@ -355,12 +414,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rows := m.visibleRows()
 		m.restoreSelection(m.selected, previous)
 		if m.screen == "logs" && len(rows) > 0 {
-			value, err := tail(rows[m.index].Log, 65536)
-			if err != nil {
-				m.logText = "Log is not available yet: " + err.Error()
-			} else {
-				m.logText = value
-			}
+			m.refreshLog(rows[m.index].Log)
 		}
 		if m.state.Done {
 			m.exit = m.state.Exit
@@ -422,6 +476,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setNotice("Cancel requested. Waiting for Fullsend to stop and finish cleanup.")
 		}
+	case settingsDone:
+		m.configSaving = false
+		if v.err != nil {
+			m.configError = v.err.Error()
+		} else {
+			m.configEditing = false
+			m.configError = ""
+			m.setNotice(v.message)
+		}
 	case retryDone:
 		if v.err != nil {
 			m.setNotice(v.err.Error())
@@ -429,6 +492,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setNotice("Retry requested for " + v.key + ". Starts when eligible and a worker slot is free.")
 		}
 	case tea.KeyMsg:
+		if m.screen == "configuration" && !m.helpOpen {
+			return m.updateConfiguration(v)
+		}
 		if m.pendingCancel != nil {
 			switch v.String() {
 			case "esc", "h":
@@ -569,14 +635,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			m.exit = 130
 			return m, tea.Quit
-		case "tab", "c":
+		case ",":
+			m.configReturn = m.screen
+			m.screen = "configuration"
+		case "tab", "shift+tab", "c":
 			if m.screen == "" && m.historyIssue == nil {
 				var prior *Row
 				if len(rows) > 0 {
 					r := rows[m.index]
 					prior = &r
 				}
-				if v.String() == "tab" {
+				if (v.String() == "tab" && m.issueGrouping) || (v.String() == "shift+tab" && !m.issueGrouping) {
+					m.configReturn = m.screen
+					m.screen = "configuration"
+				} else if v.String() == "tab" || v.String() == "shift+tab" {
 					m.issueGrouping = !m.issueGrouping
 				} else {
 					m.showCompleted = !m.showCompleted
@@ -600,14 +672,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scroll = 0
 		case "enter", "l":
 			if len(rows) > 0 {
-				m.screen = "logs"
-				m.scroll = 0
-				value, err := tail(rows[m.index].Log, 65536)
-				if err != nil {
-					m.logText = err.Error()
-				} else {
-					m.logText = value
-				}
+				m.openLog(rows[m.index].Log)
 			}
 		case "H":
 			if len(rows) > 0 || m.historyIssue != nil {
@@ -659,7 +724,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.confirmScroll = 0
 						m.setNotice("")
 					}
-				} else if row.Status != "failed" && row.Status != "canceled" {
+				} else if row.Status != "failed" && row.Status != "canceled" && row.Status != "attention" {
 					m.setNotice("Only failed or canceled jobs can be retried here.")
 				} else {
 					return m, func() tea.Msg { return retryDone{row.Key, m.engine.requestRetry(m.ctx, row.Key)} }
@@ -707,7 +772,7 @@ func (m Model) style(text, color string, bold bool) string {
 }
 func statusColor(status string) string {
 	switch status {
-	case "failed":
+	case "failed", "attention":
 		return "1"
 	case "uncertain", "canceled":
 		return "3"
@@ -720,6 +785,12 @@ func statusColor(status string) string {
 
 func rowColor(row Row) string {
 	if readiness := readinessStatus(row); readiness != "" {
+		if completedDelivery(row) {
+			return "2"
+		}
+		if row.CodeReadiness.Status == "verification_blocked" {
+			return "1"
+		}
 		if strings.HasPrefix(readiness, "CI failed") {
 			return "1"
 		}
@@ -744,7 +815,7 @@ func (m Model) workHeader(row Row, width int, section string) []string {
 
 func (m Model) wrapped(text string, width int, color string) []string {
 	// Sanitize external text before styling; never strip ANSI from styled lines.
-	wrapped := ansi.Hardwrap(clean(text), width, true)
+	wrapped := ansi.Wrap(clean(text), width, "")
 	lines := strings.Split(wrapped, "\n")
 	for i := range lines {
 		lines[i] = m.style(lines[i], color, false)
@@ -804,7 +875,7 @@ func (m Model) agentGroups(rows []Row, w, budget int) []string {
 					switch item.Status {
 					case "running":
 						running++
-					case "failed", "uncertain", "canceled":
+					case "failed", "uncertain", "attention", "canceled":
 						failed++
 					case "succeeded":
 						done++
@@ -862,6 +933,11 @@ func (m Model) detailContent(rows []Row, w int) ([]string, []string) {
 	if len(rows) > 0 {
 		r := rows[m.index]
 		header = append(header, m.workHeader(r, w, "Details")...)
+		if r.Status == "attention" {
+			body = append(body, m.style("NEEDS ATTENTION", "1", true))
+			body = append(body, m.wrapped("The failure is recorded below. Resolve its blocker before retrying; running work and cleanup remain fenced.", w, "7")...)
+			body = append(body, "")
+		}
 		if r.Status == "uncertain" {
 			body = append(body, m.style("OUTCOME NOT RECORDED", "3", true))
 			body = append(body, m.wrapped("The local worker stopped without saving its result. Check this log and confirm the remote sandbox has stopped before retrying.", w, "7")...)
@@ -905,9 +981,6 @@ func (m Model) detailContent(rows []Row, w int) ([]string, []string) {
 	}
 	return header, body
 }
-func (m Model) logPageSize() int {
-	return max(1, m.height-2-11-3)
-}
 func (m *Model) clampScroll() {
 	if m.screen == "signin" {
 		text := strings.Join(m.signInBody(max(10, m.width-6)), "\n")
@@ -919,7 +992,7 @@ func (m *Model) clampScroll() {
 		m.confirmScroll = min(m.confirmScroll, max(0, total-max(1, m.height-11)))
 	}
 	if m.screen == "logs" {
-		m.scroll = min(m.scroll, max(0, len(strings.Split(m.logText, "\n"))-m.logPageSize()))
+		m.clampLogScroll()
 	}
 	if m.screen == "details" {
 		header, body := m.detailContent(m.visibleRows(), max(12, m.width-4))
@@ -1009,6 +1082,9 @@ func (m Model) View() string {
 		lines = append(lines, m.scrollIndicator(start, min(len(content), start+count), len(content)), "", m.style("j/k scroll   h / esc / ? close   q detach", "8", false))
 		return m.frame(lines, w, h)
 	}
+	if m.screen == "configuration" {
+		return m.configurationView(lines, w, h)
+	}
 	if m.screen == "signin" {
 		lines = append(lines, m.style("Gateway  /  Sign in", "7", true), "")
 
@@ -1076,16 +1152,7 @@ func (m Model) View() string {
 
 	rows := m.visibleRows()
 	if m.screen == "logs" && len(rows) > 0 {
-		row := rows[m.index]
-		lines = append(lines, m.workHeader(row, w, "Logs")...)
-		lines = append(lines, m.style(middle(row.Log, w), "8", false), "")
-		content := strings.Split(m.logText, "\n")
-		count := max(1, h-len(lines)-3)
-		end := max(min(len(content), count), len(content)-m.scroll)
-		start := max(0, end-count)
-		lines = append(lines, m.scrollPane(content, start, count, w)...)
-		lines = append(lines, m.scrollIndicator(start, end, len(content)))
-		lines = append(lines, "", m.style("j/k scroll   d details   r retry  C cancel   C cancel   h back   ? help   q detach", "8", false))
+		lines = m.logsView(lines, rows[m.index], w, h)
 	} else if m.screen == "details" {
 		header, body := m.detailContent(rows, w)
 		lines = append(lines, header...)
@@ -1093,8 +1160,12 @@ func (m Model) View() string {
 		start := min(m.scroll, max(0, len(body)-count))
 		lines = append(lines, m.scrollPane(body, start, count, w)...)
 		lines = append(lines, m.scrollIndicator(start, min(len(body), start+count), len(body)))
-		lines = append(lines, "", m.style("j/k scroll   enter logs   r retry  C cancel   C cancel   h back   ? help   q detach", "8", false))
+		lines = append(lines, "", m.style("j/k scroll   enter logs   r retry  C cancel   h back   ? help   q detach", "8", false))
 	} else {
+		if m.state.Admission != "" {
+			lines = append(lines, m.wrapped(m.state.Admission, w, "3")...)
+			lines = append(lines, "")
+		}
 		if m.state.Monitoring {
 			lines = append(lines, "Existing workers are finishing. Scheduling resumes automatically.", "")
 		} else if connection == "Connection lost" {

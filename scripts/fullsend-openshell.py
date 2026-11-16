@@ -42,8 +42,37 @@ def main():
     # Refresh the private alias even for a worker started before the cutover.
     # Changing a shim process's environment cannot retarget its parent or HyperShell.
     os.environ['GYRE_OPEN_GATEWAY'] = bound_gateway
+    def refresh(force=False):
+        previous=os.environ.get('OPENSHELL');os.environ['OPENSHELL']=config['real_openshell']
+        try:gateway.login(store.directory,force=force,max_age=120)
+        finally:
+            if previous is None:os.environ.pop('OPENSHELL',None)
+            else:os.environ['OPENSHELL']=previous
     def invoke(arguments, **kwargs):
-        return subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
+        result=subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
+        if kwargs.get('capture_output') and result.returncode and any(marker in ((result.stderr or '')+(result.stdout or '')) for marker in ('cached OIDC token has expired','OIDC token refresh failed','Unauthenticated','token is expired')):
+            refresh(force=True)
+            result=subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
+        return result
+    from pipeline.isolation import github_provider, ensure_github_provider
+    persistent=github_provider(store)
+    shared_create=['provider','create','--name',persistent,'--type',persistent,'--credential','GH_TOKEN']
+    shared_update=['provider','update',persistent,'--credential','GH_TOKEN']
+    if args in (shared_create,shared_update):
+        ensure_github_provider(store,cli=config['real_openshell'])
+        print('Instance GitHub provider ready (unchanged credentials are retained)')
+        store.close()
+        return 0
+    from pipeline.agent_transport import pi_command, stream
+    command=pi_command(args) if config.get('durable_agent') else None
+    if command:
+        name=option(args,'--name')
+        if not name:raise ValueError('agent transport requires its assigned sandbox')
+        row=store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
+        if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token']:
+            raise ValueError('agent transport sandbox belongs to another claim')
+        timeout=min(int(option(args,'--timeout') or 14400),store.setting('model_timeout',14400))
+        return stream(execution,name,command,timeout,invoke)
     provider_create = args[:2] == ['provider', 'create']
     provider_delete = args[:2] == ['provider', 'delete']
     provider_name = option(args, '--name') if provider_create else (args[2] if provider_delete and len(args) > 2 else None)
@@ -67,9 +96,37 @@ def main():
         old = store.db.execute('SELECT * FROM resources WHERE name=?', (name,)).fetchone()
         if old and old['state'] == 'absent':
             raise RuntimeError('fullsend attempted to recreate a deleted sandbox in the same assignment; retry through the controller')
+        if old and old['work']==execution.claim['id'] and old['token']==execution.claim['token']:
+            observed=invoke(['sandbox','get',name,'--output','json'],capture_output=True,text=True,timeout=30)
+            if observed.returncode==0:
+                start=re.search(r'(?m)^\s*(?=\{)',observed.stdout)
+                value=json.loads(observed.stdout[start.start():]) if start else {}
+                labels=value.get('labels',{})
+                if labels.get('gyre.dev/pipeline')!=store.setting('owner') or labels.get('gyre.dev/work')!=execution.claim['id']:
+                    raise ValueError('existing sandbox has different ownership labels')
+                phase=value.get('phase','').lower()
+                if phase in ('ready','pending','provisioning','creating'):
+                    # Fullsend retries create after a readiness timeout. Adopt
+                    # the same allocation and let its next readiness poll wait;
+                    # a duplicate create would fail immediately and discard it.
+                    print('Created sandbox: '+name)
+                    store.close()
+                    return 0
+                raise RuntimeError('existing sandbox reached terminal infrastructure state; cleanup before retry')
         if not store.reserve(name, execution.claim['id'], execution.claim['token'], 'sandbox', store.setting('slots', 8),
                              {'engine': 'fullsend', 'logical_token': execution.claim['token'], 'repo': '/sandbox/workspace/checkout'}):
             raise RuntimeError('global sandbox capacity is occupied')
+        from pipeline.compute import assigned_profile
+        budget = assigned_profile(store, execution.claim)
+        # Never inherit the gateway's 1 GiB / half-CPU defaults for build work.
+        for flag in ('--cpu','--memory'):
+            while flag in args:
+                index=args.index(flag); del args[index:index+2]
+            args=[a for a in args if not a.startswith(flag+'=')]
+        position=args.index('--') if '--' in args else len(args)
+        args[position:position]=['--cpu',budget['cpu'],'--memory',budget['memory']]
+        record=store.db.execute('SELECT data,state FROM resources WHERE name=?',(name,)).fetchone()
+        store.resource_state(name,record['state'],json.loads(record['data']) | {'compute':budget})
         args = [arg for arg in args if arg != '--keep']
         separator = args.index('--') if '--' in args else len(args)
         args[separator:separator] = ['--label', 'gyre.dev/pipeline=' + store.setting('owner'),
@@ -91,21 +148,25 @@ def main():
             raise ValueError('refuse deletion of an unowned fullsend sandbox')
         # On cancellation/failed inference the normal validator may not run.
         # Preserve an explicitly incomplete checkpoint before deleting compute.
-        try:
-            collect(execution, name, success=False)
-        except Exception as exc:
-            store.event('fullsend_checkpoint_unavailable', {'resource': name, 'error': type(exc).__name__}, execution.claim['task'])
-            # Keep existing recovery format for the independent cleanup stage.
-            recover_env = {**env, 'GYRE_DEV_RECOVERY_REPO': '/sandbox/workspace/checkout'}
-            subprocess.run([sys.executable, str(Path(__file__).with_name('dev-recover.py')), name,
-                            str(execution.directory / 'recovery.patch')], env=recover_env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+        if execution.claim['stage']=='implement' and not (execution.directory/'outcome.json').exists():
+            try:
+                collect(execution, name, success=False)
+            except Exception as exc:
+                store.event('fullsend_checkpoint_unavailable', {'resource': name, 'error': type(exc).__name__}, execution.claim['task'])
+                # Keep existing recovery format for the independent cleanup stage.
+                recover_env = {**env, 'GYRE_DEV_RECOVERY_REPO': '/sandbox/workspace/checkout'}
+                subprocess.run([sys.executable, str(Path(__file__).with_name('dev-recover.py')), name,
+                                str(execution.directory / 'recovery.patch')], env=recover_env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
         store.resource_state(name, 'deleting')
     # Streaming exec/upload/download must inherit stdin/stdout. Retry bounded
     # control-plane calls on the precise CLI token-expiry diagnostic only.
     control = args and args[0] in ('gateway', 'provider', 'profile', 'settings') or create or delete or args[:2] in (['sandbox', 'get'], ['sandbox', 'list'])
     if control:
-        result = invoke(args, capture_output=True, text=True, timeout=600 if create else 180)
+        # Fullsend 0.50.0 bounds its create subprocess at 600s too. Keep the
+        # CLI inside that window rather than outliving a killed shim for hours.
+        control_timeout=min(store.setting('model_timeout',14400),600) if create else 180
+        result = invoke(args, capture_output=True, text=True, timeout=control_timeout)
         output = result.stdout + result.stderr
         if 'cached OIDC token has expired' in output or 'OIDC token refresh failed' in output:
             previous = os.environ.get('OPENSHELL')
@@ -116,7 +177,7 @@ def main():
                 if previous is None: os.environ.pop('OPENSHELL', None)
                 else: os.environ['OPENSHELL'] = previous
             if result.returncode:
-                result = invoke(args, capture_output=True, text=True, timeout=600 if create else 180)
+                result = invoke(args, capture_output=True, text=True, timeout=control_timeout)
             else:
                 # A successful mutation must never be replayed. Remove only
                 # the CLI's cached-token warning after refreshing future calls.
@@ -125,6 +186,18 @@ def main():
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
     else:
+        # Upload/bootstrap exec replaces this process to preserve streams. Refresh
+        # before that boundary rather than discovering expiry after allocation and
+        # discarding a perfectly good sandbox. The shared login lock coalesces it.
+        import time
+        if time.time()-gateway.auth_status(store.directory,bound_gateway).get('refreshed_at',0)>120:
+            refresh()
+        from pipeline.bootstrap_transport import staging, run
+        if staging(args):
+            result = run([config['real_openshell'], '-g', bound_gateway, *args], env, execution,
+                         timeout=min(int(option(args,'--timeout') or 120),120))
+            store.close()
+            return result
         # Fullsend's deadline must kill the actual streaming CLI, not a
         # Python parent whose orphan keeps its stdout pipe open forever.
         store.close()

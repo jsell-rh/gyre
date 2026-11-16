@@ -1,6 +1,7 @@
 <script>
   let {
     breadcrumb = [],
+    rootLabel = 'Root',
     onNavigate = () => {},
     onReset = () => {},
   } = $props();
@@ -8,9 +9,9 @@
 
 {#if breadcrumb.length > 0}
   <div class="treemap-breadcrumb" role="navigation" aria-label="Drill-down path">
-    <button class="breadcrumb-item root" onclick={onReset} type="button" aria-label="Go to root">
+    <button class="breadcrumb-item root" onclick={onReset} type="button" aria-label="Go to root" title={rootLabel}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
-      Root
+      {rootLabel}
     </button>
     {#each breadcrumb as crumb, i}
       <span class="breadcrumb-sep" aria-hidden="true">&rsaquo;</span>

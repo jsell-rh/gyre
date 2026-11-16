@@ -88,6 +88,52 @@ pub async fn resolve_blob_sha(repo_path: &str, file_path: &str) -> Option<String
     None
 }
 
+/// Read the full contents of the blob with the given SHA-1 from
+/// `repo_path` (`git cat-file blob`).
+///
+/// Used by the spec-alignment gate (agent-gates.md §Integration with Agent
+/// Gates): the gate agent must review the spec **at the pinned SHA** the
+/// code was written against, not whatever HEAD currently holds.
+///
+/// Returns `None` if the SHA is malformed (prevents argument injection),
+/// the blob does not exist in the repo, or git cannot run.
+pub async fn read_blob(repo_path: &str, sha: &str) -> Option<String> {
+    // Only a 40-char hex SHA may reach the command line — anything else is
+    // either garbage or an injection attempt.
+    if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        tracing::warn!(sha, "read_blob: invalid SHA rejected");
+        return None;
+    }
+    let out = Command::new("git")
+        .args(["cat-file", "blob", sha])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        tracing::warn!(
+            sha,
+            exit_code = ?out.status.code(),
+            "read_blob: git cat-file failed"
+        );
+        None
+    }
+}
+
+/// Resolve the current blob SHA for a spec reference path.
+///
+/// Spec refs carry ledger paths ("system/foo.md") while the file lives at
+/// "specs/system/foo.md" in the repo. Try the raw path first (covers
+/// full-git-path refs), then the specs/-prefixed form.
+pub async fn resolve_spec_blob_sha(repo_path: &str, ledger_path: &str) -> Option<String> {
+    if let Some(sha) = resolve_blob_sha(repo_path, ledger_path).await {
+        return Some(sha);
+    }
+    resolve_blob_sha(repo_path, &format!("specs/{ledger_path}")).await
+}
+
 /// Count refs that exist under `prefix` (e.g. `refs/agents/{id}/snapshots/`).
 pub async fn count_refs_under(repo_path: &str, prefix: &str) -> usize {
     if !refname_safe(prefix) {

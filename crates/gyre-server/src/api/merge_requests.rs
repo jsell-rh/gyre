@@ -8,11 +8,11 @@ use gyre_domain::{
     AnalyticsEvent, DependencySource, MergeRequest, MergeRequestDependency, MrStatus, Review,
     ReviewComment, ReviewDecision,
 };
-use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tracing::{info, instrument};
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -39,6 +39,11 @@ pub struct ListMrsQuery {
     pub status: Option<String>,
     pub repository_id: Option<String>,
     pub workspace_id: Option<String>,
+    /// Optional cap on the number of MRs returned. When set, the response
+    /// contains the most recently created MRs, newest first. Sorting here
+    /// (rather than in adapters) keeps the cap deterministic for every
+    /// backend regardless of their list ordering.
+    pub per_page: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +162,14 @@ pub struct ReviewResponse {
     pub reviewer_agent_id: String,
     pub decision: String,
     pub body: Option<String>,
+    /// Gate persona attribution (agent-gates.md §Gate Agent Lifecycle):
+    /// the persona of the gate whose agent produced this review. `None` for
+    /// reviews not produced by a gate agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_persona: Option<String>,
+    /// Id of the gate whose agent produced this review, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_id: Option<String>,
     pub created_at: u64,
 }
 
@@ -168,6 +181,8 @@ impl From<Review> for ReviewResponse {
             reviewer_agent_id: r.reviewer_agent_id,
             decision: review_decision_str(&r.decision),
             body: r.body,
+            reviewer_persona: r.reviewer_persona,
+            gate_id: r.gate_id.map(|g| g.to_string()),
             created_at: r.created_at,
         }
     }
@@ -281,9 +296,20 @@ pub async fn create_mr(
 
     let now = now_secs();
     let repo_id = Id::new(req.repository_id);
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement). Refuse to create an MR whose scope cannot be resolved
+    // instead of fabricating a "default" workspace identity — a repo that
+    // does not exist has no workspace, and an MR without its mandatory
+    // scope would silently ride a fabricated identity downstream.
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {repo_id} not found")))?;
     let mut mr = MergeRequest::new(
         new_id(),
         repo_id.clone(),
+        repo.workspace_id.clone(),
         req.title,
         req.source_branch.clone(),
         req.target_branch.clone(),
@@ -336,38 +362,35 @@ pub async fn create_mr(
     };
 
     // Compute diff stats, conflict detection, and auto-detect branch lineage deps.
-    if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        if let Ok(diff) = state
-            .git_ops
-            .diff(&repo.path, &req.target_branch, &req.source_branch)
-            .await
-        {
-            mr.diff_stats = Some(gyre_domain::DiffStats {
-                files_changed: diff.files_changed,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
-            });
-        }
-        if let Ok(can_merge) = state
-            .git_ops
-            .can_merge(&repo.path, &req.source_branch, &req.target_branch)
-            .await
-        {
-            mr.has_conflicts = Some(!can_merge);
-        }
-        // Auto-detect branch lineage dependencies (P4).
-        let lineage_deps = detect_lineage_deps(
-            &state,
-            &repo_id,
-            &repo.path,
-            &req.source_branch,
-            &req.target_branch,
-        )
-        .await;
-        if !lineage_deps.is_empty() {
-            mr.depends_on = lineage_deps;
-        }
+    if let Ok(diff) = state
+        .git_ops
+        .diff(&repo.path, &req.target_branch, &req.source_branch)
+        .await
+    {
+        mr.diff_stats = Some(gyre_domain::DiffStats {
+            files_changed: diff.files_changed,
+            insertions: diff.insertions,
+            deletions: diff.deletions,
+        });
+    }
+    if let Ok(can_merge) = state
+        .git_ops
+        .can_merge(&repo.path, &req.source_branch, &req.target_branch)
+        .await
+    {
+        mr.has_conflicts = Some(!can_merge);
+    }
+    // Auto-detect branch lineage dependencies (P4).
+    let lineage_deps = detect_lineage_deps(
+        &state,
+        &repo_id,
+        &repo.path,
+        &req.source_branch,
+        &repo.default_branch,
+    )
+    .await;
+    if !lineage_deps.is_empty() {
+        mr.depends_on = lineage_deps;
     }
 
     // Merge explicit deps with lineage deps: explicit takes precedence,
@@ -388,22 +411,9 @@ pub async fn create_mr(
     }
 
     state.merge_requests.create(&mr).await?;
-    // Index for search.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "open".to_string());
-    facets.insert("repo_id".to_string(), mr.repository_id.to_string());
-    let _ = state
-        .search
-        .index(SearchDocument {
-            entity_type: "mr".to_string(),
-            entity_id: mr.id.to_string(),
-            title: mr.title.clone(),
-            body: format!("{} -> {}", mr.source_branch, mr.target_branch),
-            workspace_id: None,
-            repo_id: Some(mr.repository_id.to_string()),
-            facets,
-        })
-        .await;
+    // Index for search (search.md §Searchable Entities: mr facets
+    // status/has_conflicts/author, workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::mr_document(&mr)).await;
     state
         .emit_event(
             Some(mr.workspace_id.clone()),
@@ -415,19 +425,30 @@ pub async fn create_mr(
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
 
-/// Auto-detect MR dependencies based on git branch lineage (P4).
+/// Auto-detect MR dependencies based on git branch lineage (P4,
+/// merge-dependencies.md §2).
 ///
-/// For each open MR in the same repo targeting the same target branch, checks
-/// whether `source_branch` is a descendant of that MR's source branch by
-/// comparing the merge-base to the candidate branch tip. If merge-base == tip,
-/// the new branch was created from the candidate branch and should depend on it.
+/// The forge infers a dependency when a MR's source branch was created from
+/// another MR's branch — not from the default branch. For every open MR in
+/// the same repo, resolves that MR's source-branch tip and the merge-base
+/// with the new source branch; when merge-base == candidate tip, the new
+/// branch descends from the candidate branch and a `BranchLineage`
+/// dependency edge is created.
+///
+/// Spec §2: "not the default branch" — a candidate whose tip is already
+/// contained in the repo's default branch is skipped. Its commits are
+/// already in the default branch, so forking from it is indistinguishable
+/// from forking from the default branch itself (e.g. a branch parked on
+/// the default tip, or commits merged out-of-band), and a lineage edge
+/// against it would block the child on a dependency that gates nothing.
 pub(crate) async fn detect_lineage_deps(
     state: &AppState,
     repo_id: &Id,
     repo_path: &str,
     source_branch: &str,
-    target_branch: &str,
+    default_branch: &str,
 ) -> Vec<MergeRequestDependency> {
+    let default_ref = format!("refs/heads/{default_branch}");
     let all_mrs = match state.merge_requests.list_by_repo(repo_id).await {
         Ok(mrs) => mrs,
         Err(_) => return vec![],
@@ -435,11 +456,7 @@ pub(crate) async fn detect_lineage_deps(
 
     let candidates: Vec<_> = all_mrs
         .into_iter()
-        .filter(|m| {
-            m.target_branch == target_branch
-                && m.source_branch != source_branch
-                && m.status == MrStatus::Open
-        })
+        .filter(|m| m.source_branch != source_branch && m.status == MrStatus::Open)
         .collect();
 
     if candidates.is_empty() {
@@ -452,9 +469,13 @@ pub(crate) async fn detect_lineage_deps(
     // Validate a branch name is safe to pass to git (no flag injection).
     let is_safe_branch = |b: &str| !b.starts_with('-') && !b.contains("..");
 
-    if !is_safe_branch(source_branch) {
+    if !is_safe_branch(source_branch) || !is_safe_branch(default_branch) {
         return vec![];
     }
+
+    // Resolve the default branch tip once; candidates contained in it are
+    // excluded (fork-from-default is not lineage, see doc comment).
+    let default_tip = rev_resolve(&git_bin, repo_path, &default_ref).await;
 
     for candidate in candidates {
         let cand_branch = &candidate.source_branch;
@@ -478,6 +499,16 @@ pub(crate) async fn detect_lineage_deps(
         };
 
         if cand_tip.is_empty() || !cand_tip.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+
+        // Spec §2 "not the default branch": skip candidates whose tip is
+        // already contained in the default branch. Forking from such a
+        // branch is indistinguishable from forking from the default branch
+        // itself (a parked zero-commit branch, or commits merged
+        // out-of-band), so the inferred edge would gate nothing and only
+        // stall the child on a zombie parent.
+        if is_contained_in(&git_bin, repo_path, &cand_tip, &default_tip).await {
             continue;
         }
 
@@ -515,11 +546,236 @@ pub(crate) async fn detect_lineage_deps(
     deps
 }
 
+/// Resolve `rev` in `repo_path` to a trimmed SHA, or an empty string when
+/// the ref does not exist (detection treats that as no candidate).
+async fn rev_resolve(git_bin: &str, repo_path: &str, rev: &str) -> String {
+    let out = tokio::process::Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg(rev)
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// True when `cand_tip` is an ancestor of (or equal to) `container_tip`.
+/// A missing/empty `container_tip` contains nothing.
+async fn is_contained_in(
+    git_bin: &str,
+    repo_path: &str,
+    cand_tip: &str,
+    container_tip: &str,
+) -> bool {
+    if container_tip.is_empty() || cand_tip.is_empty() {
+        return false;
+    }
+    matches!(
+        tokio::process::Command::new(git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("merge-base")
+            .arg("--is-ancestor")
+            .arg(cand_tip)
+            .arg(container_tip)
+            .status()
+            .await,
+        Ok(st) if st.success()
+    )
+}
+
+/// Re-evaluate branch lineage dependencies for an existing MR after its
+/// source branch was pushed (rebased or updated).
+///
+/// merge-dependencies.md §2: "If the parent MR is later rebased, the
+/// dependency is re-evaluated." Removes stale lineage dependencies (the
+/// branch no longer descends from the parent MR's branch, or the parent MR
+/// is no longer open) and adds newly detected ones. Explicit and
+/// agent-declared dependencies are never touched — only `BranchLineage`
+/// edges are auto-managed, and agents or the orchestrator can override
+/// them by declaring an explicit dependency (which takes precedence and is
+/// preserved here).
+///
+/// New lineage edges are added only if they cannot create a cycle in the
+/// repo's dependency graph.
+pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
+    let mr = match state.merge_requests.find_by_id(mr_id).await {
+        Ok(Some(m)) => m,
+        _ => return,
+    };
+    // Only open MRs participate in lineage tracking.
+    if mr.status != MrStatus::Open {
+        return;
+    }
+    let repo = match state.repos.find_by_id(&mr.repository_id).await {
+        Ok(Some(r)) => r,
+        _ => return,
+    };
+
+    let detected = detect_lineage_deps(
+        state,
+        &mr.repository_id,
+        &repo.path,
+        &mr.source_branch,
+        &repo.default_branch,
+    )
+    .await;
+    let detected_ids: std::collections::HashSet<String> = detected
+        .iter()
+        .map(|d| d.target_mr_id.to_string())
+        .collect();
+
+    // Keep every non-lineage dependency; drop lineage edges that are no
+    // longer detected (stale); re-add the current detection result.
+    let mut new_deps: Vec<MergeRequestDependency> = mr
+        .depends_on
+        .iter()
+        .filter(|d| d.source != DependencySource::BranchLineage)
+        .cloned()
+        .collect();
+    for dep in detected {
+        // Skip lineage edges that duplicate an explicit/agent-declared dep.
+        if new_deps.iter().any(|d| d.target_mr_id == dep.target_mr_id) {
+            continue;
+        }
+        new_deps.push(dep);
+    }
+
+    // Persist only when the set actually changed.
+    let changed = new_deps.len() != mr.depends_on.len()
+        || new_deps
+            .iter()
+            .zip(mr.depends_on.iter())
+            .any(|(a, b)| a.target_mr_id != b.target_mr_id || a.source != b.source);
+    if !changed {
+        return;
+    }
+
+    // Guard against cycles before writing: recompute adjacency from stored
+    // state with this MR's new edges applied, then check reachability.
+    let all_mrs = state.merge_requests.list().await.unwrap_or_default();
+    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    for m in &all_mrs {
+        adj.insert(
+            m.id.to_string(),
+            m.depends_on
+                .iter()
+                .map(|d| d.target_mr_id.to_string())
+                .collect(),
+        );
+    }
+    let mr_id_str = mr_id.to_string();
+    let new_dep_ids: Vec<String> = new_deps
+        .iter()
+        .map(|d| d.target_mr_id.to_string())
+        .collect();
+    if super::merge_deps::would_create_cycle(&mr_id_str, &new_dep_ids, &adj) {
+        tracing::warn!(
+            mr_id = %mr_id,
+            "lineage re-evaluation skipped: would create a dependency cycle"
+        );
+        return;
+    }
+
+    let removed: Vec<String> = mr
+        .depends_on
+        .iter()
+        .filter(|d| d.source == DependencySource::BranchLineage)
+        .filter(|d| !detected_ids.contains(&d.target_mr_id.to_string()))
+        .map(|d| d.target_mr_id.to_string())
+        .collect();
+    let added: Vec<String> = detected_ids.iter().cloned().collect();
+    info!(
+        mr_id = %mr_id,
+        ?removed,
+        ?added,
+        "re-evaluated branch lineage dependencies"
+    );
+
+    let mut updated = mr;
+    updated.depends_on = new_deps;
+    updated.updated_at = now_secs();
+    if let Err(e) = state.merge_requests.update(&updated).await {
+        tracing::warn!(mr_id = %mr_id, error = %e, "failed to persist lineage re-evaluation");
+    }
+}
+
+/// Select the open MRs whose lineage dependencies must be re-evaluated
+/// after a push moved `branches` in `repo_id`.
+///
+/// merge-dependencies.md §2 requires re-evaluation in both directions:
+/// - The MRs whose own source branch was pushed (the pushed branch may
+///   have been rebased onto / away from another MR's branch).
+/// - The MRs that depend (via a `BranchLineage` edge) on an MR whose
+///   source branch was pushed — when the *parent* MR is rebased, the
+///   child's lineage edge may go stale even though the child's branch
+///   itself never moved.
+///
+/// Private to the crate so git_http post-receive processing and tests
+/// share one selection rule.
+pub(crate) async fn mrs_needing_lineage_reeval(
+    state: &AppState,
+    repo_id: &Id,
+    branches: &[String],
+) -> Vec<Id> {
+    let mrs = match state.merge_requests.list_by_repo(repo_id).await {
+        Ok(mrs) => mrs,
+        Err(e) => {
+            tracing::warn!(%repo_id, error = %e, "lineage re-eval: failed to list MRs");
+            return vec![];
+        }
+    };
+    let pushed: std::collections::HashSet<&str> = branches.iter().map(|b| b.as_str()).collect();
+    let mut selected: Vec<Id> = Vec::new();
+    for mr in &mrs {
+        if mr.status != MrStatus::Open {
+            continue;
+        }
+        let own_branch_pushed = pushed.contains(mr.source_branch.as_str());
+        // Parent-direction re-evaluation (spec §2 item 3): a lineage edge
+        // targets the parent MR by id; re-check the child when the parent
+        // MR's source branch moved. The parent's branch name is looked up
+        // from the stored MR (the child stores only the MR id).
+        let lineage_parent_branch_pushed = mr
+            .depends_on
+            .iter()
+            .filter(|d| d.source == DependencySource::BranchLineage)
+            .any(|d| {
+                mrs.iter()
+                    .find(|m| m.id == d.target_mr_id)
+                    .is_some_and(|parent| pushed.contains(parent.source_branch.as_str()))
+            });
+        if own_branch_pushed || lineage_parent_branch_pushed {
+            selected.push(mr.id.clone());
+        }
+    }
+    selected
+}
+
+/// Enrich a merged-MR response with `merge_commit_sha` / `merged_at` from the
+/// attestation store — the same lookup `GET /merge-requests/:id` performs.
+/// The list endpoints must enrich too: clients resolve merged MRs by
+/// merge-commit SHA from list rows (the Inbox's HSI §8 P5 arbitration matches
+/// the divergence body's commit SHAs against the repo's merged MRs), and a
+/// list row without `merge_commit_sha` made that resolution always fail.
+async fn enrich_merged_attestation(state: &AppState, resp: &mut MrResponse) {
+    if resp.status != "merged" {
+        return;
+    }
+    if let Ok(Some(att)) = state.attestation_store.find_by_mr_id(&resp.id).await {
+        resp.merge_commit_sha = Some(att.attestation.merge_commit_sha.clone());
+        resp.merged_at = Some(att.attestation.merged_at);
+    }
+}
+
 pub async fn list_mrs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListMrsQuery>,
 ) -> Result<Json<Vec<MrResponse>>, ApiError> {
-    let mrs = if let Some(ws_id) = params.workspace_id {
+    let mut mrs = if let Some(ws_id) = params.workspace_id {
         state
             .merge_requests
             .list_by_workspace(&Id::new(ws_id))
@@ -534,9 +790,18 @@ pub async fn list_mrs(
             _ => state.merge_requests.list().await?,
         }
     };
+    // per_page caps the response to the most recently created MRs, newest
+    // first. Sort + truncate before the per-MR enrichment below so dropped
+    // MRs cost no extra queries either.
+    if let Some(cap) = params.per_page {
+        mrs.sort_by_key(|mr| std::cmp::Reverse(mr.created_at));
+        mrs.truncate(cap);
+    }
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
-    // Enrich with task_id from agent worktree tracking (best-effort).
+    // Enrich with task_id from agent worktree tracking (best-effort), and
+    // merged rows with their attestation merge-commit SHA.
     for resp in &mut results {
+        enrich_merged_attestation(&state, resp).await;
         if let Some(ref agent_id) = resp.author_agent_id {
             if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
                 if let Some(wt) = worktrees.first() {
@@ -548,18 +813,60 @@ pub async fn list_mrs(
     Ok(Json(results))
 }
 
+/// Query parameters for `GET /api/v1/workspaces/:workspace_id/merge-requests`
+/// (HSI §3 Generated Views MR ID discovery: `?has_trace=true&limit=10`).
+#[derive(Deserialize)]
+pub struct WorkspaceMrListQuery {
+    /// Only return MRs that have captured gate traces. Requires per-MR trace
+    /// lookups, so it also implies most-recent-first ordering.
+    pub has_trace: Option<bool>,
+    /// Cap the number of results (most recent first when set).
+    pub limit: Option<usize>,
+}
+
 /// GET /api/v1/workspaces/:workspace_id/merge-requests — list MRs scoped to a workspace.
 /// Primary access pattern per api-conventions.md §1.1.
+/// Optional query params (HSI §3): `has_trace=true` filters to MRs with
+/// captured gate traces; `limit=N` returns the N most recent.
 pub async fn list_workspace_mrs(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
+    Query(params): Query<WorkspaceMrListQuery>,
 ) -> Result<Json<Vec<MrResponse>>, ApiError> {
-    let mrs = state
+    let mut mrs = state
         .merge_requests
         .list_by_workspace(&Id::new(workspace_id))
         .await?;
+
+    if params.has_trace.is_some() || params.limit.is_some() {
+        // "Recent MRs" ordering: newest updated first.
+        mrs.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+    }
+    if params.has_trace == Some(true) {
+        // Keep only MRs with a captured trace (get_by_mr is the same lookup
+        // GET /merge-requests/:id/trace serves, so "has trace" cannot drift
+        // from what the trace endpoint would return).
+        let mut traced = Vec::with_capacity(mrs.len());
+        for mr in mrs {
+            if state
+                .traces
+                .get_by_mr(&mr.id)
+                .await
+                .map(|t| t.is_some())
+                .unwrap_or(false)
+            {
+                traced.push(mr);
+            }
+        }
+        mrs = traced;
+    }
+    if let Some(limit) = params.limit {
+        mrs.truncate(limit);
+    }
+
     let mut results: Vec<MrResponse> = mrs.into_iter().map(MrResponse::from).collect();
     for resp in &mut results {
+        enrich_merged_attestation(&state, resp).await;
         if let Some(ref agent_id) = resp.author_agent_id {
             if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
                 if let Some(wt) = worktrees.first() {
@@ -583,12 +890,7 @@ pub async fn get_mr(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     let mut resp = MrResponse::from(mr);
     // Enrich merged MRs with merge_commit_sha and merged_at from attestation.
-    if resp.status == "merged" {
-        if let Ok(Some(att)) = state.attestation_store.find_by_mr_id(&id).await {
-            resp.merge_commit_sha = Some(att.attestation.merge_commit_sha.clone());
-            resp.merged_at = Some(att.attestation.merged_at);
-        }
-    }
+    enrich_merged_attestation(&state, &mut resp).await;
     // Enrich with task_id from the authoring agent's worktree tracking.
     if let Some(ref agent_id) = resp.author_agent_id {
         if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(agent_id)).await {
@@ -600,9 +902,10 @@ pub async fn get_mr(
     Ok(Json(resp))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, new_status = %req.status))]
+#[instrument(skip(state, req, auth), fields(mr_id = %id, new_status = %req.status))]
 pub async fn transition_mr_status(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<MrResponse>, ApiError> {
@@ -612,6 +915,32 @@ pub async fn transition_mr_status(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     let new_status = parse_mr_status(&req.status)?;
+    // TASK-077 (HSI §2): `Approved` is the human-approval escape from the
+    // Supervised trust gate — the merge processor holds a merge when ABAC
+    // denies system subjects (`trust:require-human-mr-review`) unless
+    // `mr.status == Approved`. An agent setting its own MR to Approved would
+    // self-satisfy that escape and render the Deny inert. Mirror the
+    // `builtin:require-human-spec-approval` semantics (deny non-user
+    // subjects): the Agent role may not set `approved`. Role-based check
+    // matches abac_middleware's subject.type derivation.
+    if matches!(new_status, MrStatus::Approved)
+        && auth.roles.contains(&gyre_domain::UserRole::Agent)
+    {
+        // task-104: this is a live role check (the code above calls it one),
+        // so the rejection must be audited as RbacDenied. The required
+        // subject is any non-Agent (human) role.
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "non-Agent",
+            "PUT /api/v1/merge-requests/:id/status",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "MR approval requires a human — agents may not set status 'approved' (supervised trust)"
+                .to_string(),
+        ));
+    }
     let is_merge = matches!(new_status, MrStatus::Merged);
     let is_close = matches!(new_status, MrStatus::Closed);
     mr.transition_status(new_status)
@@ -619,6 +948,8 @@ pub async fn transition_mr_status(
     let ts = now_secs();
     mr.updated_at = ts;
     state.merge_requests.update(&mr).await?;
+    // search.md §Index Updates: MR reviewed/status changed -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::mr_document(&mr)).await;
 
     // HSI §3a trace lifecycle: on merge the gate trace is promoted to
     // attestation (permanent); on close-without-merge it is deleted.
@@ -654,16 +985,56 @@ pub async fn transition_mr_status(
             .await;
     }
 
-    // Auto-track mr.merged analytics event
-    if is_merge {
+    // Auto-track mr.merged / mr.closed analytics events (analytics.md §Auto-Emitted Events).
+    if is_merge || is_close {
+        // gate_count: number of gate results recorded for this MR.
+        let gate_count = state
+            .gate_results
+            .list_by_mr_id(mr.id.as_str())
+            .await
+            .map(|rs| rs.len() as u64)
+            .unwrap_or(0);
+        // queue_wait_secs: time from merge-queue enqueue to now, if the MR
+        // passed through the queue.
+        let queue_wait_secs = state
+            .merge_queue
+            .list_queue()
+            .await
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|e| e.merge_request_id == mr.id)
+                    .map(|e| ts.saturating_sub(e.enqueued_at))
+            });
+
+        let event_name = if is_merge { "mr.merged" } else { "mr.closed" };
+        let properties = if is_merge {
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "gate_count": gate_count,
+                "queue_wait_secs": queue_wait_secs,
+            })
+        } else {
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "reason": "closed_without_merge",
+            })
+        };
         let ev = AnalyticsEvent::new(
             new_id(),
-            "mr.merged",
+            event_name,
             mr.author_agent_id.as_ref().map(|id| id.to_string()),
-            serde_json::json!({ "mr_id": mr.id.to_string() }),
+            properties,
             ts,
-        );
+        )
+        .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
         let _ = state.analytics.record(&ev).await;
+        // search.md §Searchable Entities: activity events are indexed on write.
+        crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev))
+            .await;
     }
 
     Ok(Json(MrResponse::from(mr)))
@@ -712,24 +1083,187 @@ pub async fn list_comments(
     ))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
+#[instrument(skip(state, auth, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
     let mr_id = Id::new(&id);
-    state
+    let mr = state
         .merge_requests
         .find_by_id(&mr_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
+    // Reviewer identity binding (task-134): a caller authenticated with a
+    // scoped reviewer JWT (`review:submit`) must submit under its own token
+    // subject. Without this, a gate agent could forge reviews under any
+    // reviewer id. Exact-match capability (review F3); `validation:report`
+    // validators have no review-submission capability at all (F2) and are
+    // additionally blocked from this route by the ABAC allow-list.
+    //
+    // The same binding applies to EVERY agent-token principal (review
+    // repair, manifest gates): an agent JWT or legacy agent UUID token
+    // authenticates exactly one agent, so a review it submits recorded
+    // under a request-body reviewer id would let any spawned agent forge a
+    // review attributed to a persona-holding, attested agent — defeating
+    // the manifest gates' min_attestation_level / stack_hash constraints
+    // (spec-registry.md §Agent Approver / Gate Schema).
+    //
+    // Human principals (user JWT / API key / impersonation) may record a
+    // review under the request-body reviewer id ONLY when it names their
+    // own verified identity (`auth.user_id` — the id the credential
+    // actually resolves to), mirroring task-193's approve_spec, which
+    // derives the approver identity from verified claims for every
+    // principal. A body reviewer naming a DIFFERENT agent from a human
+    // caller is attribution forgery against the same manifest-gate
+    // constraints (the Review row attributes only the named agent;
+    // nothing records the submitting human), so it is reserved for Admin
+    // principals recording on behalf of an agent. The comparison uses
+    // `user_id`, never `agent_id`: API-key/JWT auth fills `agent_id` from
+    // the user-controlled display name, so comparing against it would let
+    // a user named after a gate agent forge that agent's review. The
+    // server's system token keeps the request-body reviewer (server-
+    // internal flows).
+    //
+    // §1 Token Scoping: the scope claim is a list; read it through the
+    // extractor-derived `auth.scope` (mirrored from signature-verified
+    // claims), never the raw JSON string form — an array claim read as a
+    // string silently fails open.
+    let agent_token_principal = auth.user_id.is_none() && !auth.is_system_principal();
+    let reviewer_agent_id = if agent_token_principal
+        || auth
+            .scope
+            .iter()
+            .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE)
+    {
+        auth.agent_id.clone()
+    } else if auth.user_id.is_some() {
+        let caller_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+        let own_identity =
+            auth.user_id.as_ref().map(|uid| uid.as_str()) == Some(req.reviewer_agent_id.as_str());
+        if !caller_admin && !own_identity {
+            return Err(ApiError::Forbidden(format!(
+                "a human caller may record a review only under its own identity; \
+                 recording a review for another reviewer requires an Admin principal \
+                 (requested reviewer: {})",
+                req.reviewer_agent_id
+            )));
+        }
+        req.reviewer_agent_id
+    } else {
+        req.reviewer_agent_id
+    };
+
     let decision = parse_review_decision(&req.decision)?;
-    let mut review = Review::new(new_id(), mr_id, req.reviewer_agent_id, decision, now_secs());
+    let mut review = Review::new(
+        new_id(),
+        mr_id.clone(),
+        reviewer_agent_id,
+        decision.clone(),
+        now_secs(),
+    );
     review.body = req.body;
 
+    // Gate-agent attribution (agent-gates.md §Gate Agent Lifecycle: "gate
+    // agent reviews are attributed — the review shows which gate persona
+    // produced it"). The scoped reviewer token's `task_id` claim carries the
+    // id of the gate that minted it (see `mint_scoped`), so the persona and
+    // gate binding are derived server-side from the token — a caller-
+    // supplied attribution would be forgeable exactly like a forged
+    // reviewer_agent_id. A token whose gate no longer exists records no
+    // attribution (the identity is still bound to the token subject above).
+    // §1 Token Scoping: the scope claim is a list; read it through the
+    // extractor-derived `auth.scope` (mirrored from signature-verified
+    // claims), never the raw JSON string form — an array claim read as a
+    // string silently fails open (this gate would never fire, stripping
+    // every gate review of its persona attribution).
+    if auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE)
+    {
+        let token_gate_id = auth
+            .jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("task_id"))
+            .and_then(|s| s.as_str());
+        if let Some(gate_id) = token_gate_id {
+            match state.quality_gates.find_by_id(gate_id).await {
+                Ok(Some(gate)) => {
+                    review.gate_id = Some(gate.id.clone());
+                    review.reviewer_persona = gate.persona.clone();
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        mr_id = %id,
+                        gate_id,
+                        "scoped reviewer token references a gate that no longer exists; review recorded without gate attribution"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        mr_id = %id,
+                        gate_id,
+                        error = %e,
+                        "gate lookup for review attribution failed; review recorded without gate attribution"
+                    );
+                }
+            }
+        }
+    }
+
     state.reviews.submit_review(&review).await?;
+
+    // HSI §12 Judgment Ledger: a human (not an agent acting unattended) approving
+    // an MR that has failing gate results is an override — the strongest judgment
+    // signal in the ledger. One event per failed gate result. Failure propagates:
+    // a silently dropped judgment event is audit theatre.
+    if decision == ReviewDecision::Approved && auth.user_id.is_some() {
+        let results = state.gate_results.list_by_mr_id(mr_id.as_str()).await?;
+        for r in results
+            .iter()
+            .filter(|r| r.status == gyre_common::GateStatus::Failed)
+        {
+            let gate = state.quality_gates.find_by_id(r.gate_id.as_str()).await?;
+            let event = gyre_domain::AuditEvent::new(
+                new_id(),
+                gyre_domain::AuditEventType::GateOverride,
+                None,
+                auth.user_id.clone(),
+                None,
+                Some(mr.workspace_id.clone()),
+                gate.as_ref().map(|g| g.repo_id.clone()),
+                "merge_request".to_string(),
+                Some(mr_id.as_str().to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({
+                    "mr_id": mr_id.as_str(),
+                    "gate_id": r.gate_id.as_str(),
+                    "gate_type": gate.as_ref().map(|g| g.gate_type.clone()),
+                    "gate_name": gate.as_ref().map(|g| g.name.clone()),
+                    "from_status": "failed",
+                    // The gate row itself is not mutated by a human approval —
+                    // "overridden" is the honest transition name.
+                    "to_status": "overridden",
+                }),
+                None,
+                None,
+                now_secs(),
+            );
+            state.audit.record(&event).await?;
+            let _ = state
+                .audit_broadcast_tx
+                .send(serde_json::to_string(&event).unwrap_or_default());
+        }
+    }
+
+    // search.md §Searchable Entities + §Index Updates ("MR created/reviewed ->
+    // index updated"): reviews are indexed on submission.
+    crate::search_indexer::index(&state, crate::search_indexer::review_document(&review, &mr))
+        .await;
     Ok((StatusCode::CREATED, Json(ReviewResponse::from(review))))
 }
 
@@ -886,6 +1420,81 @@ pub async fn get_diff(
     }))
 }
 
+// ── Spec at pinned SHA ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct MrSpecResponse {
+    pub mr_id: String,
+    /// The full "path@sha" spec reference carried by the MR.
+    pub spec_ref: String,
+    /// Path portion of the spec_ref (ledger path form).
+    pub spec_path: String,
+    /// Pinned blob SHA the MR's code was written against.
+    pub spec_sha: String,
+    /// Spec file content at the pinned SHA — NOT at HEAD
+    /// (agent-gates.md §Integration with Agent Gates step 1: "Gate agent
+    /// receives the MR diff AND the spec at the pinned SHA").
+    pub content: String,
+}
+
+/// `GET /api/v1/merge-requests/{id}/spec`
+///
+/// Serves the spec content at the MR's pinned spec_ref SHA. The
+/// spec-alignment-review gate agent fetches this (GYRE_SPEC_URL) so its
+/// review is against the exact spec version the code was written for —
+/// resolving at HEAD instead would let a spec edited after the MR was
+/// opened silently change what the gate reviews.
+pub async fn get_spec(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MrSpecResponse>, ApiError> {
+    let mr = state
+        .merge_requests
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
+
+    let spec_ref = mr
+        .spec_ref
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "merge request {id} has no spec_ref — there is no pinned spec to serve"
+            ))
+        })?
+        .to_string();
+
+    let (path, sha) = spec_ref.rsplit_once('@').ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "invalid spec_ref format '{spec_ref}': expected 'path@sha'"
+        ))
+    })?;
+    let (path, sha) = (path.to_string(), sha.to_string());
+
+    let repo = state
+        .repos
+        .find_by_id(&mr.repository_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {} not found", mr.repository_id)))?;
+
+    let content = crate::git_refs::read_blob(&repo.path, &sha)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "spec blob {sha} ({path}) not found in repository — the pinned \
+             spec version is not reachable from this repo"
+            ))
+        })?;
+
+    Ok(Json(MrSpecResponse {
+        mr_id: mr.id.to_string(),
+        spec_ref,
+        spec_path: path.to_string(),
+        spec_sha: sha.to_string(),
+        content,
+    }))
+}
+
 // ── Attestation ───────────────────────────────────────────────────────────────
 
 /// `GET /api/v1/merge-requests/{id}/attestation`
@@ -917,11 +1526,29 @@ pub async fn get_attestation(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
+    use gyre_domain::MergeRequest;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
+    async fn app() -> Router {
+        let state = test_state();
+        seed_repo(&state).await;
+        crate::api::api_router().with_state(state)
+    }
+
+    /// create_mr resolves the MR's workspace scope from its repository (M34
+    /// hierarchy enforcement) and refuses unknown repositories — seed the
+    /// repository these tests open MRs against.
+    async fn seed_repo(state: &crate::AppState) {
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-1"),
+            gyre_common::Id::new("ws1"),
+            "repo-1",
+            "/repos/repo-1",
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -958,7 +1585,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_get_mr() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Add feature").await;
 
         let resp = app
@@ -978,7 +1605,7 @@ mod tests {
 
     #[tokio::test]
     async fn mr_status_transition_valid() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Approve me").await;
 
         let body = serde_json::json!({ "status": "approved" });
@@ -987,6 +1614,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1000,15 +1628,15 @@ mod tests {
 
     #[tokio::test]
     async fn mr_status_transition_invalid() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Invalid trans").await;
-
         let body = serde_json::json!({ "status": "merged" });
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1023,6 +1651,7 @@ mod tests {
     #[tokio::test]
     async fn closing_mr_deletes_gate_trace() {
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Close deletes trace").await;
 
@@ -1050,6 +1679,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1069,9 +1699,191 @@ mod tests {
         );
     }
 
+    /// TASK-077 (HSI §2, review R2-F5): the merge processor's human-approval
+    /// escape (`mr.status == Approved`) must only be satisfiable by a human.
+    /// An Agent-role caller setting its own MR to "approved" would
+    /// self-satisfy the Supervised trust gate (`trust:require-human-mr-review`
+    /// Denies system merges; the processor holds on Deny). The endpoint must
+    /// reject agent callers with 403 and leave the MR Open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_cannot_approve_mr_status_supervised_escape() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_mr(app, "Self-approve attempt").await;
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "self-approving-agent",
+                "preferred_username": "self-approving-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let body = serde_json::json!({ "status": "approved" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Agent role must not set MR status 'approved' — it is the \
+             human-approval escape from the supervised trust gate"
+        );
+
+        // The MR must remain Open (no partial application).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/merge-requests/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "open");
+    }
+
+    #[tokio::test]
+    async fn closing_mr_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: mr.closed carries mr_id, repo_id,
+        // reason; scope fields workspace_id/repo_id are attached for filtering.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Analytics close").await;
+
+        let body = serde_json::json!({ "status": "closed" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.closed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], mr_id);
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert!(
+            ev.properties["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "reason must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn merging_mr_emits_analytics_event_with_gate_count() {
+        // analytics.md §Auto-Emitted Events: mr.merged carries mr_id, repo_id,
+        // gate_count, queue_wait_secs.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Analytics merge").await;
+
+        // Approve first (Open → Merged is invalid; Open → Approved → Merged).
+        let body = serde_json::json!({ "status": "approved" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Seed two gate results so gate_count is non-zero.
+        for gid in ["gate-1", "gate-2"] {
+            state
+                .gate_results
+                .save(&gyre_domain::GateResult {
+                    id: gyre_common::Id::new(format!("gr-{gid}")),
+                    gate_id: gyre_common::Id::new(gid),
+                    mr_id: gyre_common::Id::new(&mr_id),
+                    status: gyre_domain::GateStatus::Passed,
+                    output: None,
+                    started_at: None,
+                    finished_at: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let body = serde_json::json!({ "status": "merged" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("mr.merged"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.merged event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], mr_id);
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert_eq!(
+            ev.properties["gate_count"], 2,
+            "gate_count counts gate results"
+        );
+        // The MR never entered the merge queue — queue_wait_secs is absent/null.
+        assert!(
+            ev.properties
+                .get("queue_wait_secs")
+                .is_none_or(|v| v.is_null()),
+            "queue_wait_secs must be null when the MR never queued"
+        );
+    }
+
     #[tokio::test]
     async fn list_mrs_by_repository() {
-        let app = app();
+        let app = app().await;
         let (_, _) = create_test_mr(app.clone(), "MR for repo").await;
 
         let resp = app
@@ -1089,8 +1901,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_mrs_per_page_keeps_newest() {
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, oldest) = create_test_mr(app, "oldest").await;
+        let (app, middle) = create_test_mr(app, "middle").await;
+        let (app, newest) = create_test_mr(app, "newest").await;
+        // Pin distinct creation times: rapid API creates can share a second,
+        // which would make "newest first" ambiguous.
+        for (id, ts) in [
+            (oldest.clone(), 1_000u64),
+            (middle.clone(), 2_000),
+            (newest.clone(), 3_000),
+        ] {
+            let mut mr = state
+                .merge_requests
+                .find_by_id(&gyre_common::Id::new(&id))
+                .await
+                .unwrap()
+                .expect("created MR must be retrievable");
+            mr.created_at = ts;
+            state.merge_requests.update(&mr).await.unwrap();
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests?repository_id=repo-1&per_page=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "per_page caps the MR list");
+        let ids: Vec<&str> = arr.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(
+            ids,
+            vec![newest.as_str(), middle.as_str()],
+            "per_page keeps the most recently created MRs, newest first"
+        );
+    }
+
+    #[tokio::test]
     async fn get_mr_not_found() {
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-requests/no-such")
@@ -1104,7 +1963,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_and_list_comments() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Comment test").await;
 
         let body = serde_json::json!({
@@ -1143,7 +2002,7 @@ mod tests {
 
     #[tokio::test]
     async fn comment_with_file_and_line() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "File comment test").await;
 
         let body = serde_json::json!({
@@ -1169,8 +2028,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_gate_review_records_persona_attribution() {
+        // agent-gates.md §Gate Agent Lifecycle: "gate agent reviews are
+        // attributed — the review shows which gate persona produced it".
+        // A reviewer authenticating with a gate-agent scoped token gets its
+        // persona and gate binding derived server-side from the token's
+        // task_id claim (the gate id); nothing in the request body can
+        // forge or suppress it.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Attribution test").await;
+
+        // A real gate row: the persona the review must be attributed to.
+        let gate = gyre_domain::QualityGate {
+            id: gyre_common::Id::new("gate-attrib-1"),
+            repo_id: gyre_common::Id::new("repo-1"),
+            name: "security-review".to_string(),
+            gate_type: gyre_domain::GateType::AgentReview,
+            command: Some("true".to_string()),
+            required_approvals: None,
+            persona: Some("personas/security.md".to_string()),
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            position: 0,
+            created_at: 1_700_000_000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        // Scoped reviewer token, minted exactly as the gate executor mints
+        // them: task_id carries the gate id, tenant resolved fail-closed
+        // from the MR's workspace (task-130 hierarchy claims), persona slug
+        // from the gate persona reference. The API-created MR binds to the
+        // seeded repo fixture's workspace (create_mr resolves the scope from
+        // the repository row), but the mem workspace store has no row for
+        // it, so seed that workspace row for the tenant resolution —
+        // never a fabricated literal at the mint site.
+        let mr = state
+            .merge_requests
+            .find_by_id(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap()
+            .expect("test MR");
+        if state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            let ws = gyre_domain::Workspace::new(
+                mr.workspace_id.clone(),
+                gyre_common::Id::new("default"),
+                format!("Test workspace {}", mr.workspace_id.as_str()),
+                mr.workspace_id.as_str().to_string(),
+                1_700_000_000,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
+        let workspace = state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .expect("test MR workspace");
+        let gate_agent_id = "gate-review-attrib".to_string();
+        let token = state
+            .agent_signing_key
+            .mint_scoped(
+                &gate_agent_id,
+                gate.id.as_str(),
+                "forge",
+                &state.base_url,
+                60,
+                crate::auth::REVIEW_SUBMIT_SCOPE,
+                workspace.tenant_id.as_str(),
+                Some("security"),
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &gate_agent_id, token.clone())
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "forged-reviewer",
+            "decision": "approved",
+            "body": "checked against the security persona"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], gate_agent_id);
+        assert_eq!(
+            json["reviewer_persona"], "personas/security.md",
+            "the review shows which gate persona produced it"
+        );
+        assert_eq!(json["gate_id"], "gate-attrib-1");
+
+        // Persisted with attribution (not just the response envelope).
+        let reviews = state
+            .reviews
+            .list_reviews(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(
+            reviews[0].reviewer_persona.as_deref(),
+            Some("personas/security.md")
+        );
+        assert_eq!(
+            reviews[0].gate_id,
+            Some(gyre_common::Id::new("gate-attrib-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_review_has_no_gate_attribution() {
+        // A regular (non-gate) reviewer gets no persona attribution — the
+        // fields are gate-agent concepts, derived from the scoped token.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "No attribution test").await;
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agent-1",
+            "decision": "approved",
+            "body": "LGTM"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert!(
+            json.get("reviewer_persona").is_none(),
+            "non-gate reviews carry no persona attribution"
+        );
+        assert!(json.get("gate_id").is_none());
+    }
+
+    #[tokio::test]
     async fn submit_approve_review() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Review test").await;
 
         let body = serde_json::json!({
@@ -1185,6 +2211,10 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    // submit_review extracts AuthenticatedAgent; the bare
+                    // api_router() used here has no require_auth layer, so
+                    // the test must present the test_state auth token itself.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1209,7 +2239,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_changes_requested_review() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Changes test").await;
 
         let body = serde_json::json!({
@@ -1222,6 +2252,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1233,8 +2264,229 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_review_binds_agent_token_caller_to_own_identity() {
+        // Review repair (manifest gates): an agent-token principal must
+        // submit under its own verified identity. A request-body
+        // reviewer_agent_id would let any spawned agent forge a review
+        // attributed to a persona-holding, attested agent, defeating the
+        // manifest gates' min_attestation_level / stack_hash constraints
+        // (spec-registry.md §Agent Approver / Gate Schema).
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Forge test").await;
+
+        // An unrelated agent holding an ordinary (non-scoped) agent JWT —
+        // exactly what every spawned agent receives at spawn.
+        let mut forger = gyre_domain::Agent::new(gyre_common::Id::new("agt-forger"), "forger", 100);
+        forger
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&forger).await.unwrap();
+        let token = state
+            .agent_signing_key
+            .mint(
+                "agt-forger",
+                "task-1",
+                "tester",
+                &state.base_url,
+                600,
+                "default",
+                "ws-1",
+                "repo-1",
+                "repo-1",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agt-forger", token.clone())
+            .await
+            .unwrap();
+
+        // The forger claims to be a different reviewer (e.g. a
+        // persona-holding gate agent whose id is discoverable).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-victim",
+            "decision": "approved",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["reviewer_agent_id"], "agt-forger",
+            "an agent-token caller's review must be recorded under its own verified \
+             identity, never the request-body reviewer id"
+        );
+    }
+
+    /// Seed a human principal (user row + API key) and return nothing — the
+    /// raw key authenticates the caller in subsequent requests.
+    async fn seed_human_caller(
+        state: &Arc<crate::AppState>,
+        user_id: &str,
+        display_name: &str,
+        roles: Vec<gyre_domain::UserRole>,
+        raw_key: &str,
+    ) {
+        let mut user = gyre_domain::User::new(
+            Id::new(user_id),
+            format!("external-{user_id}"),
+            display_name,
+            0,
+        );
+        user.roles = roles;
+        user.tenant_id = Some(Id::new("t-review-forge"));
+        state.users.create(&user).await.unwrap();
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "test")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_review_human_non_admin_cannot_forge_agent_reviewer() {
+        // Review repair (manifest gates): a human principal (user JWT /
+        // API key) honoring a request-body reviewer_agent_id naming a
+        // DIFFERENT agent would forge the exact reviewer identity the
+        // manifest gates evaluate (persona + min_attestation_level /
+        // stack_hash constraints) — the Review row attributes only the
+        // named agent; nothing records the submitting human. A non-admin
+        // human may record a review only under its own verified identity.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Human forge test").await;
+
+        seed_human_caller(
+            &state,
+            "u-dev-reviewer",
+            "dev-reviewer",
+            vec![gyre_domain::UserRole::Developer],
+            "gyre_test_dev_reviewer_key",
+        )
+        .await;
+
+        // The developer names the MR's forge-spawned gate agent as the
+        // reviewer (its id is discoverable via the agents listing; its
+        // persona and attestation satisfy the manifest gate).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-gate-security",
+            "decision": "approved",
+            "body": "forged"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_dev_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-admin human must not record a review attributed to another agent"
+        );
+        let reviews = state.reviews.list_reviews(&Id::new(&mr_id)).await.unwrap();
+        assert!(
+            reviews.is_empty(),
+            "the forged review must not be persisted"
+        );
+
+        // The same caller MAY record a review under its own verified user
+        // identity — an attributed human action. The comparison is against
+        // the verified user id, never the display name (which is
+        // user-controlled and could collide with an agent id).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "u-dev-reviewer",
+            "decision": "approved",
+            "body": "own identity"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_dev_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "a human recording a review under its own identity is an attributed action"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], "u-dev-reviewer");
+    }
+
+    #[tokio::test]
+    async fn submit_review_admin_can_record_on_behalf_of_agent() {
+        // The on-behalf escape hatch is reserved for Admin principals —
+        // the same trust level that can merge directly.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Admin on-behalf test").await;
+
+        seed_human_caller(
+            &state,
+            "u-admin-reviewer",
+            "admin-reviewer",
+            vec![gyre_domain::UserRole::Admin],
+            "gyre_test_admin_reviewer_key",
+        )
+        .await;
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-gate-security",
+            "decision": "approved",
+            "body": "admin-recorded"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_admin_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "an Admin principal may record a review on behalf of an agent"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], "agt-gate-security");
+    }
+
+    #[tokio::test]
     async fn review_bad_decision_rejected() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Bad decision").await;
 
         let body = serde_json::json!({
@@ -1246,7 +2498,9 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1257,7 +2511,7 @@ mod tests {
 
     #[tokio::test]
     async fn diff_endpoint_returns_200() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Diff test").await;
 
         let resp = app
@@ -1283,6 +2537,7 @@ mod tests {
     async fn comment_on_missing_mr_returns_404() {
         let body = serde_json::json!({ "author_agent_id": "a1", "body": "hi" });
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1300,11 +2555,13 @@ mod tests {
     async fn review_on_missing_mr_returns_404() {
         let body = serde_json::json!({ "reviewer_agent_id": "a1", "decision": "approved" });
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-requests/no-such/reviews")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1313,11 +2570,241 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// HSI §12 Judgment Ledger: a human approving an MR with a FAILED gate
+    /// result must write a `gate_override` audit event per failed gate,
+    /// carrying mr_id/gate_id/from/to — the event the judgment ledger
+    /// aggregates. An agent-token approval (no user identity) must NOT.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn human_approval_on_failed_gate_writes_gate_override_event() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::GateResult;
+        use gyre_ports::AuditQueryFilter;
+
+        let state = make_test_state_with_jwt();
+        // create_mr resolves the MR's workspace scope from its repository and
+        // refuses unknown repositories — seed repo-1 like every other
+        // state-building test in this module, or the POST 404s and
+        // create_test_mr panics on the missing `id`.
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Override test").await;
+
+        // Seed one FAILED and one PASSED gate result for the MR.
+        let failed = GateResult {
+            id: Id::new("gr-fail-1"),
+            gate_id: Id::new("gate-1"),
+            mr_id: Id::new(&mr_id),
+            status: gyre_common::GateStatus::Failed,
+            output: Some("exit 1".into()),
+            started_at: Some(1000),
+            finished_at: Some(1010),
+        };
+        let passed = GateResult {
+            id: Id::new("gr-pass-1"),
+            gate_id: Id::new("gate-2"),
+            mr_id: Id::new(&mr_id),
+            status: gyre_common::GateStatus::Passed,
+            output: None,
+            started_at: Some(1000),
+            finished_at: Some(1005),
+        };
+        state.gate_results.save(&failed).await.unwrap();
+        state.gate_results.save(&passed).await.unwrap();
+
+        // An agent-token approval (user_id None) — must not write an event.
+        let agent_body = serde_json::json!({
+            "reviewer_agent_id": "agent-1",
+            "decision": "approved"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&agent_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let events0 = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("gate_override".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            events0.is_empty(),
+            "agent-token approval must not write gate_override: {events0:?}"
+        );
+
+        // A human (OIDC JWT) approves — one gate_override per failed gate.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-sub-2",
+                "preferred_username": "judge-2",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let human_body = serde_json::json!({
+            "reviewer_agent_id": "judge-2",
+            "decision": "approved"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&human_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("gate_override".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "one event per FAILED gate, not per gate: {events:?}"
+        );
+        let ev = &events[0];
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-sub-2")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(
+            ev.user_id.as_ref().map(Id::as_str),
+            Some(acting_user.id.as_str())
+        );
+        assert_eq!(ev.detail["mr_id"], mr_id);
+        assert_eq!(ev.detail["gate_id"], "gate-1");
+        assert_eq!(ev.detail["from_status"], "failed");
+        assert_eq!(ev.detail["to_status"], "overridden");
+
+        // The judgment ledger surfaces it as a gate entry via /users/me/judgments.
+        let ledger = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=gate")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ledger.status(), StatusCode::OK);
+        let ledger_json = body_json(ledger).await;
+        let items = ledger_json["judgments"].as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "ledger must surface the override: {items:?}"
+        );
+        assert_eq!(items[0]["judgment_type"], "gate");
+        assert_eq!(items[0]["entity_ref"], mr_id);
+    }
+
     // ── Attestation tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_mrs_enriches_merged_rows_with_merge_commit_sha() {
+        use crate::attestation::{sign_attestation, MergeAttestation};
+
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Merged MR").await;
+
+        // Open -> Approved -> Merged (the domain's valid transition chain).
+        for status in ["approved", "merged"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({ "status": status })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // Store the attestation the enrichment reads (same store the merge
+        // processor writes on a real merge).
+        let attestation = MergeAttestation {
+            attestation_version: 1,
+            mr_id: mr_id.clone(),
+            merge_commit_sha: "feedface".to_string(),
+            merged_at: 1_700_000_000,
+            gate_results: vec![],
+            spec_ref: None,
+            spec_fully_approved: true,
+            author_agent_id: None,
+            conversation_sha: None,
+            completion_summary: None,
+            meta_specs_used: vec![],
+        };
+        let bundle = sign_attestation(attestation, &state.agent_signing_key);
+        state.attestation_store.save(&mr_id, &bundle).await.unwrap();
+
+        // The LIST response must carry the merge-commit SHA: the Inbox's
+        // HSI §8 P5 arbitration resolves merged MRs by that SHA from the
+        // list. Previously only GET /merge-requests/:id enriched it, so the
+        // list lookup always failed and Pick A/Pick B could never resolve
+        // the MR to act on.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests?repository_id=repo-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let row = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == serde_json::json!(mr_id))
+            .expect("merged MR must appear in the repo list");
+        assert_eq!(row["status"], "merged");
+        assert_eq!(row["merge_commit_sha"], "feedface");
+        assert_eq!(row["merged_at"], 1_700_000_000);
+    }
 
     #[tokio::test]
     async fn attestation_missing_mr_returns_404() {
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-requests/no-such-mr/attestation")
@@ -1331,7 +2818,7 @@ mod tests {
 
     #[tokio::test]
     async fn attestation_unmerged_mr_returns_404() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Not yet merged").await;
 
         // MR exists but has no attestation yet (not merged)
@@ -1392,6 +2879,7 @@ mod tests {
         use crate::mem::test_state;
 
         let state = test_state();
+        seed_repo(&state).await;
 
         // Create an MR so the GET endpoint can find it.
         let app = crate::api::api_router().with_state(state.clone());
@@ -1438,7 +2926,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_mr_with_depends_on() {
-        let app = app();
+        let app = app().await;
         let (app, dep_id) = create_test_mr(app, "Dependency MR").await;
 
         // Create MR with depends_on referencing the first one.
@@ -1474,7 +2962,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_mr_with_depends_on_nonexistent_rejected() {
-        let app = app();
+        let app = app().await;
 
         let body = serde_json::json!({
             "repository_id": "repo-1",
@@ -1501,7 +2989,7 @@ mod tests {
     #[tokio::test]
     async fn create_mr_without_depends_on_works() {
         // Omitting depends_on should still work (backward compat).
-        let app = app();
+        let app = app().await;
         let body = serde_json::json!({
             "repository_id": "repo-1",
             "title": "No deps MR",
@@ -1523,5 +3011,709 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         assert_eq!(json["depends_on"].as_array().unwrap().len(), 0);
+    }
+
+    // ── Branch lineage auto-detection tests (TASK-167) ──────────────────
+    //
+    // These exercise detect_lineage_deps / reevaluate_lineage_deps against
+    // a REAL on-disk git repository built with git plumbing (commit-tree),
+    // through the REST MR-creation surface. No git mocks.
+    use std::sync::Arc;
+
+    /// Scaffolding: AppState + bare repo with `main`, plus helpers to add
+    /// commits/branches via git plumbing. The TempDir lives in the harness.
+    struct LineageRepo {
+        state: Arc<crate::AppState>,
+        _tmp: tempfile::TempDir,
+        repo_path: String,
+        repo_id: Id,
+    }
+
+    impl LineageRepo {
+        async fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let repo_path = tmp.path().join("lineage.git");
+            // git init --bare -b main (git >= 2.28); fall back for older git.
+            let init = std::process::Command::new("git")
+                .args(["init", "--bare", "-b", "main"])
+                .arg(&repo_path)
+                .output()
+                .unwrap();
+            if !init.status.success() {
+                let _ = std::process::Command::new("git")
+                    .args(["init", "--bare"])
+                    .arg(&repo_path)
+                    .output()
+                    .unwrap();
+                let out = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git symbolic-ref failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+
+            let state = test_state();
+            let repo_id = Id::new("repo-lineage");
+            let repo = gyre_domain::Repository::new(
+                repo_id.clone(),
+                Id::new("ws-test"),
+                "lineage-repo",
+                repo_path.to_str().unwrap(),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+            Self {
+                state,
+                _tmp: tmp,
+                repo_path: repo_path.to_str().unwrap().to_string(),
+                repo_id,
+            }
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        /// Create a commit whose parent is `parent` (empty tree) and point
+        /// `branch` at it. Returns the new commit SHA.
+        fn commit_on(&self, branch: &str, parent: Option<&str>, msg: &str) -> String {
+            let tree = self.git(&["mktree"]);
+            let sha = match parent {
+                Some(p) => self.git(&["commit-tree", &tree, "-p", p, "-m", msg]),
+                None => self.git(&["commit-tree", &tree, "-m", msg]),
+            };
+            self.git(&["update-ref", &format!("refs/heads/{branch}"), &sha]);
+            sha
+        }
+
+        /// Move `branch` to an existing commit (rebase simulation).
+        fn rebase_branch_to(&self, branch: &str, sha: &str) {
+            self.git(&["update-ref", &format!("refs/heads/{branch}"), sha]);
+        }
+
+        async fn create_mr(&self, source: &str) -> serde_json::Value {
+            let app = crate::api::api_router()
+                .with_state(self.state.clone())
+                .clone();
+            let body = serde_json::json!({
+                "repository_id": self.repo_id.to_string(),
+                "title": format!("MR for {source}"),
+                "source_branch": source,
+                "target_branch": "main",
+            });
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/merge-requests")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            body_json(resp).await
+        }
+
+        async fn deps_of(&self, mr_id: &str) -> Vec<serde_json::Value> {
+            let app = crate::api::api_router().with_state(self.state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/dependencies"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let json = body_json(resp).await;
+            json["depends_on"].as_array().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn lineage_forked_from_mr_branch_creates_dependency() {
+        let repo = LineageRepo::new().await;
+
+        // main: A --- B (feat/a head)
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+
+        // MR A targets main.
+        let mr_a = repo.create_mr("feat/a").await;
+        let mr_a_id = mr_a["id"].as_str().unwrap().to_string();
+
+        // feat/b forked from feat/a's head (not from main).
+        let _b = repo.commit_on("feat/b", Some(&a), "feat B on top of A");
+
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(
+            deps.len(),
+            1,
+            "B forked from A's branch must auto-depend on A: {deps:?}"
+        );
+        assert_eq!(deps[0]["mr_id"], mr_a_id);
+        assert_eq!(deps[0]["source"], "branch-lineage");
+
+        // A itself must NOT depend on B (detection is one-directional).
+        let deps_a = repo.deps_of(&mr_a_id).await;
+        assert!(deps_a.is_empty(), "A must not depend on B: {deps_a:?}");
+    }
+
+    #[tokio::test]
+    async fn lineage_forked_from_main_no_dependency() {
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let _a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _c = repo.commit_on("feat/c", Some(&base), "feat C also from main");
+
+        repo.create_mr("feat/a").await;
+        let mr_c = repo.create_mr("feat/c").await;
+        let mr_c_id = mr_c["id"].as_str().unwrap().to_string();
+
+        let deps = repo.deps_of(&mr_c_id).await;
+        assert!(
+            deps.is_empty(),
+            "C forked from main must have no auto-dependency: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_parent_merged_satisfies_dependency() {
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let mr_a = repo.create_mr("feat/a").await;
+        let mr_a_id = mr_a["id"].as_str().unwrap().to_string();
+        let _b = repo.commit_on("feat/b", Some(&a), "feat B");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        // Sanity: B depends on A.
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(deps.len(), 1);
+
+        // Merge A (Open → Approved → Merged via REST transitions).
+        let app = crate::api::api_router().with_state(repo.state.clone());
+        for status in ["approved", "merged"] {
+            let body = serde_json::json!({ "status": status });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_a_id}/status"))
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "transition to {status}");
+        }
+
+        // The stored dependency now points at a Merged MR — the merge
+        // processor's dependencies_satisfied treats it as satisfied.
+        let mr = repo
+            .state
+            .merge_requests
+            .find_by_id(&Id::new(&mr_b_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mr.depends_on.len(), 1);
+        let parent = repo
+            .state
+            .merge_requests
+            .find_by_id(&mr.depends_on[0].target_mr_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parent.status, gyre_domain::MrStatus::Merged);
+    }
+
+    #[tokio::test]
+    async fn lineage_reevaluated_on_rebase_removes_stale_dep() {
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _ = repo.create_mr("feat/a").await;
+        let _b = repo.commit_on("feat/b", Some(&a), "feat B forked from A");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        // B depends on A.
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(deps.len(), 1, "pre-rebase: B must depend on A");
+
+        // Rebase feat/b onto main (no longer descends from feat/a).
+        let new_main = repo.commit_on("main", Some(&base), "main moves on");
+        let rebased = repo.commit_on("feat/b2", Some(&new_main), "B rebased");
+        // Point feat/b at the rebased commit (descends only from main).
+        repo.rebase_branch_to("feat/b", &rebased);
+        // Delete the temp branch used to author the rebased commit.
+        repo.git(&["update-ref", "-d", "refs/heads/feat/b2"]);
+
+        // Re-evaluate as the post-receive hook would.
+        super::reevaluate_lineage_deps(&repo.state, &Id::new(&mr_b_id)).await;
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert!(
+            deps.is_empty(),
+            "post-rebase: stale lineage dependency must be removed: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_reevaluation_adds_new_dep_after_fork() {
+        let repo = LineageRepo::new().await;
+
+        // B forked from main — no dependency at creation.
+        let base = repo.commit_on("main", None, "base");
+        let _b0 = repo.commit_on("feat/b", Some(&base), "B starts from main");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+        assert!(repo.deps_of(&mr_b_id).await.is_empty());
+
+        // Later, A's branch is created and pushed AFTER B's MR existed.
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _mr_a = repo.create_mr("feat/a").await;
+
+        // B is rebased (re-pushed) on top of A's branch.
+        let b_new = repo.commit_on("feat/b2", Some(&a), "B now on top of A");
+        repo.rebase_branch_to("feat/b", &b_new);
+        repo.git(&["update-ref", "-d", "refs/heads/feat/b2"]);
+
+        super::reevaluate_lineage_deps(&repo.state, &Id::new(&mr_b_id)).await;
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(
+            deps.len(),
+            1,
+            "post-fork re-push: lineage dep on A must be added: {deps:?}"
+        );
+        assert_eq!(deps[0]["source"], "branch-lineage");
+    }
+
+    #[tokio::test]
+    async fn lineage_reevaluation_preserves_explicit_deps() {
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _ = repo.create_mr("feat/a").await;
+        let _b = repo.commit_on("feat/b", Some(&a), "B forked from A");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        // Replace deps with an explicit declaration (drops the lineage edge).
+        let other = repo.commit_on("feat/other", Some(&base), "other");
+        let mr_other = repo.create_mr("feat/other").await;
+        let mr_other_id = mr_other["id"].as_str().unwrap().to_string();
+        drop(other);
+
+        let app = crate::api::api_router().with_state(repo.state.clone());
+        let body = serde_json::json!({
+            "depends_on": [mr_other_id],
+            "reason": "orchestrator override"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_b_id}/dependencies"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Re-evaluation must not clobber the explicit dep even though the
+        // lineage signal (B descends from A) still holds.
+        super::reevaluate_lineage_deps(&repo.state, &Id::new(&mr_b_id)).await;
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(deps.len(), 2, "explicit + re-detected lineage: {deps:?}");
+        let sources: Vec<&str> = deps.iter().map(|d| d["source"].as_str().unwrap()).collect();
+        assert!(sources.contains(&"explicit"));
+        assert!(sources.contains(&"branch-lineage"));
+    }
+
+    #[tokio::test]
+    async fn lineage_parent_rebase_rechecks_dependents() {
+        // merge-dependencies.md §2 item 3: "If the parent MR is later
+        // rebased, the dependency is re-evaluated." The PARENT's branch is
+        // pushed; the child's branch never moves. The push-triggered
+        // selection must still pick the child MR for re-evaluation and
+        // drop the stale edge (parent's new tip is no longer the child's
+        // merge base).
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _mr_a = repo.create_mr("feat/a").await;
+        let _b = repo.commit_on("feat/b", Some(&a), "feat B forked from A");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+        assert_eq!(repo.deps_of(&mr_b_id).await.len(), 1);
+
+        // Parent rebases onto a fresh main — its new tip is NOT an
+        // ancestor of feat/b anymore.
+        let new_main = repo.commit_on("main", Some(&base), "main moves on");
+        let a_rebased = repo.commit_on("feat/a2", Some(&new_main), "A rebased");
+        repo.rebase_branch_to("feat/a", &a_rebased);
+        repo.git(&["update-ref", "-d", "refs/heads/feat/a2"]);
+
+        // Push-triggered selection exactly as the post-receive hook runs it:
+        // only feat/a was pushed, yet the child holding the lineage edge
+        // must be selected and re-evaluated.
+        let selected =
+            super::mrs_needing_lineage_reeval(&repo.state, &repo.repo_id, &["feat/a".to_string()])
+                .await;
+        assert!(
+            selected.contains(&Id::new(&mr_b_id)),
+            "child MR must be selected when only the parent branch was pushed"
+        );
+
+        for mr_id in selected {
+            super::reevaluate_lineage_deps(&repo.state, &mr_id).await;
+        }
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert!(
+            deps.is_empty(),
+            "parent rebased away from child: stale lineage edge must be dropped: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_cross_target_branch_still_detected() {
+        // The lineage signal is branch ancestry, not target-branch
+        // equality: a child forked from a parent MR's branch must depend
+        // on the parent even when the child targets a different branch —
+        // merging the child first would carry the parent's unreviewed
+        // commits into the other target.
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _ = repo.create_mr("feat/a").await;
+
+        // Child forked from feat/a but targeting a release branch.
+        repo.commit_on("release/1.0", Some(&base), "release branch");
+        let _b = repo.commit_on("feat/b", Some(&a), "B on top of A");
+
+        let app = crate::api::api_router()
+            .with_state(repo.state.clone())
+            .clone();
+        let body = serde_json::json!({
+            "repository_id": repo.repo_id.to_string(),
+            "title": "MR B targeting release",
+            "source_branch": "feat/b",
+            "target_branch": "release/1.0",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_b = body_json(resp).await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(
+            deps.len(),
+            1,
+            "fork-from-MR-branch must be detected across target branches: {deps:?}"
+        );
+        assert_eq!(deps[0]["source"], "branch-lineage");
+    }
+
+    #[tokio::test]
+    async fn lineage_parent_contained_in_default_not_detected() {
+        // Spec §2: the fork must be from another MR's branch, "not the
+        // default branch". An open MR whose tip is already contained in
+        // the default branch (here: a zero-commit branch parked exactly on
+        // the default tip) must NOT produce a lineage edge for children
+        // forked from the default tip — forking from it is
+        // indistinguishable from forking from main, and the edge would
+        // block the child on a parent that gates nothing.
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        // Parked branch: points at the exact default tip.
+        repo.git(&["update-ref", "refs/heads/feat/parked", &base]);
+        let _mr_parked = repo.create_mr("feat/parked").await;
+
+        // Child forked from the same default tip.
+        let _c = repo.commit_on("feat/c", Some(&base), "C from main");
+        let mr_c = repo.create_mr("feat/c").await;
+        let mr_c_id = mr_c["id"].as_str().unwrap().to_string();
+
+        let deps = repo.deps_of(&mr_c_id).await;
+        assert!(
+            deps.is_empty(),
+            "candidate contained in default branch must be skipped: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_workspace_mrs_filters_by_trace_and_limits() {
+        // HSI §3 MR ID discovery: `?has_trace=true` returns only MRs with
+        // captured gate traces (newest first); `limit=N` caps the result.
+        let state = test_state();
+        let ws = gyre_common::Id::new("ws-list");
+        let mut mrs = Vec::new();
+        for (id, title, updated_at) in [
+            ("mr-a", "Older traced", 100u64),
+            ("mr-b", "Newer traced", 200),
+            ("mr-c", "Newest untraced", 300),
+        ] {
+            let mut mr = MergeRequest::new(
+                gyre_common::Id::new(id),
+                gyre_common::Id::new("repo-list"),
+                ws.clone(),
+                title,
+                "feat/x",
+                "main",
+                updated_at,
+            );
+            mr.updated_at = updated_at;
+            state.merge_requests.create(&mr).await.unwrap();
+            mrs.push(id);
+        }
+        let _ = mrs;
+        for mr_id in ["mr-a", "mr-b"] {
+            let trace = gyre_common::GateTrace {
+                id: gyre_common::Id::new(format!("trace-{mr_id}")),
+                mr_id: gyre_common::Id::new(mr_id),
+                gate_run_id: gyre_common::Id::new("gr-list"),
+                commit_sha: "abc".to_string(),
+                spans: vec![],
+                captured_at: 1,
+            };
+            state.traces.store(&trace).await.unwrap();
+        }
+
+        let app = crate::api::api_router().with_state(state);
+
+        async fn ids(app: Router, uri: &str) -> Vec<String> {
+            let resp = app
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "uri: {uri}");
+            let json = body_json(resp).await;
+            json.as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        // No params: all three, repository order (unfiltered).
+        let all = ids(app.clone(), "/api/v1/workspaces/ws-list/merge-requests").await;
+        assert_eq!(all.len(), 3, "unfiltered list returns all MRs");
+
+        // has_trace=true: only traced MRs, newest first.
+        let traced = ids(
+            app.clone(),
+            "/api/v1/workspaces/ws-list/merge-requests?has_trace=true",
+        )
+        .await;
+        assert_eq!(traced, vec!["mr-b", "mr-a"], "traced only, newest first");
+
+        // has_trace=true&limit=1: the single most recent traced MR.
+        let capped = ids(
+            app.clone(),
+            "/api/v1/workspaces/ws-list/merge-requests?has_trace=true&limit=1",
+        )
+        .await;
+        assert_eq!(capped, vec!["mr-b"]);
+
+        // limit alone: most recent MRs of the unfiltered set.
+        let limited = ids(app, "/api/v1/workspaces/ws-list/merge-requests?limit=2").await;
+        assert_eq!(limited, vec!["mr-c", "mr-b"], "newest first, capped at 2");
+    }
+
+    /// agent-gates.md §Integration with Agent Gates step 1: the gate agent
+    /// receives the spec at the **pinned SHA**, not HEAD. `GET
+    /// /api/v1/merge-requests/{id}/spec` must serve the blob content at the
+    /// MR's spec_ref SHA even after the spec file has moved on at HEAD —
+    /// resolving at HEAD would let a later spec edit silently change what
+    /// the gate reviews against.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_mr_spec_serves_pinned_sha_not_head() {
+        let state = test_state();
+
+        // Real repo: spec v1 committed, then v2 lands on HEAD.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("pinned-spec-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v1\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v1"]);
+        let v1_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
+
+        std::fs::write(
+            repo_path.join("specs/system/identity.md"),
+            "# Identity v2 — EDITED AT HEAD\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v2"]);
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-pinned-spec"),
+            gyre_common::Id::new("ws-1"),
+            "pinned-spec-repo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let mut mr = MergeRequest::new(
+            gyre_common::Id::new("mr-pinned-spec"),
+            repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
+            "Pinned spec MR",
+            "feat/pinned",
+            "main",
+            1000,
+        );
+        mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Pinned content is v1 — NOT the v2 currently at HEAD.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-pinned-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["spec_ref"], format!("system/identity.md@{v1_blob}"));
+        assert_eq!(json["spec_path"], "system/identity.md");
+        assert_eq!(json["spec_sha"], v1_blob);
+        assert_eq!(json["content"], "# Identity v1\n");
+        assert_ne!(
+            json["content"], "# Identity v2 — EDITED AT HEAD\n",
+            "endpoint must serve the PINNED spec version, not HEAD"
+        );
+
+        // MR without a spec_ref: nothing to serve.
+        let mr_no_spec = MergeRequest::new(
+            gyre_common::Id::new("mr-no-spec"),
+            repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
+            "No spec MR",
+            "feat/nospec",
+            "main",
+            1001,
+        );
+        state.merge_requests.create(&mr_no_spec).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-no-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Pinned SHA that does not exist in the repo: unreachable version.
+        let mut mr_ghost = MergeRequest::new(
+            gyre_common::Id::new("mr-ghost-spec"),
+            repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
+            "Ghost spec MR",
+            "feat/ghost",
+            "main",
+            1002,
+        );
+        mr_ghost.spec_ref = Some(format!("system/identity.md@{}", "e".repeat(40)));
+        state.merge_requests.create(&mr_ghost).await.unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/merge-requests/mr-ghost-spec/spec")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

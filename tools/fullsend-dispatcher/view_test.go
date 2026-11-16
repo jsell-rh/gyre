@@ -288,6 +288,11 @@ func TestAgentGroupsDefaultOrderAndCompletedToggle(t *testing.T) {
 	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = next.(Model)
+	if m.screen != "configuration" {
+		t.Fatal("did not reach configuration tab")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
 	if m.issueGrouping {
 		t.Fatal("did not return to agent grouping")
 	}

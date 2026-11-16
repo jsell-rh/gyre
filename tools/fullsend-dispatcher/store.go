@@ -26,6 +26,7 @@ type CodeReadiness struct {
 	Status       string `json:"status"`
 	MergeState   string `json:"merge_state"`
 	RepairQueued bool   `json:"repair_queued"`
+	Blocker      string `json:"blocker,omitempty"`
 }
 
 type Job struct {
@@ -60,6 +61,7 @@ type Row struct {
 	RunID           string  `json:"run_id"`
 	Log             string  `json:"log"`
 	Error           string  `json:"error"`
+	FailureCategory string  `json:"failure_category,omitempty"`
 	Activity        string  `json:"activity,omitempty"`
 	CancelRequested bool    `json:"cancel_requested,omitempty"`
 }
@@ -122,7 +124,7 @@ func (s *Store) rows() ([]Row, error) {
 }
 func eligible(j Job, rows []Row, now float64) bool {
 	for _, r := range rows {
-		if r.Item == j.Item && (r.Status == "running" || r.Status == "uncertain" || r.Status == "canceled") {
+		if r.Item == j.Item && (r.Status == "running" || r.Status == "uncertain" || r.Status == "attention" || r.Status == "canceled") {
 			return false
 		}
 		if r.Key == j.Key && (r.Next > now || r.Status == "succeeded" && r.Fingerprint == j.Fingerprint) {
@@ -131,6 +133,23 @@ func eligible(j Job, rows []Row, now float64) bool {
 	}
 	return true
 }
+
+// The adapter's durable claim owns cross-stage exclusions. The native backend
+// serializes an item, but an adapter may admit an observer alongside a verifier
+// or cleanup alongside implementation. Keep per-work backoff/deduplication here.
+func dispatchEligible(j Job, rows []Row, now float64, adapter bool) bool {
+	if !adapter {
+		return eligible(j, rows, now)
+	}
+	matching := make([]Row, 0, 1)
+	for _, row := range rows {
+		if row.Key == j.Key {
+			matching = append(matching, row)
+		}
+	}
+	return eligible(j, matching, now)
+}
+
 func (s *Store) start(j Job, log string) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {

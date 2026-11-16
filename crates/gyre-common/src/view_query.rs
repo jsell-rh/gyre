@@ -41,6 +41,17 @@ pub enum Scope {
         to_commit: String,
     },
     /// Cross-cutting concept from seed nodes expanded along edges.
+    ///
+    /// `seed_match` controls how each entry in `seed_nodes` resolves to
+    /// graph nodes (ui-layout.md §4 "Data source distinction"):
+    ///   - "exact" (default): the seed names node(s) by name /
+    ///     qualified_name / id — the ad-hoc grouping and grammar-example
+    ///     mechanism.
+    ///   - "substring": the seed is a case-insensitive substring matched
+    ///     against every node's name and qualified_name, seeding ALL
+    ///     matches — the ViewSpec `data.concept` mechanism (ui-layout.md
+    ///     §4 Data Layer: "matches node `name` or `qualified_name`
+    ///     (case-insensitive substring)").
     Concept {
         seed_nodes: Vec<String>,
         #[serde(default)]
@@ -50,6 +61,9 @@ pub enum Scope {
         /// Expansion direction: "outgoing", "incoming", or "both" (default: "both").
         #[serde(default = "default_concept_direction")]
         expand_direction: String,
+        /// Seed matching mode: "exact" (default) or "substring".
+        #[serde(default = "default_seed_match")]
+        seed_match: String,
     },
 }
 
@@ -66,6 +80,9 @@ fn default_concept_depth() -> u32 {
 }
 fn default_concept_direction() -> String {
     "both".to_string()
+}
+fn default_seed_match() -> String {
+    "exact".to_string()
 }
 
 // ── Emphasis ─────────────────────────────────────────────────────────────────
@@ -299,6 +316,7 @@ impl ViewQuery {
                 seed_nodes,
                 expand_edges,
                 expand_direction,
+                seed_match,
             } => {
                 if *expand_depth > MAX_DEPTH {
                     errors.push(format!(
@@ -323,6 +341,13 @@ impl ViewQuery {
                     errors.push(format!(
                         "Invalid expand_direction '{}' in Concept scope — must be one of: incoming, outgoing, both",
                         expand_direction
+                    ));
+                }
+                let valid_seed_match = ["exact", "substring"];
+                if !valid_seed_match.contains(&seed_match.as_str()) {
+                    errors.push(format!(
+                        "Invalid seed_match '{}' in Concept scope — must be one of: exact, substring",
+                        seed_match
                     ));
                 }
             }
@@ -1058,6 +1083,8 @@ pub struct CanvasState {
 /// Structured record of a user interaction on the canvas.
 /// Accepts both structured objects `{"action":"click","node":"Foo"}` and
 /// plain strings `"click:Foo(function)"` for backwards compatibility.
+/// `to_level` is set for zoom actions (view-query-grammar.md §10), `preset`
+/// for query-preset actions.
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractionRecord {
     pub action: String,
@@ -1065,6 +1092,10 @@ pub struct InteractionRecord {
     pub node: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_level: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 impl<'de> serde::Deserialize<'de> for InteractionRecord {
@@ -1096,12 +1127,16 @@ impl<'de> serde::Deserialize<'de> for InteractionRecord {
                         action: action.to_string(),
                         node,
                         detail,
+                        to_level: None,
+                        preset: None,
                     })
                 } else {
                     Ok(InteractionRecord {
                         action: v.to_string(),
                         node: None,
                         detail: None,
+                        to_level: None,
+                        preset: None,
                     })
                 }
             }
@@ -1117,12 +1152,18 @@ impl<'de> serde::Deserialize<'de> for InteractionRecord {
                     node: Option<String>,
                     #[serde(default)]
                     detail: Option<String>,
+                    #[serde(default)]
+                    to_level: Option<f64>,
+                    #[serde(default)]
+                    preset: Option<String>,
                 }
                 let inner = Inner::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 Ok(InteractionRecord {
                     action: inner.action,
                     node: inner.node,
                     detail: inner.detail,
+                    to_level: inner.to_level,
+                    preset: inner.preset,
                 })
             }
         }

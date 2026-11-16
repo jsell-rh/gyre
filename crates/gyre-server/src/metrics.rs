@@ -17,6 +17,20 @@ pub struct Metrics {
     pub active_agents: Gauge,
     /// Number of entries currently in the merge queue.
     pub merge_queue_depth: Gauge,
+    /// Pass 2 (semantic call graph) extraction duration in seconds, labelled
+    /// by language (specs/system/lsp-call-graph.md §9 performance targets:
+    /// go ~2–5s, rust ~20s, python ~30s, typescript ~30s).
+    pub graph_pass2_duration_seconds: HistogramVec,
+    /// Count of repos with meta-spec drift, labelled by workspace and repo
+    /// (meta-spec-reconciliation.md §11).
+    pub meta_spec_drift_total: CounterVec,
+    /// Reconciliation task counts, labelled by workspace and status
+    /// (meta-spec-reconciliation.md §11).
+    pub reconciliation_tasks_total: CounterVec,
+    /// Wall-clock duration of a reconciliation wave (spec-change → last
+    /// reconciliation task terminal), labelled by workspace
+    /// (meta-spec-reconciliation.md §11).
+    pub reconciliation_duration_seconds: HistogramVec,
 }
 
 impl Metrics {
@@ -51,12 +65,54 @@ impl Metrics {
         )?;
         registry.register(Box::new(merge_queue_depth.clone()))?;
 
+        let graph_pass2_duration_seconds = HistogramVec::new(
+            prometheus::HistogramOpts::new(
+                "gyre_graph_pass2_duration_seconds",
+                "Pass 2 (semantic) call graph extraction duration in seconds, by language",
+            )
+            .buckets(vec![0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0]),
+            &["language"],
+        )?;
+        registry.register(Box::new(graph_pass2_duration_seconds.clone()))?;
+
+        let meta_spec_drift_total = CounterVec::new(
+            Opts::new(
+                "gyre_meta_spec_drift_total",
+                "Count of repos with meta-spec drift, by workspace and repo",
+            ),
+            &["workspace", "repo"],
+        )?;
+        registry.register(Box::new(meta_spec_drift_total.clone()))?;
+
+        let reconciliation_duration_seconds = HistogramVec::new(
+            prometheus::HistogramOpts::new(
+                "gyre_reconciliation_duration_seconds",
+                "Wall-clock duration of a reconciliation wave (spec-change to last task terminal), by workspace",
+            )
+            .buckets(vec![1.0, 60.0, 3600.0, 86400.0, 604800.0, 2592000.0]),
+            &["workspace"],
+        )?;
+        registry.register(Box::new(reconciliation_duration_seconds.clone()))?;
+
+        let reconciliation_tasks_total = CounterVec::new(
+            Opts::new(
+                "gyre_reconciliation_tasks_total",
+                "Reconciliation task counts, by workspace and status",
+            ),
+            &["workspace", "status"],
+        )?;
+        registry.register(Box::new(reconciliation_tasks_total.clone()))?;
+
         Ok(Self {
             registry,
             http_requests_total,
             http_request_duration_seconds,
             active_agents,
             merge_queue_depth,
+            graph_pass2_duration_seconds,
+            meta_spec_drift_total,
+            reconciliation_tasks_total,
+            reconciliation_duration_seconds,
         })
     }
 
@@ -65,6 +121,14 @@ impl Metrics {
         let encoder = prometheus::TextEncoder::new();
         let families = self.registry.gather();
         encoder.encode_to_string(&families).unwrap_or_default()
+    }
+
+    /// Observe a Pass 2 (semantic call graph) extraction duration for a
+    /// language (specs/system/lsp-call-graph.md §9).
+    pub fn observe_pass2_duration(&self, language: &str, seconds: f64) {
+        self.graph_pass2_duration_seconds
+            .with_label_values(&[language])
+            .observe(seconds);
     }
 }
 
@@ -138,6 +202,20 @@ mod tests {
         assert!(
             output.contains("gyre_http_request_duration_seconds"),
             "missing gyre_http_request_duration_seconds in: {output}"
+        );
+    }
+
+    #[test]
+    fn metrics_render_contains_reconciliation_duration_histogram() {
+        let m = Metrics::new().unwrap();
+        // HistogramVec only appears in output after at least one observation.
+        m.reconciliation_duration_seconds
+            .with_label_values(&["ws1"])
+            .observe(60.0);
+        let output = m.render();
+        assert!(
+            output.contains("gyre_reconciliation_duration_seconds"),
+            "missing gyre_reconciliation_duration_seconds in: {output}"
         );
     }
 

@@ -16,6 +16,8 @@ import (
 )
 
 type Config struct {
+	Settings       []Setting          `json:"settings"`
+	SettingsFile   string             `json:"settings_file"`
 	AdapterBackend bool               `json:"adapter_backend"`
 	SupervisorLock string             `json:"supervisor_lock"`
 	RetryFailed    string             `json:"retry"`

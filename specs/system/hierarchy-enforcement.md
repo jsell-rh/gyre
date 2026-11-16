@@ -316,7 +316,7 @@ These endpoints are exempt from ABAC evaluation (handled before the middleware):
 | `POST /api/v1/specs/:path/reject?repo_id=` | Spec rejection (per-handler auth — `:path` is not a UUID, resolves workspace from `?repo_id=`) |
 | `GET /api/v1/specs/:path/history` | Spec approval history (per-handler auth — resolves workspace from spec's repo via `?repo_id=`) |
 | `GET /api/v1/specs/:path/progress` | Spec task rollup (per-handler auth — resolves workspace from spec's repo via `?repo_id=`) |
-| `GET /api/v1/trace-spans/:span_id/payload` | Span payload drill-down (per-handler auth — `:span_id` is not a UUID; span's MR → workspace resolved by the storage layer, tenant-scoped) (HSI §3a) |
+| `GET /api/v1/trace-spans/:span_id/payload` | Span payload drill-down (per-handler auth — `:span_id` is not a UUID; handler resolves span → trace → MR → workspace and returns 403 on tenant mismatch) (HSI §3a) |
 | `GET /*` | SPA static files |
 
 ---

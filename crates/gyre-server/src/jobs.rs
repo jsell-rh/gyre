@@ -398,16 +398,38 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register log compression job (observability.md §Log Retention &
+    // Compression) — daily by default, configurable via
+    // GYRE_LOG_COMPRESSION_INTERVAL (seconds).
+    registry
+        .register(
+            JobDefinition {
+                name: crate::log_compression::JOB_NAME.to_string(),
+                description: "Zstd-compresses audit event details and agent log \
+                     lines older than 7 days (observability §Log Retention & Compression)"
+                    .to_string(),
+                interval_secs: crate::log_compression::interval_secs(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::log_compression::run_once(&state).await.map(|_| ()) },
+        )
+        .await;
+
+    // Register the budget rolling-window job (agent-runtime.md §4 Budget
+    // Reset): hourly re-sync of the token/cost counters to the per-call
+    // records inside the last 24 hours (rolling window, not calendar day).
     registry
         .register(
             JobDefinition {
                 name: "spawn_budget_reset".to_string(),
-                description: "Resets daily spawn budget counters at midnight UTC".to_string(),
-                interval_secs: 86400,
+                description: "Applies the rolling 24h budget window: re-syncs token/cost                      counters from per-call records inside the window (hourly)"
+                    .to_string(),
+                interval_secs: 3600,
                 enabled: true,
-                run_at_utc_hour: Some(0),
+                run_at_utc_hour: None,
             },
-            |state| async move { crate::api::budget::reset_daily_counters(&state).await },
+            |state| async move { crate::api::budget::apply_rolling_24h_window(&state).await },
         )
         .await;
 
@@ -472,20 +494,58 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register orphaned workspace check job (runs daily,
+    // user-management.md §Ownership Transfer & Reclamation)
+    registry
+        .register(
+            JobDefinition {
+                name: "orphaned_workspace_check".to_string(),
+                description: "Tracks workspaces with no active Owner: notifies TenantAdmins \
+             on the transition and flags workspaces ownerless beyond the configured period \
+             (default 30 days) in the admin dashboard"
+                    .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::workspace_ownership::run_once(&state).await },
+        )
+        .await;
+
     // Register trust_suggestion_check job (runs daily, HSI §2)
     registry
         .register(
             JobDefinition {
                 name: "trust_suggestion_check".to_string(),
-                description:
-                    "Evaluates workspace trust escalation criteria and creates TrustSuggestion \
-             notifications for Admin/Owner members when criteria are met (HSI §2)"
-                        .to_string(),
+                description: "Queries 30-day gate failures and MR reverts per workspace; creates \
+             TrustSuggestion notifications for Admin/Owner members when both counts \
+             are 0 and trust can escalate (HSI §2)"
+                    .to_string(),
                 interval_secs: 86400,
                 enabled: true,
                 run_at_utc_hour: None,
             },
             |state| async move { crate::trust_suggestion::run_once(&state).await },
+        )
+        .await;
+
+    // Register task_scheduler job (agent-runtime.md §1 Phases 3–4, task-115):
+    // claims Backlog Delegation/Coordination tasks and runs repo orchestrators
+    // under per-repo registry locks. The 30 s loop itself is spawned in main.rs
+    // (signal_chain::spawn_task_scheduler) and records its cycles under this
+    // same name so /healthz liveness and POST /admin/jobs/task_scheduler/run work.
+    registry
+        .register(
+            JobDefinition {
+                name: "task_scheduler".to_string(),
+                description: "Claims Delegation/Coordination tasks and runs repo orchestrators \
+             (agent-runtime.md §1 Phase 3)"
+                    .to_string(),
+                interval_secs: 30,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::signal_chain::scheduler_run_once(&state).await },
         )
         .await;
 
@@ -505,6 +565,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+<<<<<<< HEAD
     // Register meta_spec_preview_gc job (§5 of meta-spec-reconciliation.md)
     registry
         .register(
@@ -519,6 +580,122 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 run_at_utc_hour: None,
             },
             |state| async move { crate::api::meta_specs::run_once(&state).await },
+=======
+    // Register code-search file indexing (search.md §Index Updates: file
+    // content is indexed asynchronously on push; also runs on a fixed interval
+    // so the index stays consistent after restarts without a manual reindex).
+    registry
+        .register(
+            JobDefinition {
+                name: "search_code_index".to_string(),
+                description: "Indexes repo file content for code search (search.md)".to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::search_indexer::run_code_index_job(&state).await },
+        )
+        .await;
+
+    // Register meta_spec_stale_pin_check job (agent-runtime.md §2 Stale Pin
+    // Detection): compares spec-level binding pins against current versions.
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_stale_pin_check".to_string(),
+                description: "Detects specs pinning old meta-spec versions and creates priority-6 \
+                     MetaSpecDrift notifications (agent-runtime §2)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::prompt_assembly::detect_stale_pins(&state).await },
+        )
+        .await;
+
+    // Register secret expiry check job (every 5 minutes, platform-model.md §7)
+    registry
+        .register(
+            JobDefinition {
+                name: "secret_rotation_check".to_string(),
+                description: "Creates SecretExpiring notifications for workspace admins \
+                             when secrets expire within 1 hour (platform-model.md §7)"
+                    .to_string(),
+                interval_secs: 300,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::secret_rotation::run_once(&state).await },
+        )
+        .await;
+
+    // Register meta-spec conformance sweep job (runs daily,
+    // meta-spec-reconciliation.md §10). Interval is configurable via
+    // GYRE_META_SPEC_SWEEP_INTERVAL_SECS.
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_conformance_sweep".to_string(),
+                description: "Sweeps all workspaces for meta-spec drift between the active \
+                     meta-spec set and provenance-recorded set SHAs (§10)"
+                    .to_string(),
+                interval_secs: std::env::var("GYRE_META_SPEC_SWEEP_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(crate::reconciliation::SWEEP_INTERVAL_SECS),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::reconciliation::run_conformance_sweep(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
+    // Register impersonation expiry job (runs every 30 seconds,
+    // identity-security.md §Impersonation): ends sessions past their TTL
+    // (emitting ImpersonationEnded) and expires stale approval requests.
+    registry
+        .register(
+            JobDefinition {
+                name: "impersonation_expiry".to_string(),
+                description: "Ends impersonation sessions past their TTL and expires \
+                     stale approval requests (identity-security.md §Impersonation)"
+                    .to_string(),
+                interval_secs: 30,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::impersonation::expire_sessions(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
+    // Register the email digest drain (user-management.md §Email
+    // Notifications): every 60 s it drains the durable email outbox at
+    // each user's configured digest frequency — Immediate sends
+    // individually, Hourly/Daily aggregate once per window. With no SMTP
+    // relay configured (GYRE_SMTP_HOST) it holds the queue untouched.
+    registry
+        .register(
+            JobDefinition {
+                name: "email_digest".to_string(),
+                description: "Drains the durable email outbox: renders per-type \
+                     templates + digest aggregates in the user's locale and delivers \
+                     via the configured SMTP relay (user-management.md §Email Notifications)"
+                    .to_string(),
+                interval_secs: 60,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::email::run_digest_once(&state).await },
+>>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
         )
         .await;
 

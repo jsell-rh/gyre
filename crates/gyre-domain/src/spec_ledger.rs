@@ -68,6 +68,14 @@ pub struct SpecApprovalEvent {
     pub approver_id: String,
     /// Agent persona name (null for human approvers).
     pub persona: Option<String>,
+    /// Agent attestation level (0-3) captured from the approving agent's
+    /// verified JWT workload claims at approval time (null for humans).
+    /// Required to evaluate §9 agent-approval validity.
+    pub attestation_level: Option<u32>,
+    /// Agent stack fingerprint captured from the approving agent's verified
+    /// JWT `wl_stack_hash` claim at approval time (null for humans).
+    /// Required to evaluate §9 stack_hash matching.
+    pub stack_hash: Option<String>,
     pub approved_at: u64,
     pub revoked_at: Option<u64>,
     pub revoked_by: Option<String>,

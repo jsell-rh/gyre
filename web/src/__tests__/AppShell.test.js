@@ -35,6 +35,12 @@ function parseUrl(pathname) {
     return { mode: 'profile', slug: null, repoName: null, tab: null };
   }
 
+  // /@{username} — tenant-scoped public user profile
+  // (user-management.md §User Profile Page)
+  if (raw[0]?.startsWith('@') && raw[0].length > 1) {
+    return { mode: 'user_profile', slug: null, repoName: null, tab: null, username: raw[0].slice(1) };
+  }
+
   // /all  or  /all/settings  (cross-workspace view §10)
   if (raw[0] === 'all') {
     const tab = raw[1] ?? null;
@@ -58,8 +64,9 @@ function parseUrl(pathname) {
 
 function urlFor(parsed) {
   if (!parsed) return '/';
-  const { mode: m, slug, repoName, tab } = parsed;
+  const { mode: m, slug, repoName, tab, username } = parsed;
   if (m === 'profile') return '/profile';
+  if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
   if (m === 'cross_workspace') {
     return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
   }
@@ -86,6 +93,19 @@ describe('parseUrl', () => {
 
   it('parses profile route', () => {
     expect(parseUrl('/profile')).toEqual({ mode: 'profile', slug: null, repoName: null, tab: null });
+  });
+
+  it('parses /@username as the public profile route', () => {
+    expect(parseUrl('/@jsell')).toEqual({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jsell' });
+  });
+
+  it('decodes URL-encoded handles in /@username', () => {
+    expect(parseUrl('/@j%C3%B8rgen')).toEqual({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jørgen' });
+  });
+
+  it('does not treat a bare @ or non-@ path as a profile', () => {
+    expect(parseUrl('/@')).toBeNull();
+    expect(parseUrl('/dashboard')).toBeNull();
   });
 
   it('parses workspace home', () => {
@@ -189,6 +209,19 @@ describe('urlFor', () => {
 
   it('returns /profile', () => {
     expect(urlFor({ mode: 'profile', slug: null, repoName: null, tab: null })).toBe('/profile');
+  });
+
+  it('generates /@username for the public profile route', () => {
+    expect(urlFor({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jsell' })).toBe('/@jsell');
+  });
+
+  it('URL-encodes handles in /@username', () => {
+    expect(urlFor({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jørgen' })).toBe('/@j%C3%B8rgen');
+  });
+
+  it('round-trips /@username through parseUrl → urlFor', () => {
+    const parsed = parseUrl('/@jsell');
+    expect(urlFor(parsed)).toBe('/@jsell');
   });
 
   it('returns / when no slug', () => {
@@ -343,15 +376,22 @@ describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
     });
   }
 
-  it('clicking Briefing navigates to workspace home Briefing section', async () => {
+  it('clicking Briefing in repo mode opens the repo-scope Briefing sub-tab', async () => {
+    // ui-navigation.md §3 "Sub-tabs in the control bar": Briefing at repo
+    // scope is the Architecture tab's Briefing sub-tab (?repo_id= narrative).
+    // The drawer must stay in the repo's scope, not escape to workspace home.
     window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
     const { container } = render(App);
     // RepoMode is stubbed in jsdom; the document title proves repo mode.
     await waitFor(() => expect(document.title).toBe('core — Payments | Gyre'), { timeout: 3000 });
     await openDrawer(container);
     await fireEvent.click(container.querySelector('[data-testid="drawer-item-briefing"]'));
-    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments'), { timeout: 3000 });
+    // Stays in repo mode on the Architecture tab (the Briefing sub-tab's
+    // parent tab), with the subTab deep-link param for ExplorerView.
+    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/r/core/architecture'), { timeout: 3000 });
+    await waitFor(() => expect(window.location.search).toBe('?subTab=briefing'), { timeout: 3000 });
   });
+
 
   it('clicking Agent Rules navigates to agent-rules page', async () => {
     window.history.pushState({}, '', '/workspaces/payments');

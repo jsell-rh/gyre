@@ -1,11 +1,11 @@
 pub mod activity;
 pub mod admin;
 pub mod agent_logs;
-pub mod agent_messages;
 pub mod agent_tracking;
 pub mod agents;
 pub mod aibom;
 pub mod analytics;
+pub mod attestations;
 pub mod audit;
 pub mod auth;
 pub mod budget;
@@ -22,6 +22,8 @@ pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
+pub mod impersonation;
+pub mod invitations;
 pub mod jj;
 pub mod key_binding;
 pub mod llm_config;
@@ -36,16 +38,20 @@ pub mod network;
 pub mod orchestrator;
 pub mod personas;
 pub mod policies;
+pub mod prompts;
 pub mod provenance;
 pub mod push_gates;
 pub mod recovery;
 pub mod release;
+pub mod repo_access;
 pub mod repos;
 pub mod saved_views;
 pub mod scim;
 pub mod search;
+pub mod secrets;
 pub mod spawn;
 pub mod spec_assertions;
+pub mod spec_lifecycle;
 pub mod spec_policy;
 pub mod specs;
 pub mod specs_assist;
@@ -59,6 +65,18 @@ pub mod users;
 pub mod version;
 pub mod workload;
 pub mod workspaces;
+
+/// Deserialize helper that keeps an explicit JSON `null` distinct from an
+/// absent field. serde collapses `null` to `None` inside `Option<Value>`,
+/// which would make a "clear this field" request indistinguishable from
+/// "leave it alone". Returns `Some(Value::Null)` for a present null so
+/// handlers can branch on the difference. Pair with `#[serde(default)]`.
+pub fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
 
 use audit::{
     audit_stats, audit_stream, create_siem_target, delete_siem_target, list_siem_targets,
@@ -75,13 +93,26 @@ use compute::{
 };
 use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
+use impersonation::{
+    approve_impersonation, deny_impersonation, end_impersonation, request_impersonation,
+};
+use invitations::{
+    accept_my_workspace_invitation, bulk_invite_to_tenant, decline_my_workspace_invitation,
+    get_invitation_policy, invite_to_tenant, invite_to_workspace, list_my_invitations,
+    list_tenant_invitations, list_workspace_invitations, revoke_tenant_invitation,
+    revoke_workspace_invitation, update_invitation_policy,
+};
 use std::sync::Arc;
 use users::{
-    create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
-    get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
-    get_notification_count, get_notification_preferences, invite_member, list_members, list_teams,
-    list_tokens, remove_member, resolve_notification, update_me, update_member_role,
-    update_notification_preferences, update_team,
+    add_team_member, create_team, create_token, create_user, deactivate_user, delete_team,
+    delete_token, dismiss_notification, get_judgments, get_me, get_my_notifications,
+    get_notification_count, get_notification_preferences, get_unread_count, get_user_activity,
+    get_user_by_username, get_user_stats, invite_member, list_members, list_my_notifications,
+    list_my_sessions, list_teams, list_tokens, list_user_sessions, list_users,
+    mark_all_read_notifications, mark_notification_read, mark_notification_unread,
+    notification_stream, remove_member, remove_team_member, resolve_notification,
+    revoke_all_my_sessions, revoke_all_user_sessions, revoke_my_session, revoke_user_session,
+    update_me, update_member_role, update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -108,6 +139,21 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/commits", get(repos::commit_log))
         .route("/api/v1/repos/:id/diff", get(repos::diff))
         .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
+        .route("/api/v1/repos/:id/sync-specs", post(repos::sync_specs))
+        // Repo access overrides (user-management.md §Repo Access)
+        .route(
+            "/api/v1/repos/:id/access-overrides",
+            get(repo_access::list_repo_access_overrides),
+        )
+        .route(
+            "/api/v1/repos/:id/access-overrides/:user_id",
+            put(repo_access::set_repo_access_override)
+                .delete(repo_access::delete_repo_access_override),
+        )
+        .route(
+            "/api/v1/repos/:id/access/:user_id",
+            get(repo_access::get_repo_access),
+        )
         // Commit provenance (M13.2)
         .route(
             "/api/v1/repos/:id/provenance",
@@ -127,6 +173,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/attestations/:commit_sha/chain",
             get(provenance::get_attestation_chain),
+        )
+        // Merge attestation bundle verification (agent-gates.md §Part 3
+        // Verification): caller-supplied bundle, per-component result.
+        .route(
+            "/api/v1/attestations/verify",
+            post(attestations::verify_bundle),
         )
         // AI Bill of Materials (M14.3)
         .route("/api/v1/repos/:id/aibom", get(aibom::get_aibom))
@@ -155,7 +207,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/repos/:id/gates/:gate_id",
-            delete(gates::delete_gate),
+            put(gates::update_gate).delete(gates::delete_gate),
+        )
+        // Gate chain configuration (agent-gates.md §Gate Chains)
+        .route(
+            "/api/v1/repos/:id/gate-chain",
+            get(gates::get_gate_chain).put(gates::set_gate_chain),
         )
         // Pre-accept push gates
         .route(
@@ -183,6 +240,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/spec-policy",
             get(spec_policy::get_spec_policy).put(spec_policy::set_spec_policy),
+        )
+        // Spec lifecycle configuration (spec-lifecycle.md §Configuration)
+        .route(
+            "/api/v1/repos/:id/settings/spec-lifecycle",
+            get(spec_lifecycle::get_spec_lifecycle).put(spec_lifecycle::set_spec_lifecycle),
         )
         // ABAC policies (G6)
         .route(
@@ -223,6 +285,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/commits/:sha/signature",
             get(jj::get_commit_signature),
+        )
+        .route(
+            "/api/v1/repos/:id/commits/:sha/signature/verification",
+            get(jj::get_commit_signature_verification),
         )
         // Agents
         .route(
@@ -316,6 +382,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(merge_requests::get_diff),
         )
         .route(
+            "/api/v1/merge-requests/:id/spec",
+            get(merge_requests::get_spec),
+        )
+        .route(
             "/api/v1/merge-requests/:id/attestation",
             get(merge_requests::get_attestation),
         )
@@ -368,6 +438,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/conflicts", get(specs::get_conflicts))
         // TASK-023: Accountability agent patrol (spec-links.md §Accountability Agent Integration)
         .route("/api/v1/patrol/spec-links", post(specs::patrol_spec_links))
+        // task-204: spec-lifecycle accountability patrol (spec-lifecycle.md
+        // §Accountability Integration) — findings escalate to the orchestrator.
+        .route(
+            "/api/v1/patrol/spec-lifecycle",
+            post(specs::patrol_spec_lifecycle),
+        )
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(
@@ -413,6 +489,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(specs_assist::assist_spec),
         )
         .route(
+            "/api/v1/workspaces/:id/meta-specs/assist",
+            post(specs_assist::assist_meta_spec),
+        )
+        .route(
             "/api/v1/repos/:id/specs/save",
             post(specs_assist::save_spec),
         )
@@ -455,6 +535,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/analytics/usage", get(analytics::usage))
         .route("/api/v1/analytics/compare", get(analytics::compare))
         .route("/api/v1/analytics/top", get(analytics::top_events))
+        // Analytics Decision API (analytics.md §Decision API for Agents)
+        .route("/api/v1/analytics/decide", get(analytics::decide))
+        .route(
+            "/api/v1/analytics/decide/custom",
+            post(analytics::decide_custom),
+        )
         // Costs
         .route(
             "/api/v1/costs",
@@ -473,6 +559,27 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/admin/jobs", get(admin::admin_jobs))
         .route("/api/v1/admin/jobs/:name/run", post(admin::admin_run_job))
         .route("/api/v1/admin/audit", get(admin::admin_audit))
+        .route(
+            "/api/v1/admin/orphaned-workspaces",
+            get(admin::admin_orphaned_workspaces),
+        )
+        // Admin user impersonation (identity-security.md §Impersonation).
+        // Approve/deny are called by the TARGET user (any role) and are
+        // ABAC-exempt with per-handler authorization — see
+        // api/impersonation.rs and abac_middleware.rs.
+        .route("/api/v1/admin/impersonate", post(request_impersonation))
+        .route(
+            "/api/v1/admin/impersonate/:request_id/approve",
+            post(approve_impersonation),
+        )
+        .route(
+            "/api/v1/admin/impersonate/:request_id/deny",
+            post(deny_impersonation),
+        )
+        .route(
+            "/api/v1/admin/impersonate/:request_id",
+            delete(end_impersonation),
+        )
         .route(
             "/api/v1/admin/agents/:id/kill",
             post(admin::admin_kill_agent),
@@ -611,8 +718,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(budget::get_workspace_budget).put(budget::set_workspace_budget),
         )
         .route("/api/v1/budget/summary", get(budget::budget_summary))
+        .route(
+            "/api/v1/workspaces/:id/budget/by-team",
+            get(budget::budget_by_team),
+        )
         // Search (M22.7)
         .route("/api/v1/search", get(search::search_handler))
+        .route("/api/v1/search/suggest", get(search::suggest_handler))
+        .route("/api/v1/search/facets", get(search::facets_handler))
         // Tenants (M34)
         .route(
             "/api/v1/tenants",
@@ -634,6 +747,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(trust_anchors::get_trust_anchor)
                 .put(trust_anchors::update_trust_anchor)
                 .delete(trust_anchors::delete_trust_anchor),
+        )
+        // Tenant-level meta-spec sets (meta-spec-reconciliation.md §8)
+        .route(
+            "/api/v1/tenants/:id/meta-specs/set",
+            get(meta_specs::get_tenant_meta_spec_set).put(meta_specs::put_tenant_meta_spec_set),
         )
         // Workspaces (M22.1)
         .route(
@@ -667,6 +785,16 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
+        )
+        // Workspace merge policy (meta-spec-reconciliation.md §9)
+        .route(
+            "/api/v1/workspaces/:id/merge-policy",
+            get(workspaces::get_merge_policy).put(workspaces::set_merge_policy),
+        )
+        // Rollout policy (meta-spec-reconciliation.md §7)
+        .route(
+            "/api/v1/workspaces/:id/meta-specs/rollout-policy",
+            get(meta_specs::get_rollout_policy).put(meta_specs::put_rollout_policy),
         )
         // Orchestrator lifecycle (platform-model.md §3, task-093)
         .route(
@@ -702,6 +830,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:workspace_id/presence",
             get(workspaces::get_workspace_presence),
         )
+        // Secrets Admin API (platform-model.md §7, task-098) — Admin only.
+        .route(
+            "/api/v1/secrets",
+            post(secrets::create_secret).get(secrets::list_secrets),
+        )
+        .route("/api/v1/secrets/:id", delete(secrets::delete_secret))
+        .route("/api/v1/secrets/:id/rotate", post(secrets::rotate_secret))
         // LLM prompt templates (Slice 2)
         .route(
             "/api/v1/workspaces/:id/llm/prompts",
@@ -762,6 +897,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/meta-specs-registry/:id/versions/:version",
             get(meta_specs::get_meta_spec_version),
         )
+        // Spec-level meta-spec bindings (agent-runtime spec §2)
+        .route(
+            "/api/v1/specs/:path/meta-spec-bindings",
+            get(meta_specs::get_spec_meta_spec_bindings)
+                .put(meta_specs::put_spec_meta_spec_bindings),
+        )
         // Personas (M22.1, VISION-3)
         .route(
             "/api/v1/personas",
@@ -795,20 +936,53 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .put(policies::update_policy)
                 .delete(policies::delete_policy),
         )
-        // Bootstrap user provisioning - Admin-only, per-handler check.
-        .route("/api/v1/users", post(create_user))
+        // Bootstrap user provisioning + user listing - Admin-only, per-handler check.
+        .route("/api/v1/users", get(list_users).post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
-        .route("/api/v1/users/me/agents", get(get_my_agents))
-        .route("/api/v1/users/me/tasks", get(get_my_tasks))
-        .route("/api/v1/users/me/mrs", get(get_my_mrs))
+        // My workspace invitations (task-110 repair: the invitee's pending-
+        // invitations view, spec §Workspace Invitation Flow steps 3-4)
+        .route("/api/v1/users/me/invitations", get(list_my_invitations))
+        // Tenant-public profile by username (user-management.md §API >
+        // User Management). Registered after /users/me: axum's matchit
+        // prioritizes the static segment, so /users/me never lands here.
+        .route("/api/v1/users/:username", get(get_user_by_username))
+        // Public profile activity feed + aggregate stats
+        // (user-management.md §User Profile Page, /@{username} surface):
+        // same tenant containment as the profile itself (in-handler).
+        .route("/api/v1/users/:username/activity", get(get_user_activity))
+        .route("/api/v1/users/:username/stats", get(get_user_stats))
+        // Deactivate a user (TenantAdmin only, per-handler check)
+        .route("/api/v1/users/:id/deactivate", put(deactivate_user))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",
             get(list_tokens).post(create_token),
         )
         .route("/api/v1/users/me/tokens/:id", delete(delete_token))
-        // Notification Preferences (HSI §12) — per-handler auth, ABAC-exempt
+        // Session Management (user-management.md §Session Management) —
+        // per-handler auth (scoped to caller), ABAC-exempt
+        .route("/api/v1/users/me/sessions", get(list_my_sessions))
+        .route(
+            "/api/v1/users/me/sessions/revoke-all",
+            post(revoke_all_my_sessions),
+        )
+        .route("/api/v1/users/me/sessions/:id", delete(revoke_my_session))
+        // TenantAdmin session management (user-management.md §Session
+        // Management — "TenantAdmins can view and revoke any user's
+        // sessions") — per-handler auth (Admin role), ABAC-exempt
+        .route("/api/v1/users/:user_id/sessions", get(list_user_sessions))
+        .route(
+            "/api/v1/users/:user_id/sessions/revoke-all",
+            post(revoke_all_user_sessions),
+        )
+        .route(
+            "/api/v1/users/:user_id/sessions/:id",
+            delete(revoke_user_session),
+        )
+        // Notification Preferences (HSI §12 + user-management.md §Delivery
+        // Channels) — per-type preferences and delivery channel config,
+        // per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/notification-preferences",
             get(get_notification_preferences).put(update_notification_preferences),
@@ -821,6 +995,21 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/users/me/notifications/count",
             get(get_notification_count),
         )
+        // Spec paths (user-management.md §API > Notifications). Same handlers
+        // and per-handler scoping as the legacy /users/me routes above.
+        .route("/api/v1/notifications", get(list_my_notifications))
+        .route("/api/v1/notifications/unread-count", get(get_unread_count))
+        .route(
+            "/api/v1/notifications/mark-all-read",
+            post(mark_all_read_notifications),
+        )
+        // Preferences (per-type + delivery channels, task-112 §Delivery
+        // Channels) — same combined handlers as /users/me/notification-preferences
+        .route(
+            "/api/v1/notifications/preferences",
+            get(get_notification_preferences).put(update_notification_preferences),
+        )
+        .route("/api/v1/notifications/stream", get(notification_stream))
         .route(
             "/api/v1/notifications/:id/dismiss",
             post(dismiss_notification),
@@ -829,14 +1018,75 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/notifications/:id/resolve",
             post(resolve_notification),
         )
+        .route(
+            "/api/v1/notifications/:id/read",
+            // Spec (user-management.md §API > Notifications) names PUT;
+            // POST is kept for the pre-existing clients of the same handler.
+            put(mark_notification_read).post(mark_notification_read),
+        )
+        .route(
+            "/api/v1/notifications/:id/unread",
+            post(mark_notification_unread),
+        )
         // Workspace members (M22.8)
         .route(
             "/api/v1/workspaces/:id/members",
             post(invite_member).get(list_members),
         )
+        // NOTE (task-110 rebase onto base 5984177): the four spec
+        // invitation paths below — POST /invite, GET /invitations,
+        // POST /invite/accept, DELETE /invitations/:id — are registered by
+        // api/invitations.rs (task-110's WorkspaceInvitation model). The
+        // task-124 base registered its membership-row handlers on the same
+        // paths; axum rejects duplicate registrations and both branches
+        // implemented the same spec section, so only task-110's
+        // superset model (decline, expiry, per-tenant policy,
+        // max_pending cap, background expiry) keeps them.
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
+        )
+        // Tenant invitations (task-110, user-management.md §API > Tenant
+        // Invitations). TenantAdmin-only, enforced per-handler.
+        .route("/api/v1/tenant/invite", post(invite_to_tenant))
+        .route("/api/v1/tenant/invite/bulk", post(bulk_invite_to_tenant))
+        .route("/api/v1/tenant/invitations", get(list_tenant_invitations))
+        .route(
+            "/api/v1/tenant/invitations/policy",
+            get(get_invitation_policy).put(update_invitation_policy),
+        )
+        .route(
+            "/api/v1/tenant/invitations/:id",
+            delete(revoke_tenant_invitation),
+        )
+        // Workspace invitations (task-110, user-management.md §API >
+        // Workspace Membership). Owner/Admin enforced per-handler.
+        .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
+        // Invitee-facing accept/decline (task-110 repair, spec §API >
+        // Workspace Membership: authenticated invitee accepts THEIR
+        // pending invitation — no token).
+        .route(
+            "/api/v1/workspaces/:id/invite/accept",
+            post(accept_my_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invite/decline",
+            post(decline_my_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invitations",
+            get(list_workspace_invitations),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invitations/:id",
+            delete(revoke_workspace_invitation),
+        )
+        // Spec-named alias (user-management.md §Ownership Transfer &
+        // Reclamation and §API: `PUT .../members/{user_id}/role`) for the
+        // M22.8 member path above — same handler, same authorization.
+        .route(
+            "/api/v1/workspaces/:id/members/:user_id/role",
+            put(update_member_role),
         )
         // Teams (M22.8)
         .route(
@@ -846,6 +1096,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/teams/:team_id",
             put(update_team).delete(delete_team),
+        )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id/members",
+            post(add_team_member),
+        )
+        .route(
+            "/api/v1/workspaces/:id/teams/:team_id/members/:user_id",
+            delete(remove_team_member),
         )
         // ── SCIM 2.0 Provisioning ─────────────────────────────────────────
         .route(
@@ -884,6 +1142,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::get_graph_concept),
         )
         .route(
+            "/api/v1/repos/:id/graph/concepts",
+            get(graph::list_graph_concepts),
+        )
+        .route(
             "/api/v1/repos/:id/graph/timeline",
             get(graph::get_graph_timeline),
         )
@@ -919,6 +1181,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::get_workspace_graph_concept),
         )
         .route(
+            "/api/v1/workspaces/:id/graph/concepts",
+            get(graph::list_workspace_graph_concepts),
+        )
+        .route(
             "/api/v1/workspaces/:id/briefing",
             get(graph::get_workspace_briefing),
         )
@@ -947,6 +1213,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/explorer-views/generate",
             post(explorer_views::generate_explorer_view),
+        )
+        .route(
+            "/api/v1/workspaces/:id/explorer-views/ask",
+            post(explorer_views::ask_explorer),
         )
         .route(
             "/api/v1/workspaces/:id/explorer-views/:view_id",

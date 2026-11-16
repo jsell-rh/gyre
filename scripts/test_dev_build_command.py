@@ -42,6 +42,41 @@ elif mode == 'exit7':
         self.addCleanup(lambda: child.kill() if child.poll() is None else None)
         return child
 
+    def test_single_job_budget_wins_over_explicit_agent_parallelism(self):
+        self.real.write_text("#!/usr/bin/env python3\nimport os,sys,json; print(json.dumps({'args':sys.argv[1:],'jobs':os.environ['CARGO_BUILD_JOBS'],'threads':os.environ['RUST_TEST_THREADS']}))\n")
+        import json
+        for flags in (['-j','8'],['--jobs=8'],['-j8']):
+            result=subprocess.run([str(self.root/'cargo'),'test',*flags,'--','-j8'],env=self.env,capture_output=True,text=True,check=True)
+            value=json.loads(result.stdout)
+            self.assertEqual(value['jobs'],'1')
+            self.assertEqual(value['threads'],'1')
+            self.assertEqual(value['args'],['test','--','-j8'])
+        result=subprocess.run([str(self.root/'npm'),'test'],env=self.env,capture_output=True,text=True,check=True)
+        self.assertEqual(json.loads(result.stdout)['args'],['test','--','--no-file-parallelism','--maxWorkers=1'])
+
+    def test_assessment_cannot_compile_or_run_tests_beside_the_model(self):
+        self.env['GYRE_PIPELINE_STAGE']='assess'
+        for command,args in [('cargo',['test','-p','gyre-server']),('cargo',['check']),('npm',['test']),('npx',['vitest'])]:
+            result=subprocess.run([str(self.root/command),*args],env=self.env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,64)
+            self.assertIn('host-controlled verification',result.stderr)
+        self.assertFalse((self.root/'calls').exists())
+
+    def test_server_codegen_is_exclusive_to_verification_but_small_probes_remain(self):
+        for stage in ('implement','review','triage'):
+            self.env['GYRE_PIPELINE_STAGE']=stage
+            for args in (['test','-p','gyre-server'],['build','--package=gyre-server'],
+                         ['test','-pgyre-*'],['test','--workspace','-p','gyre-domain'],['test','--','-p','gyre-cli'],
+                         ['test','--manifest-path','crates/gyre-server/Cargo.toml']):
+                result=subprocess.run([str(self.root/'cargo'),*args],env=self.env,capture_output=True,text=True)
+                self.assertEqual(result.returncode,64,(stage,args,result.stderr))
+        self.assertFalse((self.root/'calls').exists())
+        for stage,args in [('review',['test','-p','gyre-domain']),('implement',['check','-p','gyre-server']),
+                           ('verify',['test','-p','gyre-server'])]:
+            self.env['GYRE_PIPELINE_STAGE']=stage
+            result=subprocess.run([str(self.root/'cargo'),*args],env=self.env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+
     def test_other_build_waits_and_retains_actual_exit(self):
         first = self.process('cargo', 'hold')
         self.assertEqual(first.stdout.readline().strip(), 'hold')
@@ -61,6 +96,18 @@ elif mode == 'exit7':
         _, error = child.communicate(timeout=5)
         self.assertEqual(child.returncode, 7, error)
         self.assertEqual((self.root / 'calls').read_text(), 'nested\nexit7\n')
+
+    def test_lean_compiler_settings_override_inherited_agent_environment(self):
+        import json
+        self.env.update(CARGO_INCREMENTAL='1',RUSTFLAGS='-C debuginfo=2',CARGO_PROFILE_TEST_DEBUG='2')
+        self.real.write_text("#!/usr/bin/env python3\nimport os,json;print(json.dumps({k:os.environ[k] for k in ('CARGO_INCREMENTAL','RUSTFLAGS','CARGO_PROFILE_TEST_DEBUG','CARGO_PROFILE_TEST_INCREMENTAL')}))\n")
+        result=subprocess.run([str(self.root/'cargo'),'test'],env=self.env,capture_output=True,text=True,check=True)
+        value=json.loads(result.stdout)
+        self.assertEqual(value['CARGO_INCREMENTAL'],'0')
+        self.assertEqual(value['CARGO_PROFILE_TEST_INCREMENTAL'],'false')
+        self.assertEqual(value['CARGO_PROFILE_TEST_DEBUG'],'0')
+        self.assertIn('--threads=1',value['RUSTFLAGS'])
+        self.assertNotIn('debug-assertions',value['RUSTFLAGS'])
 
     def test_review_rejects_workspace_suite_before_starting_a_build_but_permits_focused_tests(self):
         self.env['GYRE_PIPELINE_STAGE']='review'

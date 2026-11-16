@@ -34,7 +34,7 @@ def auth_status(state, name=None):
         return {}
 
 
-def login(state, force=False):
+def login(state, force=False, max_age=300):
     """Coalesce refreshes, retry with backoff, and retain usable cached auth."""
     with (state / "gateway-login.lock").open("a") as lock:
         deadline = time.monotonic() + 30
@@ -65,7 +65,7 @@ def login(state, force=False):
                 except (RuntimeError,OSError,subprocess.TimeoutExpired):
                     pass
             raise RuntimeError(f"Gateway login refresh backing off; retry in {int(status['retry_at']-now)+1}s")
-        if not force and now-status.get('refreshed_at',0)<300:
+        if not force and now-status.get('refreshed_at',0)<max_age:
             try:
                 probe()
                 return

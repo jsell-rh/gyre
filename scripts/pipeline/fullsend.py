@@ -14,6 +14,7 @@ import time
 import threading
 
 from .execution import ROOT, Retry, Wait
+from .catalog import helper
 from .diagnostics import DEFAULT_MODEL_TIMEOUT, diagnose
 
 
@@ -65,14 +66,31 @@ def adopt(execution, task):
         job_path = path.parent / 'bundle/job.json'
         if not job_path.is_file() or not receipt.get('published'):
             continue
+        repair = task['data'].get('repair') or {}
+        if (claim['stage'] == 'implement' and repair
+                and task['data'].get('candidate') == receipt.get('head')
+                and repair.get('source') == receipt.get('head')):
+            # This outcome was already consumed and produced the current repair.
+            # Re-adopting it cannot address its own finding. Keep its source as
+            # the seed, but execute the repair rather than replaying the receipt.
+            continue
         job = json.loads(job_path.read_text())
         if job['stage'] != claim['stage'] or job['task'] != task['name']:
             raise ValueError('published receipt belongs to another assignment')
-        if claim['stage'] in ('triage', 'review') and not receipt.get('valid'):
+        if claim['stage'] in ('triage', 'assess', 'review') and not receipt.get('valid'):
             continue
         execution.branch = job['branch']
         execution.phase('AdoptingPublishedOutcome', head=receipt['head'])
         (execution.directory / 'outcome.json').write_text(json.dumps(receipt))
+        provenance={'work':claim['id'],'attempt':int(path.parent.name),'head':receipt['head']}
+        (execution.directory / 'adopted-from.json').write_text(json.dumps(provenance))
+        with execution.log.open('a') as output:
+            output.write(f"Adopted published checkpoint from attempt {path.parent.name}.\n")
+            previous_log=path.parent/'output.log'
+            if previous_log.exists() and previous_log != execution.log:
+                with previous_log.open('rb') as source:
+                    source.seek(0,2);source.seek(max(0,source.tell()-16000))
+                    output.write(source.read(16000).decode('utf-8',errors='replace'))
         return receipt | {'branch': execution.branch}
     return None
 
@@ -91,14 +109,20 @@ def prepare(execution, task, prompt):
     repo_url = execution.store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git')
     if repo.exists():
         shutil.rmtree(repo)
-    execution.command('git', 'clone', '--quiet', '--no-checkout', repo_url, str(repo), timeout=300)
+    # Historical attempt branches grow without bound. Keep main's full commit
+    # ancestry for attribution, fetch the assigned candidate explicitly, and
+    # materialize only checkout blobs. No host-local object alternates may leak
+    # into the sandbox's copied repository.
+    execution.command('git', 'clone', '--quiet', '--no-checkout', '--single-branch',
+                      '--filter=blob:none', repo_url, str(repo), timeout=300)
     for key, value in (('user.name', 'gyre-pipeline'), ('user.email', 'jsell-rh@users.noreply.github.com'), ('core.hooksPath', '/dev/null')):
         execution.command('git', 'config', key, value, cwd=repo)
     seed = claim['input'].get('candidate') or claim['input']['base']
-    execution.command('git', 'fetch', '--quiet', 'origin', seed, claim['input']['base'], cwd=repo, timeout=180)
+    execution.command('git', 'fetch', '--quiet', '--filter=blob:none', 'origin', seed, claim['input']['base'], cwd=repo, timeout=180)
     execution.command('git', 'checkout', '--quiet', '-b', branch, seed, cwd=repo)
     if claim['stage'] == 'implement':
         execution.command('git', 'merge', '--no-edit', claim['input']['base'], cwd=repo, check=False)
+        helper('pipeline-artifacts').restore_generated(repo,claim['input']['base'])
     task_path = repo / 'specs/tasks' / (task['name'] + '.md')
     task_path.parent.mkdir(parents=True, exist_ok=True)
     task_path.write_text(task['body'])
@@ -111,9 +135,9 @@ def prepare(execution, task, prompt):
     (bundle / 'bin').mkdir(exist_ok=True)
     for name in ('cargo', 'npm', 'npx'):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py'):
+    for name in ('pipeline-remote.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
-    if claim['stage'] in ('review', 'triage'):
+    if claim['stage'] in ('review', 'assess', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
                           str(bundle / 'review-before.json'), '--task', task['name'], cwd=repo)
     if claim['stage'] == 'review':
@@ -162,8 +186,10 @@ def prepare(execution, task, prompt):
     stage = claim['stage']
     harness = {'base': 'worker.yaml', 'agent': 'agents/' + stage + '.md',
                'providers': [forge_provider],
-               'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage'}[stage],
+               'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage', 'assess':'review'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
+               # Pinned Fullsend 0.50.0 validates this field in [30,600].
+               # Model/CLI budgets and capacity backoff are separate bounds.
                'sandbox_timeout_seconds': 600,
                'timeout_minutes': max(1, (execution.store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT) + 59) // 60),
                'host_files': [{'src': str(p), 'dest': '/tmp/stage/' + str(p.relative_to(bundle))}
@@ -171,8 +197,8 @@ def prepare(execution, task, prompt):
                'env': {'runner': {'GYRE_FULLSEND_CONTEXT': str(execution.directory / 'fullsend-context.json'),
                                   'GYRE_PIPELINE_ROOT': str(ROOT)},
                        'sandbox': {'GYRE_PIPELINE_STAGE': stage,
-                                   'CARGO_BUILD_JOBS': '2', 'CARGO_TARGET_DIR': '/tmp/gyre-target',
-                                   'CARGO_HOME': '/tmp/cargo', 'RUSTUP_HOME': '/usr/local/rustup',
+                                   **helper('pipeline-build-env').environment(),
+                                   'NODE_OPTIONS':'--max-old-space-size=768',
                                    'PLAYWRIGHT_BROWSERS_PATH': '/usr/local/share/gyre-playwright',
                                    'GYRE_DEV_REAL_CARGO': '/usr/local/cargo/bin/cargo',
                                    'GYRE_DEV_REAL_NPM': '/usr/bin/npm', 'GYRE_DEV_REAL_NPX': '/usr/bin/npx'}}}
@@ -180,7 +206,7 @@ def prepare(execution, task, prompt):
         raise Retry('Set fullsend_image to the pushed digest built from docker/dev-worker/Dockerfile')
     (cfg / 'harness' / (stage + '.yaml')).write_text(json.dumps(harness))
     value = {'state': str(execution.store.directory), 'work': claim['id'], 'token': claim['token'],
-             'branch': branch, 'gateway': execution.store.setting('gateway', 'gyre-gyre'), 'real_openshell': str(Path(real_cli).resolve())}
+             'branch': branch, 'gateway': execution.store.setting('gateway', 'gyre-gyre'), 'real_openshell': str(Path(real_cli).resolve()), 'durable_agent':True}
     (execution.directory / 'fullsend-context.json').write_text(json.dumps(value))
     shim = execution.directory / 'bin'
     shim.mkdir(exist_ok=True)
@@ -195,7 +221,7 @@ def capture_evidence(execution, sandbox):
     code = """import base64,io,pathlib,tarfile
 root=pathlib.Path('/tmp/stage'); output=io.BytesIO(); total=0
 with tarfile.open(fileobj=output,mode='w:gz') as archive:
- for relative in ('outcome.json','verdict.json','capabilities.json','review-evidence'):
+ for relative in ('outcome.json','assessment.json','verdict.json','capabilities.json','review-evidence'):
   path=root/relative
   paths=path.rglob('*') if path.is_dir() else [path]
   for item in paths:
@@ -218,6 +244,17 @@ print('GYRE_ARTIFACT '+base64.b64encode(output.getvalue()).decode())
         execution.store.event('fullsend_evidence_unavailable', {'error': type(exc).__name__}, execution.claim['task'])
 
 
+def owned_sandbox(execution):
+    """Old cleanup debt must neither enter nor invalidate this attempt's receipt."""
+    execution.current()
+    rows = execution.store.db.execute(
+        "SELECT name FROM resources WHERE work=? AND token=? AND kind='sandbox' AND state<>'absent'",
+        (execution.claim['id'], execution.claim['token'])).fetchall()
+    if len(rows) != 1:
+        raise ValueError('Expected exactly one sandbox owned by this fenced attempt')
+    return rows[0]['name']
+
+
 def collect(execution, sandbox, success):
     """Capture a published source receipt before fullsend deletes the sandbox."""
     existing = execution.directory / 'outcome.json'
@@ -228,9 +265,18 @@ def collect(execution, sandbox, success):
     if not job.exists():
         raise ValueError('fullsend assignment bundle missing')
     # Re-upload trusted checkpoint code after the model has finished.
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'job.json'):
+    for name in ('pipeline-remote.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-agent.py', 'job.json'):
         source = execution.directory / 'bundle' / name
+        if name == 'pipeline-agent.py' or (name in ('pipeline-artifacts.py','dev-coverage.py','dev-contract.py') and not source.exists()):
+            source = ROOT / 'scripts' / name
         execution.os('sandbox', 'upload', sandbox, str(source), '/tmp/stage/' + name, '--no-git-ignore', timeout=120)
+    # Tools can outlive Pi in detached groups. No checkpoint may race a writer.
+    code="import pathlib,subprocess,sys\nfor p in pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*'):\n if p.is_dir() and (p/'identity.json').exists(): subprocess.run([sys.executable,'/tmp/stage/pipeline-agent.py','cancel',str(p)],check=True,timeout=12)"
+    stopped=execution.os('sandbox','exec','-n',sandbox,'--','python3','-c',code,timeout=60,check=False)
+    if stopped.returncode:
+        from .execution import Attention
+        error=Attention('Owned agent tools could not be stopped before checkpoint capture; no source receipt accepted')
+        error.category='sandbox_stopped';raise error
     result = execution.os('sandbox', 'exec', '-n', sandbox, '--no-login-shell', '--workdir', '/sandbox/workspace/checkout',
                           '--', 'python3', '/tmp/stage/pipeline-remote.py', 'finalize', '1' if success else '0',
                           timeout=300, check=False)
@@ -295,7 +341,7 @@ def cloud_step(execution, task, prompt):
     execution.login()
     from .inference import check, credential
     check(execution.store)
-    outstanding = execution.store.db.execute("SELECT name FROM resources WHERE work=? AND state<>'absent' AND kind<>'admission'", (execution.claim['id'],)).fetchall()
+    outstanding = [row for row in execution.store.blocking_resources(work=execution.claim['id']) if row['kind']!='admission']
     if outstanding:
         raise Wait('Previous attempt still owns resources; cleanup must finish first')
     cfg, repo, shim = prepare(execution, task, prompt)
@@ -339,6 +385,13 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                 if time.monotonic() >= deadline:
                     raise Retry('fullsend execution exceeded assignment deadline')
                 execution.cancelled.wait(1)
+        runtime_failure=execution.directory/'runtime-failure.json'
+        if runtime_failure.exists():
+            value=json.loads(runtime_failure.read_text())
+            from .execution import Attention
+            error=(Attention if value.get('attention') else Retry)(value['message'])
+            error.category=value['category'];error.diagnostic=value.get('diagnostic')
+            raise error
         result = execution.directory / 'outcome.json'
         diagnostic = diagnose(execution.directory, process.returncode) if process.returncode or not result.exists() else None
         if result.exists():
@@ -377,7 +430,7 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                     continue
                 execution.store.resource_state(name, 'deleting')
                 if inventory[name]['phase'].lower() != 'deleting':
-                    if inventory[name]['phase'].lower() == 'ready' and not (execution.directory / 'outcome.json').exists():
+                    if execution.claim['stage']=='implement' and inventory[name]['phase'].lower() == 'ready' and not (execution.directory / 'outcome.json').exists():
                         try:
                             collect(execution, name, success=False)
                         except Exception as exc:

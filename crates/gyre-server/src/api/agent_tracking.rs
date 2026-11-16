@@ -157,9 +157,21 @@ pub async fn create_worktree(
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
     // G6: ABAC enforcement — check repo access policies against the caller's JWT claims.
-    crate::abac::check_repo_abac(&state, &repo_id, &auth)
-        .await
-        .map_err(ApiError::Forbidden)?;
+    if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
+        // task-104: AbacDenied audit event (observability.md §Audit Event
+        // Types) — the per-handler repo-level ABAC check rejected the
+        // request outside the ABAC middleware.
+        crate::abac_middleware::record_abac_denied(
+            &state,
+            &auth,
+            "repo",
+            "write",
+            None,
+            "POST /api/v1/repos/:id/worktrees",
+        )
+        .await;
+        return Err(ApiError::Forbidden(reason));
+    }
 
     // Create the worktree via git ops.
     if let Err(e) = state
@@ -208,11 +220,26 @@ pub async fn delete_worktree(
     State(state): State<Arc<AppState>>,
     Path((repo_id, wt_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    state
+    let repo = state
         .repos
         .find_by_id(&Id::new(&repo_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // jj workspace teardown before deleting the record (source-control.md §4).
+    if let Ok(wts) = state.worktrees.find_by_repo(&repo.id).await {
+        if let Some(wt) = wts.iter().find(|wt| wt.id.as_str() == wt_id) {
+            let agent_id = wt.agent_id.to_string();
+            crate::api::spawn::cleanup_jj_workspace(
+                &state,
+                &agent_id,
+                &repo.path,
+                &wt.path,
+                &format!("agent-{agent_id}"),
+            )
+            .await;
+        }
+    }
 
     state.worktrees.delete(&Id::new(&wt_id)).await?;
     Ok(StatusCode::NO_CONTENT)

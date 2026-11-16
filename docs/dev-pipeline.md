@@ -24,6 +24,122 @@ The stages are triage, implementation, independent review, verification,
 publication/merge, CI observation, and cleanup. Review and verification bind to an exact candidate
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
+Verifier readiness uses the authorized verification timeout (four hours by
+default). Pinned Fullsend 0.50.0 constrains its readiness polling and create
+subprocess to 600 seconds; both its harness and CLI boundary stay within that
+supported bound (and any shorter authorized model budget). Readiness expiry is reported as provisioning failure,
+including to the stress guard.
+When the owned pod's latest scoped scheduler evidence confirms insufficient
+CPU/memory, provisioning failure instead becomes a backend-capacity retry.
+Its backoff grows from one to fifteen minutes across work identities and main
+advances, scoped to the task/stage/requirements generation. Successful stage
+completion clears that backoff. Confirmed capacity shortage does not trip the
+structural-fault guard; missing, foreign, stale or superseded scheduling evidence
+cannot downgrade a provisioning fault.
+
+Discovery reconciles obsolete runtime holds against installed recovery policy.
+An owned, current-generation 4 GiB OOM hold is released once when its evidence
+qualifies for the authorized 6 GiB profile. Historical unknown-verifier-health
+holds recover once after fresh gateway health and inventory observations.
+Manual task pauses, 6 GiB OOMs, storage failures, spec conflicts and unrelated
+stalled repairs remain held. Recovery records the original reason and policy;
+source receipts, historical attempts and exact-source review/verification stay
+intact. Desired slots remain an upper bound on useful dependency-ready work.
+
+## Thin workers and runtime recovery
+
+Build-capable assignments default to one CPU and **4 GiB RAM**. The operator's
+`worker_memory_max_gib` setting permits ceilings of 4 or 6 (default 6). A recorded,
+authoritative 4 GiB OOM permits a **6 GiB retry** for that task stage and requirements
+generation after the old allocation is cleaned up. An OOM at 6 GiB requires
+attention; there is no escalation to 8 GiB. Historical ad-hoc 8 GiB settings are
+ignored. The harness does not change namespace admission policy or cluster
+resources to increase its budget. Running allocations keep their assigned size.
+
+When the scoped runtime observer is configured, new compute admissions also
+respect the namespace's CPU, memory and pod quotas and container maxima. A fresh
+read-only observation accounts for every namespace pod (including other callers),
+supervisor overhead and admitted work not yet visible in Kubernetes. Reservations
+are atomic across dispatcher processes, transfer to sandbox ownership without
+double charging, and fix the assignment's resource size before creation. Quota
+waiting preserves desired slots and does not allocate/delete replacement sandboxes.
+Stale or unavailable capacity observations stop new compute; active workers,
+cleanup and CI observation continue. The cockpit and Configuration show the
+limiting resource. Raising desired slots does not increase platform quotas.
+The verification reserve includes real quota headroom for a ceiling-sized
+verifier, so a large desired slot count cannot let model jobs exhaust a smaller
+namespace envelope and strand the verification queue.
+
+The opt-in **Stress experiment guard** watches new experiment activity. Overlapping
+compute claims, or failures across three tasks in ten minutes (provisioning,
+exhausted bootstrap connection retries,
+lost leases, ledger locking, or OOM at the 6 GiB ceiling), pause new admissions
+and record a dashboard alert. Existing workers, cleanup, CI observation, source
+and the desired slot count are retained. Historical failures and ordinary
+candidate defects do not stop the experiment. Re-enabling the guard starts a
+new observation cohort after a structural fix; resume admission separately.
+
+Fullsend's upload staging commands retry the SDK's precise initial gateway
+connection failure up to three times in the same sandbox, within a two-minute
+deadline. Remote command failures, partial output, generic transport errors,
+and arbitrary commands are not replayed. The retry child's lifetime is bound
+to the wrapper, including when Fullsend kills it on deadline.
+
+Build commands share one sandbox lock, with one Cargo job and one test thread.
+Agent and verifier environments use the same settings: no incremental Rust
+compilation, no dev/test DWARF symbols, and one mold linker thread. Debug
+assertions, test selection, and required verification checks stay enabled.
+The coding agent's JavaScript heap is bounded separately from build tools.
+
+The trusted implementation finalizer restores accidentally toggled task
+checkbox markers only when every protected requirement otherwise matches the
+assignment exactly. It commits the restoration before publishing the checkpoint;
+normative edits still fail the contract guard. A repair specifically reviewed
+in the task's own document may advance to fresh review without an unrelated
+production edit. Only old holds matching these corrected cases recover once.
+
+Source/checkpoints and the agent spool remain on the gateway-provided workspace.
+Rebuildable Cargo target/registry and npm caches use disk-backed
+`/tmp/gyre-build`, which survives transport reconnects but may require rebuilding
+after a sandbox restart. Before builds, the harness inspects filesystem space
+through OpenShell and rejects memory-backed or insufficient cache storage.
+It never patches PVCs or cluster limits. Storage exhaustion retains evidence
+and requires attention rather than silently changing platform configuration.
+Only generated build cache may be reclaimed; source and symlink targets are
+never deleted by reclamation.
+
+An optional, read-only Kubernetes runtime observer uses `runtime_kube_context`
+and `runtime_namespace` settings to capture workload termination reasons before
+pods disappear. It only records pods matching existing owned resource records;
+cluster diagnostics are not a prerequisite for healthy gateway execution. Read-only
+cgroup counters also detect child-only OOM kills that leave the pod running;
+a compiler failure by itself never raises memory.
+An authoritative OOM and its allocation size are retained as diagnostics;
+only the bounded retry policy above permits a larger next allocation. Unknown
+limits, ordinary compiler failures and transport errors never raise memory.
+The cockpit reports the actual runtime failure instead of calling
+an OOM a model or generic transport failure.
+
+Agent polling refreshes expired gateway authentication. Failed polls preserve
+process identity and output offsets while the sandbox remains Ready, bounded by
+the assignment deadline. A stopped owned sandbox may restart once per claim;
+trusted temporary inputs are restored and Pi resumes its persisted session.
+Agent spool lives on the workspace volume; disposable caches are rebuilt after
+a stop. Another stop requires
+attention. OOM recovery can salvage source before retiring the failed allocation;
+it does not restart the coding process at the insufficient tier. Verification
+also reconnects to its detached process and may resume after an owned restart.
+Unknown health during a control-plane outage keeps that same verifier and its
+output offsets within the assignment deadline; it does not purge the build or
+create a permanent hold after six failed polls. Authoritatively terminal
+sandboxes and the verification deadline still enforce safety stops.
+Infrastructure backoff retains its task checkpoint without blocking other
+candidates; claims and exact-source checks still gate publication.
+Cleanup salvages source only from implementation assignments; reviewers and
+exact-tree verifiers retain bounded logs and are purged without indexing their
+generated output. Verification defaults to four hours. Exhausting that budget
+requires inspection and an explicit retry, with a budget change if needed, rather than repeating the same cold
+build automatically, including when main advances.
 
 ## Scheduling priority and reserved capacity
 
@@ -69,27 +185,73 @@ compute. Changing reservation/priority lets existing workers finish naturally.
 The cockpit shows the reservation, class, and class source. These are host
 scheduling controls, not PriorityClass objects in the remote Kubernetes cluster.
 
+The adapter ledger owns cross-stage admission. The Go dispatcher preserves
+per-work backoff and deduplication, while the atomic claim permits CI observation
+alongside verification and cleanup alongside model work. Native item serialization
+must not suppress these independently safe operations.
+
 CI observation is a separate, sandbox-free stage bound to the recorded published
 head and its verified base. It can run alongside a verifier, but never races a
 branch publisher. A completed failing check is actionable even while sibling
 checks remain pending or main advances. Head and check state are rechecked after
 evidence collection. A confirmed candidate failure retains the failed head and
 logs, requests implementation, and fences any now-obsolete verifier. Pending CI
-waits; upstream failures and transient CI infrastructure retain their distinct
-recovery paths. PR readiness is visible separately from a successful review run.
+waits. If an Actions check contradicts itself (pending status with a terminal
+conclusion and completion timestamp), the observer requires the exact job and
+completed current workflow attempt on the published head before treating it as
+terminal. Raw observations and reconciliation evidence are retained; missing,
+changed-head, or ambiguous evidence stays pending. GitHub still enforces all
+required checks at merge. A merged PR goes directly to confirmation of its
+original verified tree; its own merge must not start another verification.
+Confirmed PR conflicts (`DIRTY` plus `CONFLICTING`) become durable rebase
+findings immediately, independently of CI readiness or integration-lane ownership.
+The observer rechecks the open PR, exact published head, and current target base
+before handing off. Implementation resumes the retained published head against
+current main, resolves conflicts, and must obtain fresh review and verification
+before the existing PR can merge. The handoff fences obsolete verification,
+releases integration, and creates one repair assignment; later polls cannot
+create duplicate repairs. Unknown mergeability and genuine policy waits remain
+observations. Upstream failures and transient CI infrastructure retain their
+distinct recovery paths. PR readiness is visible separately from a successful
+review run.
 
-A durable **integration lane** admits one candidate at a time to final
-verification, CI, and merge. Implementation and independent review remain
-parallel up to the normal shared sandbox budget. The lane survives worker
-restarts, infrastructure retries, and gaps while GitHub checks run; repair,
-delivery, cancellation, or a changed contract/candidate releases it. Queued
-candidates pick up current main when admitted. This prevents the controller's
-own merges from repeatedly invalidating one another's full integration checks.
-If an external merge advances main, the current lane owner first observes its
-published CI and then refreshes integration once needed. Independent review is
-retained for the unchanged candidate. Checks on a different merge tree are
-never reused as proof of the final tree; protected exact-head GitHub checks
-and authoritative upstream-tree comparison still gate delivery.
+Verification is concurrent across independent candidates within the shared
+sandbox budget. PR preparation and CI observation are sandbox-free and do not
+hold a compute or integration lane. Only the actual upstream merge request and
+its authoritative confirmation own the durable global **merge permit**. An
+uncertain or queued merge retains that permit, while other candidates continue
+verification and publication. Per-task claims, safety holds, dependencies,
+independent review, exact-head CI, and upstream-tree confirmation still apply.
+
+A completed verification receipt stays pinned to its original tested head and
+base while main advances. The publisher checks freshness when CI becomes ready.
+It can reuse that original head only if Git proves the resulting merge tree is
+byte-identical to the verified tree and the trusted verifier/image policy is
+unchanged. New upstream source-history edits also reverify, even if later
+reverted to the same files, because attribution gates inspect commits. No receipt
+is rebound to an untested head. Changed source, test/gate
+inputs, merge conflicts, or a strict GitHub `BEHIND` policy require verification
+against current main. Pending CI has one observer rather than repeated
+publisher and verifier wakeups. An already-completed CI environment refresh
+can replace the old failing branch; it does not rediscover the same setup
+failure and discard the successful refresh.
+
+Generated `web/dist` is produced by final integration, not coding workers.
+The executor discards worker bundle changes against the assigned base and
+mechanically resolves generated-only merge conflicts. Actual source conflicts
+still go to implementation. For an already-published PR with green checks, the
+observer reproduces conflict paths using Git only; generated-only conflicts
+request integration refresh without an LLM, preserving the source review.
+Classification is bound to both refs and rechecked after inspection.
+
+The remote verifier builds assets from the integrated source, runs the Rust and
+frontend suites, and publishes the generated build on its claim-specific branch.
+The host verifies a linear artifact commit changes only `web/dist`, followed by
+exactly the assigned task's append-only commit attribution. No other source or
+requirement change is accepted. The final receipt records the tested source head
+and published artifact tree; GitHub CI and exact-tree merge confirmation apply
+to the final published head. Generated files are never merely chosen from an old
+branch and shipped without rebuilding.
 
 Model assignments default to four hours (`model_timeout: 14400` seconds in the
 private ledger). Existing assignments retain the harness deadline they started
@@ -138,6 +300,12 @@ EnMaaS route. `toolchain.json` pins release archive/binary checksums and the
 public worker image digest. The system's independently installed fullsend is
 not overwritten; modified or mismatched runners are rejected before allocation.
 
+Assignment checkouts clone only the default branch with `blob:none`, then fetch
+the exact assigned candidate and base. Full commit ancestry is retained for
+attribution; unrelated historical attempt branches are excluded. Checkout blobs
+are materialized as needed and no host-local object alternates are copied into
+the sandbox. Remote Git access remains available for historical blob reads.
+
 The model is `gateway/rits/zai-org/glm-5-3`. Fullsend strips `gateway/` and calls
 `https://api.enmaas.devshift.net/v1/chat/completions`, using the inline pinned
 OpenAI-completions model entry and `supportsDeveloperRole: false`. The configured
@@ -154,8 +322,10 @@ No GCP credential file is needed.
 A narrow OpenShell adapter records sandbox/provider intent before the external
 create, attaches the claim's ownership labels, enforces shared compute capacity,
 and refreshes expired gateway authentication. Fullsend's normal cleanup runs;
-unconfirmed deletion stays charged and is retried independently. A pending
-allocation is retained across fullsend's readiness retries. A deleted sandbox
+unconfirmed compute release stays charged and deletion is retried independently. A pending
+allocation is retained across fullsend's readiness retries; a repeated create
+adopts only the existing claim's ownership-labeled sandbox. Terminal/deleted
+allocations cannot be recreated within an attempt. A deleted sandbox
 cannot be recreated within the same attempt. A failed run's source checkpoint
 is explicitly incomplete and cannot approve itself. Cleanup also fences and
 stops an orphaned host runner using its boot ID, PID, and process start time.
@@ -165,6 +335,15 @@ A host validator checkpoints and publishes actual source before deletion;
 source guards, exact-candidate independent review, remote verification, CI repair,
 and protected merge observation remain controller responsibilities. Raw fullsend
 logs/transcripts are retained and Pi events feed the existing cockpit stream.
+Pi runs under a detached supervisor with a bounded deadline inside the sandbox.
+Stdout and stderr spool separately and clients resume by verified byte offsets.
+Idle readers long-poll rather than creating a busy RPC loop for every worker.
+A lost launch acknowledgement or broken RPC reconnects to the same claim/command
+identity; it cannot start another coding process. Transport failures retry with
+backoff for up to five minutes before normal source capture and sandbox cleanup.
+A genuine process failure or incomplete verdict remains a failure. Local
+checkpoint adoption also records its originating attempt and a bounded log tail;
+a missing log cannot discard an otherwise recoverable checkpoint.
 The large trusted input checkout is removed after execution, keeping receipts
 and diagnostics without retaining duplicate repository clones indefinitely.
 
@@ -188,7 +367,45 @@ the same ledger. Type a sandbox count (0–1000) in the header and press Enter o
 Apply; Escape cancels the edit. Zero drains new work. The +/− controls also remain
 available. The terminal cockpit offers filtering, live logs, attempt
 history, retry, and cancellation. Press `?` for keys; `q`/Ctrl-C detaches while
-workers continue. `serve --plain` selects text output. Stop the supervisor with Ctrl-C;
+workers continue. In a run log, `/` filters source lines, `m` toggles Markdown
+for agent prose, `w` toggles wrapping, and `a` toggles command colors (`NO_COLOR`
+is respected). Left/right arrows pan long lines. Scrolling up pauses following
+without moving the reading position as output arrives; `f` or `G` returns to
+live output. The bordered pane shows follow state, active modes, and line/column
+ranges, including on short terminals. Full logs remain available rather than
+only the last 64 KiB.
+
+Delivery labels follow the current task and candidate, separately from each
+stage's saved outcome. Confirmed merges and upstream resolutions move into the
+completed list (`c`); history retains the original attempt result. Green CI on
+an older head cannot mark a replacement candidate ready. Integration refreshes
+show whether they are required, queued, running, or blocked for attention
+(including an out-of-memory failure), rather than remaining "awaiting merge".
+Known failures have a distinct needs-attention state and retain their diagnosis
+(out of memory, stalled repair, stopped sandbox, or spec/assessment issue).
+"Outcome unknown" is reserved for uncertain worker outcomes; the details of a
+known failure never claim that its result was lost.
+
+The terminal's **Configuration** tab is the third tab (`Tab`/`Shift-Tab`), or
+press `,` from a run/list view. Select a setting with `j`/`k`, press Enter to
+edit, Enter to save, and Escape to discard. It edits the same private SQLite
+ledger as the browser and CLI, with no HyperShell preference file. External
+changes refresh automatically; an edit based on an older value is rejected
+rather than overwriting another controller's change.
+
+- Capacity, pause state, verification reservations, and per-stage concurrency
+  affect new admission. Existing workers finish. An empty stage limit inherits
+  total capacity; limits never bypass global admission or reservations.
+- Agent and verification deadlines apply to new assignments, in seconds.
+- Verification commands inherit the configured verification deadline; no shorter
+  hidden compiler timeout discards a healthy thin worker's cache.
+- Retry base and ceiling affect future exponential-backoff schedules, retaining
+  jitter. Existing wake times and explicit stage-specific delays remain intact.
+- Model, repository, gateway, and last successful gateway health check are
+  read-only. The pinned model must agree with inference routing and admission;
+  credentials remain outside the editor.
+
+`serve --plain` selects text output. Stop the supervisor with Ctrl-C;
 already claimed stages finish independently. Restarting `serve` adopts their
 leases and discovers pending work. `pause` stops new model-stage dispatch while
 preserving the desired slot count; `resume` enables it again. Slots zero also
@@ -259,7 +476,10 @@ registration (`gyre-d-<instance hash>`) snapshots the connection metadata and
 mints its own token; it does not copy a refresh token or modify the source
 registration. This also isolates authentication when HyperShell uses the same
 physical gateway. Gyre's persistent GitHub provider and profile use
-`gyre-gh-<instance hash>` instead of the shared `github` name. Per-run inference
+`gyre-gh-<instance hash>` instead of the shared `github` name. Its credentials are reconciled under a
+private lock: unchanged values are health-checked, never rewritten by each
+Fullsend worker. A changed credential is updated once. This avoids unnecessary
+provider generations propagating to running sandboxes. Per-run inference
 providers remain separate and are purged normally. Sandbox/provider cleanup
 retains the existing owner and claim checks.
 
@@ -306,7 +526,16 @@ Infrastructure errors retain the same work identity and use exponential backoff
 from five seconds up to fifteen minutes. Pending autoscaler capacity waits within
 the existing sandbox. Failed input clones retry before sandbox allocation. No failure retains a sandbox
 for debugging: artifacts are captured locally, deletion is attempted immediately,
-and cleanup retries unresolved deletion while the reservation remains charged.
+and cleanup retries unresolved deletion. Cleanup debt and compute occupancy are
+tracked separately: a deleting allocation releases its compute slot only after
+scoped Kubernetes inventories establish that its sandbox is suspended, deleting,
+or absent and no matching pod remains. Sandbox state is read before pod state;
+even a terminating pod remains charged. Evidence is bound to the resource claim,
+cluster context, and namespace, and expires after three minutes. Unknown,
+incomplete, or stale evidence keeps the slot charged. Gateway sandbox/provider
+cleanup records and retries remain intact, and cleanup of the same task still
+precedes a replacement attempt. The cockpit reports occupied slots separately
+from pending deletions.
 
 Model admission also checks the pinned inference endpoint before reserving a
 sandbox. The shared probe uses `ENMAAS_API_KEY` or the local secret-store entry
@@ -334,6 +563,23 @@ logs are kept separate from baseline failures; bounded logs and screenshot
 artifacts are staged inside the repair sandbox. Pending checks and merge
 confirmation are expected observations, polled every 30 seconds without
 accumulating infrastructure failure backoff.
+
+Shared CI setup failures are coordinated separately from product defects.
+For Playwright's unsupported-runner failure, the observer verifies the terminal
+Actions job/attempt and failed installation step, then compares workflow and npm
+input blob identities against the exact upstream base. Product-test failures,
+mixed failures, and candidates that changed those inputs remain candidate repairs.
+An older green base run cannot establish the health of today's hosted runner.
+Matching setup failures share one SQLite-deduplicated repair task, even as main
+advances. Affected tasks retain their candidate, review, and product dependency
+contract; they do not start individual implementation workers for that failure.
+The shared repair receives automatic repair priority.
+
+Once the repair ships, retained candidates re-enter verification against a base
+containing the fix. If main already has different CI inputs when the failure is
+observed, the observer requests that integration refresh directly, without a
+repair model. This permits fresh verification only; it never marks CI green or
+merges an old failing head. New publication still requires all GitHub checks.
 
 Completing a repair clears its active finding but retains the original evidence
 as review context. The independent reviewer receives the failure source identity,
@@ -385,6 +631,8 @@ Implementation and review use Fullsend/Pi. Verification is a model-free gateway
 job using the same pinned worker image and shared sandbox reservations. The local
 controller reconciles Git metadata and uploads a prerequisite Git bundle; Cargo,
 source guards, npm builds, and tests execute only in the disposable verifier.
+Verification uses the shared one-CPU, 4 GiB default and the bounded 6 GiB OOM
+retry policy, just like coding workers; gateway defaults cannot override them.
 Every verifier gets an isolated build target, so cross-checkout host cache
 invalidation is unnecessary. There is no host build fallback. Per-stage `limits`
 can bound verification concurrency independently without changing desired slots.
@@ -392,11 +640,20 @@ can bound verification concurrency independently without changing desired slots.
 The verifier checks the exact assigned head and tree, runs unchanged upstream
 and candidate guards, all-target Clippy, the web build, all Rust tests, and frontend
 tests. GitHub's required checks (including browser E2E) still gate merging. A
-complete source-bound receipt is mandatory; transport loss, missing receipts,
-and timeouts retry as infrastructure. Concrete check failures become durable
-implementation findings. Git retries reuse the allocation. Logs stream to the
-cockpit and remain locally; compute is immediately requested for deletion, with
-unconfirmed deletion charged until authoritative absence. Slots zero drains
+complete source-bound receipt is mandatory. Every received receipt is saved
+privately as `remote-verification-raw.json` before validation and sandbox deletion;
+only accepted receipts become `remote-verification.json`. Source-integrity
+failures report changed paths and observed HEAD/tree, stop in Needs attention,
+and release integration for other candidates. A new base cannot bypass that
+hold; operator retry resumes it after inspection. Ordinary transport loss,
+missing receipts, and timeouts retry as infrastructure. Concrete check failures become durable
+implementation findings. When testing upstream's scripts against the candidate,
+the verifier records which upstream-only files it introduces. Restoration removes
+only those unchanged files, leaving candidate deletions intact; modified or
+pre-existing files are never blindly cleaned. This prevents the verifier itself
+from contaminating the exact checkout it later checks. Git retries reuse the
+allocation. Logs stream to the cockpit and remain locally; compute is immediately requested for deletion, with
+unconfirmed compute release charged until scoped runtime evidence proves absence. Slots zero drains
 verification too. SQLite, gateway authentication, Git publication, and GitHub
 observation remain in the lightweight local control plane.
 
@@ -421,3 +678,191 @@ python3 scripts/prove-remote-verification.py --candidate HEAD
 This creates isolated proof state, uses one gateway sandbox, runs real gates,
 and cleans its temporary verified branch. It does not mark a product task
 delivered, publish a PR, or alter production slots.
+
+## Requirement inputs, shipped history, and change assessment
+
+`specs/task-spec-inputs.json` binds each task's `spec_ref` to explicit stable
+section IDs. A definition selects an exact Markdown heading breadcrumb (ATX,
+ignoring fenced code), or declares `document: true` when the entire document is
+intentionally required. Section subtrees inherit their ancestor introductions,
+not sibling sections. `shared` lists additional global inputs; GOAL and the
+normative task text are always included. Scheduling dependencies remain claim
+preconditions rather than coding requirements. Maintain selectors in the same PR
+as a heading rename; never silently retarget an ID or broaden a missing binding.
+New task references need an explicit registry binding. Missing/ambiguous references
+appear as `needs-triage` and cannot dispatch implementation.
+
+A scoped contract change fences old claims and discovers `assess` work. This is
+an independent, read-only Fullsend assignment through OpenShell, sharing the
+normal claim/admission/cleanup budget. Its structured report names the exact
+source and requirement fingerprint. Concrete gaps become durable
+`requirements_gap` findings for implementation. A no-gap decision must also pass
+the normal full deterministic verification under the same 4/6 GiB policy before
+currentness is restored. Ambiguous evidence or failed checks require attention;
+they never silently close a task or request a speculative code rewrite.
+
+`task_history` preserves append-only contract/delivery snapshots. The cockpit
+counts historically confirmed shipments separately from current requirement
+satisfaction and shows assessment/triage conditions. Reassessment never invents
+a new shipped merge. Imported completion retains its original evidence level.
+
+Installing the fingerprint format alone preserves existing execution epochs,
+claims, candidates and receipts. For old whole-document invalidations, preview
+and then apply the guarded recovery plan:
+
+```bash
+PYTHONPATH=scripts /usr/bin/python3 -m pipeline.requirement_migration \
+  --state .gyre-pipeline --checkout .gyre-pipeline/source
+# Repeat with --apply after inspecting the plan.
+```
+
+Recovery verifies a recorded succeeded merge against main ancestry and its exact
+historical contract generation, then compares old/current scoped inputs. Only
+proven equivalent inputs restore currentness mechanically. Unproven or changed
+inputs go to assessment. The migration skips active claims and unrelated repair
+findings, rechecks its entire planned state transactionally, and retains all
+candidate checkpoints, PRs and attempt outcomes. `--change-revision SHA` can also
+select completed speculative repairs whose recorded catalog source was that
+specific invalidation; it does not select arbitrary historical changes.
+
+A no-gap assessment also inspects the retained candidate's actual merge
+contribution. Reviewed source changes proceed through normal verification and
+publication; they are not retired merely because main meets the product contract.
+Ancestor checkpoints and task/review-note-only differences do not manufacture
+new coding work. This preserves useful guard or quality fixes discovered during
+an earlier repair without paying for another implementation round.
+
+Assessment is source inspection only: its build wrapper rejects builds/tests.
+All model stages defer gyre-server code generation to the independent verifier;
+server `cargo check` and explicit smaller-package probes remain available to
+implementation/review. This prevents the large test compiler and model heap from
+competing for the same 4 GiB. The verifier still runs the full required suites.
+
+Semantic spec conflicts are `needs-triage`, distinct from implementation failures.
+Their stage/generation hold survives unrelated main advances; a requirement
+change or explicit operator retry releases it. Evidence and conflicting findings
+remain attached to the attempt instead of provoking speculative implementation.
+
+During recovery, `requirements_recovery_revision` can name the original catalog
+revision. Source refresh then retries the guarded migration for deferred tasks
+as their existing claims finish. It does not fence active work or supersede
+unrelated repair findings; once handled, each task's migration marker makes the
+operation a no-op.
+
+A completed, trusted full verification can also prove that a task was already
+implemented upstream. If its exact reviewed candidate changes only that task's
+operational record/review notes, its verified base is an ancestor of main, and
+the normative contract still matches, source reconciliation records
+`resolved: already_upstream`. This creates no fictitious shipped merge. Production
+assets count as real changes. Only redundant read-only verifiers may be retired;
+implementation/review, actual publication, source checkpoints and completed proof
+remain intact, with sandbox retirement handled by the normal cleanup reconciler.
+
+Recovery can explicitly `--reconsider TASK` after an input-binding correction;
+all original ancestry, historical-generation and exact scoped-equivalence checks
+still apply. This supports narrowing a legacy coverage-row reference without
+shipping a formatting-only checkpoint or inventing a new delivery.
+
+## Efficiency and bounded recovery
+
+CI observation examines exact-head terminal workflow jobs and the failed step.
+Transport failures in recognized setup steps, with an unchanged workflow, retry
+that same head with exponential backoff (60 seconds to 30 minutes). If main has
+updated the failing setup inputs, retain review and reverify against that base
+without another coding assignment. Each workflow
+attempt is rerun at most once; six rerun rounds require attention. Product-test
+failures and mixed failures still become implementation findings. Priority-only
+observation during repair polls every ten minutes, without allocating a sandbox.
+
+Generated `web/dist/` observations are deferred to the deterministic verifier.
+Independent review still blocks on source defects. The verifier merges source,
+resolves generated conflicts, rebuilds remotely, runs all required suites, and
+publishes assets bound to the exact verified tree. An already-upstream candidate
+is fetched by its upstream base and checked out at its exact head; no empty Git
+bundle is created.
+
+Three repair rounds with identical findings and unchanged production source
+require attention, retaining source and findings. Notes and generated output
+cannot reset this budget. Explicit retry resets the stage budget and hold, retaining its previous state
+in the audit log; real source
+progress or different findings starts a new budget. Main advancing does not
+clear a stage hold.
+
+Remote verifiers exchange disposable build caches through OpenShell. The host
+only relays archives on disk; compilation remains remote. Archives are bounded
+to 2 GiB compressed / 12 GiB expanded with an 8 GiB local retention budget. Keys
+include image, toolchain, dependency lockfiles/manifests and build settings.
+A cache can be shared after its successful producer's source is included in
+upstream main. Before merge, a cache is private to the same task, requirement
+generation and independently approved candidate, and requires a recorded
+successful full verification with matching artifact digest. Other tasks, changed
+candidates, partial runs and changed contracts cannot consume that private cache. Integrity, ancestry, path, disk-space and size checks reject unsafe
+or stale archives. Credentials and verification decisions are never cached.
+Workspace Rust packages are invalidated before checks; dependency artifacts and
+content-addressed package downloads can be reused. Cache misses run normal full
+verification, with no reduced checks. Set `build_cache_enabled=false` in the
+local ledger to disable exchange.
+
+Read measured compute occupancy, merge throughput, observation wakeups and cache
+use with `python3 scripts/dev-efficiency.py --hours 24`. Worker minutes include
+provisioning/transport waits; they are not CPU utilization measurements.
+
+Hosted CI installs the checksum-pinned upstream mold 2.40.4 release instead of
+resolving distro packages for every job. Download retries remain bounded and a
+checksum mismatch fails setup; linker availability and all build/test gates are
+still required.
+
+## Delivery recovery and progress reporting
+
+A task can have a previous-generation merged PR and a new verified candidate.
+Publication detaches that association only when the merged head and commit match
+its recorded previous delivery. The historical receipt remains; a generation-
+scoped delivery branch gets a new PR through normal checks. An unexplained merged
+head/tree mismatch instead becomes a durable attention condition, with observed
+and verified identities, rather than an unbounded execution retry.
+
+Completed source rejected solely for acceptance-checkbox markers can be repaired
+without a model round. The reconciler requires the original successful published
+receipt and exact protected-contract equality after marker restoration. It
+commits the restored task markers and attribution on the saved source, then
+requires fresh independent review, remote verification and CI. Changed requirement
+wording or a failed/incomplete agent receipt never qualifies.
+
+Malformed assessment reports get one fresh automatic report attempt for an exact
+candidate and requirement fingerprint. Repeated schema errors require diagnosis;
+contradictory task/spec requirements require a reviewed authoritative correction.
+A narrowly scoped policy retries legacy malformed reports once without clearing
+semantic conflicts, operator pauses or completed assessments.
+
+Provider cleanup waits for its owned sandbox to disappear before attempting
+provider deletion. Stuck sandbox deletion remains visible and charged according
+to observed compute occupancy; it never silently releases a potentially live pod.
+
+The cockpit distinguishes gateway/controller readiness from delivery progress.
+It reports the last confirmed merge and current task blockers, including named
+unfinished dependencies. A live scheduler with unfinished work and no merge for
+an hour reports delivery as stalled instead of implying healthy throughput.
+
+A deleting sandbox whose pod is proven absent may leave gateway metadata behind.
+That debt does not block another read-only attempt of the same task. A coding
+attempt may proceed only when source recovery was explicitly recorded as
+never-started, or the old resource has been deleted. Absence evidence must be
+fresh and match namespace, context, work identity and fencing token. An unknown
+or still-live pod and uncaptured implementation source continue to block safely;
+cleanup retries and provider tracking remain independent.
+
+A consumed implementation receipt that already produced the task's current
+repair is a source seed, never that repair's solution. Adoption skips that
+receipt and executes the recorded repair instead of replaying the same outcome.
+
+Before allocating a review sandbox, a Git-only preflight checks the exact saved
+candidate against observed main. Known source conflicts create a structured
+rebase finding and return to implementation without a model review. Clean
+merges and generated-web-only conflicts still require normal independent review;
+the verifier remains responsible for deterministic generated assets and checks
+the final exact merge tree. No existing approval is transferred to rebased code.
+
+Fullsend validation selects the sandbox by both work identity and current fencing
+token. A previous attempt's deleting metadata cannot invalidate or supply a new
+attempt's source receipt. Zero or multiple current-attempt sandboxes still fail
+closed rather than selecting an arbitrary runtime.

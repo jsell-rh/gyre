@@ -363,6 +363,46 @@ pub enum NotificationPriority {
     Urgent,    // Needs attention now (security finding, agent escalation, MR reverted)
 }
 
+> **Priority band membership (amended 2026-11, task-112 review):** The band
+> comments above classify notification types by example. The full
+> type→band mapping (implemented as `NotificationPriority::for_notification_type`
+> in `gyre-domain/src/user.rs`) is:
+>
+> | Band | Notification types |
+> |---|---|
+> | Urgent | SecurityFinding, AgentEscalation, MrReverted, AgentNeedsClarification, MergeQueueEscalation, BudgetExhausted, ImpersonationAlert³ |
+> | High | GateFailure, BudgetWarning, SpecPendingApproval, SpecRejected, ConstraintViolation, SpecConflict, PersonaApprovalRequested, PersonaChangePendingApproval², MergeQueuePaused, CascadeTestFailed, AtomicGroupFailure, SecretExpiring¹, ImpersonationRequest³ |
+> | Medium | MetaSpecDrift, CrossWorkspaceSpecChange, ConflictingInterpretations, DependencyChainTooDeep, SpecAssertionFailure |
+> | Low | AgentCompleted, TrustSuggestion, AbandonedBranch, SuggestedSpecLink, CascadeTestTriggered |
+>
+> The HSI §8 1–10 numeric priority is an Inbox-ordering concern and is
+> deliberately **not** threshold-mapped onto these bands: SecurityFinding and
+> GateFailure share numeric priority 3 yet sit in different bands, AgentEscalation
+> is numeric 5 yet Urgent, and BudgetWarning is numeric 7 yet High — no numeric
+> threshold can reproduce the specced membership. Channel `min_priority`
+> filtering and the §Notification Routing for Agent Escalations Urgent check
+> therefore derive the band from the notification type, never from the numeric
+> priority.
+>
+> ¹ SecretExpiring is defined by platform-model.md §7 (secret rotation); it is
+> banded High here (recorded 2026-11, task-112 merge with main) as the same
+> approaching-deadline class as BudgetWarning — the resource still works but
+> will fail at expiry, so it needs attention soon rather than eventually.
+>
+> ² PersonaChangePendingApproval is defined by meta-spec-reconciliation.md
+> (spec-lifecycle push hook); it is banded High here (recorded 2026-11,
+> task-112 merge with main's task-116) as the same pending-approval decision
+> class as SpecPendingApproval and PersonaApprovalRequested — work continues
+> until the deadline, but the decision stalls progress soon, so it needs
+> attention soon rather than eventually.
+>
+> ³ ImpersonationRequest/ImpersonationAlert are defined by
+> identity-security.md §Impersonation; they are banded here (recorded
+> 2026-11, task-112 merge with main's task-109) as, respectively, the same
+> pending-consent decision class as SpecPendingApproval (High) and an active
+> security alert on the user's own account (Urgent — an admin is acting as
+> this user right now).
+
 pub struct NotificationSource {
     pub entity_type: String,  // "agent", "mr", "spec", "gate", "budget"
     pub entity_id: String,
@@ -415,10 +455,28 @@ pub enum DigestFrequency { Immediate, Hourly, Daily, Off }
 | MR merged | MR author (if human) |
 | MR reverted | MR author + workspace Admin |
 | Merge queue paused | All workspace Admins/Owners |
-| Breaking change detected | Dependent repo team leads |
+| Breaking change detected | Dependent repo team leads (see note below) |
 | Spec drift detected | Spec owner |
 | Security finding (Critical/High) | Workspace Owner + tenant Admin |
 | Invitation | Invited user |
+
+> **Team-lead routing note (amended 2026-11, task-112 review; corrected
+> after the 1cae4a25 review round):** `Team` carries a `lead` field
+> (user-management.md §Team Management; migration
+> `2026-11-13-000062_team_slug_lead_membership` backfills it to the
+> workspace Owner), so the lead concept exists. The genuine gap is the
+> **repo→team mapping**: no spec models which team owns a repo, so "the
+> repo's team lead" (Agent escalation row) and "dependent repo team
+> leads" (Breaking change row) cannot be resolved to a `Team.lead` —
+> there is no repo↔team link to resolve through. Until a repo→team
+> ownership mapping lands (task-122's default-reviewers bullet already
+> tracks the same missing association), the interim production routing is
+> the closest available concept, a superset: agent escalations follow the
+> §Notification Routing for Agent Escalations chain (spawning user →
+> workspace Admins if offline → workspace Owners if Urgent), and breaking
+> changes notify all members of the dependent repo's workspace
+> (`process_breaking_changes` in `git_http.rs`). When the repo→team
+> mapping lands, narrow both rows to the specced recipients.
 
 ### Notification Routing for Agent Escalations
 
@@ -451,16 +509,36 @@ This solves the "how does the human know?" problem. Agent escalations become pus
 
 ## "My Stuff" Views
 
-### My Dashboard (Landing Page After Login)
+### "My Stuff" Is Not a Surface (amended 2026-10-07, task-208)
 
-| Section | Content |
-|---|---|
-| My Tasks | Tasks assigned to me, grouped by status |
-| My MRs | MRs I authored (or was spawned to create), with gate/merge status |
-| My Agents | Agents I spawned, with status and budget usage |
-| Pending Approvals | Specs and personas waiting for my approval |
-| My Notifications | Unread notifications, prioritized |
-| Recent Activity | My recent activity across all workspaces |
+The M22-era "My Dashboard (Landing Page After Login)" table that stood here is
+**superseded**. No per-user dashboard page exists and none will be built.
+
+- **The landing page is the workspace home.** [`ui-navigation.md`](ui-navigation.md)
+  §2: "The workspace home is a **dashboard**, not a sidebar-driven view. It's the
+  landing page after selecting a workspace." `ui-navigation.md` §10 supersedes the
+  entrypoint flow this section assumed (`ui-layout.md` §1).
+- **My Tasks / My MRs / My Agents get no per-user surface anywhere.** Per
+  [`human-system-interface.md`](human-system-interface.md) §12 "What the Profile
+  Is NOT": tasks are agent work units, not human artifacts; humans don't author
+  MRs, they approve or reject them (that record lives in the judgment ledger);
+  agents are system machinery that humans interrogate (via the Inbox/Decisions),
+  not manage. These three views MUST NOT appear in `/profile` or any other
+  per-user surface. Humans who need agent, task, or MR state use the workspace
+  home, the repo tabs, and the judgment ledger. The
+  `GET /api/v1/users/me/{agents,tasks,mrs}` endpoints that backed them are
+  removed accordingly (see §Completeness Assessment below).
+- **The remaining dashboard needs are served by the workspace home** — nothing is
+  lost, and none of it gets a separate page:
+
+  | Old dashboard section | Where it is served |
+  |---|---|
+  | Pending Approvals | Workspace home **Decisions** section (`ui-navigation.md` §2), sourced from `GET /api/v1/users/me/notifications` |
+  | My Notifications | Top-bar notification bell with unread count (`ui-navigation.md` §1) → Decisions (§2) |
+  | Recent Activity | Workspace home **Briefing** section (`ui-navigation.md` §2) |
+
+The public profile page below is unaffected: it is a tenant-scoped public
+surface, not the per-user surface HSI §12 governs.
 
 ### User Profile Page (`/@{username}`)
 
@@ -576,7 +654,6 @@ gyre notifications preferences set --slack-url https://hooks.slack.com/...
 
 | Page | Purpose |
 |---|---|
-| My Dashboard | Landing page with my tasks, MRs, agents, approvals, notifications, pending invitations |
 | User Profile (`/@username`) | Public profile with activity feed |
 | User Settings | Edit display name, timezone, preferences, notification channels |
 | Session Management | Active sessions with revoke |
@@ -588,6 +665,11 @@ gyre notifications preferences set --slack-url https://hooks.slack.com/...
 | Team Management | Create/edit teams, manage membership |
 | Notification Drawer | Slide-out panel from bell icon |
 | Notification Preferences | Channel configuration, priority filters |
+
+> The M22-era **My Dashboard** landing page formerly listed here is superseded —
+> see §"My Stuff" Views. The workspace home (`ui-navigation.md` §2) is the landing
+> page, and My Tasks / My MRs / My Agents have no per-user surface anywhere
+> (`human-system-interface.md` §12 "What the Profile Is NOT").
 
 ---
 
@@ -625,7 +707,7 @@ As of M22, the following user management features are **implemented**:
 | Feature | Status |
 |---|---|
 | `GET/PUT /api/v1/users/me` — profile + preferences | ✅ Implemented |
-| `GET /api/v1/users/me/{agents,tasks,mrs}` — "my stuff" | ✅ Implemented |
+| ~~`GET /api/v1/users/me/{agents,tasks,mrs}` — "my stuff"~~ | 🗑 **Removed** (2026-10-07, task-208) — per-user "my stuff" surface forbidden by `human-system-interface.md` §12 "What the Profile Is NOT"; see §"My Stuff" Views |
 | `GET /api/v1/users/me/notifications` — notification list | ✅ Implemented |
 | `PUT /api/v1/users/me/notifications/{id}/read` — mark read | ✅ Implemented |
 | `POST/GET /api/v1/workspaces/{id}/members` — invite + list | ✅ Implemented |
@@ -640,8 +722,8 @@ The following features are **not yet implemented** (future milestones):
 | SCIM 2.0 provisioning endpoints (`/scim/v2/*`) | Spec in `identity-security.md`; no implementation |
 | Tenant invitation flow (`POST /api/v1/tenant/invite`) | Specced above; not yet implemented |
 | Session management (`GET/DELETE /api/v1/users/me/sessions`) | Specced above; not yet implemented |
-| Notification channels (email digest, Slack webhook) | Spec complete; backend delivery not implemented |
+| Notification channels (Slack webhook, generic webhook) | ✅ Implemented (task-112) — `NotificationDispatcher` fans out per-channel with `min_priority` filtering; HMAC-SHA256-signed webhooks, Slack incoming-webhook POST, durable email outbox queue. Email digest emission/SMTP transport remains task-113 |
 | User profile pages (`/@username`) | Specced; UI not built |
-| Notification preferences (`GET/PUT /api/v1/notifications/preferences`) | Specced; not yet implemented |
+| Notification preferences (`GET/PUT /api/v1/notifications/preferences`) | ✅ Implemented (task-112) — self-scope per-handler-authorized API over the `user_channel_preferences` table |
 | User deactivation (`PUT /api/v1/users/{id}/deactivate`) | Specced; not yet implemented |
-| Impersonation | Specced in `identity-security.md`; not yet implemented |
+| Impersonation | ✅ Implemented (task-108) — approval-gated flow, short-lived EdDSA impersonation JWT, full audit attribution; see `identity-security.md` coverage |

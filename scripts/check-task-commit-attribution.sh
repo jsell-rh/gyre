@@ -28,7 +28,7 @@
 # as abac-route-registry: legacy drift recorded, never extended. Fix drift
 # by adding the SHA to the task's frontmatter (and removing the exemption
 # line), not by growing the file.
-FROZEN_EXEMPTION_COUNT=3
+FROZEN_EXEMPTION_COUNT=2
 #
 # Run by CI (needs full git history: checkout with fetch-depth: 0) and
 # pre-commit.

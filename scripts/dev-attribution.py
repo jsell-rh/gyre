@@ -23,7 +23,8 @@ def refresh(task, commit=False):
             labels.update('task-' + number for number in [first] + siblings.split('+')[1:])
         scoped = sha in branch_commits or (task in labels and not subject.startswith(('process:', 'review:')))
         if scoped and any(
-                path.startswith(('crates/', 'web/src', 'web/tests')) for path in paths):
+                path == '.gitattributes' or
+                path.startswith(('crates/', 'web/src', 'web/tests', 'web/dist/')) for path in paths):
             hashes.append(sha)
     path = Path('specs/tasks') / (task + '.md')
     parts = path.read_text().split('---', 2)

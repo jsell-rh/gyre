@@ -22,6 +22,13 @@ pub struct QualityGate {
     pub required_approvals: Option<u32>,
     /// Persona file path for AgentReview / AgentValidation gates.
     pub persona: Option<String>,
+    /// Domain-specific check identifier for AgentValidation gates
+    /// (e.g. "license-scan", "accessibility"). Delivered to the validation
+    /// agent as `GYRE_VALIDATION_TYPE` so it knows which check to run;
+    /// surfaced in gate output for attribution. `None` for other gate types
+    /// or when the validator is generic.
+    #[serde(default)]
+    pub validation_type: Option<String>,
     /// When false, a failing gate is advisory only — it does not block the MR from merging.
     /// Defaults to true (blocking).
     #[serde(default = "default_required")]
@@ -34,6 +41,16 @@ pub struct QualityGate {
     /// `None` uses the system default (300s).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Position of this gate in the repo's ordered gate chain
+    /// (agent-gates.md §Gate Chains: "repos configure gate chains as
+    /// ordered policies"; repo-lifecycle.md §3 Gates: drag to reorder).
+    /// Lower positions run/are listed first; ties (including all-zero
+    /// rows written before this column existed) fall back to creation
+    /// order. `create_gate` assigns the next free position unless the
+    /// caller supplies one; the gate-chain configuration endpoint
+    /// rewrites the whole chain's positions atomically.
+    #[serde(default)]
+    pub position: u32,
     pub created_at: u64,
 }
 

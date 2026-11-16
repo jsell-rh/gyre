@@ -13,6 +13,13 @@ vi.mock('../lib/layout-engines.js', () => ({
   }),
 }));
 
+// DependencyDetail acknowledges breaking changes through the real API client.
+vi.mock('../lib/api.js', () => ({
+  api: {
+    acknowledgeBreakingChange: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
 const MOCK_NODES = [
   { repo_id: 'repo-1', name: 'frontend' },
   { repo_id: 'repo-2', name: 'backend-api' },
@@ -374,5 +381,206 @@ describe('DependencyGraph', () => {
     const nodeGroup = container.querySelector('[data-testid="dep-node-repo-1"]');
     const label = nodeGroup.querySelector('.dep-node-label');
     expect(label.textContent).toBe('frontend');
+  });
+
+  // ── Orphaned status (dependency-graph.md §UI: gray = Orphaned) ───────────
+
+  it('styles orphaned edges gray', async () => {
+    const orphanedEdges = [
+      { id: 'e1', source: 'repo-1', target: 'repo-2', type: 'code', status: 'orphaned' },
+    ];
+    const { container } = render(DependencyGraph, {
+      props: { nodes: MOCK_NODES.slice(0, 2), edges: orphanedEdges },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    const orphanedEdge = container.querySelector('[data-status="orphaned"]');
+    expect(orphanedEdge).toBeTruthy();
+    const path = orphanedEdge.querySelectorAll('path')[1];
+    expect(path.getAttribute('stroke')).toBe('#9ca3af');
+  });
+
+  it('marks nodes with orphaned health when connected to orphaned edges', async () => {
+    const orphanedEdges = [
+      { id: 'e1', source: 'repo-1', target: 'repo-2', type: 'code', status: 'orphaned' },
+    ];
+    const { container } = render(DependencyGraph, {
+      props: { nodes: MOCK_NODES.slice(0, 2), edges: orphanedEdges },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    const repo1Node = container.querySelector('[data-testid="dep-node-repo-1"]');
+    expect(repo1Node.getAttribute('data-health')).toBe('orphaned');
+    const rect = repo1Node.querySelector('rect');
+    expect(rect.getAttribute('stroke')).toBe('#9ca3af');
+  });
+
+  it('renders orphaned in the legend', async () => {
+    const { container } = render(DependencyGraph, {
+      props: { nodes: [], edges: [] },
+    });
+
+    const legend = container.querySelector('[data-testid="dep-legend"]');
+    expect(legend.textContent).toContain('Orphaned');
+  });
+
+  // ── Dependency detail panel (click an edge) ─────────────────────────────
+
+  const DETAIL_EDGE = {
+    id: 'e1',
+    source: 'repo-1',
+    target: 'repo-2',
+    type: 'code',
+    status: 'stale',
+    source_artifact: 'Cargo.toml',
+    target_artifact: 'shared-lib',
+    version_pinned: '1.2.0',
+    target_version_current: '1.5.0',
+    version_drift: 3,
+    breaking_changes: [
+      {
+        id: 'bc-1',
+        commit_sha: 'abcdef1234567890',
+        description: 'switched to async API',
+        detected_at: 1700000000,
+        acknowledged: false,
+        acknowledged_by: null,
+        acknowledged_at: null,
+      },
+      {
+        id: 'bc-2',
+        commit_sha: '1234567890abcdef',
+        description: 'removed legacy endpoint',
+        detected_at: 1700000100,
+        acknowledged: true,
+        acknowledged_by: 'admin',
+        acknowledged_at: 1700000200,
+      },
+    ],
+  };
+
+  it('shows the dependency detail panel when an edge is clicked', async () => {
+    const { container } = render(DependencyGraph, {
+      props: { nodes: MOCK_NODES.slice(0, 2), edges: [DETAIL_EDGE] },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    expect(container.querySelector('[data-testid="dep-detail"]')).toBeNull();
+
+    const edgeGroup = container.querySelector('[data-testid="dep-edge-0"]');
+    await fireEvent.click(edgeGroup);
+
+    const panel = container.querySelector('[data-testid="dep-detail"]');
+    expect(panel).toBeTruthy();
+  });
+
+  it('detail panel shows source/target names, version info, and drift', async () => {
+    const { container } = render(DependencyGraph, {
+      props: { nodes: MOCK_NODES.slice(0, 2), edges: [DETAIL_EDGE] },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    await fireEvent.click(container.querySelector('[data-testid="dep-edge-0"]'));
+
+    // Repo names resolved from nodes, not raw IDs
+    expect(container.querySelector('[data-testid="dep-detail-title"]').textContent)
+      .toBe('frontend → backend-api');
+    expect(container.querySelector('[data-testid="dep-detail-source-artifact"]').textContent)
+      .toBe('Cargo.toml');
+    expect(container.querySelector('[data-testid="dep-detail-target-artifact"]').textContent)
+      .toBe('shared-lib');
+    expect(container.querySelector('[data-testid="dep-detail-pinned"]').textContent)
+      .toBe('1.2.0');
+    expect(container.querySelector('[data-testid="dep-detail-current"]').textContent)
+      .toBe('1.5.0');
+    expect(container.querySelector('[data-testid="dep-detail-drift"]').textContent)
+      .toContain('3');
+    expect(container.querySelector('[data-testid="dep-detail-status"]').textContent)
+      .toContain('stale');
+  });
+
+  it('detail panel shows breaking changes with acknowledgment status', async () => {
+    const { container } = render(DependencyGraph, {
+      props: { nodes: MOCK_NODES.slice(0, 2), edges: [DETAIL_EDGE] },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    await fireEvent.click(container.querySelector('[data-testid="dep-edge-0"]'));
+
+    const list = container.querySelector('[data-testid="dep-detail-breaking-list"]');
+    expect(list).toBeTruthy();
+    expect(list.querySelectorAll('.dep-bc-item').length).toBe(2);
+    expect(container.querySelector('[data-testid="dep-detail-bc-status-bc-1"]').textContent)
+      .toContain('Unacknowledged');
+    expect(container.querySelector('[data-testid="dep-detail-bc-status-bc-2"]').textContent)
+      .toContain('Acknowledged');
+    // Acknowledge button only for the unacknowledged change
+    expect(container.querySelector('[data-testid="dep-detail-ack-bc-1"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="dep-detail-ack-bc-2"]')).toBeNull();
+  });
+
+  it('acknowledging a breaking change calls the API and refreshes the graph', async () => {
+    const { api } = await import('../lib/api.js');
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    const { container } = render(DependencyGraph, {
+      props: { nodes: MOCK_NODES.slice(0, 2), edges: [DETAIL_EDGE], onRefresh },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    await fireEvent.click(container.querySelector('[data-testid="dep-edge-0"]'));
+    await fireEvent.click(container.querySelector('[data-testid="dep-detail-ack-bc-1"]'));
+
+    await waitFor(() => {
+      expect(api.acknowledgeBreakingChange).toHaveBeenCalledWith('bc-1');
+      expect(onRefresh).toHaveBeenCalledWith('bc-1');
+    });
+  });
+
+  it('closes the detail panel via the close button', async () => {
+    const { container } = render(DependencyGraph, {
+      props: { nodes: MOCK_NODES.slice(0, 2), edges: [DETAIL_EDGE] },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    await fireEvent.click(container.querySelector('[data-testid="dep-edge-0"]'));
+    expect(container.querySelector('[data-testid="dep-detail"]')).toBeTruthy();
+
+    await fireEvent.click(container.querySelector('.dep-detail-close'));
+    expect(container.querySelector('[data-testid="dep-detail"]')).toBeNull();
+  });
+
+  it('selects an edge via Enter key', async () => {
+    const { container } = render(DependencyGraph, {
+      props: { nodes: MOCK_NODES.slice(0, 2), edges: [DETAIL_EDGE] },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    const edgeGroup = container.querySelector('[data-testid="dep-edge-0"]');
+    await fireEvent.keyDown(edgeGroup, { key: 'Enter' });
+    expect(container.querySelector('[data-testid="dep-detail"]')).toBeTruthy();
   });
 });

@@ -83,6 +83,11 @@ pub struct MergeRequest {
     pub updated_at: u64,
     /// Workspace that governs this MR (ABAC boundary). Non-optional per M34 hierarchy enforcement.
     pub workspace_id: Id,
+    /// SHA of the merge commit that landed this MR on the target branch
+    /// (task-095 R3-F1). Recorded at merge time; the manual revert endpoint
+    /// reverts THIS commit — never the current branch HEAD, which may be a
+    /// later merge or an unrelated revert.
+    pub merge_commit_sha: Option<String>,
     /// Unix timestamp when this MR was reverted via recovery protocol.
     pub reverted_at: Option<u64>,
     /// SHA of the revert commit that undid this MR's changes (task-095 R2-3:
@@ -91,10 +96,18 @@ pub struct MergeRequest {
     pub revert_commit_sha: Option<String>,
 }
 
+// `MergeRequest::new` requires the workspace as an explicit constructor
+// parameter (task-111 scope-fabrication fix): a merge request cannot be
+// constructed without its mandatory scope, so no bootstrap binding is
+// needed here — unlike `Agent::new` / `Task::new`, which keep the
+// documented bootstrap-workspace default for callers without a real
+// workspace at hand.
+
 impl MergeRequest {
     pub fn new(
         id: Id,
         repository_id: Id,
+        workspace_id: Id,
         title: impl Into<String>,
         source_branch: impl Into<String>,
         target_branch: impl Into<String>,
@@ -103,6 +116,7 @@ impl MergeRequest {
         Self {
             id,
             repository_id,
+            workspace_id,
             title: title.into(),
             source_branch: source_branch.into(),
             target_branch: target_branch.into(),
@@ -116,7 +130,7 @@ impl MergeRequest {
             atomic_group: None,
             created_at,
             updated_at: created_at,
-            workspace_id: Id::new("default"),
+            merge_commit_sha: None,
             revert_commit_sha: None,
             reverted_at: None,
         }
@@ -171,6 +185,7 @@ mod tests {
         MergeRequest::new(
             Id::new("mr1"),
             Id::new("repo1"),
+            Id::new("default"),
             "Add feature",
             "feat/thing",
             "main",

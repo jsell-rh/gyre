@@ -14,6 +14,7 @@ pub mod agent_card;
 pub mod agent_tracking;
 pub mod analytics;
 pub mod attestation;
+pub mod attestation_verification;
 pub mod audit;
 pub mod budget;
 pub mod call_graph_resolve;
@@ -21,27 +22,35 @@ pub mod compose;
 pub mod compute_target;
 pub mod constraint_evaluator;
 pub mod container_audit;
+pub mod decisions;
 pub mod dependency;
 pub mod extractor;
 pub mod git_types;
 pub mod go_extractor;
+pub mod invitation;
 pub mod llm_config;
+pub mod merge_attestation;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
 pub mod meta_spec;
+pub mod narrative;
 pub mod network_peer;
 pub mod notification;
 pub mod policy;
 pub mod prompt_template;
 pub mod python_extractor;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
 pub mod rust_extractor;
+pub mod search_query;
 pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
+pub mod spec_lifecycle_config;
+pub mod spec_links;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -65,8 +74,12 @@ pub use analytics::{AnalyticsEvent, CostEntry};
 pub use attestation::{
     constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
 };
+pub use attestation_verification::{
+    assemble_verification_result, check_bundle_consistency, GateVerificationResult,
+    VerificationResult,
+};
 pub use audit::{AuditEvent, AuditEventType, AuditOutcome};
-pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
+pub use budget::{BudgetCallRecord, BudgetConfig, BudgetEnforcementAction, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use compute_target::{ComputeTargetEntity, ComputeTargetType};
 pub use constraint_evaluator::{
@@ -75,31 +88,45 @@ pub use constraint_evaluator::{
     TargetContext,
 };
 pub use container_audit::ContainerAuditRecord;
+pub use decisions::{
+    evaluate_custom, BuiltinDecision, CustomDecisionSpec, CustomRule, DecisionRequest,
+    DecisionResult,
+};
 pub use dependency::{
     BreakingChange, BreakingChangeBehavior, DependencyEdge, DependencyPolicy, DependencyStatus,
     DependencyType, DetectionMethod,
 };
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
-pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
+pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult, RevertResult};
 pub use go_extractor::GoExtractor;
+pub use invitation::{InvitationPolicy, InvitationStatus, TenantInvitation, WorkspaceInvitation};
 pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
+pub use merge_attestation::{
+    AuthorAttestation, GateAttestation as MergeGateAttestation, MergeAttestationBundle,
+    SpecRefAttestation, MERGE_ATTESTATION_VERSION,
+};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
 pub use merge_request::{
     DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrError, MrStatus,
 };
 pub use message_type::MessageType;
 pub use meta_spec::{
-    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
+    MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope,
+    MetaSpecVersion, ReconciliationPriority, RolloutPolicy, RolloutStrategy,
+    DEFAULT_MAX_CONCURRENT_AGENTS,
 };
 pub use network_peer::NetworkPeer;
 pub use notification::{Notification, NotificationType};
 pub use policy::{
     builtin_policies, trust_policies_for_level, Condition, ConditionOp, ConditionValue, Policy,
-    PolicyDecision, PolicyEffect, PolicyScope,
+    PolicyDecision, PolicyEffect, PolicyScope, SYSTEM_ABAC_IDENTITY,
 };
 pub use prompt_template::{PromptTemplate, LLM_FUNCTION_KEYS};
 pub use python_extractor::PythonExtractor;
 pub use quality_gate::{GatePhase, GateResult, GateStatus, GateType, QualityGate};
+pub use repo_access::{
+    effective_repo_permissions, effective_repo_role, RepoAccessOverride, RepoPermission,
+};
 pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
@@ -109,12 +136,22 @@ pub use spec_assertions::{
     SpecAssertionResult, Subject,
 };
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
+pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
-pub use team::Team;
+pub use team::{Team, TeamMembership};
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
-pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
-pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
-pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
+pub use user::{
+    DiffView, DigestFrequency, EmailConfig, FeedScope, GlobalRole, NotificationChannels,
+    NotificationPriority, SlackConfig, Theme, UiDensity, User, UserPreferences,
+    UserPreferencesPatch, UserRole, WebhookConfig,
+};
+pub use user_profile::{
+    JudgmentEntry, JudgmentType, UserNotificationPreference, UserSession, UserToken,
+};
+pub use workspace::{
+    builtin_personas, BuiltinPersonaDef, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel,
+    Workspace, BUILTIN_PERSONA_DEFS,
+};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};

@@ -305,6 +305,7 @@ Use \`gyre_agent_heartbeat\` periodically to signal liveness.
 
 Begin by reading your task description, then implement it completely.`;
 
+<<<<<<< HEAD
 const draftKind = process.env.GYRE_META_SPEC_DRAFT_KIND || 'unknown';
 const draftContent = process.env.GYRE_META_SPEC_DRAFT_CONTENT || 'unknown';
 const targetSpecPath = process.env.GYRE_TARGET_SPEC_PATH || 'unknown';
@@ -345,6 +346,20 @@ Use \`gyre_agent_heartbeat\` periodically to signal liveness.
 Begin by reading ${targetSpecPath}, then implement it completely.`;
 
 const taskPrompt = process.env.GYRE_TASK_PROMPT || (previewMode ? previewPrompt : defaultPrompt);
+=======
+// ── Meta-spec system prompt (agent-runtime spec §2) ─────────────────────────
+//
+// The server assembles the agent's meta-spec prompt set (required tenant →
+// required workspace → spec-level bindings at pinned versions) at spawn time
+// and injects it as GYRE_META_SPEC_PROMPT. Prepend it to the task prompt so
+// the behavioral instructions lead the context the LLM receives. Without this
+// hop the registry is stored and attested but never actually shapes agent
+// behavior — "the meta-spec registry IS the prompt configuration".
+const metaSpecPrompt = (process.env.GYRE_META_SPEC_PROMPT || '').trim();
+const fullPrompt = metaSpecPrompt
+  ? `${metaSpecPrompt}\n---\n${taskPrompt}`
+  : taskPrompt;
+>>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
 
 // ── Main execution ──────────────────────────────────────────────────────────
 
@@ -362,9 +377,8 @@ let messageCount = 0;
 let lastHeartbeat = Date.now();
 const HEARTBEAT_INTERVAL_MS = 15_000; // Must be < server's 60s stale timeout
 let conversationSha = null;
-
 try {
-  for await (const message of query({ prompt: taskPrompt, options })) {
+  for await (const message of query({ prompt: fullPrompt, options })) {
     messageCount++;
 
     // Record message for provenance

@@ -231,15 +231,24 @@ fn ingest_request(req: &ExportTraceServiceRequest, guard: &mut Vec<TraceSpan>, m
 /// shutdown sender, and the server task handle. The socket is bound before
 /// this returns, so the receiver is guaranteed ready before the caller runs
 /// the test command (HSI §3a lifecycle step 1 precedes step 2).
+/// Lifecycle handle for the spawned OTLP gRPC receiver (HSI §3a): the
+/// bound address (the socket is bound before `spawn_receiver` returns, so
+/// the receiver is guaranteed ready), the shutdown signal sender, and the
+/// server task join handle.
+struct ReceiverHandle {
+    addr: SocketAddr,
+    shutdown_tx: oneshot::Sender<()>,
+    server: JoinHandle<std::result::Result<(), tonic::transport::Error>>,
+}
+
+/// Bind and start the OTLP gRPC receiver. The socket is bound before
+/// this returns, so the receiver is guaranteed ready before the caller runs
+/// the test command (HSI §3a lifecycle step 1 precedes step 2).
 async fn spawn_receiver(
     port: u16,
     accumulator: SpanAccumulator,
     max_spans: usize,
-) -> Result<(
-    SocketAddr,
-    oneshot::Sender<()>,
-    JoinHandle<std::result::Result<(), tonic::transport::Error>>,
-)> {
+) -> Result<ReceiverHandle> {
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)
         .await
@@ -262,7 +271,11 @@ async fn spawn_receiver(
             .await
     });
 
-    Ok((actual_addr, shutdown_tx, handle))
+    Ok(ReceiverHandle {
+        addr: actual_addr,
+        shutdown_tx,
+        server: handle,
+    })
 }
 
 /// Run the full TraceCapture gate lifecycle:
@@ -278,11 +291,10 @@ pub async fn run_trace_capture(
     commit_sha: String,
 ) -> Result<GateTrace> {
     let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
-    let (actual_addr, shutdown_tx, server) =
-        spawn_receiver(port, Arc::clone(&accumulator), config.max_spans).await?;
+    let receiver = spawn_receiver(port, Arc::clone(&accumulator), config.max_spans).await?;
 
     // Run the test command with OTel env vars pointing at our gRPC receiver.
-    let otlp_endpoint = format!("http://{actual_addr}");
+    let otlp_endpoint = format!("http://{}", receiver.addr);
     let parts: Vec<&str> = config.test_command.split_whitespace().collect();
     let command_output = if parts.is_empty() {
         Err(anyhow::anyhow!("empty test_command"))
@@ -309,8 +321,8 @@ pub async fn run_trace_capture(
     };
 
     // Stop the OTLP receiver.
-    let _ = shutdown_tx.send(());
-    let _ = server.await;
+    let _ = receiver.shutdown_tx.send(());
+    let _ = receiver.server.await;
 
     command_output?;
 
@@ -716,11 +728,11 @@ mod tests {
     #[tokio::test]
     async fn grpc_receiver_accepts_export() {
         let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
-        let (addr, shutdown_tx, server) = spawn_receiver(0, Arc::clone(&accumulator), 100)
+        let receiver = spawn_receiver(0, Arc::clone(&accumulator), 100)
             .await
             .unwrap();
 
-        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+        let mut client = TraceServiceClient::connect(format!("http://{}", receiver.addr))
             .await
             .expect("connect to gRPC receiver");
         let req = make_request(
@@ -738,8 +750,8 @@ mod tests {
         );
         client.export(req).await.expect("export spans");
 
-        let _ = shutdown_tx.send(());
-        let _ = server.await;
+        let _ = receiver.shutdown_tx.send(());
+        let _ = receiver.server.await;
 
         let spans = accumulator.lock();
         assert_eq!(spans.len(), 1, "receiver should have accumulated one span");
@@ -837,6 +849,161 @@ env:
         assert_eq!(
             observed, "my-repo-tests",
             "user env must override the default OTEL_SERVICE_NAME"
+        );
+    }
+
+    /// HSI §3a lifecycle step 5: post-capture span-to-graph-node linkage.
+    /// HTTP (Server) spans match Endpoint nodes by `http.route`, Internal
+    /// spans match Function nodes by the `code.function` qualified name,
+    /// Database spans match Module/Type nodes by operation name; spans with
+    /// no match keep `graph_node_id: None`.
+    #[tokio::test]
+    async fn resolve_graph_linkage_resolves_http_function_db_spans() {
+        use gyre_common::graph::{GraphNode, NodeType, SpecConfidence, Visibility};
+        let state = crate::mem::test_state();
+
+        let mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-link"),
+            Id::new("repo-link"),
+            Id::new("default"),
+            "link MR".to_string(),
+            "feat/x",
+            "main",
+            1000,
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let node = |id: &str, node_type: NodeType, name: &str, qual: &str| GraphNode {
+            id: Id::new(id),
+            repo_id: Id::new("repo-link"),
+            node_type,
+            name: name.to_string(),
+            qualified_name: qual.to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line_start: 1,
+            line_end: 2,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_paths: vec![],
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "s".into(),
+            last_modified_by: None,
+            last_modified_at: 1,
+            created_sha: "s".into(),
+            created_at: 1,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: 1,
+            last_seen_at: 1,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        };
+        state
+            .graph_store
+            .create_node(node(
+                "n-endpoint",
+                NodeType::Endpoint,
+                "widgets",
+                "/api/v1/widgets",
+            ))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_node(node(
+                "n-func",
+                NodeType::Function,
+                "do_thing",
+                "crate::service::do_thing",
+            ))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_node(node("n-db", NodeType::Module, "users", "db::users"))
+            .await
+            .unwrap();
+
+        let span = |span_id: &str, kind: SpanKind, op: &str, attrs: &[(&str, &str)]| TraceSpan {
+            span_id: span_id.to_string(),
+            parent_span_id: None,
+            operation_name: op.to_string(),
+            service_name: "svc".to_string(),
+            kind,
+            start_time: 1,
+            duration_us: 2,
+            attributes: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            input_summary: None,
+            output_summary: None,
+            status: SpanStatus::Ok,
+            graph_node_id: None,
+        };
+
+        let trace = GateTrace {
+            id: Id::new("t-link"),
+            mr_id: mr.id.clone(),
+            gate_run_id: Id::new("gr-link"),
+            commit_sha: "0".repeat(40),
+            captured_at: 1,
+            spans: vec![
+                span(
+                    "s-http",
+                    SpanKind::Server,
+                    "GET /api/v1/widgets",
+                    &[("http.route", "/api/v1/widgets")],
+                ),
+                span(
+                    "s-func",
+                    SpanKind::Internal,
+                    "handle_request",
+                    &[("code.function", "crate::service::do_thing")],
+                ),
+                span(
+                    "s-db",
+                    SpanKind::Database,
+                    "SELECT users",
+                    &[("db.system", "sqlite")],
+                ),
+                span("s-miss", SpanKind::Client, "external call", &[]),
+            ],
+        };
+
+        let linked = resolve_graph_linkage(&state, trace).await;
+        let by_id = |sid: &str| {
+            linked
+                .spans
+                .iter()
+                .find(|s| s.span_id == sid)
+                .unwrap()
+                .graph_node_id
+                .clone()
+        };
+        assert_eq!(
+            by_id("s-http"),
+            Some(Id::new("n-endpoint")),
+            "HTTP span must link the Endpoint node via http.route"
+        );
+        assert_eq!(
+            by_id("s-func"),
+            Some(Id::new("n-func")),
+            "function span must link the Function node via code.function qualified name"
+        );
+        assert_eq!(
+            by_id("s-db"),
+            Some(Id::new("n-db")),
+            "DB span must link the adapter Module node via operation name"
+        );
+        assert_eq!(
+            by_id("s-miss"),
+            None,
+            "unresolvable span must keep graph_node_id None"
         );
     }
 }

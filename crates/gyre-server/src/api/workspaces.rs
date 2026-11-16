@@ -4,7 +4,10 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{trust_policies_for_level, BudgetConfig, TrustLevel, UserRole, Workspace};
+use gyre_domain::{
+    trust_policies_for_level, BudgetConfig, TrustLevel, UserRole, Workspace, WorkspaceMembership,
+    WorkspaceRole,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -42,6 +45,10 @@ pub struct UpdateWorkspaceRequest {
     pub trust_level: Option<String>,
     pub llm_model: Option<String>,
     /// Set to a compute target ID to bind agent spawning, or null to clear.
+    /// Raw deserializer keeps an explicit JSON `null` distinct from an
+    /// absent field: serde collapses `null` to `None` inside
+    /// `Option<Value>`, which would make a clear a silent no-op.
+    #[serde(default, deserialize_with = "crate::api::deserialize_present")]
     pub compute_target_id: Option<serde_json::Value>,
 }
 
@@ -124,7 +131,15 @@ pub async fn create_workspace(
     ws.max_repos = req.max_repos;
     ws.max_agents_per_repo = req.max_agents_per_repo;
     if let Some(tl) = req.trust_level {
-        ws.trust_level = TrustLevel::from_db_str(&tl);
+        // Strict parse of caller input: a typo must 400, not silently
+        // coerce to the Supervised default (which would seed trust
+        // policies the caller never asked for). `from_db_str`'s
+        // fallback is for stored rows only.
+        ws.trust_level = TrustLevel::parse(&tl).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "invalid trust_level '{tl}'; must be Supervised, Guided, Autonomous, or Custom"
+            ))
+        })?;
     }
     ws.llm_model = req.llm_model;
     // Seed the trust preset ABAC policies atomically with the workspace row so a
@@ -138,6 +153,42 @@ pub async fn create_workspace(
         .apply_trust_transition(&ws, false, &seed_policies)
         .await
         .map_err(ApiError::Internal)?;
+    // apply_trust_transition persists policies outside the PolicyRepository
+    // port (atomicity) — invalidate the policy-set cache so the ABAC engine
+    // sees the seeded trust policies immediately (policy_cache.rs contract).
+    state.policy_cache.invalidate();
+
+    // Seed the creator's Owner membership (user-management.md §Workspace
+    // Membership): a workspace created by a user principal is owned by its
+    // creator from birth, so it is never falsely flagged ownerless by the
+    // orphaned-workspace job (§Ownership Transfer & Reclamation frames the
+    // flag as "when a workspace Owner leaves"). Only seeded when the
+    // creator is a user of the workspace's tenant — cross-tenant
+    // memberships are not supported (Admin callers may create workspaces
+    // in other tenants via the tenant_id override; those are owned by the
+    // first invited Owner). System/agent principals have no user identity
+    // and seed nothing.
+    if let Some(user_id) = &auth.user_id {
+        let user = state.users.find_by_id(user_id).await?;
+        if user.as_ref().and_then(|u| u.tenant_id.as_ref()) == Some(&ws.tenant_id) {
+            let mut membership = WorkspaceMembership::new(
+                new_id(),
+                user_id.clone(),
+                ws.id.clone(),
+                WorkspaceRole::Owner,
+                user_id.clone(),
+                now,
+            );
+            // The creator accepts their own ownership immediately — the
+            // membership is active from creation, not a pending invite.
+            membership.accept(now);
+            state
+                .workspace_memberships
+                .create(&membership)
+                .await
+                .map_err(ApiError::Internal)?;
+        }
+    }
     Ok((StatusCode::CREATED, Json(WorkspaceResponse::from(ws))))
 }
 
@@ -220,13 +271,22 @@ pub async fn update_workspace(
     if let Some(max_agents) = req.max_agents_per_repo {
         ws.max_agents_per_repo = Some(max_agents);
     }
-    let trust_changed = if let Some(tl) = req.trust_level {
-        let new_trust = TrustLevel::from_db_str(&tl);
+    let (trust_changed, trust_transition) = if let Some(tl) = req.trust_level {
+        // Strict parse of caller input (400 on typo) — a misspelled level
+        // must not fall through to `from_db_str`'s Supervised fallback,
+        // which would silently transition the workspace and rewrite its
+        // trust: policies while returning 200.
+        let new_trust = TrustLevel::parse(&tl).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "invalid trust_level '{tl}'; must be Supervised, Guided, Autonomous, or Custom"
+            ))
+        })?;
         let changed = new_trust != ws.trust_level;
-        ws.trust_level = new_trust;
-        changed
+        let from = ws.trust_level.clone();
+        ws.trust_level = new_trust.clone();
+        (changed, changed.then_some((from, new_trust)))
     } else {
-        false
+        (false, None)
     };
     if let Some(model) = req.llm_model {
         ws.llm_model = Some(model);
@@ -234,8 +294,35 @@ pub async fn update_workspace(
     if let Some(ct_id_value) = req.compute_target_id {
         ws.compute_target_id = match ct_id_value {
             serde_json::Value::Null => None,
-            serde_json::Value::String(s) => Some(Id::new(s)),
-            _ => ws.compute_target_id,
+            serde_json::Value::String(s) => {
+                // agent-runtime.md §3: "Workspace selects ONE compute target
+                // from the tenant's list" — the ID must resolve to an
+                // existing target in THIS workspace's tenant. Rejecting
+                // here prevents binding a workspace to another tenant's
+                // target (cross-tenant leak) or to a stale ID that would
+                // silently fall through the spawn-time fallback chain.
+                let target = state
+                    .compute_targets
+                    .get_by_id(&Id::new(&s))
+                    .await?
+                    .ok_or_else(|| {
+                        ApiError::InvalidInput(format!("compute target {s} not found"))
+                    })?;
+                if target.tenant_id != ws.tenant_id {
+                    // Same shape as the compute-targets handlers: a
+                    // cross-tenant ID is indistinguishable from a missing
+                    // one — do not confirm its existence.
+                    return Err(ApiError::InvalidInput(format!(
+                        "compute target {s} not found"
+                    )));
+                }
+                Some(target.id)
+            }
+            _ => {
+                return Err(ApiError::InvalidInput(
+                    "compute_target_id must be a string or null".to_string(),
+                ))
+            }
         };
     }
     // When the trust level changes, write the workspace row AND its `trust:`
@@ -255,11 +342,47 @@ pub async fn update_workspace(
             .apply_trust_transition(&ws, !is_now_custom, &new_policies)
             .await
             .map_err(|_| {
+                // Verbatim HSI §2 message — the UI surfaces this string.
                 ApiError::Conflict(
-                    "Trust level transition failed and was rolled back; no changes were applied"
-                        .to_string(),
+                    "Trust level transition failed — policies could not be created".to_string(),
                 )
             })?;
+        // apply_trust_transition persists policies outside the
+        // PolicyRepository port (atomicity) — invalidate the policy-set
+        // cache so the ABAC engine sees the transitioned trust policies
+        // immediately (policy_cache.rs contract). Without this, a
+        // Supervised workspace's merge-hold Deny could stay invisible to
+        // merge-time evaluation until an unrelated policy write.
+        state.policy_cache.invalidate();
+        // HSI §12 Judgment Ledger: a trust transition is human judgment — record
+        // it so it surfaces in the actor's ledger. Failure propagates: a silently
+        // dropped judgment event is audit theatre.
+        if let Some((from, to)) = &trust_transition {
+            let event = gyre_domain::AuditEvent::new(
+                new_id(),
+                gyre_domain::AuditEventType::TrustChange,
+                None,
+                auth.user_id.clone(),
+                None,
+                Some(ws.id.clone()),
+                None,
+                "workspace".to_string(),
+                Some(ws.id.as_str().to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({
+                    "workspace_id": ws.id.as_str(),
+                    "from": from.to_string(),
+                    "to": to.to_string(),
+                }),
+                None,
+                None,
+                now_secs(),
+            );
+            state.audit.record(&event).await?;
+            let _ = state
+                .audit_broadcast_tx
+                .send(serde_json::to_string(&event).unwrap_or_default());
+        }
     } else {
         // No trust change — only the non-trust workspace fields need updating.
         state.workspaces.update(&ws).await?;
@@ -380,10 +503,101 @@ pub async fn get_workspace_presence(
     Ok(Json(entries))
 }
 
+// ---------------------------------------------------------------------------
+// Workspace merge policy (meta-spec-reconciliation.md §9)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct MergePolicyResponse {
+    pub require_current_meta_spec_set: bool,
+}
+
+impl From<crate::merge_policy::WorkspaceMergePolicy> for MergePolicyResponse {
+    fn from(p: crate::merge_policy::WorkspaceMergePolicy) -> Self {
+        Self {
+            require_current_meta_spec_set: p.require_current_meta_spec_set,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMergePolicyRequest {
+    pub require_current_meta_spec_set: Option<bool>,
+}
+
+/// GET /api/v1/workspaces/:id/merge-policy
+///
+/// Returns the workspace merge policy — the §9 strict-mode switch for the
+/// meta-spec drift merge gate. Default: warn only.
+pub async fn get_merge_policy(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<Json<MergePolicyResponse>, ApiError> {
+    let workspace_id = Id::new(&id);
+
+    // Verify workspace exists and the caller's tenant owns it.
+    let ws = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
+
+    let policy = crate::merge_policy::get_merge_policy(&state, &workspace_id).await?;
+    Ok(Json(policy.into()))
+}
+
+/// PUT /api/v1/workspaces/:id/merge-policy (Admin only)
+///
+/// Update the workspace merge policy (partial update). Admin-only: the
+/// strict-mode flag converts the §9 meta-spec drift warning into a hard
+/// merge block — a governance control that determines whether in-flight MRs
+/// can merge during reconciliation, so non-Admin callers (Developers,
+/// Agents) must not be able to flip it (same NEW-26 rule as the meta-spec-set
+/// binding).
+pub async fn set_merge_policy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    auth: AuthenticatedAgent,
+    Json(req): Json<UpdateMergePolicyRequest>,
+) -> Result<Json<MergePolicyResponse>, ApiError> {
+    // Admin-only: see doc comment above.
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace merge policy".to_string(),
+        ));
+    }
+
+    let workspace_id = Id::new(&id);
+
+    // Verify workspace exists and the caller's tenant owns it.
+    let ws = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
+
+    // Apply partial update.
+    let mut policy = crate::merge_policy::get_merge_policy(&state, &workspace_id).await?;
+    if let Some(require) = req.require_current_meta_spec_set {
+        policy.require_current_meta_spec_set = require;
+    }
+    crate::merge_policy::set_merge_policy(&state, &workspace_id, &policy).await?;
+
+    Ok(Json(policy.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -438,6 +652,82 @@ mod tests {
         assert_eq!(list_resp.status(), StatusCode::OK);
         let list = body_json(list_resp).await;
         assert_eq!(list.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_workspace_seeds_owner_membership_for_creator() {
+        // user-management.md §Workspace Membership + §Ownership Transfer &
+        // Reclamation: a workspace created by a user principal is owned by
+        // its creator from birth (active Owner membership), so the
+        // orphaned-workspace job never flags a freshly created workspace —
+        // the flag is for owner DEPARTURE ("when a workspace Owner
+        // leaves"), not for workspaces that simply haven't invited an
+        // Owner yet.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let mut creator = gyre_domain::User::new(
+            Id::new("creator-1"),
+            "ext-creator-1",
+            "creator-1",
+            1_700_000_000,
+        );
+        creator.tenant_id = Some(Id::new("t1"));
+        creator.global_role = gyre_domain::GlobalRole::Member;
+        creator.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&creator).await.unwrap();
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key("creator-key-1"),
+                &creator.id,
+                "test",
+            )
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({
+            "name": "Creator Owned",
+            "slug": "creator-owned"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer creator-key-1")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = body_json(resp).await;
+        let ws_id = created["id"].as_str().unwrap().to_string();
+
+        let membership = state
+            .workspace_memberships
+            .find_by_user_and_workspace(&creator.id, &Id::new(&ws_id))
+            .await
+            .unwrap()
+            .expect("the creator must hold a membership in the workspace they created");
+        assert_eq!(membership.role, gyre_domain::WorkspaceRole::Owner);
+        assert!(
+            membership.accepted && membership.accepted_at.is_some(),
+            "the creator's Owner membership is active immediately, not a pending invite"
+        );
+
+        // The orphaned-workspace job does not flag the creator-owned
+        // workspace (an active Owner exists).
+        crate::workspace_ownership::run_once(&state).await.unwrap();
+        let flagged = crate::workspace_ownership::orphaned_workspaces_with(&state, 0)
+            .await
+            .unwrap();
+        assert!(
+            flagged.iter().all(|w| w.workspace_id != ws_id),
+            "a workspace owned by its creator must never be flagged orphaned"
+        );
     }
 
     #[tokio::test]
@@ -864,9 +1154,8 @@ mod tests {
 
         let policies_after = state.policies.list().await.unwrap();
         assert!(
-            !policies_after
-                .iter()
-                .any(|p| p.name.starts_with("trust:") && p.scope_id.as_deref() == Some("ws-fail-1")),
+            !policies_after.iter().any(|p| p.name.starts_with("trust:")
+                && p.scope_id.as_ref().map(|i| i.as_str()) == Some("ws-fail-1")),
             "failed transition must not partially apply trust: policies"
         );
     }
@@ -933,6 +1222,726 @@ mod tests {
         assert!(
             !policies.iter().any(|p| p.name.starts_with("trust:")),
             "Guided preset must not seed trust: policies"
+        );
+    }
+
+    /// §9 workspace merge policy API: default is warn-only, a Developer-role
+    /// caller cannot flip the strict-mode flag, and an Admin can
+    /// (meta-spec-reconciliation.md §9, task-159).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_policy_default_admin_only_update_and_roundtrip() {
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        let _ = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+
+        // Create a workspace with the admin static token.
+        let ws_resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"ws-mp","slug":"ws-mp"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        // Unknown workspace → 404.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspaces/does-not-exist/merge-policy")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Default policy: warn only.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let policy = body_json(resp).await;
+        assert_eq!(policy["require_current_meta_spec_set"], false);
+
+        // A Developer-role JWT must not flip the strict-mode flag.
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", format!("Bearer {dev_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"require_current_meta_spec_set": true}"#.to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The rejected update changed nothing.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let policy = body_json(resp).await;
+        assert_eq!(policy["require_current_meta_spec_set"], false);
+
+        // Admin (static token) enables strict mode.
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"require_current_meta_spec_set": true}"#.to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let policy = body_json(resp).await;
+        assert_eq!(policy["require_current_meta_spec_set"], true);
+
+        // GET reflects the persisted strict mode.
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/merge-policy"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let policy = body_json(resp).await;
+        assert_eq!(policy["require_current_meta_spec_set"], true);
+    }
+
+    // -- Compute target binding (agent-runtime.md §3) --------------------------
+
+    /// Binding a workspace to a compute target in the same tenant succeeds
+    /// and round-trips through the workspace response (spec §3: "Workspace
+    /// selects ONE compute target from the tenant's list").
+    #[tokio::test]
+    async fn update_workspace_binds_compute_target_in_tenant() {
+        let state = crate::mem::test_state();
+        // Seed a compute target in tenant t1 directly via the repository.
+        let ct = gyre_domain::ComputeTargetEntity::new(
+            gyre_common::Id::new("ct-t1-1"),
+            gyre_common::Id::new("t1"),
+            "local-docker".to_string(),
+            gyre_domain::ComputeTargetType::Container,
+            100,
+        );
+        state.compute_targets.create(&ct).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "CtWs", "slug": "ct-ws" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let update = serde_json::json!({ "compute_target_id": "ct-t1-1" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["compute_target_id"], "ct-t1-1");
+
+        // Clearing with null also round-trips.
+        let clear = serde_json::json!({ "compute_target_id": null });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&clear).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert!(updated["compute_target_id"].is_null());
+    }
+
+    /// A compute target from ANOTHER tenant must be rejected: the spawn-time
+    /// fallback chain would otherwise never resolve it (workspace tenant ≠
+    /// target tenant), and binding it would leak the other tenant's
+    /// infrastructure config into this workspace's spawn decisions.
+    #[tokio::test]
+    async fn update_workspace_rejects_cross_tenant_compute_target() {
+        let state = crate::mem::test_state();
+        // Seed a compute target in a DIFFERENT tenant.
+        let ct = gyre_domain::ComputeTargetEntity::new(
+            gyre_common::Id::new("ct-other-1"),
+            gyre_common::Id::new("other-tenant"),
+            "evil-docker".to_string(),
+            gyre_domain::ComputeTargetType::Container,
+            100,
+        );
+        state.compute_targets.create(&ct).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "CtWs2", "slug": "ct-ws-2" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let update = serde_json::json!({ "compute_target_id": "ct-other-1" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "cross-tenant compute target binding must be rejected"
+        );
+
+        // The workspace must be unchanged — no partial application.
+        let ws_after = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .expect("workspace still exists");
+        assert!(
+            ws_after.compute_target_id.is_none(),
+            "rejected binding must not persist"
+        );
+    }
+
+    /// A nonexistent compute target ID must be rejected with 400, not
+    /// silently stored: a stale ID would fall through the spawn-time
+    // fallback chain, hiding the misconfiguration.
+    #[tokio::test]
+    async fn update_workspace_rejects_unknown_compute_target() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "CtWs3", "slug": "ct-ws-3" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let update = serde_json::json!({ "compute_target_id": "no-such-target" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown compute target must be rejected, not silently stored"
+        );
+    }
+
+    /// TASK-077 (F7): Preset → Custom must PRESERVE the existing trust:
+    /// policies (Custom means "operator manages policies manually").
+    #[tokio::test]
+    async fn trust_transition_preset_to_custom_preserves_trust_policies() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create with the entity-default Supervised level (seeds
+        // trust:require-human-mr-review).
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Sanity: the Supervised trust policy exists after create.
+        let seeded = state.policies.list().await.unwrap();
+        assert!(
+            seeded
+                .iter()
+                .any(|p| p.name == "trust:require-human-mr-review"),
+            "default Supervised create must seed trust:require-human-mr-review"
+        );
+
+        // Transition Supervised → Custom: trust policies must be preserved.
+        let update = serde_json::json!({ "trust_level": "Custom" });
+        let update_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let updated = body_json(update_resp).await;
+        assert_eq!(updated["trust_level"], "Custom");
+
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            policies
+                .iter()
+                .any(|p| p.name == "trust:require-human-mr-review"),
+            "Custom transition must PRESERVE existing trust: policies"
+        );
+    }
+
+    /// TASK-077 (F7): Custom → preset must DELETE all trust: policies for the
+    /// workspace and reseed the preset's policies. A non-trust user policy
+    /// (no `trust:` prefix) must survive the transition.
+    #[tokio::test]
+    async fn trust_transition_custom_to_preset_deletes_and_reseeds() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create Supervised (default) then transition to Custom.
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W2", "slug": "w2" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let to_custom = serde_json::json!({ "trust_level": "Custom" });
+        let custom_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&to_custom).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(custom_resp.status(), StatusCode::OK);
+
+        // In Custom mode the operator adds their own policies — including
+        // custom trust-prefixed ones and unrelated user policies.
+        let base = gyre_domain::trust_policies_for_level(
+            &gyre_domain::TrustLevel::Supervised,
+            &ws_id,
+            "operator",
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        let custom_trust = gyre_domain::Policy {
+            id: gyre_common::Id::new("trust-operator-custom-rule"),
+            name: "trust:operator-custom-rule".to_string(),
+            ..base.clone()
+        };
+        state.policies.create(&custom_trust).await.unwrap();
+
+        let user_policy = gyre_domain::Policy {
+            id: gyre_common::Id::new("user-no-trust-prefix"),
+            name: "user:custom-policy".to_string(),
+            ..base
+        };
+        state.policies.create(&user_policy).await.unwrap();
+
+        // Transition Custom → Guided: all trust: policies for this workspace
+        // must be deleted (including the operator's custom trust policy and
+        // the seeded require-human-mr-review); the user policy survives and
+        // Guided reseeds nothing.
+        let to_guided = serde_json::json!({ "trust_level": "Guided" });
+        let guided_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&to_guided).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(guided_resp.status(), StatusCode::OK);
+        let updated = body_json(guided_resp).await;
+        assert_eq!(updated["trust_level"], "Guided");
+
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            !policies.iter().any(|p| p.name.starts_with("trust:")),
+            "Custom → preset must DELETE all trust: policies for the workspace"
+        );
+        assert!(
+            policies.iter().any(|p| p.name == "user:custom-policy"),
+            "non-trust user policies must survive the Custom → preset transition"
+        );
+    }
+
+    /// A misspelled trust_level in the update body must 400 — NOT silently
+    /// coerce to the Supervised fallback. Without strict parsing, a typo
+    /// like "Autonomus" on a Guided workspace returned 200 and rewrote the
+    /// workspace + its trust: policies to Supervised while the caller
+    /// believed they had selected Autonomous (a trust downgrade via typo —
+    /// strictly more human review, but still an unintended policy rewrite
+    /// the caller cannot distinguish from success).
+    #[tokio::test]
+    async fn update_workspace_invalid_trust_level_returns_400_and_leaves_state() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Guided workspace (explicit, so the assertions below pin a state
+        // that differs from both the fallback and the typo's target).
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let update = serde_json::json!({ "trust_level": "Autonomus" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // State untouched: still Guided, no trust: policies seeded.
+        let ws_after = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new(&ws_id))
+            .await
+            .unwrap()
+            .expect("workspace still exists");
+        assert_eq!(
+            ws_after.trust_level,
+            gyre_domain::TrustLevel::Guided,
+            "rejected trust_level must not change the stored level"
+        );
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            !policies.iter().any(|p| p.name.starts_with("trust:")
+                && p.scope_id.as_ref().map(|id| id.as_str()) == Some(ws_id.as_str())),
+            "rejected trust_level must not seed trust: policies"
+        );
+    }
+
+    /// Same contract on create: a typo'd trust_level must 400 instead of
+    /// creating a Supervised workspace the caller cannot distinguish from
+    /// the level they asked for.
+    #[tokio::test]
+    async fn create_workspace_invalid_trust_level_returns_400() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "autonomous" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // No workspace row leaked through the rejected create.
+        let workspaces = state
+            .workspaces
+            .list_by_tenant(&gyre_common::Id::new("t1"))
+            .await
+            .unwrap();
+        assert!(
+            workspaces.is_empty(),
+            "rejected create must not persist a workspace"
+        );
+    }
+
+    /// HSI §12 Judgment Ledger: a successful trust transition via
+    /// PUT /workspaces/:id must write a `trust_change` audit event attributed
+    /// to the acting user, carrying from/to and workspace_id — the event the
+    /// judgment ledger aggregates. A no-change PUT must NOT write one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trust_transition_writes_trust_change_audit_event() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_ports::AuditQueryFilter;
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a Guided workspace as the admin static token.
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A human (OIDC JWT, admin role) performs the transition.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-sub-1",
+                "preferred_username": "judge-1",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+
+        let update = serde_json::json!({ "trust_level": "Supervised" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The trust_change event exists, attributed to the acting human user.
+        // (AuditQueryFilter::default() has limit 0 — set it explicitly.)
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("trust_change".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ev = &events[0];
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-sub-1")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(
+            ev.user_id.as_ref().map(Id::as_str),
+            Some(acting_user.id.as_str())
+        );
+        assert_eq!(
+            ev.workspace_id.as_ref().map(Id::as_str),
+            Some(ws_id.as_str())
+        );
+        assert_eq!(ev.detail["from"], "Guided");
+        assert_eq!(ev.detail["to"], "Supervised");
+
+        // Same-value PUT: no transition, no second event.
+        let same = serde_json::json!({ "trust_level": "Supervised" });
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&same).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::OK,
+            "same-value PUT must succeed"
+        );
+        let events2 = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("trust_change".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events2.len(),
+            1,
+            "no-change PUT must not write trust_change: {events2:?}"
         );
     }
 }

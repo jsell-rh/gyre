@@ -28,7 +28,7 @@
 # scripts/forwarded-header-trust-exemptions.txt (path:line form,
 # frozen count). Fix by using the socket peer address and gating
 # forwarded headers on a trusted-proxy list; never add entries.
-FROZEN_EXEMPTION_COUNT=2
+FROZEN_EXEMPTION_COUNT=0
 #
 # Run by pre-commit and CI.
 

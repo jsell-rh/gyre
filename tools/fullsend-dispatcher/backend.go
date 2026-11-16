@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,8 +28,10 @@ type Backend interface {
 }
 
 type AdapterBackend struct {
-	adapter Adapter
-	limit   atomic.Int64
+	adapter    Adapter
+	limit      atomic.Int64
+	settingsMu sync.RWMutex
+	settings   []Setting
 }
 
 func (b *AdapterBackend) call(action string, input, output any) error {
@@ -38,14 +41,26 @@ func (b *AdapterBackend) call(action string, input, output any) error {
 }
 func (b *AdapterBackend) rows() ([]Row, error) {
 	var result struct {
-		Rows     []Row `json:"rows"`
-		Capacity int   `json:"capacity"`
+		Rows     []Row     `json:"rows"`
+		Capacity int       `json:"capacity"`
+		Settings []Setting `json:"settings"`
 	}
 	err := b.call("rows", nil, &result)
 	if err == nil {
 		b.limit.Store(int64(result.Capacity))
+		b.setSettings(result.Settings)
 	}
 	return result.Rows, err
+}
+func (b *AdapterBackend) setSettings(rows []Setting) {
+	b.settingsMu.Lock()
+	defer b.settingsMu.Unlock()
+	b.settings = append([]Setting(nil), rows...)
+}
+func (b *AdapterBackend) currentSettings() []Setting {
+	b.settingsMu.RLock()
+	defer b.settingsMu.RUnlock()
+	return append([]Setting(nil), b.settings...)
 }
 func (b *AdapterBackend) currentLimit() int { return int(b.limit.Load()) }
 func (b *AdapterBackend) recover() error {

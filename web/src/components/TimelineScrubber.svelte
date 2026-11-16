@@ -9,11 +9,45 @@
     active = false,           // Whether time travel mode is active
     scrubIndex = -1,          // Current index into timeline array (-1 = present)
     nodes = [],               // Current graph nodes (for key moment marker extraction)
+    reconciliationEvents = [], // Workspace reconciliation_completed messages (key moments, system-explorer.md §6)
     onToggle = () => {},      // Callback to toggle time travel mode
     onScrub = (_idx) => {},   // Callback when scrubber position changes
     onMarkerClick = (_delta) => {}, // Callback when a key moment marker is clicked
     deltaStats = null,        // { added: N, removed: N, modified: N, byType: {} }
   } = $props();
+
+  // ── d3-scale time axis (ui-layout.md §10: timeline → d3-scale + Svelte) ────
+  // Marker positions and axis ticks map delta *timestamps* (not array
+  // indexes) onto the track, so spacing reflects real time: a month-long
+  // gap renders ten times wider than a three-day gap.
+  import { scaleTime } from 'd3-scale';
+
+  function tsMs(ts) {
+    const ms = typeof ts === 'number' ? ts * 1000 : new Date(ts).getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  function safeParse(s) {
+    try { return JSON.parse(s); } catch { return null; }
+  }
+
+  let timeScale = $derived.by(() => {
+    const times = (timeline ?? []).map((d) => tsMs(d?.timestamp)).filter((ms) => ms !== null);
+    if (times.length < 2) return null;
+    const min = Math.min(...times);
+    const max = Math.max(...times);
+    if (max === min) return null;
+    return scaleTime().domain([new Date(min), new Date(max)]).range([0, 100]);
+  });
+
+  let timeTicks = $derived.by(() => {
+    if (!timeScale) return [];
+    try {
+      return timeScale.ticks(4).map((date) => ({ date, left: timeScale(date) }));
+    } catch {
+      return [];
+    }
+  });
 
   // Extract key moments from timeline deltas and node metadata
   let keyMoments = $derived.by(() => {
@@ -64,12 +98,65 @@
       }
     }
 
-    // Deduplicate by index proximity (merge moments within 1 index)
+    // Reconciliation events (persona v3 → v4, system-explorer.md §6): workspace
+    // reconciliation_completed messages. `created_at` is epoch milliseconds.
+    // The narrative derives ONLY from fields the production emitter sends
+    // (maybe_emit_reconciliation_completed → emit_reconciliation_completed:
+    // workspace_id, wave_started_at, task_count, duration_secs, specs[] (the
+    // changed meta-specs as {name, version}). Fields no emitter sends
+    // are never read, so no fabricated persona/specs narrative can appear.
+    for (const ev of reconciliationEvents ?? []) {
+      const payload = typeof ev?.payload === 'string' ? safeParse(ev.payload) : ev?.payload;
+      const tsMs = typeof ev?.created_at === 'number' ? ev.created_at : null;
+      if (tsMs == null) continue;
+      const ts = Math.floor(tsMs / 1000);
+      const idx = findClosestIndex(ts);
+      if (idx < 0) continue;
+      const taskCount = Number(payload?.task_count ?? 0);
+      const specLabels = (Array.isArray(payload?.specs) ? payload.specs : [])
+        .map((s) => {
+          if (typeof s === 'string') return s;
+          const name = s?.name;
+          if (!name) return null;
+          const v = Number(s?.version);
+          return name && Number.isFinite(v) && s.version != null ? `${name} v${s.version}` : name;
+        })
+        .filter(Boolean);
+      const duration = formatDuration(payload?.duration_secs);
+      const tasksText = `${taskCount} task${taskCount === 1 ? '' : 's'}`;
+      const narrative = specLabels.length
+        ? `Reconciliation wave complete: ${tasksText} aligned code with ${specLabels.join(', ')}${duration ? ` (${duration})` : ''}.`
+        : `Reconciliation wave complete: ${tasksText}${duration ? ` (${duration})` : ''}.`;
+      moments.push({
+        index: idx,
+        delta: {
+          timestamp: ts,
+          spec_ref: specLabels.length === 1 ? specLabels[0] : null,
+          narrative,
+        },
+        eventType: 'reconciliation',
+        addedCount: 0,
+        removedCount: 0,
+      });
+    }
+
+    // Deduplicate within event type (merge moments of the SAME type within
+    // 1 index). Different-type moments at the same index are BOTH kept: a
+    // reconciliation wave completing right after its tasks land a large
+    // structural delta is the expected collision (reconciliation_completed
+    // fires moments after the code-alignment deltas), and dropping the later
+    // moment made its narrative unreachable — spec §6 requires spec
+    // approvals, milestones, reconciliations AND structural changes to be
+    // marked. Colliding markers stack vertically (markerRows) so each stays
+    // visible and clickable.
     moments.sort((a, b) => a.index - b.index);
     const deduped = [];
+    const lastIndexByType = new Map();
     for (const m of moments) {
-      if (deduped.length > 0 && Math.abs(deduped[deduped.length - 1].index - m.index) < 2) continue;
+      const lastIdx = lastIndexByType.get(m.eventType);
+      if (lastIdx != null && Math.abs(lastIdx - m.index) < 2) continue;
       deduped.push(m);
+      lastIndexByType.set(m.eventType, m.index);
     }
     return deduped;
   });
@@ -106,11 +193,52 @@
     return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
-  // Marker position as percentage
-  function markerPosition(idx) {
-    if (!timeline?.length || timeline.length <= 1) return 0;
-    return (idx / (timeline.length - 1)) * 100;
+  // Human-readable duration for reconciliation narratives
+  // (duration_secs from the production reconciliation_completed payload).
+  function formatDuration(secs) {
+    const s = Number(secs);
+    if (!Number.isFinite(s) || s <= 0) return '';
+    const days = Math.floor(s / 86400);
+    const hours = Math.floor((s % 86400) / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+    if (hours > 0) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    if (mins > 0) return `${mins}m`;
+    return `${Math.floor(s)}s`;
   }
+
+  // Marker position as percentage — by timestamp through the d3-scale time
+  // axis, falling back to index spacing when the time domain is degenerate
+  // (single delta, or all deltas share one timestamp).
+  function markerPosition(moment) {
+    if (!timeScale) {
+      if (!timeline?.length || timeline.length <= 1) return 0;
+      return (moment.index / (timeline.length - 1)) * 100;
+    }
+    const ms = tsMs(moment.delta?.timestamp);
+    if (ms === null) return 0;
+    return timeScale(new Date(ms));
+  }
+
+  // Vertical stack row for markers sharing a track position (different-type
+  // key moments at the same timestamp — the expected reconciliation/
+  // structural collision). Row 0 is the track center; each collision adds a
+  // 10px step down so every marker stays visible and clickable instead of
+  // the top dot hiding the ones beneath it.
+  let markerRows = $derived.by(() => {
+    const rows = new Map();
+    const positioned = keyMoments
+      .map((m) => ({ m, left: markerPosition(m) }))
+      .sort((a, b) => a.left - b.left);
+    let prevLeft = null;
+    let row = 0;
+    for (const p of positioned) {
+      row = prevLeft != null && p.left - prevLeft < 1.5 ? row + 1 : 0;
+      rows.set(p.m, row);
+      prevLeft = p.left;
+    }
+    return rows;
+  });
 
   // Event type display properties
   function eventTypeLabel(type) {
@@ -194,13 +322,24 @@
           {#each keyMoments as moment}
             <button
               class="tl-marker"
-              style="left: {markerPosition(moment.index)}%; background: {eventTypeColor(moment.eventType)}"
+              style="left: {markerPosition(moment)}%; top: calc(50% + {(markerRows.get(moment) ?? 0) * 10}px); background: {eventTypeColor(moment.eventType)}"
               onclick={(e) => handleMarkerClick(moment, e)}
               type="button"
               title="{eventTypeLabel(moment.eventType)} — {formatDate(moment.delta?.timestamp)}"
             ></button>
           {/each}
         </div>
+        <!-- Time axis ticks (d3-scale, ui-layout.md §10 timeline layout) -->
+        {#if timeTicks.length > 1}
+          <div class="tl-time-axis" aria-hidden="true">
+            {#each timeTicks as tick (tick.left)}
+              <span class="tl-time-axis-tick" style="left: {tick.left}%">
+                <span class="tl-time-axis-pip"></span>
+                <span class="tl-time-axis-label">{tick.date.toLocaleDateString()}</span>
+              </span>
+            {/each}
+          </div>
+        {/if}
       </div>
 
       <!-- Delta stats summary — per-type breakdown (spec §6: "+12 types, -3 types, +2 traits") -->
@@ -292,6 +431,12 @@
             </span>
           </div>
         {/if}
+        {#if selectedMoment.delta?.narrative}
+          <div class="tl-popover-field">
+            <span class="tl-popover-label">Why</span>
+            <span class="tl-popover-value">{selectedMoment.delta.narrative}</span>
+          </div>
+        {/if}
       </div>
       <div class="tl-popover-footer">
         <button
@@ -330,7 +475,7 @@
   }
 
   .tl-slider-container {
-    position: relative; flex: 1; min-width: 200px; height: 20px;
+    position: relative; flex: 1; min-width: 200px; height: 34px;
     display: flex; align-items: center;
   }
   .tl-slider {
@@ -349,6 +494,24 @@
     padding: 0;
   }
   .tl-marker:hover { transform: translate(-50%, -50%) scale(1.5); }
+
+  /* Time axis ticks (d3-scale, ui-layout.md §10 timeline layout) */
+  .tl-time-axis {
+    position: absolute; top: 22px; left: 0; right: 0; height: 12px;
+    pointer-events: none;
+  }
+  .tl-time-axis-tick {
+    position: absolute; top: 0;
+    transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
+  }
+  .tl-time-axis-pip {
+    width: 1px; height: 5px; background: #475569;
+  }
+  .tl-time-axis-label {
+    font-size: 9px; color: #64748b; white-space: nowrap;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
 
   .tl-delta-stats {
     display: flex; gap: 6px; font-size: 11px;

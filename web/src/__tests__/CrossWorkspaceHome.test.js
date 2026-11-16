@@ -85,10 +85,32 @@ describe('CrossWorkspaceHome', () => {
     }, { timeout: 3000 });
   });
 
-  it('calls api.specsForWorkspace(null) for all-workspace specs', async () => {
-    render(CrossWorkspaceHome);
+  // ── Regression: §10 Specs scoped to accessible workspaces ───────────
+  // The Specs section must query per accessible workspace (the server
+  // honors ?workspace_id=), never the unscoped list: reverting to
+  // api.specsForWorkspace(null) showed specs from workspaces the caller
+  // cannot access and fails this test.
+  it('fetches specs per accessible workspace, not the unscoped list', async () => {
+    api.workspaces.mockResolvedValue([
+      { id: 'ws-1', name: 'Payments', slug: 'payments' },
+      { id: 'ws-2', name: 'Billing', slug: 'billing' },
+    ]);
+    api.specsForWorkspace.mockImplementation((wsId) =>
+      wsId === 'ws-1'
+        ? [{ path: 'specs/payments.md', status: 'approved', workspace_id: 'ws-1' }]
+        : [{ path: 'specs/billing.md', status: 'pending', workspace_id: 'ws-2' }]
+    );
+    const { container } = render(CrossWorkspaceHome);
     await waitFor(() => {
-      expect(api.specsForWorkspace).toHaveBeenCalledWith(null);
+      expect(api.specsForWorkspace).toHaveBeenCalledWith('ws-1');
+      expect(api.specsForWorkspace).toHaveBeenCalledWith('ws-2');
+    }, { timeout: 3000 });
+    expect(api.specsForWorkspace).not.toHaveBeenCalledWith(null);
+    await waitFor(() => {
+      const table = container.querySelector('[data-testid="specs-table"]');
+      expect(table).toBeTruthy();
+      expect(table.textContent).toContain('specs/payments.md');
+      expect(table.textContent).toContain('specs/billing.md');
     }, { timeout: 3000 });
   });
 
@@ -148,6 +170,48 @@ describe('CrossWorkspaceHome', () => {
     }, { timeout: 3000 });
   });
 
+  // ── Regression: real server envelope for myNotifications ────────────
+  // users.rs get_my_notifications returns { notifications: [...], limit,
+  // offset }, NOT a bare array. Every other mock in this file resolves a
+  // bare array, so nothing pinned the real envelope: reverting the component
+  // to read `data?.items` (the pre-fix bug that always rendered an empty
+  // Decisions section) passed all of them. These tests fail under that
+  // revert.
+  it('renders decision items from the real {notifications:[...]} server envelope', async () => {
+    api.myNotifications.mockResolvedValue({
+      notifications: [
+        { id: 'n1', notification_type: 'gate_failure', message: 'Gate failed in payment-api', workspace_name: 'Payments' },
+        { id: 'n2', notification_type: 'spec_approval', message: 'Spec approval needed', workspace_name: 'Billing' },
+      ],
+      limit: 50,
+      offset: 0,
+    });
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      const section = container.querySelector('[data-testid="section-decisions"]');
+      expect(section?.textContent).toContain('Gate failed in payment-api');
+      expect(section?.textContent).toContain('Spec approval needed');
+    }, { timeout: 3000 });
+    const items = container.querySelectorAll('[data-testid="cwh-decision-item"]');
+    expect(items.length).toBe(2);
+  });
+
+  it('does not show the decisions empty state for a non-empty notifications envelope', async () => {
+    api.myNotifications.mockResolvedValue({
+      notifications: [
+        { id: 'n1', notification_type: 'spec_approval', message: 'Spec approval needed' },
+      ],
+      limit: 50,
+      offset: 0,
+    });
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      expect(container.querySelectorAll('[data-testid="cwh-decision-item"]').length).toBe(1);
+    }, { timeout: 3000 });
+    const section = container.querySelector('[data-testid="section-decisions"]');
+    expect(section?.textContent).not.toContain('No decisions needed');
+  });
+
   it('shows workspace badge on each decision', async () => {
     api.workspaces.mockResolvedValue([
       { id: 'ws-pay', name: 'Payments', slug: 'payments' },
@@ -204,6 +268,9 @@ describe('CrossWorkspaceHome', () => {
   });
 
   it('shows specs in a table', async () => {
+    api.workspaces.mockResolvedValue([
+      { id: 'ws-1', name: 'Payments', slug: 'payments' },
+    ]);
     api.specsForWorkspace.mockResolvedValue([
       { path: 'specs/auth.md', status: 'approved', workspace_name: 'Payments', repo_name: 'payment-api' },
       { path: 'specs/retry.md', status: 'draft', workspace_name: 'Billing', repo_name: 'billing-api' },
@@ -272,6 +339,9 @@ describe('CrossWorkspaceHome', () => {
   });
 
   it('handles api error for specs gracefully', async () => {
+    api.workspaces.mockResolvedValue([
+      { id: 'ws-1', name: 'Payments', slug: 'payments' },
+    ]);
     api.specsForWorkspace.mockRejectedValue(new Error('Specs error'));
     const { container } = render(CrossWorkspaceHome);
     await waitFor(() => {

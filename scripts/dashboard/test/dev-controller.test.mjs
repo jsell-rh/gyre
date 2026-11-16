@@ -60,7 +60,7 @@ test("cockpit reads pipeline stages and updates the durable sandbox budget", asy
   assert.equal(state.present, true);
   assert.equal(state.online, false);
   assert.deepEqual(state.tasks, []);
-  assert.deepEqual(Object.keys(state.stages), ["triage", "implement", "review", "verify", "publish", "observe", "cleanup"]);
+  assert.deepEqual(Object.keys(state.stages), ["triage", "assess", "implement", "review", "verify", "publish", "observe", "cleanup"]);
 
   await setSlots(paths, 7);
   assert.equal((await collectController(paths)).slots, 7);

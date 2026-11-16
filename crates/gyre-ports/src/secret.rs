@@ -12,6 +12,7 @@ use gyre_common::{Id, Secret, SecretScope};
 /// Tenant isolation: every method filters by `tenant_id` in addition to any
 /// scope filter, so a secret stored for one tenant is invisible to another.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait SecretRepository: Send + Sync {
     /// Create a secret with the given plaintext `value`.
     ///
@@ -23,6 +24,13 @@ pub trait SecretRepository: Send + Sync {
     ///
     /// Returns `None` if the secret does not exist in `tenant_id`.
     async fn get_value(&self, id: &Id, tenant_id: &str) -> Result<Option<Vec<u8>>>;
+
+    /// Look up a secret's metadata (never its value) by id.
+    ///
+    /// Returns `None` if the secret does not exist in `tenant_id`. Used by
+    /// the Admin API to resolve `DELETE /secrets/{id}` and
+    /// `POST /secrets/{id}/rotate` targets before acting on them.
+    async fn find_by_id(&self, id: &Id, tenant_id: &str) -> Result<Option<Secret>>;
 
     /// List secret metadata (never values) attached to a scope.
     async fn list_by_scope(

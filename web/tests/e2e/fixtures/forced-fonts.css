@@ -1,0 +1,161 @@
+/**
+ * Deterministic webfont environment for Explorer visual regression tests.
+ *
+ * Screenshot baselines are only portable across environments (agent sandboxes,
+ * GitHub CI) when every glyph is rasterized from the same font binary. The app
+ * mixes three font sources:
+ *
+ *   1. Google Fonts webfonts (Red Hat families) — only load when the network
+ *      host is reachable, so sandbox and CI render different faces.
+ *   2. CSS variables --font-display/--font-body/--font-mono — resolve through
+ *      the stacks above once the webfonts fail to load.
+ *   3. Literal stacks ('system-ui, -apple-system, sans-serif' and
+ *      "'SF Mono', Menlo, monospace") used by the Explorer toolbar/legend/
+ *      tooltips and by canvas ctx.font strings — these ALWAYS resolve through
+ *      fontconfig, which differs per machine (Ubuntu on CI, arbitrary defaults
+ *      in sandboxes).
+ *
+ * This stylesheet + the canvas ctx.font patch installed by
+ * setupGraphIntercept() (see explorer-visual.spec.js) force every text source
+ * onto the @font-face declarations below, which are served from the committed
+ * woff2 fixtures in tests/e2e/fixtures/fonts/ via route interception. With
+ * identical font binaries and one Chromium rasterizer, baselines regenerate
+ * once and compare equal everywhere.
+ *
+ * Sources: @fontsource/red-hat-{text,mono,display} 5.3.0, latin subsets,
+ * normal style, weights used by the Explorer surface.
+ *
+ * NOTE: the arrow/check glyphs (U+2190, U+2713, U+2717) used in canvas spec
+ * badges are outside the latin subsets and still resolve through the system
+ * fallback; they occupy well under the 2% maxDiffPixelRatio budget and matched
+ * across environments in every baseline generation to date.
+ */
+
+/* ── Faces (urls resolve against the route-served /test-assets/fonts/*) ── */
+
+@font-face {
+  font-family: 'Red Hat Text';
+  src: url('fonts/red-hat-text-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Text';
+  src: url('fonts/red-hat-text-latin-500-normal.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Text';
+  src: url('fonts/red-hat-text-latin-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Text';
+  src: url('fonts/red-hat-text-latin-700-normal.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Mono';
+  src: url('fonts/red-hat-mono-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Mono';
+  src: url('fonts/red-hat-mono-latin-500-normal.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Mono';
+  src: url('fonts/red-hat-mono-latin-700-normal.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Display';
+  src: url('fonts/red-hat-display-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Display';
+  src: url('fonts/red-hat-display-latin-500-normal.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Display';
+  src: url('fonts/red-hat-display-latin-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Red Hat Display';
+  src: url('fonts/red-hat-display-latin-700-normal.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+/* ── CSS variable overrides (design tokens resolve here) ── */
+
+:root {
+  --font-display: 'Red Hat Display', sans-serif !important;
+  --font-body: 'Red Hat Text', sans-serif !important;
+  --font-mono: 'Red Hat Mono', monospace !important;
+}
+
+/* ── Literal-stack overrides ──
+ * Selectors below carry hardcoded 'system-ui, -apple-system, sans-serif' or
+ * "'SF Mono', Menlo, monospace" stacks in ExplorerCanvas.svelte. !important
+ * beats the (scoped) component rules so fontconfig never participates. Keep
+ * in sync with the literals in ExplorerCanvas.svelte <style>.
+ */
+
+.anomaly-item,
+.anomaly-title,
+.ctx-item,
+.ctx-more-toggle,
+.preview-mode-label,
+.search-result-item,
+.tb-btn {
+  font-family: 'Red Hat Text', sans-serif !important;
+}
+
+.anomaly-node-name,
+.canvas-search-count,
+.canvas-search-input,
+.ctx-node-name,
+.edge-detail-node,
+.edge-detail-path,
+.ghost-chip,
+.preview-mode-count,
+.sr-file,
+.sr-name,
+.timeline-count,
+.timeline-delta-panel,
+.timeline-label,
+.timeline-marker-label,
+.tooltip-eval span,
+.tooltip-file,
+.tooltip-name,
+.tooltip-qname,
+.tooltip-span-stats span,
+.treemap-stats,
+.zoom-ind {
+  font-family: 'Red Hat Mono', monospace !important;
+}

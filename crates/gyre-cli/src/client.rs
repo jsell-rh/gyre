@@ -157,10 +157,12 @@ pub struct RepoResponse {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-#[allow(dead_code)]
 pub struct PersonaResponse {
     pub id: String,
     pub slug: String,
+    /// "Pending" | "Approved" | "Deprecated" — the resume path reads it:
+    /// a Pending persona from an interrupted run must be approved, not
+    /// skipped (spawn 409s on it).
     pub approval_status: String,
 }
 
@@ -170,10 +172,109 @@ pub struct CreateUserResponse {
     pub api_key: CreatedApiKey,
 }
 
+/// Error from [`GyreClient::create_user`]: a 409 duplicate (the user
+/// already exists — bootstrap's resume path) or any other failure. The
+/// split exists so the resume logic cannot mistake a 403 (non-admin
+/// token), a 400 (validation), or a network error for "already exists"
+/// and silently adopt a saved credential.
+#[derive(Debug)]
+pub enum CreateUserError {
+    /// HTTP 409: duplicate external_id or username. Carries the response
+    /// body (names the conflicting user).
+    Duplicate(String),
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for CreateUserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CreateUserError::Duplicate(body) => write!(f, "user already exists: {body}"),
+            CreateUserError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for CreateUserError {}
+
+/// GET /api/v1/users/me — the principal the current token authenticates
+/// as. `username` and `tenant_id` drive the bootstrap resume verification.
+#[derive(Deserialize, Debug, Clone)]
+pub struct CurrentUser {
+    pub username: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+}
+
+/// GET /api/v1/users/me — the caller's full profile
+/// (user-management.md §User Entity). Consumed by `gyre whoami` and
+/// `gyre profile set`; every field beyond id/username is defaulted so a
+/// server response missing optional fields still parses.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MyProfile {
+    pub id: String,
+    pub username: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub timezone: String,
+    #[serde(default)]
+    pub locale: String,
+    #[serde(default)]
+    pub global_role: String,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub preferences: serde_json::Value,
+    #[serde(default)]
+    pub last_login_at: Option<u64>,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+/// GET /api/v1/users/:username — tenant-public profile
+/// (user-management.md §API > User Management). The CLI resolves `@handle`
+/// arguments to the `id` the membership and team APIs key on.
+#[derive(Deserialize, Debug, Clone)]
+pub struct PublicUserProfile {
+    pub id: String,
+    pub username: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub timezone: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub created_at: u64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub memberships: Vec<serde_json::Value>,
+}
+
+/// One row of GET /api/v1/repos/:id/gates — the name is all the bootstrap
+/// resume path needs (skip gates already configured for the repo).
+#[derive(Deserialize, Debug, Clone)]
+pub struct GateSummary {
+    pub name: String,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct CreateUserUser {
     pub id: String,
     pub username: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -188,6 +289,17 @@ pub struct CreatedApiKey {
 pub struct SpawnOrchestratorResponse {
     /// Flattened agent summary (id, name, orchestrator_type, ...).
     pub agent: SpawnOrchestratorAgent,
+    /// Truthful process-launch outcome (task-099 F3): "running" or
+    /// "launch_failed". A persisted agent row is not a running orchestrator.
+    #[serde(default = "default_launch_status")]
+    pub launch_status: String,
+    /// Failure reason when launch_status == "launch_failed".
+    #[serde(default)]
+    pub launch_detail: Option<String>,
+}
+
+fn default_launch_status() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -204,6 +316,166 @@ pub struct SpawnOrchestratorAgent {
     #[serde(default)]
     #[allow(dead_code)]
     pub restart_on_failure: Option<bool>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub persona_id: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SyncSpecsResponse {
+    /// Number of ledger entries present after the sync.
+    pub registered: usize,
+    /// Default-branch HEAD the sync ran against.
+    pub head_sha: String,
+}
+
+// ── Secret admin types (mirrors /api/v1/secrets, platform-model.md §7) ───────
+
+/// Secret metadata as returned by the Admin API. The server never includes
+/// the plaintext value in any response, so neither does this type.
+#[derive(Deserialize, Debug, Clone)]
+pub struct SecretResponse {
+    pub id: String,
+    pub name: String,
+    pub scope: String,
+    pub scope_id: String,
+    pub secret_type: String,
+    #[allow(dead_code)]
+    pub created_by: String,
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+    pub last_rotated_at: Option<u64>,
+    #[allow(dead_code)]
+    pub tenant_id: String,
+}
+
+/// POST /api/v1/secrets request body (value included here — it is write-only
+/// and never appears in a response).
+#[derive(Serialize, Debug, Clone)]
+pub struct CreateSecretRequest {
+    pub name: String,
+    pub scope: String,
+    pub scope_id: Option<String>,
+    pub secret_type: String,
+    pub value: String,
+    pub expires_at: Option<u64>,
+}
+
+// ── ABAC policy types (mirrors /api/v1/policies, abac-policy-engine.md) ──────
+
+/// One condition of a policy: `{attribute, operator, value}`. Mirrors the
+/// server's ConditionRequest (POST /api/v1/policies). `value` is the raw
+/// JSON side of the comparison (string, number, bool, list, or null).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PolicyConditionRequest {
+    pub attribute: String,
+    pub operator: String,
+    pub value: serde_json::Value,
+}
+
+/// POST /api/v1/policies request body. Mirrors the server's
+/// CreatePolicyRequest field-for-field (Admin only server-side; reserved
+/// `trust:`/`builtin:` name prefixes are rejected there).
+#[derive(Serialize, Debug, Clone)]
+pub struct CreatePolicyRequest {
+    pub name: String,
+    pub description: Option<String>,
+    /// "tenant" | "workspace" | "repo"
+    pub scope: String,
+    /// Id of the scoped entity; None = applies to ALL entities at the scope.
+    pub scope_id: Option<String>,
+    pub priority: u32,
+    /// "allow" | "deny"
+    pub effect: String,
+    pub conditions: Vec<PolicyConditionRequest>,
+    pub actions: Vec<String>,
+    pub resource_types: Vec<String>,
+    pub enabled: Option<bool>,
+}
+
+/// A policy as returned by GET/POST /api/v1/policies. Mirrors
+/// `gyre_domain::Policy` as serialized by the server (scope/effect are
+/// snake_case strings; conditions and audit fields are present in the
+/// payload but not needed for CLI display, so they are not modeled).
+#[derive(Deserialize, Debug, Clone)]
+pub struct PolicyResponse {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub scope: String,
+    #[serde(default)]
+    pub scope_id: Option<String>,
+    pub priority: u32,
+    pub effect: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub built_in: bool,
+}
+
+/// POST /api/v1/policies/evaluate request body. Mirrors the server's
+/// EvaluateRequest; the CLI fills the subject type/id and resource
+/// type/id from `--subject user:jsell` / `--resource spec:identity`.
+#[derive(Serialize, Debug)]
+pub struct EvaluatePolicyRequest {
+    pub subject: EvaluateSubject,
+    pub action: String,
+    pub resource: EvaluateResource,
+}
+
+#[derive(Serialize, Debug)]
+pub struct EvaluateSubject {
+    pub r#type: String,
+    pub id: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct EvaluateResource {
+    pub r#type: String,
+    pub id: Option<String>,
+}
+
+/// POST /api/v1/policies/evaluate response.
+#[derive(Deserialize, Debug)]
+pub struct EvaluatePolicyResponse {
+    /// "allow" | "deny"
+    pub decision: String,
+    pub matched_policy: Option<String>,
+    pub evaluated_policies: u32,
+    pub evaluation_ms: f64,
+}
+
+/// One audit record from GET /api/v1/policies/decisions. Mirrors
+/// `gyre_domain::PolicyDecision` as serialized by the server.
+#[derive(Deserialize, Debug, Clone)]
+pub struct PolicyDecisionResponse {
+    #[allow(dead_code)]
+    pub request_id: String,
+    pub subject_id: String,
+    pub subject_type: String,
+    pub action: String,
+    pub resource_type: String,
+    #[serde(default)]
+    pub resource_id: String,
+    /// "allow" | "deny"
+    pub decision: String,
+    pub matched_policy: Option<String>,
+    #[allow(dead_code)]
+    pub evaluated_policies: u32,
+    #[allow(dead_code)]
+    pub evaluation_ms: f64,
+    pub evaluated_at: u64,
+}
+
+/// One row of GET /api/v1/policies/effective: the decision for one sampled
+/// action on the queried resource type.
+#[derive(Deserialize, Debug, Clone)]
+pub struct EffectivePermissionResponse {
+    pub action: String,
+    pub resource_type: String,
+    /// "allow" | "deny"
+    pub decision: String,
+    pub matched_policy: Option<String>,
 }
 
 // ── Search response types (mirrors GET /api/v1/search) ───────────────────────
@@ -252,6 +524,12 @@ impl GyreClient {
             token,
             client: Client::new(),
         }
+    }
+
+    /// The bearer token this client authenticates with (needed when the
+    /// bootstrap flow shells out to `git push` against the server).
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     fn auth_header(&self) -> String {
@@ -611,11 +889,222 @@ impl GyreClient {
         Ok(())
     }
 
+    /// POST /api/v1/secrets — create or update a secret (Admin role
+    /// required server-side). The plaintext `value` is sent in the request
+    /// and never appears in the response.
+    pub async fn create_secret(&self, req: &CreateSecretRequest) -> Result<SecretResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/secrets", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(req)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create secret failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing create secret response")
+    }
+
+    /// GET /api/v1/secrets?scope=...&scope_id=... — list secret metadata
+    /// for a scope. The server never returns values.
+    pub async fn list_secrets(
+        &self,
+        scope: &str,
+        scope_id: Option<&str>,
+    ) -> Result<Vec<SecretResponse>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/secrets", self.base_url))
+            .header("Authorization", self.auth_header())
+            .query(&[("scope", scope)]);
+        if let Some(sid) = scope_id {
+            req = req.query(&[("scope_id", sid)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list secrets failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing secrets list response")
+    }
+
+    /// DELETE /api/v1/secrets/:id — delete a secret (204 on success).
+    pub async fn delete_secret(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!("{}/api/v1/secrets/{id}", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("delete secret failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+
+    /// POST /api/v1/secrets/:id/rotate — replace a secret's value and
+    /// update `last_rotated_at`.
+    pub async fn rotate_secret(
+        &self,
+        id: &str,
+        new_value: &str,
+        expires_at: Option<u64>,
+    ) -> Result<SecretResponse> {
+        let body = serde_json::json!({ "new_value": new_value, "expires_at": expires_at });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/secrets/{id}/rotate", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("rotate secret failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing rotate secret response")
+    }
+
+    /// GET /api/v1/policies[?scope=&scope_id=] — list ABAC policies.
+    /// `scope` filters by level (tenant/workspace/repo); `scope_id`
+    /// restricts to one entity at that level.
+    pub async fn list_policies(
+        &self,
+        scope: Option<&str>,
+        scope_id: Option<&str>,
+    ) -> Result<Vec<PolicyResponse>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/policies", self.base_url))
+            .header("Authorization", self.auth_header());
+        if let Some(s) = scope {
+            req = req.query(&[("scope", s)]);
+        }
+        if let Some(sid) = scope_id {
+            req = req.query(&[("scope_id", sid)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list policies failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing policies list response")
+    }
+
+    /// POST /api/v1/policies — create a policy (Admin only server-side;
+    /// reserved `trust:`/`builtin:` name prefixes rejected there with 400).
+    pub async fn create_policy(&self, req: &CreatePolicyRequest) -> Result<PolicyResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/policies", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(req)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create policy failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing create policy response")
+    }
+
+    /// POST /api/v1/policies/evaluate — dry-run the live policy set for a
+    /// hypothetical subject/action/resource.
+    pub async fn evaluate_policy(
+        &self,
+        req: &EvaluatePolicyRequest,
+    ) -> Result<EvaluatePolicyResponse> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/policies/evaluate", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(req)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("evaluate policy failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing evaluate policy response")
+    }
+
+    /// GET /api/v1/policies/decisions — the decision audit log, newest
+    /// first. Filters (subject_id, resource_type, limit) are applied
+    /// server-side; outcome/age filtering is the caller's.
+    pub async fn list_policy_decisions(
+        &self,
+        subject_id: Option<&str>,
+        resource_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PolicyDecisionResponse>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/policies/decisions", self.base_url))
+            .header("Authorization", self.auth_header())
+            .query(&[("limit", limit)]);
+        if let Some(sid) = subject_id {
+            req = req.query(&[("subject_id", sid)]);
+        }
+        if let Some(rt) = resource_type {
+            req = req.query(&[("resource_type", rt)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list policy decisions failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing policy decisions response")
+    }
+
+    /// GET /api/v1/policies/effective?subject=&resource_type= — the
+    /// effective-permissions answer for a real subject (the server loads
+    /// the subject's actual attributes from the stores).
+    pub async fn effective_permissions(
+        &self,
+        subject: &str,
+        resource_type: Option<&str>,
+    ) -> Result<Vec<EffectivePermissionResponse>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/policies/effective", self.base_url))
+            .header("Authorization", self.auth_header())
+            .query(&[("subject", subject)]);
+        if let Some(rt) = resource_type {
+            req = req.query(&[("resource_type", rt)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("effective permissions failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing effective permissions response")
+    }
+
     /// GET /api/v1/repos/:id/graph/concept/:name or
     /// GET /api/v1/workspaces/:id/graph/concept/:name
     ///
-    /// Uses the dedicated concept search endpoints which filter by name pattern
-    /// server-side (the generic /graph endpoints ignore the concept query param).
+    /// Concept view projection (realized-model.md §4): the concept is resolved
+    /// from the repo's specs/manifest.yaml and the knowledge graph is projected
+    /// through its include patterns. A concept not defined in the manifest
+    /// 404s. (The `?concept=` substring filter on GET /graph is a distinct
+    /// surface.)
     pub async fn get_graph_concept(
         &self,
         concept: &str,
@@ -791,6 +1280,32 @@ impl GyreClient {
             anyhow::bail!("get MR trace failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing trace response")
+    }
+
+    /// POST /api/v1/attestations/verify — run the merge attestation bundle
+    /// verification protocol (agent-gates.md §Part 3 Verification) over a
+    /// caller-supplied bundle. Returns the per-component result
+    /// (bundle signature, per-gate signatures, spec approval signature,
+    /// consistency, findings); a bundle that fails verification is a
+    /// valid answer here, not an error.
+    pub async fn verify_attestation(
+        &self,
+        bundle: &serde_json::Value,
+    ) -> Result<gyre_domain::attestation_verification::VerificationResult> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/attestations/verify", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(bundle)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("verify attestation failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing verification result")
     }
 
     /// POST /api/v1/repos/:repo_id/specs/assist (SSE stream → collected `{diff, explanation}` responses)
@@ -1264,12 +1779,48 @@ impl GyreClient {
         Ok(repos.into_iter().find(|r| r.name == name))
     }
 
-    /// GET /api/v1/personas - find an existing persona by slug (resume path:
-    /// bootstrap re-runs skip re-registering built-in personas).
-    pub async fn find_persona_by_slug(&self, slug: &str) -> Result<Option<PersonaResponse>> {
+    /// POST /api/v1/repos/:id/sync-specs - re-run the spec-ledger sync
+    /// against the repo's default-branch HEAD (bootstrap step 6 registers
+    /// the specs in the platform registry at first-run time).
+    pub async fn sync_specs(&self, repo_id: &str) -> Result<SyncSpecsResponse> {
         let resp = self
             .client
-            .get(format!("{}/api/v1/personas", self.base_url))
+            .post(format!(
+                "{}/api/v1/repos/{repo_id}/sync-specs",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("spec sync failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing spec sync response")
+    }
+
+    /// GET /api/v1/personas?scope=tenant&scope_id=<tenant> - find an existing
+    /// persona by slug within the bootstrap tenant (resume path: bootstrap
+    /// re-runs skip re-registering built-in personas).
+    ///
+    /// The scope filter is mandatory, not cosmetic: the unscoped endpoint
+    /// lists personas across ALL tenants, so an unscoped lookup makes the
+    /// second tenant's bootstrap skip persona registration ("already
+    /// registered") and then fail at spawn with a persona 404 (round-3
+    /// finding 3 — cross-tenant resume defect).
+    pub async fn find_persona_by_slug_in_tenant(
+        &self,
+        slug: &str,
+        tenant_id: &str,
+    ) -> Result<Option<PersonaResponse>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/personas?scope=tenant&scope_id={tenant_id}",
+                self.base_url
+            ))
             .header("Authorization", self.auth_header())
             .send()
             .await
@@ -1284,10 +1835,20 @@ impl GyreClient {
         Ok(personas.into_iter().find(|p| p.slug == slug))
     }
 
-    /// POST /api/v1/users - create the admin user; response contains the
-    /// API key exactly once.
-    pub async fn create_user(&self, username: &str) -> Result<CreateUserResponse> {
-        let body = serde_json::json!({ "username": username });
+    /// POST /api/v1/users - create the admin user bound to a tenant; the
+    /// response contains the API key exactly once. `tenant_id` is REQUIRED
+    /// by the server (task-099 F1: the user is scoped at creation).
+    ///
+    /// A 409 is reported as [`CreateUserError::Duplicate`] (the user already
+    /// exists — bootstrap's resume path); every other failure is
+    /// [`CreateUserError::Other`] so the caller cannot mistake a 403 or a
+    /// validation error for "already exists".
+    pub async fn create_user(
+        &self,
+        username: &str,
+        tenant_id: &str,
+    ) -> Result<CreateUserResponse, CreateUserError> {
+        let body = serde_json::json!({ "username": username, "tenant_id": tenant_id });
         let resp = self
             .client
             .post(format!("{}/api/v1/users", self.base_url))
@@ -1295,13 +1856,65 @@ impl GyreClient {
             .json(&body)
             .send()
             .await
+            .context("connecting to Gyre server")
+            .map_err(CreateUserError::Other)?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .context("reading create user response")
+            .map_err(CreateUserError::Other)?;
+        if status == reqwest::StatusCode::CONFLICT {
+            return Err(CreateUserError::Duplicate(text));
+        }
+        if !status.is_success() {
+            return Err(CreateUserError::Other(anyhow::anyhow!(
+                "create user failed (HTTP {status}): {text}"
+            )));
+        }
+        serde_json::from_str(&text)
+            .context("parsing create user response")
+            .map_err(CreateUserError::Other)
+    }
+
+    /// GET /api/v1/users/me - resolve the caller the token authenticates
+    /// as. Used by the bootstrap resume path to VERIFY a saved credential
+    /// before adopting it: a matching server URL in ~/.gyre/config says
+    /// nothing about which principal the token belongs to (the config is
+    /// also written by `gyre register` with agent tokens).
+    pub async fn me(&self) -> Result<CurrentUser> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/users/me", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
             .context("connecting to Gyre server")?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            anyhow::bail!("create user failed (HTTP {status}): {text}");
+            anyhow::bail!("whoami failed (HTTP {status}): {text}");
         }
-        serde_json::from_str(&text).context("parsing create user response")
+        serde_json::from_str(&text).context("parsing whoami response")
+    }
+
+    /// GET /api/v1/repos/:id/gates - list the repo's configured quality
+    /// gates (bootstrap resume path: step 7 skips names already configured
+    /// so a re-run cannot duplicate the gate set).
+    pub async fn list_gates(&self, repo_id: &str) -> Result<Vec<GateSummary>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/repos/{repo_id}/gates", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list gates failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing gate list")
     }
 
     /// POST /api/v1/workspaces - create a workspace under a tenant.
@@ -1458,7 +2071,22 @@ impl GyreClient {
         let status = resp.status();
         let text = resp.text().await?;
         if status == reqwest::StatusCode::CONFLICT {
+            // Two distinct 409s: a live orchestrator already holds the
+            // repo slot (resume path — keep it), OR the repo-orchestrator
+            // persona resolves but is not Approved. The latter is NOT a
+            // resume success: no orchestrator exists, and pretending one
+            // is active reports fake completion (the server's message
+            // names the persona and its status; the caller surfaces it).
+            if text.contains("approve it before spawning") {
+                return Ok(SpawnRepoOrchestratorOutcome::PersonaPending(text));
+            }
             return Ok(SpawnRepoOrchestratorOutcome::AlreadyLive);
+        }
+        if status == reqwest::StatusCode::BAD_REQUEST && text.contains("already exists") {
+            // Name collision with a LIVE agent outside this repo's scope
+            // (stopped predecessors are released server-side). The caller
+            // retries with a distinct name; not a resume blocker.
+            return Ok(SpawnRepoOrchestratorOutcome::NameTaken);
         }
         if !status.is_success() {
             anyhow::bail!("spawn repo orchestrator failed (HTTP {status}): {text}");
@@ -1546,13 +2174,443 @@ impl GyreClient {
         }
         serde_json::from_str(&text).context("parsing revert response")
     }
+
+    // ── User management (user-management.md §CLI) ─────────────────────────
+
+    /// Issue an authenticated API request and return the response body
+    /// text, mapping any non-2xx status to an error naming the operation.
+    /// Shared by the user-management client methods so they all surface
+    /// failures the same way ("<op> failed (HTTP <status>): <body>").
+    async fn api_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        op: &str,
+    ) -> Result<String> {
+        let mut req = self
+            .client
+            .request(method, format!("{}{path}", self.base_url))
+            .header("Authorization", self.auth_header());
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("connecting to Gyre server ({op})"))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .with_context(|| format!("reading {op} response"))?;
+        if !status.is_success() {
+            anyhow::bail!("{op} failed (HTTP {status}): {text}");
+        }
+        Ok(text)
+    }
+
+    /// GET /api/v1/users/me — the caller's full profile
+    /// (`gyre whoami`, `gyre profile set`).
+    pub async fn get_my_profile(&self) -> Result<MyProfile> {
+        let text = self
+            .api_request(
+                reqwest::Method::GET,
+                "/api/v1/users/me",
+                None,
+                "get profile",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing profile response")
+    }
+
+    /// PUT /api/v1/users/me — partial update of the caller's editable
+    /// profile fields. `body` carries only the fields being set; omitted
+    /// fields keep their stored values (server-side partial-update
+    /// semantics, user-management.md §User Preferences).
+    pub async fn update_my_profile(&self, body: &serde_json::Value) -> Result<MyProfile> {
+        let text = self
+            .api_request(
+                reqwest::Method::PUT,
+                "/api/v1/users/me",
+                Some(body),
+                "update profile",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing profile response")
+    }
+
+    /// GET /api/v1/users/:username — tenant-public profile. Used to
+    /// resolve `@handle` arguments (workspace invites, team leads, member
+    /// role changes) to the user id the membership APIs key on.
+    pub async fn get_public_profile(&self, username: &str) -> Result<PublicUserProfile> {
+        let text = self
+            .api_request(
+                reqwest::Method::GET,
+                &format!("/api/v1/users/{username}"),
+                None,
+                "lookup user",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing user lookup response")
+    }
+
+    /// GET /api/v1/users/me/sessions — the caller's active sessions
+    /// (user-management.md §Session Management; server side owned by
+    /// task-111).
+    pub async fn list_sessions(&self) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::GET,
+                "/api/v1/users/me/sessions",
+                None,
+                "list sessions",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing sessions response")
+    }
+
+    /// DELETE /api/v1/users/me/sessions/:id — revoke one session.
+    pub async fn revoke_session(&self, id: &str) -> Result<()> {
+        self.api_request(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/users/me/sessions/{id}"),
+            None,
+            "revoke session",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// POST /api/v1/users/me/sessions/revoke-all — revoke every session
+    /// ("sign out everywhere").
+    pub async fn revoke_all_sessions(&self) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::POST,
+                "/api/v1/users/me/sessions/revoke-all",
+                Some(&serde_json::json!({})),
+                "revoke all sessions",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing revoke-all response")
+    }
+
+    /// POST /api/v1/tenant/invite — invite a user to the caller's tenant
+    /// by email, optionally pre-assigning a workspace + role
+    /// (user-management.md §Tenant-Level User Onboarding; server side
+    /// owned by task-110).
+    pub async fn tenant_invite(&self, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::POST,
+                "/api/v1/tenant/invite",
+                Some(body),
+                "tenant invite",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing tenant invite response")
+    }
+
+    /// POST /api/v1/tenant/invite/bulk — bulk invite from parsed CSV rows
+    /// (user-management.md §CLI: `gyre tenant invite --bulk users.csv`).
+    pub async fn tenant_invite_bulk(&self, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::POST,
+                "/api/v1/tenant/invite/bulk",
+                Some(body),
+                "bulk tenant invite",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing bulk invite response")
+    }
+
+    /// GET /api/v1/tenant/invitations — list the tenant's invitations.
+    pub async fn list_tenant_invitations(&self) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::GET,
+                "/api/v1/tenant/invitations",
+                None,
+                "list tenant invitations",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing tenant invitations response")
+    }
+
+    /// DELETE /api/v1/tenant/invitations/:id — revoke a pending tenant
+    /// invitation.
+    pub async fn revoke_tenant_invitation(&self, id: &str) -> Result<()> {
+        self.api_request(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/tenant/invitations/{id}"),
+            None,
+            "revoke tenant invitation",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// GET /api/v1/workspaces/:id/members — list workspace members.
+    pub async fn list_workspace_members(&self, workspace_id: &str) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::GET,
+                &format!("/api/v1/workspaces/{workspace_id}/members"),
+                None,
+                "list members",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing members response")
+    }
+
+    /// POST /api/v1/workspaces/:id/invite — invite an existing tenant
+    /// user (by id) to the workspace.
+    pub async fn invite_workspace_member(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        role: &str,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({ "user_id": user_id, "role": role });
+        let text = self
+            .api_request(
+                reqwest::Method::POST,
+                &format!("/api/v1/workspaces/{workspace_id}/invite"),
+                Some(&body),
+                "invite member",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing invite response")
+    }
+
+    /// PUT /api/v1/workspaces/:id/members/:user_id/role — change a
+    /// member's role (including ownership transfer).
+    pub async fn set_workspace_member_role(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        role: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let body = serde_json::json!({ "role": role, "reason": reason });
+        self.api_request(
+            reqwest::Method::PUT,
+            &format!("/api/v1/workspaces/{workspace_id}/members/{user_id}/role"),
+            Some(&body),
+            "set member role",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// DELETE /api/v1/workspaces/:id/members/:user_id — remove a member.
+    pub async fn remove_workspace_member(&self, workspace_id: &str, user_id: &str) -> Result<()> {
+        self.api_request(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/workspaces/{workspace_id}/members/{user_id}"),
+            None,
+            "remove member",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// GET /api/v1/workspaces/:id/invitations — list the workspace's
+    /// pending invitations.
+    pub async fn list_workspace_invitations(
+        &self,
+        workspace_id: &str,
+    ) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::GET,
+                &format!("/api/v1/workspaces/{workspace_id}/invitations"),
+                None,
+                "list invitations",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing invitations response")
+    }
+
+    /// DELETE /api/v1/workspaces/:id/invitations/:invitation_id — revoke
+    /// a pending workspace invitation.
+    pub async fn revoke_workspace_invitation(
+        &self,
+        workspace_id: &str,
+        invitation_id: &str,
+    ) -> Result<()> {
+        self.api_request(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/workspaces/{workspace_id}/invitations/{invitation_id}"),
+            None,
+            "revoke invitation",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// POST /api/v1/workspaces/:id/teams — create a team.
+    pub async fn create_workspace_team(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        lead_user_id: &str,
+        description: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "name": name,
+            "lead": lead_user_id,
+            "description": description,
+        });
+        let text = self
+            .api_request(
+                reqwest::Method::POST,
+                &format!("/api/v1/workspaces/{workspace_id}/teams"),
+                Some(&body),
+                "create team",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing team response")
+    }
+
+    /// GET /api/v1/workspaces/:id/teams — list the workspace's teams.
+    pub async fn list_workspace_teams(&self, workspace_id: &str) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::GET,
+                &format!("/api/v1/workspaces/{workspace_id}/teams"),
+                None,
+                "list teams",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing teams response")
+    }
+
+    /// POST /api/v1/workspaces/:id/teams/:team_id/members — add a member
+    /// to a team.
+    pub async fn add_team_member(
+        &self,
+        workspace_id: &str,
+        team_id: &str,
+        user_id: &str,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({ "user_id": user_id });
+        let text = self
+            .api_request(
+                reqwest::Method::POST,
+                &format!("/api/v1/workspaces/{workspace_id}/teams/{team_id}/members"),
+                Some(&body),
+                "add team member",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing team membership response")
+    }
+
+    /// DELETE /api/v1/workspaces/:id/teams/:team_id/members/:user_id —
+    /// remove a member from a team.
+    pub async fn remove_team_member(
+        &self,
+        workspace_id: &str,
+        team_id: &str,
+        user_id: &str,
+    ) -> Result<()> {
+        self.api_request(
+            reqwest::Method::DELETE,
+            &format!("/api/v1/workspaces/{workspace_id}/teams/{team_id}/members/{user_id}"),
+            None,
+            "remove team member",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// GET /api/v1/notifications — the caller's notifications with the
+    /// spec-path filter surface (user-management.md §API > Notifications):
+    /// `?workspace_id=`, `?priority=` (four-level name), `?type=`, `?limit=`.
+    pub async fn list_notifications_filtered(
+        &self,
+        workspace_id: Option<&str>,
+        priority: Option<&str>,
+        notification_type: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<serde_json::Value> {
+        let mut path = "/api/v1/notifications".to_string();
+        let mut sep = '?';
+        let push = |key: &str, val: &str, path: &mut String, sep: &mut char| {
+            path.push(*sep);
+            path.push_str(key);
+            path.push('=');
+            path.push_str(val);
+            *sep = '&';
+        };
+        if let Some(ws) = workspace_id {
+            push("workspace_id", ws, &mut path, &mut sep);
+        }
+        if let Some(p) = priority {
+            push("priority", p, &mut path, &mut sep);
+        }
+        if let Some(t) = notification_type {
+            push("type", t, &mut path, &mut sep);
+        }
+        if let Some(l) = limit {
+            push("limit", &l.to_string(), &mut path, &mut sep);
+        }
+        let text = self
+            .api_request(reqwest::Method::GET, &path, None, "list notifications")
+            .await?;
+        serde_json::from_str(&text).context("parsing notifications response")
+    }
+
+    /// GET /api/v1/notifications/preferences — the caller's per-type
+    /// preferences and delivery-channel configuration.
+    pub async fn get_notification_preferences(&self) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::GET,
+                "/api/v1/notifications/preferences",
+                None,
+                "get notification preferences",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing preferences response")
+    }
+
+    /// PUT /api/v1/notifications/preferences — update the caller's
+    /// per-type preferences and/or delivery-channel configuration.
+    pub async fn update_notification_preferences(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let text = self
+            .api_request(
+                reqwest::Method::PUT,
+                "/api/v1/notifications/preferences",
+                Some(body),
+                "update notification preferences",
+            )
+            .await?;
+        serde_json::from_str(&text).context("parsing preferences response")
+    }
 }
 
-/// Outcome of `spawn_repo_orchestrator`: fresh spawn, or a live orchestrator
-/// already exists for the repo (HTTP 409 — bootstrap resume path).
+/// Outcome of `spawn_repo_orchestrator`: fresh spawn, a live orchestrator
+/// already exists for the repo (HTTP 409 "already active" — bootstrap
+/// resume path), the requested name is held by a LIVE agent elsewhere
+/// (HTTP 400 name collision — agent names are unique server-wide, so a
+/// second tenant bootstrapping a same-named repo hits this; the caller
+/// retries with a suffixed name), or the repo-orchestrator persona
+/// resolves but is Pending (HTTP 409 with the persona detail — a
+/// bootstrap interrupted between persona creation and approval hits
+/// this; it is a failure, not a resume success).
 pub enum SpawnRepoOrchestratorOutcome {
     Spawned(SpawnOrchestratorResponse),
     AlreadyLive,
+    NameTaken,
+    /// The repo-orchestrator persona exists but is not Approved; carries
+    /// the server's conflict body verbatim.
+    PersonaPending(String),
 }
 
 /// Test-only helpers for spinning up real loopback HTTP servers that
@@ -1678,7 +2736,6 @@ mod tests {
         assert_eq!(c.base_url, "http://localhost:3333");
     }
 
-
     #[test]
     fn spawn_orchestrator_response_parses() {
         // Exact shape from POST /api/v1/repos/:id/orchestrator/spawn after
@@ -1702,7 +2759,10 @@ mod tests {
         }"#;
         let parsed: SpawnOrchestratorResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.agent.id, "0eea0f49-8faa-4b16-a020-6ec24913c197");
-        assert_eq!(parsed.agent.orchestrator_type.as_deref(), Some("repo_orchestrator"));
+        assert_eq!(
+            parsed.agent.orchestrator_type.as_deref(),
+            Some("repo_orchestrator")
+        );
         assert_eq!(parsed.agent.repo_id.as_deref(), Some("repo"));
         assert_eq!(parsed.agent.restart_on_failure, Some(true));
     }
@@ -1710,6 +2770,87 @@ mod tests {
     fn auth_header_format() {
         let c = GyreClient::new("http://localhost:3333".to_string(), "mytoken".to_string());
         assert_eq!(c.auth_header(), "Bearer mytoken");
+    }
+
+    // ── Bootstrap resume classification tests ─────────────────────────
+    //
+    // The resume path must not mistake one server signal for another:
+    // a 409 from the orchestrator spawn endpoint is either "a live
+    // orchestrator already holds the repo slot" (resume success) or "the
+    // repo-orchestrator persona is Pending" (NO orchestrator exists —
+    // reporting success there was fake completion), and a create_user
+    // failure is only resumable when it is a 409 duplicate (a 403 from a
+    // non-admin token is not "already exists").
+
+    #[tokio::test]
+    async fn spawn_repo_orchestrator_pending_persona_409_is_not_already_live() {
+        let (base, _rx) = spawn_mock_http_server(
+            "409 Conflict",
+            "persona 'repo-orchestrator' resolves in scope Tenant(\"t-1\") but is Pending; \
+             approve it before spawning its orchestrator",
+        );
+        let api = GyreClient::new(base, "tok".to_string());
+        let outcome = api
+            .spawn_repo_orchestrator("r-1", Some("main-orchestrator"))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, SpawnRepoOrchestratorOutcome::PersonaPending(_)),
+            "a Pending-persona 409 must not be classified as AlreadyLive \
+             (no orchestrator exists — that was the fake-completion bug)"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_repo_orchestrator_live_slot_409_is_already_live() {
+        let (base, _rx) = spawn_mock_http_server(
+            "409 Conflict",
+            "a repo orchestrator is already active for repo r-1",
+        );
+        let api = GyreClient::new(base, "tok".to_string());
+        let outcome = api
+            .spawn_repo_orchestrator("r-1", Some("main-orchestrator"))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, SpawnRepoOrchestratorOutcome::AlreadyLive));
+    }
+
+    #[tokio::test]
+    async fn create_user_classifies_409_as_duplicate() {
+        let (base, _rx) = spawn_mock_http_server(
+            "409 Conflict",
+            "user with external id local:jsell already exists (id u-1)",
+        );
+        let api = GyreClient::new(base, "tok".to_string());
+        let err = api.create_user("jsell", "t-1").await.unwrap_err();
+        match err {
+            CreateUserError::Duplicate(body) => {
+                assert!(body.contains("already exists"), "body: {body}")
+            }
+            other => panic!("409 must classify as Duplicate, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_non_duplicate_error_is_not_resumable() {
+        // A 403 (non-admin token) is NOT "already exists": the resume
+        // path must fail the run, not adopt a saved credential.
+        let (base, _rx) =
+            spawn_mock_http_server("403 Forbidden", "only Admin role may create users");
+        let api = GyreClient::new(base, "tok".to_string());
+        let err = api.create_user("jsell", "t-1").await.unwrap_err();
+        match err {
+            CreateUserError::Other(e) => {
+                let msg = format!("{e:#}");
+                assert!(
+                    msg.contains("HTTP 403") && msg.contains("only Admin role"),
+                    "error should carry the server detail: {msg}"
+                );
+            }
+            CreateUserError::Duplicate(_) => {
+                panic!("403 must not classify as Duplicate")
+            }
+        }
     }
 
     #[test]

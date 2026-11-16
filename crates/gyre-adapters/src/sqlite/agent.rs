@@ -74,6 +74,7 @@ struct AgentRow {
     orchestrator_type: String,
     repo_id: Option<String>,
     restart_on_failure: bool,
+    persona_id: Option<String>,
 }
 
 impl AgentRow {
@@ -95,6 +96,7 @@ impl AgentRow {
             orchestrator_type: str_to_orchestrator_type(&self.orchestrator_type)?,
             repo_id: self.repo_id.map(Id::new),
             restart_on_failure: self.restart_on_failure,
+            persona_id: self.persona_id.map(Id::new),
         })
     }
 }
@@ -116,6 +118,7 @@ struct NewAgentRow<'a> {
     orchestrator_type: &'a str,
     repo_id: Option<&'a str>,
     restart_on_failure: bool,
+    persona_id: Option<&'a str>,
 }
 
 #[async_trait]
@@ -141,6 +144,7 @@ impl AgentRepository for SqliteStorage {
                 orchestrator_type: orchestrator_type_to_str(&a.orchestrator_type),
                 repo_id: a.repo_id.as_ref().map(|id| id.as_str()),
                 restart_on_failure: a.restart_on_failure,
+                persona_id: a.persona_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(agents::table)
                 .values(&row)
@@ -158,6 +162,7 @@ impl AgentRepository for SqliteStorage {
                     agents::orchestrator_type.eq(row.orchestrator_type),
                     agents::repo_id.eq(row.repo_id),
                     agents::restart_on_failure.eq(row.restart_on_failure),
+                    agents::persona_id.eq(row.persona_id),
                 ))
                 .execute(&mut *conn)
                 .context("insert agent")?;
@@ -253,6 +258,7 @@ impl AgentRepository for SqliteStorage {
                 agents::orchestrator_type.eq(orchestrator_type_to_str(&a.orchestrator_type)),
                 agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
                 agents::restart_on_failure.eq(a.restart_on_failure),
+                agents::persona_id.eq(a.persona_id.as_ref().map(|id| id.as_str())),
             ))
             .execute(&mut *conn)
             .context("update agent")?;
@@ -290,6 +296,23 @@ impl AgentRepository for SqliteStorage {
                 .order(agents::spawned_at.asc())
                 .load::<AgentRow>(&mut *conn)
                 .context("list agents by workspace")?;
+            rows.into_iter().map(|r| r.into_agent()).collect()
+        })
+        .await?
+    }
+
+    async fn list_by_spawner(&self, spawned_by: &str) -> Result<Vec<Agent>> {
+        let pool = Arc::clone(&self.pool);
+        let spawner = spawned_by.to_string();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Agent>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = agents::table
+                .filter(agents::tenant_id.eq(&tenant))
+                .filter(agents::spawned_by.eq(&spawner))
+                .order(agents::spawned_at.desc())
+                .load::<AgentRow>(&mut *conn)
+                .context("list agents by spawner")?;
             rows.into_iter().map(|r| r.into_agent()).collect()
         })
         .await?
@@ -403,6 +426,28 @@ mod tests {
     async fn find_by_name_missing() {
         let (_tmp, s) = setup();
         assert!(s.find_by_name("ghost").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn list_by_spawner_filters_and_orders_newest_first() {
+        // Public-profile stats/activity attribution (user-management.md
+        // §User Profile Page): only the named spawner's agents come back,
+        // newest first.
+        let (_tmp, s) = setup();
+        for (id, ts) in [("a-old", 1000u64), ("a-new", 2000)] {
+            let mut a = make_agent(id, "worker");
+            a.spawned_at = ts;
+            a.spawned_by = Some("alice".to_string());
+            s.create(&a).await.unwrap();
+        }
+        let mut other = make_agent("a-other", "worker");
+        other.spawned_by = Some("bob".to_string());
+        s.create(&other).await.unwrap();
+
+        let mine = s.list_by_spawner("alice").await.unwrap();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(mine[0].id.as_str(), "a-new");
+        assert_eq!(mine[1].id.as_str(), "a-old");
     }
 
     #[tokio::test]

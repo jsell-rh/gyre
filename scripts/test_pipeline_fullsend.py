@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -82,6 +83,54 @@ class FullsendContracts(FullsendFixture):
         self.assertEqual(harness['timeout_minutes'], 240)
         self.assertTrue((shim / 'openshell').is_file())
 
+    def test_assignment_clone_excludes_old_attempts_and_publishes_from_copied_checkout(self):
+        source=self.root/'source'
+        self.call('git','checkout','-qb','pipeline/unrelated',cwd=source)
+        (source/'unrelated.bin').write_bytes(b'unrelated historical attempt\n'*10000)
+        self.call('git','add','unrelated.bin',cwd=source)
+        self.call('git','commit','-qm','unrelated attempt',cwd=source)
+        unrelated=self.call('git','rev-parse','HEAD:unrelated.bin',cwd=source).strip()
+        self.call('git','push','-q','origin','pipeline/unrelated',cwd=source)
+        self.call('git','checkout','-qb','pipeline/candidate',self.base,cwd=source)
+        (source/'code.py').write_text('def add(a, b):\n    return a + b\n')
+        self.call('git','commit','-qam','assigned candidate',cwd=source)
+        candidate=self.call('git','rev-parse','HEAD',cwd=source).strip()
+        self.call('git','push','-q','origin','pipeline/candidate',cwd=source)
+        self.call('git','config','uploadpack.allowFilter','true',cwd=self.repo)
+        # file:// exercises real pack negotiation rather than Git's local
+        # hardlink optimization, which ignores partial-clone filters.
+        self.store.set_setting('repo_url',self.repo.as_uri())
+        self.execution.claim['input']['candidate']=candidate
+        _,repo,_=self.prepare()
+        self.assertEqual(self.call('git','rev-parse','HEAD',cwd=repo).strip(),candidate)
+        self.assertEqual(self.call('git','config','remote.origin.partialclonefilter',cwd=repo).strip(),'blob:none')
+        refs=self.call('git','for-each-ref','--format=%(refname)','refs/remotes',cwd=repo)
+        self.assertNotIn('pipeline/unrelated',refs)
+        self.assertNotIn('pipeline/candidate',refs)
+        self.assertFalse((repo/'.git/shallow').exists())
+        objects=self.call('git','cat-file','--batch-all-objects','--batch-check=%(objectname)',cwd=repo)
+        self.assertNotIn(unrelated,objects)
+        self.assertFalse((repo/'.git/objects/info/alternates').exists())
+        copied=self.root/'copied-to-sandbox';shutil.copytree(repo,copied)
+        shutil.rmtree(repo)
+        self.call('git','merge-base','--is-ancestor',self.base,candidate,cwd=copied)
+        self.assertIn('a + b',(copied/'code.py').read_text())
+        self.call('git','push','-q','origin','HEAD:refs/heads/pipeline/publication-proof',cwd=copied)
+        self.assertEqual(self.call('git','rev-parse','refs/heads/pipeline/publication-proof',cwd=self.repo).strip(),candidate)
+
+    def test_assessment_is_registered_with_fullsend_and_has_a_read_only_guard(self):
+        self.store.finish(self.work,self.claim['token'],{})
+        work=self.store.enqueue('assess','task-9999','g',{'base':self.base,'candidate':self.base,'requirements':'fp'})
+        self.claim=self.store.claim('assess','assessor');self.execution=Execution(self.store,self.claim)
+        cfg,repo,_=self.prepare()
+        config=(cfg/'config.yaml').read_text()
+        self.assertIn('name: assess\n    source: harness/assess.yaml',config)
+        harness=json.loads((cfg/'harness/assess.yaml').read_text())
+        self.assertEqual(harness['role'],'review')
+        self.assertEqual(harness['agent'],'agents/assess.md')
+        self.assertTrue((cfg/'agents/assess.md').is_file())
+        self.assertTrue((self.execution.directory/'bundle/review-before.json').is_file())
+
     def interrupted_review(self, source_edit=False, wrong_candidate=False):
         import io
         self.store.finish(self.work,self.claim['token'],{})
@@ -154,9 +203,11 @@ class FullsendContracts(FullsendFixture):
         self.assertIn('/tmp/stage/findings.log', [item['dest'] for item in harness['host_files']])
 
     def test_actual_checkpoint_publishes_fixture_source_to_bare_remote(self):
+        self.body += '\n## Acceptance Criteria\n\n- [ ] Arithmetic performs real addition.\n'
+        self.store.put_task('task-9999','g',self.body,{})
         _, repo, _ = self.prepare()
         (repo / 'code.py').write_text('def add(a, b):\n    return a + b\n')
-        (repo / 'specs/tasks/task-9999.md').write_text(self.body.replace('not-started','ready-for-review'))
+        (repo / 'specs/tasks/task-9999.md').write_text(self.body.replace('not-started','ready-for-review').replace('- [ ]','- [x]'))
         stage = self.execution.directory / 'bundle'
         job = json.loads((stage / 'job.json').read_text());job['checkout'] = str(repo)
         (stage / 'job.json').write_text(json.dumps(job))
@@ -169,6 +220,9 @@ class FullsendContracts(FullsendFixture):
         receipt = json.loads((stage / 'outcome.json').read_text())
         actual = self.call('git', 'rev-parse', 'refs/heads/' + self.execution.branch, cwd=self.repo).strip()
         self.assertEqual(actual, receipt['head'])
+        published_task=self.call('git','show',actual+':specs/tasks/task-9999.md',cwd=self.repo)
+        self.assertIn('- [ ] Arithmetic performs real addition.',published_task)
+        self.assertNotIn('- [x]',published_task)
         self.assertEqual(receipt['tree'], self.call('git', 'rev-parse', actual + '^{tree}', cwd=self.repo).strip())
         self.assertIn('a + b', self.call('git','show',actual+':code.py',cwd=self.repo))
         self.assertTrue(receipt['published'] and receipt['valid'])
@@ -253,13 +307,25 @@ if a[:1]==['-g']:
  v.setdefault('gateways',[]).append(a[1]);a=a[2:]
 v['calls'].append(a)
 if a[:2]==['sandbox','create']:
- n=a[a.index('--name')+1];v['pods'].append({'name':n,'phase':'Ready','labels':{}})
+ n=a[a.index('--name')+1];labels=dict(a[i+1].split('=',1) for i,x in enumerate(a) if x=='--label');v['pods'].append({'name':n,'phase':'Ready','labels':labels})
 elif a[:2]==['sandbox','delete'] and not os.environ.get('HOLD_DELETE'):
  v['pods']=[x for x in v['pods'] if x['name']!=a[2]]
 p.write_text(json.dumps(v))
+if a[:2]==['sandbox','create'] and os.environ.get('HOLD_CREATE'):
+ import time
+ time.sleep(2)
 if a[:2]==['sandbox','exec']:
  import time
  p.with_suffix('.pid').write_text(str(os.getpid()))
+ if os.environ.get('STAGING_TEST'):
+  mode=os.environ['STAGING_TEST'];n=sum(c[:2]==['sandbox','exec'] for c in v['calls'])
+  if mode=='hold':time.sleep(60)
+  if mode=='always' or (mode=='once' and n==1):
+   print('Error:   × connect error: transport error',file=sys.stderr);sys.exit(1)
+  if mode=='remote':
+   print('remote command failed: transport error',file=sys.stderr);sys.exit(1)
+  v['executions']=v.get('executions',0)+1;p.write_text(json.dumps(v))
+  print('staged fixture');sys.exit(0)
  time.sleep(60)
 if os.environ.get('WARN_ONCE') and not any(x[:2]==['gateway','login'] for x in v['calls']):
  print('Warning: OIDC token refresh failed; continuing with cached token',file=sys.stderr)
@@ -281,15 +347,37 @@ else: print('fixture control operation')
         return subprocess.run([str(self.shim/'openshell'),*args],env={**self.env,**(extra or {})},capture_output=True,text=True,timeout=30)
 
     def test_creation_is_reserved_and_owned_before_real_cli_and_capacity_is_enforced(self):
-        result=self.invoke('sandbox','create','--name',self.name,'--keep','--','sleep','infinity')
+        self.store.set_setting('compute_memory:task-9999:implement',8)
+        result=self.invoke('sandbox','create','--name',self.name,'--memory','8Gi','--keep','--','sleep','infinity')
         self.assertEqual(result.returncode,0,result.stderr)
         state=json.loads((self.root/'backend.json').read_text())
         self.assertNotIn('--keep',state['calls'][0])
+        self.assertEqual(state['calls'][0][state['calls'][0].index('--memory')+1],'4Gi')
         self.assertIn('gyre.dev/work='+self.work,state['calls'][0])
         self.assertEqual(self.store.db.execute('select state from resources where name=?',(self.name,)).fetchone()[0],'present')
         refused=self.invoke('sandbox','create','--name','fs-imp-'+'b'*12,'--','sleep','infinity')
         self.assertEqual(refused.returncode,75)
         self.assertEqual(len(json.loads((self.root/'backend.json').read_text())['pods']),1)
+
+    def test_readiness_retry_adopts_the_same_pending_allocation(self):
+        self.assertEqual(self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity').returncode,0)
+        path=self.root/'backend.json';state=json.loads(path.read_text());state['pods'][0]['phase']='Provisioning';path.write_text(json.dumps(state))
+        self.assertEqual(self.invoke('sandbox','delete',self.name).returncode,75)
+        retry=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
+        self.assertEqual(retry.returncode,0,retry.stderr)
+        state=json.loads(path.read_text())
+        self.assertEqual(sum(c[:2]==['sandbox','create'] for c in state['calls']),1)
+        self.assertEqual(len(state['pods']),1)
+        self.assertEqual(self.store.compute_used(),1)
+
+    def test_create_uses_authorized_budget_and_adopts_after_uncertain_timeout(self):
+        self.store.set_setting('model_timeout',1)
+        result=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity',extra={'HOLD_CREATE':'1'})
+        self.assertEqual(result.returncode,75,result.stderr)
+        adopted=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
+        self.assertEqual(adopted.returncode,0,adopted.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        self.assertEqual(sum(c[:2]==['sandbox','create'] for c in calls),1)
 
     def test_streaming_deadline_targets_the_real_cli_without_an_orphan_parent(self):
         process = subprocess.Popen([str(self.shim / 'openshell'), 'sandbox', 'exec',
@@ -311,6 +399,62 @@ else: print('fixture control operation')
                 process.kill()
                 process.wait(timeout=5)
             process.stderr.close()
+
+    def staging_args(self):
+        path='/tmp/fs-upload-'+'a'*20+'/fixture'
+        return ['sandbox','exec','--name',self.name,'--no-tty','--timeout','120','--','sh','-c',
+                f"test -f '{path}' && mkdir -p -- '/tmp/stage/bin' && mv -fT -- '{path}' '/tmp/stage/bin/fixture'"]
+
+    def test_bootstrap_connect_retry_keeps_the_same_sandbox_and_executes_once(self):
+        result=self.invoke(*self.staging_args(),extra={'STAGING_TEST':'once'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        state=json.loads((self.root/'backend.json').read_text())
+        calls=[c for c in state['calls'] if c[:2]==['sandbox','exec']]
+        self.assertEqual(len(calls),2)
+        self.assertEqual(calls[0],calls[1])
+        self.assertEqual(state['executions'],1)
+        self.assertFalse(any(c[:2] in (['sandbox','create'],['sandbox','delete']) for c in state['calls']))
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='bootstrap_connect_retry'").fetchone()[0],1)
+
+    def test_bootstrap_retries_are_bounded_and_do_not_replay_remote_failures(self):
+        for mode,count in [('always',3),('remote',1)]:
+            with self.subTest(mode=mode):
+                path=self.root/'backend.json'
+                if path.exists():path.unlink()
+                result=self.invoke(*self.staging_args(),extra={'STAGING_TEST':mode})
+                self.assertEqual(result.returncode,1,result.stderr)
+                state=json.loads(path.read_text())
+                self.assertEqual(sum(c[:2]==['sandbox','exec'] for c in state['calls']),count)
+                self.assertNotIn('executions',state)
+
+    def test_preconnect_diagnostic_does_not_enable_arbitrary_command_replay(self):
+        args=self.staging_args();args[-1]='echo arbitrary-command'
+        result=self.invoke(*args,extra={'STAGING_TEST':'once'})
+        self.assertEqual(result.returncode,1)
+        state=json.loads((self.root/'backend.json').read_text())
+        self.assertEqual(sum(c[:2]==['sandbox','exec'] for c in state['calls']),1)
+
+    def test_bootstrap_wrapper_death_does_not_orphan_the_cli(self):
+        process=subprocess.Popen([str(self.shim/'openshell'),*self.staging_args()],
+            env={**self.env,'STAGING_TEST':'hold'},stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        child=None
+        try:
+            marker=self.root/'backend.pid';deadline=time.monotonic()+5
+            while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(marker.exists())
+            child=int(marker.read_text());self.assertNotEqual(child,process.pid)
+            process.kill();process.wait(timeout=5)
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                stat=Path(f'/proc/{child}/stat')
+                if not stat.exists() or stat.read_text().rsplit(')',1)[1].split()[0]=='Z':break
+                time.sleep(.02)
+            else:self.fail('bootstrap CLI survived its killed wrapper')
+        finally:
+            if process.poll() is None:process.kill();process.wait(timeout=5)
+            if child and Path(f'/proc/{child}').exists():
+                try:os.kill(child,9)
+                except ProcessLookupError:pass
 
     def test_checkpoint_hook_consumes_matching_scope_and_refuses_other_gateway(self):
         result = self.invoke('--gateway', 'gyre-gyre', 'provider', 'list')
@@ -335,7 +479,16 @@ else: print('fixture control operation')
         self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias])
         streamed=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
         self.assertEqual(streamed.returncode,0,streamed.stderr)
-        self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias,alias])
+        self.assertEqual(set(json.loads((self.root/'backend.json').read_text())['gateways']),{alias})
+
+    def test_streamed_bootstrap_refreshes_auth_before_replacing_the_process(self):
+        result=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        login=next(i for i,c in enumerate(calls) if c[:2]==['gateway','login'])
+        upload=next(i for i,c in enumerate(calls) if c[:2]==['sandbox','upload'])
+        self.assertLess(login,upload)
+        self.assertEqual(sum(c[:2]==['sandbox','upload'] for c in calls),1)
 
     def test_cancellation_allows_cleanup_transport_but_forbids_new_compute(self):
         self.store.set_setting(f"cancel:{self.work}:{self.claim['token']}",True)
@@ -379,6 +532,15 @@ else: print('fixture control operation')
         self.assertEqual(self.store.db.execute('select state from resources where name=?',(self.name,)).fetchone()[0],'deleting')
         self.assertEqual(len(json.loads((self.root/'backend.json').read_text())['pods']),1)
 
+    def test_failed_review_deletes_without_attempting_source_capture(self):
+        self.assertEqual(self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity').returncode,0)
+        self.store.db.execute("UPDATE work SET stage='review' WHERE id=?",(self.work,))
+        result=self.invoke('sandbox','delete',self.name)
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        self.assertFalse(any(x[:2]==['sandbox','exec'] for x in calls))
+        self.assertFalse(json.loads((self.root/'backend.json').read_text())['pods'])
+
     def test_fenced_worker_cannot_invoke_gateway(self):
         self.store.finish(self.work,self.claim['token'],{})
         result=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
@@ -398,3 +560,25 @@ else: print('fixture control operation')
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ValidatorOwnershipTests(FullsendFixture):
+    def test_previous_token_cleanup_debt_is_excluded_from_current_receipt(self):
+        from pipeline.fullsend import owned_sandbox
+        for name,token,state in [('previous',self.claim['token']-1,'deleting'),('current',self.claim['token'],'present')]:
+            self.store.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
+                (name,self.work,token,'sandbox',state,'{}',time.time()))
+        self.assertEqual(owned_sandbox(self.execution),'current')
+        self.store.resource_state('current','absent')
+        with self.assertRaisesRegex(ValueError,'exactly one'):
+            owned_sandbox(self.execution)
+        self.store.resource_state('previous','present')
+        with self.assertRaises(ValueError):owned_sandbox(self.execution)
+
+    def test_multiple_current_attempt_sandboxes_still_fail_closed(self):
+        from pipeline.fullsend import owned_sandbox
+        for name in ('first','second'):
+            self.store.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
+                (name,self.work,self.claim['token'],'sandbox','present','{}',time.time()))
+        with self.assertRaisesRegex(ValueError,'exactly one'):
+            owned_sandbox(self.execution)

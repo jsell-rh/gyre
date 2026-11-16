@@ -1,30 +1,105 @@
 <script>
-  import { getContext, onDestroy } from 'svelte';
+  import { getContext, onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
-  import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { computeTimelineDeltaStats, computeTimelineGhostOverlays, createTimelineHistoryFetcher, resolveScrubTimestamp } from '../lib/timeline-utils.js';
+  import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
+  import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
+  import { traceStepTargetNode } from '../lib/trace-navigation.js';
+  import { onViewEvent, dispatchViewEvent, viewEventFromDom } from '../lib/viewEvents.js';
+  import { applyDensityPolicy } from '../lib/canvas-density.js';
+  // ui-layout.md §10 Layout Engines: the layout registry (task-170) maps
+  // ViewSpec layout names to renderer components; the generated view's
+  // `layout` field selects the renderer (see applyGeneratedViewSpec).
+  import { getLayout } from '../lib/layoutRegistry.js';
+  import { resolveScopeNodes, edgeSrc, edgeTgt } from '../lib/view-query-scope.js';
+  import VirtualNodeList from '../lib/VirtualNodeList.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
+  import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
+  // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
+  // workspace generate endpoint (read-only query translator).
+  import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
+  // Conversational exploration (system-explorer.md §8, task-187):
+  // knowledge-graph-grounded Q&A with clickable entity references and
+  // canvas actions (view specs, ghost-overlay predictions, highlights).
+  import ConversationalExplorer from '../lib/ConversationalExplorer.svelte';
+  import { viewSpecToViewQuery, viewDocumentToQuery } from '../lib/generated-view.js';
+  import { FLOW_TEMPLATES, matchFlowTemplate, flowTemplateQuery, pickTraceMr } from '../lib/flow-templates.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import Briefing from './Briefing.svelte';
   import WorkspaceCards from './WorkspaceCards.svelte';
-  import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
+  import DependencyGraph from './DependencyGraph.svelte';
+  // HSI §3 Default Views (task-088): Spec Realization, Change, System Trace.
+  // Boundary is the default explorer view (canvas drill-down), so it has no
+  // dedicated component — the ExplorerCanvas IS the Boundary View.
+  import SpecRealizationView from './explorer/SpecRealizationView.svelte';
+  import ChangeView from './explorer/ChangeView.svelte';
+  import SystemTraceView from './explorer/SystemTraceView.svelte';
+  // In-view filter panel (ui-navigation.md §3, task-178): category filters +
+  // discovered concepts, toggled by the filter icon in the control bar.
+  import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
+  import { hiddenNodeIds as computeHiddenNodeIds, conceptNodeIds as computeConceptNodeIds, CATEGORY_IDS } from '../lib/filter-categories.js';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
+  const goToWorkspaceHomeCtx = getContext('goToWorkspaceHome');
+  // Repo scope change from the workspace graph (ui-layout.md §5: double-click
+  // a repo node → scope changes to repo). Wired by App.svelte; absent in
+  // standalone/test renders where the in-place drill fallback applies.
+  const goToRepoCtx = getContext('goToRepo');
+  // App-level detail panel opener — used for agent provenance links in the
+  // moldable views (system-explorer.md §2: "Every agent reference is
+  // clickable → shows provenance"). Absent in standalone/test renders.
+  const openDetailPanelCtx = getContext('openDetailPanel') ?? null;
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
-  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null } = $props();
+  let {
+    scope = { type: 'tenant' },
+    onSelectWorkspace = null,
+    workspaceName = null,
+    embedded = false,
+    onEnterRepo = null,
+    archSubTab = undefined,
+    onArchSubTabChange = undefined,
+  } = $props();
 
   let scopeType = $derived(scope?.type ?? 'tenant');
+
+  // ── Architecture sub-tabs (ui-navigation.md §2, repo scope) ─────────────
+  // Control-bar sub-tabs at repo scope: Graph (default) | Briefing (the
+  // repo-scoped narrative via ?repo_id= — HSI §1.5 repo-scope Briefing row).
+  // Controlled from App when the `archSubTab` prop is provided (drawer
+  // Briefing clicks must switch the sub-tab even when the Architecture tab
+  // is already active); `localArchSubTab` is the standalone fallback.
+  let localArchSubTab = $state('graph');
+  let activeArchSubTab = $derived(archSubTab !== undefined ? archSubTab : localArchSubTab);
+
+  function setArchSubTab(sub) {
+    localArchSubTab = sub;
+    onArchSubTabChange?.(sub);
+  }
 
   // ── Workspace-scope repo list ──────────────────────────────────────────
   let wsRepos = $state([]);
   let wsReposLoading = $state(true);
   let wsReposError = $state(null);
+  // HSI §3 Boundary View Level 1: per-repo type/endpoint counts from the
+  // workspace knowledge graph, rendered as a sub-label on each repo node.
+  let wsRepoStats = $state({});   // repoId → { types, endpoints }
+
+  // ── Workspace-scope cross-repo dependency graph (ui-layout.md §5) ──────
+  // C4 "Container" level: repos as nodes, cross-repo dependencies as edges.
+  let wsDepEdges = $state([]);
+  let wsDepExternal = $state([]); // repos referenced by edges but not in this workspace
+  let wsDepLoading = $state(true);
+  let wsDepError = $state(null);
+  // Repo metadata detail panel (single-click on a repo node)
+  let repoDetail = $state(null);
 
   // ── Repo-scope graph state ─────────────────────────────────────────────
   let repos = $state([]);
@@ -38,6 +113,18 @@
 
   // Explorer always shows architecture view (tabs removed per spec: "one canvas, one conversation, one understanding").
 
+  // ── HSI §3 Default Views: view selector ───────────────────────────────
+  // Boundary (default) | Spec Realization | Change | System Trace.
+  // Boundary is the ExplorerCanvas C4 drill-down (workspace repo cards →
+  // packages → modules → code items); the other three are dedicated panels.
+  const EXPLORER_VIEWS = [
+    { id: 'boundary', label: 'Boundary' },
+    { id: 'spec-realization', label: 'Spec Realization' },
+    { id: 'change', label: 'Change' },
+    { id: 'system-trace', label: 'System Trace' },
+  ];
+  let explorerViewMode = $state('boundary');
+
   // Graph data quality warnings (e.g., missing LSP toolchains)
   let graphWarnings = $state([]);
   let graphWarningsDismissed = $state(false);
@@ -46,20 +133,530 @@
   let explorerCanvasState = $state({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [], recent_interactions: [] });
   let activeViewQuery = $state(null);
   let explorerFilter = $state('all');
-  let explorerLens = $state('structural');
+  // Lens selection persists in the URL query param (?lens=evaluative) so a
+  // view with an active lens is deep-linkable (HSI §3 Three Lenses).
+  let explorerLens = $state(initialLensFromUrl());
+  // Evaluative lens data (HSI §3): gate outcomes per spec path (from the most
+  // recent gate results of MRs carrying that spec_ref) and the spec approval
+  // ledger. Both are best-effort overlays — the structural base renders fine
+  // without them.
+  let gateStatusBySpec = $state({});
+  let specApprovals = $state([]);
   let explorerSavedViews = $state([]);
+
+  // In-view filter panel (ui-navigation.md §3, task-178): filter icon in
+  // the control bar opens the collapsible 200px left panel inside the
+  // Architecture content area (not the app sidebar). Category checkboxes
+  // toggle node visibility; concept selection fades the canvas to the
+  // concept's elements (task-182, system-explorer.md §4).
+  let filterPanelOpen = $state(false);
+  let activeFilterCategories = $state({ boundaries: true, interfaces: true, data: true, specs: true });
+  let activeFilterConcepts = $state([]);
+
+  // ── Concept views (system-explorer.md §4, task-182) ─────────────
+  // Predefined concepts from the repo's spec manifest (served by
+  // GET /repos/:id/graph/concepts); selecting one fetches its projection
+  // (GET /repos/:id/graph/concept/:name) and fades the canvas to the
+  // concept's nodes. Discovered concepts (activeFilterConcepts above)
+  // use the substring mechanism — both are supported per the spec's data
+  // source distinction.
+  let manifestConcepts = $state([]);
+  let manifestConceptsLoadedFor = $state('');
+  let activeManifestConcept = $state(null); // { name, nodeIds: Set|null }
+
+  // Fetch the manifest concept listing when the filter panel opens at
+  // repo scope (once per repo — the panel is the only consumer).
+  $effect(() => {
+    if (!filterPanelOpen || !selectedRepoId || explorerViewMode !== 'boundary') return;
+    if (manifestConceptsLoadedFor === selectedRepoId) return;
+    const repoId = selectedRepoId;
+    manifestConceptsLoadedFor = repoId;
+    api.repoGraphConcepts(repoId)
+      .then((res) => {
+        if (selectedRepoId !== repoId) return; // stale
+        manifestConcepts = Array.isArray(res?.concepts) ? res.concepts : [];
+      })
+      .catch(() => {
+        // No manifest / endpoint unavailable — no predefined concepts to
+        // list; allow a retry on the next panel open.
+        if (selectedRepoId === repoId) manifestConceptsLoadedFor = '';
+      });
+  });
+
+  /** Toggle a manifest concept view: fetching the projection resolves the
+   *  concept's node set (manifest-based — distinct from the substring
+   *  mechanism); toggling the active concept clears it. */
+  async function toggleManifestConcept(name) {
+    if (activeManifestConcept?.name === name) {
+      activeManifestConcept = null;
+      return;
+    }
+    activeManifestConcept = { name, nodeIds: null }; // projection loading
+    pushInteraction({ action: 'concept', detail: `manifest:${name}` });
+    try {
+      const result = await api.getGraphConcept(selectedRepoId, name);
+      if (activeManifestConcept?.name !== name) return; // stale toggle
+      const ids = new Set((result?.nodes ?? []).map((n) => n?.id).filter(Boolean));
+      activeManifestConcept = { name, nodeIds: ids };
+    } catch (e) {
+      if (activeManifestConcept?.name === name) activeManifestConcept = null;
+      showToast(`Concept "${name}" could not be loaded: ${e.message}`, { type: 'error' });
+    }
+  }
+
+  // ── Ad-hoc concept creation (system-explorer.md §4) ─────────────
+  // Multi-select on the canvas (Shift+Click) + "Create concept" (context
+  // menu or the selection bar) opens a naming dialog; saving persists the
+  // grouping as an explorer view (POST /workspaces/:id/explorer-views)
+  // whose ViewQuery concept scope seeds exactly the selected nodes.
+  let conceptDialog = $state(null); // { name, error, saving, nodes: [...] }
+
+  function openConceptDialog(nodeIds) {
+    const ids = Array.isArray(nodeIds) ? nodeIds : [...(nodeIds ?? [])];
+    const nodes = (effectiveGraph?.nodes ?? []).filter((n) => ids.includes(n.id));
+    if (nodes.length < 2) return;
+    conceptDialog = { name: '', error: '', saving: false, nodes };
+  }
+
+  function closeConceptDialog() {
+    conceptDialog = null;
+  }
+
+  async function saveConceptDialog() {
+    if (!conceptDialog) return;
+    const name = (conceptDialog.name ?? '').trim();
+    if (!name) {
+      conceptDialog = { ...conceptDialog, error: 'Name the concept before saving.' };
+      return;
+    }
+    const workspaceId = scope?.workspaceId;
+    if (!workspaceId) {
+      conceptDialog = { ...conceptDialog, error: 'No workspace scope — cannot save a view here.' };
+      return;
+    }
+    // ViewQuery grammar (view-query-grammar.md): a concept scope seeded
+    // with the selected nodes' qualified names. No edge expansion — the
+    // ad-hoc concept is exactly the grouped nodes.
+    const seedNodes = conceptDialog.nodes.map((n) => n.qualified_name ?? n.name);
+    const spec = {
+      scope: {
+        type: 'concept',
+        seed_nodes: seedNodes,
+        expand_edges: [],
+        expand_depth: 0,
+        expand_direction: 'both',
+      },
+      emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.15 },
+      zoom: 'fit',
+      annotation: {
+        title: `Concept: ${name}`,
+        description: `${seedNodes.length} grouped nodes`,
+      },
+    };
+    conceptDialog = { ...conceptDialog, saving: true, error: '' };
+    try {
+      await api.saveExplorerView(workspaceId, {
+        name,
+        description: `Ad-hoc concept grouping ${seedNodes.length} nodes`,
+        spec,
+      });
+      pushInteraction({ action: 'save_concept', detail: name });
+      showToast(`Concept "${name}" saved as an explorer view`, { type: 'success' });
+      conceptDialog = null;
+    } catch (e) {
+      conceptDialog = { ...conceptDialog, saving: false, error: e.message };
+    }
+  }
+
+  // ── View spec editor (ui-navigation.md §3, task-178) ────────────────
+  // "Edit view spec" opens a collapsible JSON editor for the view spec
+  // grammar (data/layout/encoding/highlight); Apply translates via
+  // viewSpecToViewQuery and re-renders the canvas.
+  let viewSpecEditorOpen = $state(false);
+  let viewSpecText = $state('');
+  let viewSpecError = $state('');
+  let activeViewSpec = $state(null); // generated/edited ViewSpec currently applied
   let detailNode = $state(null);
   let highlightedSpanId = $state(null);
+  // Causal trace step focus: clicking a step in the detail panel pans/zooms
+  // the canvas to that node (explorer-canvas.md §6 step 6). The nonce lets
+  // repeated clicks on the same step re-trigger the camera move.
+  let traceFocusRequest = $state(null);
+  let traceFocusNonce = 0;
+
+  // ── HSI §3 Generated Views (task-089) ──────────────────────────────────
+  // Chat column mode: 'ask' is the repo-scoped Explorer agent (WebSocket);
+  // 'generate' is the LLM view generator (workspace generate endpoint) that
+  // translates natural-language questions into ViewSpec documents;
+  // 'explore' is conversational exploration (system-explorer.md §8) —
+  // knowledge-graph-grounded Q&A with entity references.
+  let chatMode = $state('ask');
+  // Trace playback request for generated "flow" views: the nonce lets a new
+  // flow view re-trigger the canvas particle animation.
+  let tracePlaybackRequest = $state(null);
+  let tracePlaybackNonce = 0;
+
+  /**
+   * Apply a generated ViewSpec (HSI §3) to the Explorer.
+   *
+   * The ViewSpec's `layout` field selects the renderer through the layout
+   * registry (ui-layout.md §10 Layout Engines): 'hierarchical'/'layered'
+   * render on the SVG canvas positioned by ELK, 'side-by-side' on the
+   * CSS-Grid composite, 'diff' on the structural-diff component, 'list' on
+   * the shell's virtualized node list; 'graph'/'timeline' stay on the
+   * unified ExplorerCanvas (Canvas 2D + TimelineScrubber), and 'flow'
+   * stays on ExplorerCanvas too, which delegates its rendering to
+   * FlowCanvas (SVG nodes/edges + Canvas/WebGL particle overlay, §4).
+   *
+   * For the canvas-rendered layouts the ViewSpec is translated to a
+   * ViewQuery the canvas renders (concept / node-type filters, callouts,
+   * and the LLM's explanation as the query annotation — the sidebar
+   * annotation alongside the graph). A "flow" layout additionally fetches
+   * the trace_source MR's captured trace and starts particle playback on
+   * the evaluative lens; the server already guarantees flow views are
+   * trace-backed, so a fetch failure here falls back to the structural
+   * lens (client mirror of the server fallback).
+   */
+  function applyGeneratedViewSpec(spec) {
+    if (!spec || typeof spec !== 'object') return;
+    activeViewSpec = spec; // view spec editor prefills the active spec
+    const layoutName = typeof spec.layout === 'string' ? spec.layout.trim() : '';
+    activeLayout = getLayout(layoutName) ? layoutName : 'graph';
+    const query = viewSpecToViewQuery(spec);
+    if (query) {
+      activeViewQuery = query;
+      pushInteraction({ action: 'query', detail: `generated:${spec.layout ?? 'view'}` });
+    }
+    if (spec.layout === 'flow' && spec.data?.trace_source?.mr_id) {
+      const mrId = spec.data.trace_source.mr_id;
+      api.mrTrace(mrId)
+        .then((trace) => {
+          if (trace?.spans?.length > 0) {
+            traceData = trace;
+            tracePlaybackRequest = { nonce: ++tracePlaybackNonce };
+          } else {
+            explorerLens = 'structural';
+          }
+        })
+        .catch((err) => {
+          console.warn('[ExplorerView] flow view trace fetch failed:', err);
+          explorerLens = 'structural';
+        });
+    } else {
+      explorerLens = 'structural';
+    }
+  }
+
+  // ── Conversational exploration (system-explorer.md §8) ────────────
+  // Canvas actions dispatched by ConversationalExplorer entity-reference
+  // clicks and response payloads. Every action lands on the SAME canvas
+  // machinery the rest of the Explorer uses — concept-scope queries for
+  // highlighting, openNodeDetail/openSpecEditor for navigation, and ghost
+  // overlays for structural predictions.
+
+  /** Highlight specific nodes on the canvas (§8: "canvas highlights
+   *  matching nodes"). A concept scope seeded by node ids with no edge
+   *  expansion matches exactly the referenced nodes; emphasis colors them
+   *  and dims the rest — the same visual language as search highlighting. */
+  function conversationHighlightNodes(nodeIds) {
+    if (!Array.isArray(nodeIds) || nodeIds.length === 0) return;
+    explorerViewMode = 'boundary';
+    activeSavedViewName = null;
+    activeViewSpec = null;
+    activeViewQuery = {
+      scope: { type: 'concept', seed_nodes: [...nodeIds], expand_edges: [], expand_depth: 1 },
+      emphasis: { highlight: { matched: { color: '#fbbf24', label: 'mentioned' } }, dim_unmatched: 0.3 },
+    };
+    pushInteraction({ action: 'query', detail: 'conversation:highlight' });
+    showToast($t('conversational_explorer.highlighted_nodes', { values: { count: nodeIds.length } }), { type: 'info' });
+  }
+
+  /** Click a node entity reference → navigate to the entity: open the
+   *  detail panel and pan the canvas camera to the node. */
+  function conversationOpenNode(nodeId) {
+    const node = (graph?.nodes ?? []).find((n) => n.id === nodeId);
+    if (!node) {
+      showToast($t('conversational_explorer.node_not_in_view'), { type: 'warning' });
+      return;
+    }
+    explorerViewMode = 'boundary';
+    openNodeDetail(node);
+    traceFocusNonce += 1;
+    traceFocusRequest = { nodeId, nonce: traceFocusNonce };
+  }
+
+  /** Click a spec entity reference → open the spec inline (§8 spec
+   *  references "open inline"). */
+  function conversationOpenSpec(specPath) {
+    if (!selectedRepoId) {
+      showToast($t('conversational_explorer.spec_needs_repo'), { type: 'warning' });
+      return;
+    }
+    openSpecEditor(specPath);
+  }
+
+  /** Click a commit entity reference → open the commit in git. With a
+   *  configured remote (mirror URL) this opens the commit page; otherwise
+   *  the SHA is copied so the human can look it up in their git tooling. */
+  function conversationOpenCommit(sha) {
+    const repo = (repos ?? []).find((r) => r.id === selectedRepoId);
+    const base = repo?.mirror_url ?? null;
+    if (base) {
+      const url = `${base.replace(/\/+$/, '')}/commit/${encodeURIComponent(sha)}`;
+      try {
+        window.open(url, '_blank', 'noopener');
+        return;
+      } catch { /* popups blocked — fall through to copy */ }
+    }
+    try {
+      navigator.clipboard?.writeText(sha);
+      showToast($t('conversational_explorer.commit_link_copied'), { type: 'info' });
+    } catch {
+      showToast(sha, { type: 'info' });
+    }
+  }
+
+  /** Click an agent entity reference → show provenance: highlight the
+   *  nodes the agent last modified (§8 "agent (show provenance)"). */
+  function conversationShowAgent(agentId) {
+    const nodeIds = (graph?.nodes ?? [])
+      .filter((n) => n.last_modified_by === agentId)
+      .map((n) => n.id);
+    if (nodeIds.length === 0) {
+      showToast($t('conversational_explorer.no_agent_nodes'), { type: 'info' });
+      return;
+    }
+    conversationHighlightNodes(nodeIds);
+  }
+
+  /** "What would happen if…" response → structural prediction as ghost
+   *  overlays (§3 visual language, same mapping as the spec-edit
+   *  prediction flow). */
+  function conversationApplyPrediction(prediction) {
+    const overlays = predictionOverlays(prediction);
+    if (overlays.length === 0) {
+      showToast($t('conversational_explorer.prediction_empty'), { type: 'info' });
+      return;
+    }
+    ghostOverlays = overlays;
+    showToast(
+      $t('conversational_explorer.prediction_applied_toast', { values: { count: overlays.length } }),
+      { type: 'info' }
+    );
+  }
+
+  // ── Active generated-view layout (ui-layout.md §10 Layout Engines) ─────
+  // The generated ViewSpec's `layout` field (set in applyGeneratedViewSpec)
+  // selects the renderer through the layout registry. Layouts rendered by
+  // the unified canvas (graph/flow/timeline) and the shell-owned list
+  // layout have no dedicated registry component — the boundary branch
+  // below renders them; the rest dispatch to their registered renderer.
+  const CANVAS_LAYOUTS = new Set(['graph', 'flow', 'timeline']);
+  let activeLayout = $state('graph');
+
+  /** Dismiss the generated layout — return to the default graph canvas.
+   *  The active view query is kept (it stays visible via the canvas's own
+   *  annotation UI and can be cleared from the manual query editor). */
+  function clearGeneratedLayout() {
+    activeLayout = 'graph';
+    // A flow template names the view (activeSavedViewName) — dismissing the
+    // layout clears that name so the selector label returns to the base view.
+    activeSavedViewName = null;
+  }
+
+  // ── Predefined flow templates (system-explorer.md §5 Flow Traces) ────
+  // "Predefined flows for common operations (agent spawn, MR merge, spec
+  // approval)" — curated entry points in the View selector's "Trace flows"
+  // section. Each template's expected call path is matched against the
+  // current graph; the flow layout then renders that path, animated with
+  // the captured gate trace of a matching MR when one exists (particles
+  // only appear for spans that actually traverse the path — never
+  // fabricated). Custom flows remain the canvas's trace-from-node action.
+
+  /** Find a gate trace backing a flow template: reuse the trace already
+   *  loaded for this repo, else the most recent traced MR in the workspace
+   *  matching the template (pickTraceMr), else the MR trace fetch fails —
+   *  all lookups are best-effort, a template without trace data renders as
+   *  a static structural path. */
+  async function resolveFlowTemplateTrace(template) {
+    if (traceData?.spans?.length > 0) return traceData;
+    const wsId = scope?.workspaceId;
+    if (!wsId) return null;
+    const mrs = await api
+      .workspaceMergeRequests(wsId, { has_trace: true, limit: 10 })
+      .catch(() => null);
+    const mr = pickTraceMr(template, Array.isArray(mrs) ? mrs : []);
+    if (!mr) return null;
+    const trace = await api.mrTrace(mr.id).catch(() => null);
+    return trace?.spans?.length > 0 ? trace : null;
+  }
+
+  /** Apply a predefined flow template: match its expected call path against
+   *  the loaded graph, scope the flow layout to the match, and animate the
+   *  backing gate trace when one exists. */
+  async function applyFlowTemplate(template) {
+    viewSelectOpen = false;
+    const match = matchFlowTemplate(template, effectiveGraph?.nodes ?? []);
+    if (match.matchedNodeIds.length === 0) {
+      showToast(`No nodes in this graph match the ${template.label} — select a repo whose graph covers it.`, { type: 'warning' });
+      return;
+    }
+    explorerViewMode = 'boundary';
+    activeSavedViewName = template.label;
+    activeViewSpec = null;
+    activeLayout = 'flow';
+    activeViewQuery = flowTemplateQuery(template, match);
+    pushInteraction({ action: 'query', detail: `flow-template:${template.id}` });
+    const trace = await resolveFlowTemplateTrace(template);
+    if (trace) {
+      traceData = trace;
+      explorerLens = 'evaluative';
+      tracePlaybackRequest = { nonce: ++tracePlaybackNonce };
+    } else {
+      // No captured trace for this flow — the expected path still renders
+      // (structural lens), it just does not animate.
+      explorerLens = 'structural';
+      showToast(`No captured gate trace for the ${template.label} — showing the expected call path without animation.`, { type: 'info' });
+    }
+  }
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
   // canvasState.recent_interactions.  ExplorerView adds higher-level
   // interactions (search, load_view) so the LLM has full context.
-  function pushInteraction(label) {
+  function pushInteraction(record) {
     const existing = explorerCanvasState?.recent_interactions ?? [];
-    const updated = [...existing, label].slice(-10);
+    const updated = [...existing, record].slice(-10);
     explorerCanvasState = { ...explorerCanvasState, recent_interactions: updated };
   }
+
+  // ── Uniform ViewEvent handling (ui-layout.md §10 Interaction Events) ──────────
+  // The Explorer shell handles all ViewEvents uniformly:
+  //   click        → open the detail panel
+  //   dblclick     → drill down (scope into the entity's repo)
+  //   hover        → show a tooltip
+  //   context-menu → open an actions menu
+  // Events marked `handled` were already serviced by an integrated emitter
+  // (ExplorerCanvas routes its own click/drill/tooltip/menu interactions
+  // through its direct callbacks) — they are observed here for interaction
+  // tracking only, never re-performed.
+  let viewTooltip = $state(null); // { x, y, name, type }
+  let viewMenu = $state(null);    // { x, y, entity, data }
+
+  /** Open the node detail panel (shared by canvas callback + ViewEvents). */
+  function openNodeDetail(n) {
+    detailNode = n;
+    highlightedSpanId = null;
+    if (n?._action === 'view_spec' && n.spec_path) {
+      openSpecEditor(n.spec_path);
+    } else if (n?._action === 'create_spec') {
+      // Open spec editor with a template for the uncovered node
+      const suggestedPath = n.suggested_spec_path || `specs/system/${(n.name ?? 'new').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
+      specEditorOpen = true;
+      specEditorPath = suggestedPath;
+      const template = `# ${n.name ?? 'New Spec'}\n\nStatus: Draft\n\n## Purpose\n\nGoverns the \`${n.qualified_name ?? n.name}\` ${n.node_type ?? 'component'}.\n\n## Requirements\n\n- TODO: Define requirements\n`;
+      specEditorContent = template;
+      specEditorOriginal = '';
+      specEditorError = '';
+    }
+    // 'view_code' and plain nodes render in the detail panel (location shown
+    // by NodeDetailPanel) — setting detailNode above covers them.
+  }
+
+  function handleViewEvent(ev) {
+    if (!ev) return;
+    pushInteraction(`viewevent:${ev.type}:${ev.entity_type}:${ev.entity_id}`);
+    if (ev.handled) return;
+    const data = ev.data;
+    switch (ev.type) {
+      case 'click':
+        viewMenu = null;
+        if (data) openNodeDetail(data);
+        break;
+      case 'dblclick':
+        // Drill-down: scope the Explorer into the entity's repo when it
+        // lives elsewhere; otherwise open its detail panel.
+        if (data?.repo_id && data.repo_id !== selectedRepoId) {
+          selectRepo({ id: data.repo_id });
+        } else if (data) {
+          openNodeDetail(data);
+        }
+        break;
+      case 'hover':
+        viewTooltip = data
+          ? {
+              x: ev.position?.x ?? 0,
+              y: ev.position?.y ?? 0,
+              name: data.name ?? data.qualified_name ?? data.id,
+              type: data.node_type ?? ev.entity_type,
+            }
+          : null;
+        break;
+      case 'context-menu':
+        viewTooltip = null;
+        viewMenu = {
+          x: ev.position?.x ?? 0,
+          y: ev.position?.y ?? 0,
+          entity: ev.entity_type,
+          data,
+        };
+        break;
+    }
+  }
+
+  $effect(() => onViewEvent(handleViewEvent));
+
+  function onWindowClick(e) {
+    // Clicking anywhere dismisses the hover tooltip; clicking outside the
+    // ViewEvent actions menu dismisses it.
+    if (viewTooltip) viewTooltip = null;
+    if (viewMenu && !e.target.closest?.('.viewevent-menu')) viewMenu = null;
+    // Clicking outside the view selector dropdown dismisses it.
+    if (viewSelectOpen && !e.target.closest?.('.explorer-view-select')) viewSelectOpen = false;
+  }
+
+  function viewMenuAction(action) {
+    const data = viewMenu?.data;
+    viewMenu = null;
+    if (!data) return;
+    if (action === 'details') {
+      openNodeDetail(data);
+    } else if (action === 'code' && data.file_path) {
+      openNodeDetail({ ...data, _action: 'view_code' });
+    } else if (action === 'spec' && data.spec_path) {
+      openNodeDetail({ ...data, _action: 'view_spec' });
+    } else if (action === 'copy_id') {
+      navigator.clipboard?.writeText?.(String(data.id ?? ''));
+    }
+  }
+
+  /** Cards (Architecture Insights entries) emit ViewEvents too — they are
+   *  interactive elements under ui-layout.md §10 ("nodes, edges, rows, cards"). */
+  function emitCardViewEvent(domEvent, node) {
+    dispatchViewEvent(
+      domEvent.currentTarget,
+      viewEventFromDom(domEvent, 'node', node?.id ?? node?.qualified_name ?? node?.name ?? 'unknown', node)
+    );
+  }
+
+  function cardClick(domEvent, node) {
+    emitCardViewEvent(domEvent, node);
+  }
+
+  function cardKeydown(e, node) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      emitCardViewEvent(e, node);
+    }
+  }
+  // §10 Interaction Context: the active view query is part of the canvas
+  // state sent with each message, so the LLM knows what view is currently
+  // applied ("what about this one?" can build on the active query).
+  $effect(() => {
+    const q = activeViewQuery;
+    const cs = untrack(() => explorerCanvasState);
+    explorerCanvasState = { ...cs, active_query: q };
+  });
 
   // ── Dynamic welcome suggestions (vision.md Principle 6: challenge ceremony) ──
   // Compute context-aware suggestions from the graph so the user doesn't need
@@ -175,6 +772,14 @@
 
   // Evaluative lens: trace data from most recent MR
   let traceData = $state(null);
+  // HSI §3 Layer 1: MR gate evaluation records for the current repo —
+  // [{ mrId, spec_ref, gates }] — drive the Evaluative-lens green/red edges.
+  let gateRecords = $state([]);
+  // HSI §3 Layer 1: recent ArchitecturalDelta records (last hour only) for
+  // the fading highlight rings. Loaded on canvas load so the rings do not
+  // depend on the collapsed-by-default Architecture-Insights panel; the
+  // insights panel's full timeline (a superset) takes precedence once live.
+  let livenessTimeline = $state(null);
   let predictAffectedSpecs = $state([]);
   let predictEstimatedCost = $state(null);
   let predictConfidence = $state(null);
@@ -340,6 +945,35 @@
     };
   });
 
+  /** Map a structural-prediction response (POST /repos/:id/graph/predict
+   *  or the conversational ask endpoint's prediction payload) to ghost
+   *  overlays. Shared by the spec-edit prediction flow and the
+   *  conversational "what would happen if…" flow so both render the same
+   *  visual language (§3 ghost overlays). */
+  function predictionOverlays(result) {
+    const overlays = [];
+    function addOverlay(item, defaultAction) {
+      const name = item?.name ?? item?.qualified_name;
+      if (!name || typeof name !== 'string') return; // Skip malformed items
+      const action = item?.action ?? defaultAction;
+      if (!['add', 'change', 'remove'].includes(action)) return; // Skip unknown actions
+      overlays.push({
+        id: item.id ?? `ghost-${action}-${overlays.length}`,
+        name,
+        type: item.node_type ?? item.type ?? 'unknown',
+        action,
+        confidence: item.confidence,
+        reason: item.reason,
+      });
+    }
+    for (const item of (result?.added ?? [])) addOverlay(item, 'add');
+    for (const item of (result?.changed ?? [])) addOverlay(item, 'change');
+    for (const item of (result?.removed ?? [])) addOverlay(item, 'remove');
+    // Also check for predictions array (alternative response format)
+    for (const item of (result?.predictions ?? [])) addOverlay(item, 'change');
+    return overlays;
+  }
+
   async function runPrediction() {
     if (!selectedRepoId || !specEditorPath || predictLoading) return;
     predictLoading = true;
@@ -359,29 +993,7 @@
       predictEstimatedCost = result?.estimated_agent_cost ?? result?.cost ?? null;
       predictConfidence = result?.confidence ?? null;
 
-      // Build ghost overlays with per-node confidence and reason.
-      // Validate each item has at minimum a name and action.
-      const overlays = [];
-      function addOverlay(item, defaultAction) {
-        const name = item?.name ?? item?.qualified_name;
-        if (!name || typeof name !== 'string') return; // Skip malformed items
-        const action = item?.action ?? defaultAction;
-        if (!['add', 'change', 'remove'].includes(action)) return; // Skip unknown actions
-        overlays.push({
-          id: item.id ?? `ghost-${action}-${overlays.length}`,
-          name,
-          type: item.node_type ?? item.type ?? 'unknown',
-          action,
-          confidence: item.confidence,
-          reason: item.reason,
-        });
-      }
-      for (const item of (result?.added ?? [])) addOverlay(item, 'add');
-      for (const item of (result?.changed ?? [])) addOverlay(item, 'change');
-      for (const item of (result?.removed ?? [])) addOverlay(item, 'remove');
-      // Also check for predictions array (alternative response format)
-      for (const item of (result?.predictions ?? [])) addOverlay(item, 'change');
-      ghostOverlays = overlays;
+      ghostOverlays = predictionOverlays(result);
     } catch (e) {
       predictError = e.message ?? 'Prediction failed';
     } finally {
@@ -687,6 +1299,8 @@
         return;
       }
       activeViewQuery = parsed;
+      // §10: user-composed JSON queries are query interactions
+      pushInteraction({ action: 'query', detail: parsed.scope.type });
     } catch (e) {
       queryEditorError = `Invalid JSON: ${e.message}`;
     }
@@ -717,6 +1331,7 @@
       loadRepos();
     }
     if (scopeType === 'workspace') {
+      repoDetail = null;
       loadWsRepos();
     }
   });
@@ -727,6 +1342,21 @@
       selectedRepoId = scope.repoId;
       clearConceptSearch();
       loadGraph(scope.repoId);
+    }
+  });
+
+  // Read initial Architecture sub-tab from URL params (set by goToRepoTab
+  // context — same convention as the Code tab's subTab param).
+  // The param is intentionally NOT deleted after reading: App's
+  // setRepoArchSubTab keeps the ?subTab= URL param mirroring the rendered
+  // sub-tab (docs/ui.md "deep-linkable via ?subTab=briefing"), so
+  // reload/copy of the current URL must keep opening the same sub-tab.
+  $effect(() => {
+    if (scopeType !== 'repo') return;
+    const params = new URLSearchParams(window.location.search);
+    const initialSubTab = params.get('subTab');
+    if (initialSubTab === 'briefing' || initialSubTab === 'graph') {
+      setArchSubTab(initialSubTab);
     }
   });
 
@@ -743,6 +1373,271 @@
     } finally {
       wsReposLoading = false;
     }
+    loadWsDepGraph();
+    loadWsBoundaryStats();
+  }
+
+  /** Load cross-repo dependency edges for the workspace graph canvas
+   *  (ui-layout.md §5 Workspace Scope — Realized Architecture). */
+  async function loadWsDepGraph() {
+    if (!scope.workspaceId) {
+      wsDepLoading = false;
+      return;
+    }
+    wsDepLoading = true;
+    wsDepError = null;
+    try {
+      const data = await api.workspaceDependencyGraph(scope.workspaceId);
+      wsDepEdges = data?.edges ?? [];
+      wsDepExternal = data?.nodes ?? [];
+    } catch (e) {
+      // The dependency graph is additive context — repos-as-nodes still render
+      // from wsRepos; surface the failure without blocking the canvas.
+      wsDepError = e.message ?? 'Failed to load cross-repo dependencies';
+      wsDepEdges = [];
+      wsDepExternal = [];
+    } finally {
+      wsDepLoading = false;
+    }
+  }
+
+  // Workspace graph nodes: every repo in the workspace (C4 containers), plus
+  // external repos referenced by dependency edges so cross-workspace edges
+  // have visible endpoints. Isolated repos (no edges) still appear as nodes.
+  // Each node carries its HSI §3 Level 1 type/endpoint counts (when loaded)
+  // for the counts sub-label inside the node box.
+  let wsGraphNodes = $derived.by(() => {
+    const nodes = wsRepos.map((r) => ({
+      repo_id: r.id,
+      name: r.name,
+      repo: r,
+      types: wsRepoStats[r.id]?.types ?? null,
+      endpoints: wsRepoStats[r.id]?.endpoints ?? null,
+    }));
+    const seen = new Set(wsRepos.map((r) => r.id));
+    for (const n of wsDepExternal) {
+      if (n?.repo_id && !seen.has(n.repo_id)) {
+        nodes.push({ repo_id: n.repo_id, name: n.name ?? n.repo_id, external: true, types: null, endpoints: null });
+        seen.add(n.repo_id);
+      }
+    }
+    return nodes;
+  });
+
+  let wsGraphEdges = $derived(wsDepEdges);
+
+  /** Single-click a repo node → detail panel with repo metadata (§5). */
+  function showRepoDetail(node) {
+    const repo = wsRepos.find((r) => r.id === node.repo_id);
+    repoDetail = repo
+      ? { ...repo, external: false }
+      : { id: node.repo_id, name: node.name, external: true };
+  }
+
+  /** Double-click a repo node → drill to crate level: scope changes to repo
+   *  (URL update + breadcrumb change in the host shell). Falls back to the
+   *  in-place crate-level graph when no host navigation is available. */
+  function enterRepo(nodeOrRepo) {
+    const repo = nodeOrRepo.repo ?? wsRepos.find((r) => r.id === nodeOrRepo.repo_id) ?? nodeOrRepo;
+    if (!repo?.id && !repo?.repo_id) return;
+    repoDetail = null;
+    if (onEnterRepo) {
+      onEnterRepo(repo.id ? repo : { id: repo.repo_id, name: repo.name });
+      return;
+    }
+    if (goToRepoCtx) {
+      goToRepoCtx(repo.id ? repo : { id: repo.repo_id, name: repo.name }, 'architecture');
+      return;
+    }
+    // No host shell — drill in place (canvas switches to the repo's crate-level graph)
+    selectRepo(repo.id ? repo : { id: repo.repo_id, name: repo.name, description: repo.description });
+  }
+
+  /** Empty-state action: go where repos can be created (workspace home). */
+  function goToCreateRepo() {
+    goToWorkspaceHomeCtx?.();
+  }
+
+  /** HSI §3 Boundary View Level 1 — enrich the workspace graph nodes with
+   *  type/endpoint counts (from the aggregated workspace knowledge graph).
+   *  Best-effort: failures leave the nodes without counts rather than
+   *  breaking the canvas (the counts render as a muted sub-label on each
+   *  repo node, per the HSI §3 Level 1 node boxes). */
+  async function loadWsBoundaryStats() {
+    if (!scope.workspaceId) return;
+    try {
+      const g = await api.workspaceGraph(scope.workspaceId);
+      const stats = {};
+      for (const n of g?.nodes ?? []) {
+        const rid = n.repo_id;
+        if (!rid) continue;
+        if (!stats[rid]) stats[rid] = { types: 0, endpoints: 0 };
+        const t = String(n.node_type ?? '').toLowerCase();
+        if (['type', 'interface', 'trait', 'class', 'enum'].includes(t)) stats[rid].types += 1;
+        if (t === 'endpoint') stats[rid].endpoints += 1;
+      }
+      wsRepoStats = stats;
+    } catch {
+      wsRepoStats = {};
+    }
+  }
+
+  /** Switch the Explorer view (HSI §3 view selector). Resetting to Boundary
+   *  restores the canvas drill-down exactly as it was (canvas state is kept
+   *  in explorerCanvasState, so nothing is lost while other views are shown). */
+  function setExplorerView(mode) {
+    explorerViewMode = mode;
+    activeSavedViewName = null;
+    pushInteraction({ action: 'view_switch', detail: mode });
+  }
+
+  // ── View selector dropdown (ui-navigation.md §3, task-178) ───────────
+  // "The view selector is a dropdown listing built-in views, then user's
+  // saved views, then a 'Generate view...' option."
+  let viewSelectOpen = $state(false);
+  let activeSavedViewName = $state(null);
+
+  // Saved views via REST (task-178 repair): the dropdown must list the
+  // workspace's saved views even when the explorer chat socket fails or
+  // the chat column is collapsed before its `views` message arrives — the
+  // socket is one delivery path, not the only one. Fetched when the
+  // dropdown opens; best-effort (a failed fetch keeps the current list).
+  // Both scopes are merged by id, mirroring the socket's ListViews: the
+  // repo-scoped records carry the stored ViewQuery directly, the
+  // workspace-scoped records carry a stored document in EITHER grammar
+  // (ViewSpec — generated views; ViewQuery — ad-hoc concept groupings),
+  // translated via viewDocumentToQuery.
+  let savedViewsRefreshing = false;
+  async function refreshSavedViews() {
+    if (savedViewsRefreshing) return;
+    savedViewsRefreshing = true;
+    try {
+      const wsId = scope?.workspaceId;
+      const repoId = selectedRepoId;
+      const [wsViews, repoViews] = await Promise.all([
+        wsId ? api.explorerViews(wsId).catch(() => null) : null,
+        repoId ? api.savedViews(repoId).catch(() => null) : null,
+      ]);
+      if (!Array.isArray(wsViews) && !Array.isArray(repoViews)) return;
+      const byId = new Map();
+      for (const r of Array.isArray(repoViews) ? repoViews : []) {
+        if (r?.id && !byId.has(r.id)) byId.set(r.id, { ...r, query: r.query ?? null });
+      }
+      for (const r of Array.isArray(wsViews) ? wsViews : []) {
+        if (!r?.id || byId.has(r.id)) continue;
+        byId.set(r.id, {
+          ...r,
+          is_system: r.is_system ?? r.is_builtin ?? false,
+          query: r.query ?? (r.spec ? viewDocumentToQuery(r.spec) : null),
+        });
+      }
+      explorerSavedViews = [...byId.values()];
+    } finally {
+      savedViewsRefreshing = false;
+    }
+  }
+
+  /** Load a saved view: apply its query to the canvas (works with or
+   *  without the chat WebSocket — the query is part of the view record). */
+  function selectSavedView(view) {
+    viewSelectOpen = false;
+    explorerViewMode = 'boundary';
+    activeSavedViewName = view?.name ?? null;
+    if (view?.query && typeof view.query === 'object') {
+      activeViewQuery = JSON.parse(JSON.stringify(view.query));
+      pushInteraction({ action: 'query', preset: view.name ?? null });
+    }
+  }
+
+  /** "Generate view..." — focus the Ask input (natural-language view
+   *  generation via POST /workspaces/:id/explorer-views/generate). */
+  function openGenerateView() {
+    viewSelectOpen = false;
+    chatCollapsed = false;
+    chatMode = 'generate';
+  }
+
+  /** "Ask the graph…" — open the conversational exploration panel
+   *  (system-explorer.md §8) from the control bar's view selector. */
+  function openConversationalExplorer() {
+    viewSelectOpen = false;
+    chatCollapsed = false;
+    chatMode = 'explore';
+  }
+
+  let activeViewLabel = $derived(
+    activeSavedViewName
+    ?? EXPLORER_VIEWS.find((v) => v.id === explorerViewMode)?.label
+    ?? 'Boundary'
+  );
+
+  // ── View spec editor (ui-navigation.md §3, task-178) ──────────────
+  /** The ViewSpec to prefill the JSON editor with: the active generated
+   *  spec when one is applied, else a spec synthesized from the current
+   *  view state (data layer derived from the active view query's scope). */
+  function currentViewSpecForEditor() {
+    if (activeViewSpec) return activeViewSpec;
+    const q = activeViewQuery;
+    const spec = {
+      name: activeViewLabel,
+      layout: activeLayout ?? 'graph',
+      data: {},
+      encoding: { color: 'spec_coverage', size: 'complexity' },
+      highlight: {},
+    };
+    if (q?.scope?.type === 'concept' && Array.isArray(q.scope.seed_nodes) && q.scope.seed_nodes.length > 0) {
+      spec.data.concept = q.scope.seed_nodes[0];
+      spec.data.depth = q.scope.expand_depth ?? 2;
+    } else if (q?.scope?.type === 'filter' && Array.isArray(q.scope.node_types) && q.scope.node_types.length > 0) {
+      spec.data.node_types = [...q.scope.node_types];
+    }
+    return spec;
+  }
+
+  function toggleViewSpecEditor() {
+    viewSpecEditorOpen = !viewSpecEditorOpen;
+    if (viewSpecEditorOpen && !viewSpecText.trim()) {
+      viewSpecText = JSON.stringify(currentViewSpecForEditor(), null, 2);
+      viewSpecError = '';
+    }
+  }
+
+  /** Apply the edited ViewSpec: validate JSON, translate to a ViewQuery
+   *  (viewSpecToViewQuery), and re-render the canvas. Errors are shown
+   *  inline in the editor panel. */
+  function applyViewSpecEditor() {
+    const text = viewSpecText.trim();
+    if (!text) {
+      viewSpecError = 'View spec cannot be empty';
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      viewSpecError = `Invalid JSON: ${e.message}`;
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      viewSpecError = 'View spec must be a JSON object';
+      return;
+    }
+    const query = viewSpecToViewQuery(parsed);
+    if (!query) {
+      viewSpecError = 'View spec must be an object (layers: data, layout, encoding, highlight)';
+      return;
+    }
+    viewSpecError = '';
+    activeViewSpec = parsed;
+    applyGeneratedViewSpec(parsed);
+  }
+
+  /** Navigate from another view (Change / Spec Realization) to a node's
+   *  implementation details in the Boundary View. */
+  function navigateToBoundaryNode(node) {
+    explorerViewMode = 'boundary';
+    explorerCanvasState = { ...explorerCanvasState, selectedNode: node };
+    detailNode = node;
   }
 
   /** Read the drilled repo name from the current URL (?repo=name), or null.
@@ -758,6 +1653,34 @@
       return null;
     }
   }
+
+  /** Read the lens from the current URL (?lens=evaluative). Called once at
+   *  component init (from the explorerLens $state initializer) so a lens
+   * deep link restores on reload/refresh. Structural is the default;
+   *  observable is future work and normalizes back to structural. */
+  function initialLensFromUrl() {
+    try {
+      return lensFromUrl(window.location.href);
+    } catch {
+      return 'structural';
+    }
+  }
+
+  // Lens selection persists in the URL query param (?lens=evaluative) so
+  // an overlaid view is deep-linkable. replaceState (no history entry):
+  // switching lenses is a view concern, not a navigation — browser Back must
+  // not step through lens toggles. The structural default drops the param
+  // to keep URLs clean. Other params (e.g. ?repo=) and the #drill= hash are
+  // preserved.
+  $effect(() => {
+    const lensValue = explorerLens;
+    try {
+      const url = lensToUrl(lensValue, window.location.href);
+      if (url !== window.location.href) {
+        history.replaceState(null, '', url);
+      }
+    } catch { /* URL unavailable (SSR) — skip persistence */ }
+  });
 
   function selectRepo(repo) {
     // In workspace-scope mode, selecting a repo loads its graph in this view.
@@ -845,14 +1768,19 @@
   }
 
   async function loadGraph(repoId) {
-    if (!repoId) { graph = null; traceData = null; return; }
+    if (!repoId) { graph = null; traceData = null; gateRecords = []; livenessTimeline = null; return; }
     loading = true;
     graph = null;
     graphError = null;
     selectedNode = null;
     traceData = null;
+    gateStatusBySpec = {};
+    specApprovals = [];
+    gateRecords = [];
+    livenessTimeline = null;
     graphWarnings = [];
     graphWarningsDismissed = false;
+    perfWarningDismissed = false;
     try {
       graph = await api.repoGraph(repoId);
       // Surface data quality warnings from the API (e.g., missing LSP toolchains)
@@ -863,6 +1791,15 @@
       restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
       loadTraceData(repoId);
+      // Load evaluative lens overlays: gate outcomes + spec approvals
+      // (best-effort, non-blocking)
+      loadEvaluativeData(repoId);
+      // Load MR gate records for evaluative-lens edge colors (HSI §3 Layer 1)
+      loadGateData(repoId);
+      // Load recent ArchitecturalDelta records for the fading change rings
+      // (HSI §3 Layer 1) — the canvas-load query the insights panel's lazy
+      // load must not gate.
+      loadLivenessTimeline(repoId);
     } catch (e) {
       showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
@@ -908,7 +1845,7 @@
   async function loadTraceData(repoId) {
     try {
       // Find the most recent MR for this repo that has trace data
-      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 5 });
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 5 });
       const mrList = mrs?.merge_requests ?? mrs ?? [];
       for (const mr of mrList) {
         try {
@@ -920,6 +1857,117 @@
         } catch { /* no trace for this MR, try next */ }
       }
     } catch { /* trace loading is best-effort */ }
+  }
+
+  /** Load Evaluative lens data (HSI §3): gate outcomes and spec approvals.
+   *
+   *  Gate status: gate results are recorded per MR, and each MR carries a
+   *  spec_ref ("path@sha"), so the outcome is joined to graph nodes via the
+   *  node's governing spec paths. For each spec path, the most recent MR
+   *  with concluded gate results decides: pass = every gate passed,
+   *  fail = at least one failed.
+   *
+   *  Spec approvals: the approval ledger (GET /api/v1/specs/approvals)
+   *  provides ✓ approved / ⏳ pending / ✗ rejected status per spec path.
+   *
+   *  Both loads are best-effort and non-blocking — the structural base
+   *  renders fine without them. */
+  async function loadEvaluativeData(repoId) {
+    // Spec approval ledger — one fetch, filtered client-side by the paths
+    // actually present on graph nodes.
+    try {
+      api.specsApprovals()
+        .then((list) => { specApprovals = Array.isArray(list) ? list : []; })
+        .catch(() => { /* ledger unavailable — approval icons omitted */ });
+    } catch { /* ledger endpoint unavailable — approval icons omitted */ }
+
+    // Gate outcomes per spec path from recent MRs.
+    try {
+      // GET /api/v1/merge-requests scopes by `repository_id` and caps via
+      // `per_page` (newest first — ListMrsQuery), so the gate-status window
+      // is requested repo-scoped with a bounded per-MR gate fetch fan-out
+      // (the same ≤10 bound the liveness loaders uphold); a repo_id param
+      // is silently ignored and would attribute other repos' gate outcomes
+      // to this repo's evaluative overlay. A client-side sort keeps the
+      // recency order explicit even if a backend ignores the cap.
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      // Most recent first: the latest MR with concluded gates decides a
+      // spec path's status; older MRs for the same path are ignored.
+      const sorted = [...mrList].sort((a, b) => {
+        const at = Number(a?.created_at ?? 0) || 0;
+        const bt = Number(b?.created_at ?? 0) || 0;
+        return bt - at;
+      }).slice(0, 10);
+      const byPath = {};
+      for (const mr of sorted) {
+        const specRef = mr?.spec_ref;
+        if (!specRef) continue;
+        const path = specRef.split('@')[0];
+        if (!path || byPath[path]) continue;
+        try {
+          const results = await api.mrGates(mr.id);
+          // Keep only the most recent result per gate (re-runs append new
+          // records; the latest run decides the outcome).
+          const latestByGate = new Map();
+          for (const r of results ?? []) {
+            if (r?.status !== 'passed' && r?.status !== 'failed') continue;
+            const gid = r.gate_id ?? r.id;
+            const prev = latestByGate.get(gid);
+            if (!prev || (r.started_at ?? 0) >= (prev.started_at ?? 0)) latestByGate.set(gid, r);
+          }
+          const concluded = [...latestByGate.values()];
+          if (concluded.length === 0) continue;
+          byPath[path] = concluded.some(r => r.status === 'failed') ? 'fail' : 'pass';
+        } catch { /* no gate results for this MR — try older MRs for the path */ }
+      }
+      gateStatusBySpec = byPath;
+    } catch {
+      gateStatusBySpec = {};
+    }
+  }
+
+  /**
+   * HSI §3 Layer 1: load MR gate evaluation records for the current repo.
+   * Each MR's spec_ref links its gate results to the graph nodes the spec
+   * governs; the Evaluative lens colors edges green (all passed) / red (any
+   * failed). Best-effort and non-blocking, like trace loading.
+   */
+  async function loadGateData(repoId) {
+    try {
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      const records = [];
+      for (const mr of mrList) {
+        if (!mr?.spec_ref) continue;
+        try {
+          const gates = await api.mrGates(mr.id);
+          if (Array.isArray(gates) && gates.length > 0) {
+            records.push({ mrId: mr.id, spec_ref: mr.spec_ref, gates });
+          }
+        } catch { /* no gates for this MR, skip */ }
+      }
+      gateRecords = records;
+    } catch { /* gate loading is best-effort */ }
+  }
+
+  /**
+   * HSI §3 Layer 1: load the repo's recent ArchitecturalDelta records on
+   * canvas load so the fading highlight rings have a data source in the
+   * default view (the Architecture-Insights panel that owns the full
+   * timeline is collapsed by default). The query is bounded to the recent-
+   * change window (since = now − 1h, no until) so the payload stays small;
+   * computeRecentChanges re-applies the same window, and the insights
+   * panel's full timeline supersedes this slice once loaded. Best-effort
+   * and non-blocking, like trace/gate loading.
+   */
+  async function loadLivenessTimeline(repoId) {
+    try {
+      const since = Math.floor((Date.now() - RECENT_CHANGE_WINDOW_MS) / 1000);
+      const timeline = await api.repoGraphTimeline(repoId, since);
+      if (selectedRepoId !== repoId) return; // stale — user switched repos
+      livenessTimeline = Array.isArray(timeline) ? timeline : [];
+    } catch { /* recent-change rings are best-effort */ }
   }
 
   function onRepoChange(e) {
@@ -985,9 +2033,15 @@
 
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
+      if (viewSelectOpen) { viewSelectOpen = false; return; }
+      if (conceptDialog) { conceptDialog = null; return; }
+      if (viewMenu) { viewMenu = null; return; }
+      if (viewTooltip) { viewTooltip = null; return; }
       if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
+      if (viewSpecEditorOpen) { viewSpecEditorOpen = false; return; }
       if (queryEditorOpen) { queryEditorOpen = false; return; }
       if (detailNode) { detailNode = null; return; }
+      if (repoDetail) { repoDetail = null; return; }
       if (activeViewQuery) { activeViewQuery = null; return; }
       return;
     }
@@ -1015,6 +2069,19 @@
   onDestroy(() => {
     clearTimeout(debounceTimer);
     ghostOverlays = [];
+  });
+
+  // ── Large graph performance warning (explorer-implementation.md §28 Phase 4) ──
+  // Graphs above 10k nodes are the spec's "large graph" threshold: rendering
+  // stays correct (viewport culling + zoom-level LOD) but interaction can
+  // degrade, so the user is told why instead of guessing.
+  const LARGE_GRAPH_THRESHOLD = 10000;
+  let perfWarningDismissed = $state(false);
+  let largeGraphWarning = $derived.by(() => {
+    if (perfWarningDismissed) return null;
+    const count = effectiveGraph?.nodes?.length ?? 0;
+    if (count <= LARGE_GRAPH_THRESHOLD) return null;
+    return $t('explorer_view.large_graph_warning', { values: { count: count.toLocaleString() } });
   });
 
   // ── Toolchain warning: detect missing call edges ──────────────────
@@ -1054,10 +2121,68 @@
   let timelineScrubActive = $state(false);
   let timelineScrubIndex = $state(-1); // index into graphTimeline array, -1 = current
 
-  // When timeline scrub is active, compute filtered nodes/edges to show state at that point
+  // The timeline array the scrubber scrubs over: the full insights-panel
+  // timeline once loaded, else the liveness slice loaded at repo selection.
+  let timelineArray = $derived(Array.isArray(graphTimeline) ? graphTimeline : (Array.isArray(livenessTimeline) ? livenessTimeline : []));
+  // Scrub position as unix epoch seconds (null = present / unknown).
+  let timelineScrubTimestamp = $derived(resolveScrubTimestamp(timelineArray, timelineScrubIndex));
+
+  // Server point-in-time graph (GET /repos/:id/graph?at=) for the current
+  // scrub position: { at, graph }. Set by the debounced fetch effect below;
+  // null while pending, on failure, or when time travel is off — the
+  // client-side first_seen_at filter below is the instant fallback.
+  let timelineHistoricalGraph = $state(null);
+  let timelineHistoryFetcher = null;   // debounced ?at= fetcher (per repo)
+  let timelineHistoryFetcherFor = '';  // repoId the current fetcher is bound to
+
+  $effect(() => {
+    // The "Now" position (last index) is the present — no historical fetch.
+    if (
+      !timelineScrubActive ||
+      timelineScrubTimestamp == null ||
+      !selectedRepoId ||
+      timelineScrubIndex >= timelineArray.length - 1
+    ) {
+      timelineHistoricalGraph = null;
+      return;
+    }
+    const repoId = selectedRepoId;
+    const at = timelineScrubTimestamp;
+    if (timelineHistoryFetcherFor !== repoId) {
+      timelineHistoryFetcher?.cancel();
+      timelineHistoryFetcher = createTimelineHistoryFetcher((t) => api.repoGraphAt(repoId, t));
+      timelineHistoryFetcherFor = repoId;
+    }
+    const fetcher = timelineHistoryFetcher;
+    fetcher
+      .request(at)
+      .then((g) => {
+        // null = superseded by a newer position or cancelled — keep fallback.
+        // The position check keeps a late out-of-order response for an
+        // older position from clobbering the newer position's pinned
+        // graph (the fetcher already guarantees `g` is the graph for `at`).
+        if (g?.nodes && selectedRepoId === repoId && timelineScrubActive && at === timelineScrubTimestamp) {
+          timelineHistoricalGraph = { at, graph: g };
+        }
+      })
+      .catch(() => { /* fetch failed — keep the client-side filter */ });
+  });
+
+  // When timeline scrub is active, compute filtered nodes/edges to show state at that point.
+  // The server's ?at= reconstruction (which also resurrects nodes soft-deleted after the
+  // scrub time — invisible to the current graph) replaces the client-side filter once the
+  // debounced fetch lands for this exact position.
   let timelineFilteredGraph = $derived.by(() => {
-    if (!timelineScrubActive || timelineScrubIndex < 0 || !graphTimeline?.length || !graph?.nodes?.length) return null;
-    const delta = graphTimeline[timelineScrubIndex];
+    // The "Now" position (last index) shows the current graph — no ghosts.
+    if (!timelineScrubActive || timelineScrubIndex < 0 || timelineScrubIndex >= timelineArray.length - 1 || !timelineArray.length || !graph?.nodes?.length) return null;
+    if (
+      timelineHistoricalGraph &&
+      timelineHistoricalGraph.at === timelineScrubTimestamp &&
+      timelineHistoricalGraph.graph?.nodes
+    ) {
+      return timelineHistoricalGraph.graph;
+    }
+    const delta = timelineArray[timelineScrubIndex];
     if (!delta?.timestamp) return null;
     const cutoff = typeof delta.timestamp === 'number' ? delta.timestamp : Math.floor(new Date(delta.timestamp).getTime() / 1000);
     // Filter to nodes that existed at or before the cutoff time
@@ -1079,6 +2204,113 @@
   // The effective graph passed to canvas: either time-filtered or full
   let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
 
+  // ── In-view filter panel → canvas node visibility (task-178) ──────────
+  // filter-categories.js owns the classification; the panel's category
+  // checkboxes reduce to the set of node ids the canvas hides (concept
+  // selection fades instead — see explorerConceptNodeIds below). null when
+  // no category is unchecked (no filtering cost on the draw loop).
+  let explorerHiddenNodeIds = $derived.by(() => {
+    const hiddenCategories = CATEGORY_IDS.filter((id) => !activeFilterCategories[id]);
+    if (hiddenCategories.length === 0) return null;
+    return computeHiddenNodeIds(effectiveGraph.nodes ?? [], {
+      hiddenCategories,
+    });
+  });
+
+  // ── Concept view emphasis set (task-182, system-explorer.md §4) ──────
+  // Union of the manifest concept's projection node ids and the
+  // discovered-concept substring matches. The canvas fades every node
+  // outside this set to background (0.15) and highlights edges within it.
+  // null when no concept is active.
+  let explorerConceptNodeIds = $derived.by(() => {
+    const sets = [];
+    if (activeManifestConcept?.nodeIds && activeManifestConcept.nodeIds.size > 0) {
+      sets.push(activeManifestConcept.nodeIds);
+    }
+    if (activeFilterConcepts.length > 0) {
+      const discovered = computeConceptNodeIds(effectiveGraph.nodes ?? [], activeFilterConcepts);
+      if (discovered.size > 0) sets.push(discovered);
+    }
+    if (sets.length === 0) return null;
+    const union = new Set();
+    for (const s of sets) for (const id of s) union.add(id);
+    return union.size > 0 ? union : null;
+  });
+
+  // Unchecked category ids + selected concepts, BEFORE reduction to node
+  // ids: the canvas classifies tree-group containers (synthetic boundary
+  // boxes) through their own node, so it needs the panel state itself, not
+  // just the hidden leaf-id set.
+  let explorerHiddenCategories = $derived(CATEGORY_IDS.filter((id) => !activeFilterCategories[id]));
+
+  // ── Evaluative lens risk overlay (task-178 / task-181) ───────────
+  // GET /repos/:id/graph/risks — fetched when the Evaluative lens is active
+  // (best-effort, non-blocking; the lens renders fine without it).
+  // riskEntries keeps the full RiskMetricsResponse records (churn_rate,
+  // fan_in, fan_out, complexity, spec_covered) for the Risk Map heat map
+  // and anomaly callouts (system-explorer.md §7); riskByNode reduces them
+  // to the task-178 churn × complexity aggregate.
+  let riskEntries = $state([]);
+  let riskByNode = $state({});
+  let riskLoadedFor = $state('');
+  $effect(() => {
+    if (explorerLens !== 'evaluative' || explorerViewMode !== 'boundary' || !selectedRepoId) return;
+    if (riskLoadedFor === selectedRepoId) return;
+    const currentRepoId = selectedRepoId;
+    riskLoadedFor = currentRepoId;
+    api.repoGraphRisks(currentRepoId)
+      .then((risks) => {
+        if (selectedRepoId !== currentRepoId) return; // stale
+        const entries = [];
+        const m = {};
+        for (const r of Array.isArray(risks) ? risks : []) {
+          if (!r?.node_id) continue;
+          entries.push(r);
+          const churn = Number(r.churn_rate ?? 0) || 0;
+          const complexity = Number(r.complexity ?? 0) || 0;
+          m[r.node_id] = churn * complexity;
+        }
+        riskEntries = entries;
+        riskByNode = m;
+      })
+      .catch(() => {
+        // Risk endpoint unavailable — allow a retry on the next lens toggle.
+        if (selectedRepoId === currentRepoId) riskLoadedFor = '';
+      });
+  });
+
+  // Rendering density policy for the canvas area (ui-layout.md §10):
+  // the shell owns the >1000-node list fallback; the public-only filter
+  // (>500) is applied inside ExplorerCanvas with its own banner.
+  let graphDensity = $derived(applyDensityPolicy(effectiveGraph?.nodes ?? []));
+
+  // ── Generated-view layout dispatch (ui-layout.md §10 Layout Engines) ──
+  /** Renderer component for the active layout (capitalized for Svelte's
+   *  dynamic component syntax; null → unified canvas / shell list). */
+  let LayoutRenderer = $derived.by(() => {
+    if (CANVAS_LAYOUTS.has(activeLayout) || activeLayout === 'list') return null;
+    return getLayout(activeLayout)?.component ?? null;
+  });
+
+  /** The active layout's registry entry (label key, engine selector). */
+  let activeLayoutReg = $derived(getLayout(activeLayout));
+
+  /** Nodes/edges the generated layout renderer receives: the active view
+   *  query's scope applied to the effective graph, so a generated
+   *  hierarchical/layered/side-by-side/diff/list view shows the same node
+   *  set the unified canvas would show for the same spec (null scope or an
+   *  unmatched scope → full graph, mirroring the canvas). */
+  let generatedLayoutGraph = $derived.by(() => {
+    if (CANVAS_LAYOUTS.has(activeLayout)) return null;
+    const allNodes = effectiveGraph?.nodes ?? [];
+    const allEdges = effectiveGraph?.edges ?? [];
+    const scoped = resolveScopeNodes(activeViewQuery?.scope, allNodes, allEdges);
+    const nodes = scoped ?? allNodes;
+    const ids = new Set(nodes.map((n) => n.id));
+    const edges = allEdges.filter((e) => ids.has(edgeSrc(e)) && ids.has(edgeTgt(e)));
+    return { nodes, edges };
+  });
+
   // Compute delta stats between the scrubber position and the current graph (system-explorer.md §6)
   // Uses imported functions from timeline-utils.js for testability.
   let timelineDeltaStats = $derived.by(() => {
@@ -1086,7 +2318,7 @@
     return computeTimelineDeltaStats({
       graph,
       timelineFilteredGraph,
-      timeline: graphTimeline,
+      timeline: timelineArray,
       scrubIndex: timelineScrubIndex,
     });
   });
@@ -1100,7 +2332,7 @@
     return computeTimelineGhostOverlays({
       graph,
       timelineFilteredGraph,
-      timeline: graphTimeline,
+      timeline: timelineArray,
       scrubIndex: timelineScrubIndex,
     });
   });
@@ -1112,6 +2344,33 @@
       : ghostOverlays
   );
 
+  // ── Key moment narrative (system-explorer.md §6) ──────────────────────
+  // Clicking a key moment marker surfaces the delta's grounded narrative
+  // ("what changed and why") in a panel above the canvas.
+  let timelineMomentDetail = $state(null);
+
+  // ── Reconciliation key moments (system-explorer.md §6) ────────────────
+  // Workspace reconciliation_completed messages (persona v3 → v4 events),
+  // lazy-loaded the first time time travel is activated for a workspace
+  // (Vision Principle 2: don't fetch what the user hasn't asked to see).
+  let reconciliationEvents = $state([]);
+  let reconciliationEventsLoadedFor = '';
+  $effect(() => {
+    if (!timelineScrubActive) return;
+    const wsId = scope?.workspaceId;
+    if (!wsId || reconciliationEventsLoadedFor === wsId) return;
+    reconciliationEventsLoadedFor = wsId;
+    api.workspaceMessages(wsId, { kind: 'reconciliation_completed', limit: 100 })
+      .then((msgs) => {
+        if (scope?.workspaceId !== wsId) return; // stale
+        reconciliationEvents = Array.isArray(msgs) ? msgs : [];
+      })
+      .catch(() => {
+        // Endpoint unavailable — allow a retry on the next toggle.
+        if (scope?.workspaceId === wsId) reconciliationEventsLoadedFor = '';
+      });
+  });
+
   // Reset insights on repo change; lazy-load when panel expanded (Vision Principle 2:
   // "Right Context, Not More Context" — don't fetch data the user hasn't asked to see)
   $effect(() => {
@@ -1121,6 +2380,8 @@
     graphTypes = null;
     graphModules = null;
     graphTimeline = null;
+    timelineHistoricalGraph = null;
+    timelineMomentDetail = null;
   });
 
   // Lazy-load insights data only when the panel is expanded
@@ -1150,24 +2411,25 @@
   });
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} onbeforeunload={onBeforeUnload} />
+<svelte:window onkeydown={onWindowKeydown} onbeforeunload={onBeforeUnload} onclick={onWindowClick} />
 
 {#if scopeType === 'tenant'}
   <!-- Tenant scope: workspace cards grid (S4.4a) -->
   <WorkspaceCards {onSelectWorkspace} />
 
 {:else if scopeType === 'workspace' && !showingRepoGraph}
-  <!-- Workspace scope: repo list for graph exploration — S4.4b -->
-  <div class="ws-repo-list" aria-busy={wsReposLoading}>
-    <div class="ws-repo-header">
-      <h1 class="page-title">{$t('explorer_view.workspace_title')}</h1>
-      <p class="ws-repo-desc">{$t('explorer_view.workspace_desc')}</p>
-    </div>
+  <!-- Workspace scope: realized architecture — repos as nodes, cross-repo
+       dependencies as edges (ui-layout.md §5, C4 "Container" level) — S4.4b -->
+  <div class="ws-arch-view" aria-busy={wsReposLoading || wsDepLoading}>
+    {#if !embedded}
+      <div class="ws-repo-header">
+        <h1 class="page-title">{$t('explorer_view.workspace_title')}</h1>
+        <p class="ws-repo-desc">{$t('explorer_view.workspace_desc')}</p>
+      </div>
+    {/if}
     {#if wsReposLoading}
-      <div class="ws-repo-grid">
-        <Skeleton height="80px" />
-        <Skeleton height="80px" />
-        <Skeleton height="80px" />
+      <div class="ws-arch-canvas-loading">
+        <Skeleton lines={6} />
       </div>
     {:else if wsReposError}
       <div class="error-banner" role="alert">
@@ -1175,25 +2437,95 @@
         <button onclick={() => { wsReposError = null; loadWsRepos(); }} class="retry-btn">{$t('common.retry')}</button>
       </div>
     {:else if wsRepos.length === 0}
-      <EmptyState title={$t('explorer_view.no_repos')} description={$t('explorer_view.no_repos_desc')} />
+      <!-- Empty state (§5): zero repos → centered message with a create link -->
+      <div class="ws-arch-empty">
+        <EmptyState
+          title={$t('explorer_view.no_repos')}
+          description={$t('explorer_view.no_repos_desc')}
+        >
+          {#snippet action()}
+            <button class="go-admin-btn" onclick={goToCreateRepo} data-testid="ws-arch-create-repo">
+              {$t('explorer_view.create_repo')}
+            </button>
+          {/snippet}
+        </EmptyState>
+      </div>
     {:else}
-      <div class="ws-repo-grid">
-        {#each wsRepos as repo (repo.id)}
-          <button class="ws-repo-card" onclick={() => selectRepo(repo)} aria-label={$t('explorer_view.explore_repo', { values: { name: repo.name } })}>
-            <div class="ws-repo-card-left">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="ws-repo-icon" aria-hidden="true">
-                <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
-              </svg>
-              <div class="ws-repo-info">
-                <span class="ws-repo-name">{repo.name}</span>
-                {#if repo.description}
-                  <span class="ws-repo-description">{repo.description}</span>
-                {/if}
-              </div>
+      <div class="ws-arch-body">
+        <div class="ws-arch-canvas" data-testid="ws-arch-canvas">
+          {#if wsDepError}
+            <div class="ws-dep-warning" role="status">
+              <span>{$t('explorer_view.dep_graph_unavailable', { values: { error: wsDepError } })}</span>
+              <button class="chip-clear" onclick={loadWsDepGraph} aria-label={$t('common.retry')}>↻</button>
             </div>
-            <span class="ws-repo-explore">{$t('explorer_view.explore_arrow')}</span>
-          </button>
-        {/each}
+          {/if}
+          <DependencyGraph
+            nodes={wsGraphNodes}
+            edges={wsGraphEdges}
+            scope="workspace"
+            showScopeToggle={false}
+            onNodeClick={showRepoDetail}
+            onNodeDblClick={enterRepo}
+            onRefresh={loadWsDepGraph}
+          />
+        </div>
+        {#if repoDetail}
+          <!-- Single-click detail panel: repo metadata (§5) -->
+          <aside class="ws-repo-detail" data-testid="ws-repo-detail" aria-label={repoDetail.name}>
+            <div class="ws-repo-detail-header">
+              <h2 class="ws-repo-detail-title" title={repoDetail.name}>{repoDetail.name}</h2>
+              <button
+                class="ws-repo-detail-close"
+                onclick={() => { repoDetail = null; }}
+                aria-label={$t('common.close')}
+                type="button"
+              >✕</button>
+            </div>
+            {#if repoDetail.description}
+              <p class="ws-repo-detail-desc">{repoDetail.description}</p>
+            {/if}
+            {#if repoDetail.external}
+              <p class="ws-repo-detail-external">{$t('explorer_view.repo_external')}</p>
+            {/if}
+            <dl class="ws-repo-detail-meta">
+              <div class="meta-row">
+                <dt>{$t('explorer_view.repo_detail_id')}</dt>
+                <dd class="mono">{repoDetail.id ?? repoDetail.repo_id}</dd>
+              </div>
+              {#if repoDetail.default_branch}
+                <div class="meta-row">
+                  <dt>{$t('explorer_view.repo_detail_branch')}</dt>
+                  <dd class="mono">{repoDetail.default_branch}</dd>
+                </div>
+              {/if}
+              {#if repoDetail.created_at}
+                <div class="meta-row">
+                  <dt>{$t('explorer_view.repo_detail_created')}</dt>
+                  <dd>{new Date(repoDetail.created_at * 1000).toLocaleDateString()}</dd>
+                </div>
+              {/if}
+              {#if repoDetail.updated_at}
+                <div class="meta-row">
+                  <dt>{$t('explorer_view.repo_detail_updated')}</dt>
+                  <dd>{new Date(repoDetail.updated_at * 1000).toLocaleDateString()}</dd>
+                </div>
+              {/if}
+            </dl>
+            <div class="ws-repo-detail-actions">
+              <!-- Keyboard-reachable equivalent of the double-click drill -->
+              <button
+                class="enter-btn"
+                onclick={() => enterRepo(repoDetail)}
+                data-testid="ws-repo-detail-explore"
+              >
+                {$t('explorer_view.explore_architecture')}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+                  <path d="M9 18l6-6-6-6"/>
+                </svg>
+              </button>
+            </div>
+          </aside>
+        {/if}
       </div>
     {/if}
   </div>
@@ -1215,6 +2547,29 @@
         <h1 class="page-title">{scopeType === 'repo' || showingRepoGraph ? $t('explorer_view.architecture_title') : $t('explorer_view.system_title')}</h1>
         {#if scopeType !== 'repo' && !showingRepoGraph}
           <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
+        {/if}
+
+        {#if scopeType === 'repo'}
+          <!-- Control-bar sub-tabs (ui-navigation.md §2): Graph (default) |
+               Briefing (repo-scoped narrative, HSI §1.5). -->
+          <div class="arch-subtabs" role="tablist" aria-label={$t('explorer_view.arch_subtabs_label')}>
+            <button
+              class="arch-subtab-btn"
+              class:active={activeArchSubTab === 'graph'}
+              role="tab"
+              aria-selected={activeArchSubTab === 'graph'}
+              onclick={() => setArchSubTab('graph')}
+              data-testid="arch-subtab-graph"
+            >{$t('explorer_view.sub_tabs.graph')}</button>
+            <button
+              class="arch-subtab-btn"
+              class:active={activeArchSubTab === 'briefing'}
+              role="tab"
+              aria-selected={activeArchSubTab === 'briefing'}
+              onclick={() => setArchSubTab('briefing')}
+              data-testid="arch-subtab-briefing"
+            >{$t('explorer_view.sub_tabs.briefing')}</button>
+          </div>
         {/if}
       </div>
       <div class="header-right">
@@ -1280,9 +2635,133 @@
     </div>
 
 
-    <!-- Control bar — concept search + filter toggle, always shown when repo is selected -->
+    <!-- Control bar — view selector + concept search + filter toggle, always shown when repo is selected -->
     {#if selectedRepoId}
       <div class="concept-search-bar">
+        <!-- HSI §3 / ui-navigation.md §3 view selector: a dropdown listing
+             built-in views, then the user's saved views, then a "Generate
+             view..." option (task-178). -->
+        <div class="explorer-view-select" data-testid="explorer-view-selector">
+          <button
+            class="view-select-btn"
+            onclick={() => {
+              viewSelectOpen = !viewSelectOpen;
+              // REST refresh on open: the saved-views list must not depend
+              // solely on the chat socket's `views` message.
+              if (viewSelectOpen) void refreshSavedViews();
+            }}
+            aria-haspopup="listbox"
+            aria-expanded={viewSelectOpen}
+            aria-label="View selector"
+            type="button"
+          >
+            <span class="view-select-label">{activeViewLabel}</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          {#if viewSelectOpen}
+            <div class="view-select-menu" role="listbox" aria-label="Explorer views">
+              <div class="view-select-section">Built-in views</div>
+              {#each EXPLORER_VIEWS as v (v.id)}
+                <button
+                  class="view-select-option"
+                  class:active={explorerViewMode === v.id && !activeSavedViewName}
+                  role="option"
+                  aria-selected={explorerViewMode === v.id && !activeSavedViewName}
+                  onclick={() => { viewSelectOpen = false; setExplorerView(v.id); }}
+                  data-testid={`view-option-${v.id}`}
+                  type="button"
+                >{v.label}</button>
+              {/each}
+              {#if explorerSavedViews.length > 0}
+                <div class="view-select-section">Saved views</div>
+                {#each explorerSavedViews as view (view.id)}
+                  <button
+                    class="view-select-option"
+                    class:active={activeSavedViewName === view.name}
+                    role="option"
+                    aria-selected={activeSavedViewName === view.name}
+                    onclick={() => selectSavedView(view)}
+                    data-testid="view-option-saved"
+                    title={view.description ?? view.name}
+                    type="button"
+                  >{view.name}</button>
+                {/each}
+              {/if}
+              <!-- Predefined flow templates (system-explorer.md §5 Flow
+                   Traces): curated traces for common operations, applied via
+                   applyFlowTemplate onto the flow layout. -->
+              <div class="view-select-section">Trace flows</div>
+              {#each FLOW_TEMPLATES as tpl (tpl.id)}
+                <button
+                  class="view-select-option"
+                  class:active={activeSavedViewName === tpl.label && activeLayout === 'flow'}
+                  role="option"
+                  aria-selected={activeSavedViewName === tpl.label && activeLayout === 'flow'}
+                  onclick={() => void applyFlowTemplate(tpl)}
+                  data-testid={`view-option-flow-${tpl.id}`}
+                  title={tpl.description}
+                  type="button"
+                >{tpl.label}</button>
+              {/each}
+              <div class="view-select-divider" role="presentation"></div>
+              <button
+                class="view-select-option view-select-generate"
+                role="option"
+                aria-selected="false"
+                onclick={openGenerateView}
+                data-testid="view-option-generate"
+                title="Describe a view in natural language — the LLM generates it"
+                type="button"
+              >Generate view…</button>
+              <button
+                class="view-select-option view-select-generate"
+                role="option"
+                aria-selected="false"
+                onclick={openConversationalExplorer}
+                data-testid="view-option-ask"
+                title="Ask a question — the answer is grounded in the knowledge graph with clickable references"
+                type="button"
+              >{$t('conversational_explorer.title')}…</button>
+            </div>
+          {/if}
+        </div>
+
+        {#if explorerViewMode === 'boundary'}
+        <!-- In-view filter panel toggle (ui-navigation.md §3): filter icon in
+             the control bar opens the collapsible 200px left panel inside the
+             Architecture content area (not the app sidebar). -->
+        <button
+          class="ctrl-btn icon-btn"
+          class:active={filterPanelOpen}
+          onclick={() => { filterPanelOpen = !filterPanelOpen; }}
+          title="Toggle filter panel"
+          aria-label="Toggle filter panel"
+          aria-pressed={filterPanelOpen}
+          data-testid="filter-panel-toggle"
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+          </svg>
+        </button>
+
+        <!-- View spec editor toggle (ui-navigation.md §3): "Edit view spec"
+             opens a collapsible JSON editor for the view spec grammar. -->
+        <button
+          class="ctrl-btn icon-btn"
+          class:active={viewSpecEditorOpen}
+          onclick={toggleViewSpecEditor}
+          title="Edit view spec"
+          aria-label="Edit view spec"
+          aria-pressed={viewSpecEditorOpen}
+          data-testid="view-spec-editor-toggle"
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+          </svg>
+        </button>
+
         <!-- Manual query editor toggle -->
         <button
           class="ctrl-btn icon-btn"
@@ -1345,13 +2824,50 @@
             </span>
           {/if}
         {/if}
+        {/if}
+
+        <!-- Active concept filter chips (system-explorer.md §4, task-182):
+             the active concept view (manifest or discovered) shows as a chip
+             in the control bar — click ✕ to clear, restoring the full graph. -->
+        {#if explorerViewMode === 'boundary'}
+          {#if activeManifestConcept}
+            <span class="concept-chip concept-filter-chip" data-testid="concept-filter-chip">
+              Concept: {activeManifestConcept.name}
+              <button
+                class="chip-clear"
+                onclick={() => { activeManifestConcept = null; }}
+                aria-label="Clear concept filter"
+                data-testid="concept-filter-chip-clear"
+                type="button"
+              >✕</button>
+            </span>
+          {/if}
+          {#each activeFilterConcepts as c (c)}
+            <span class="concept-chip concept-filter-chip" data-testid="concept-filter-chip">
+              Concept: {c}
+              <button
+                class="chip-clear"
+                onclick={() => { activeFilterConcepts = activeFilterConcepts.filter((x) => x !== c); }}
+                aria-label="Clear concept filter"
+                data-testid="concept-filter-chip-clear"
+                type="button"
+              >✕</button>
+            </span>
+          {/each}
+        {/if}
       </div>
     {/if}
 
     <!-- Main content -->
     <div class="explorer-body">
       <div class="explorer-body-main">
-        {#if !selectedRepoId}
+        {#if scopeType === 'repo' && activeArchSubTab === 'briefing' && scope.repoId}
+          <!-- Briefing sub-tab (ui-navigation.md §2): repo-scoped narrative —
+               HSI §1.5 repo-scope Briefing row (?repo_id= filter). -->
+          <div class="arch-briefing-wrap" data-testid="arch-briefing">
+            <Briefing workspaceId={scope.workspaceId} repoId={scope.repoId} scope="repo" />
+          </div>
+        {:else if !selectedRepoId}
           <div class="empty-state-wrap">
             {#if scopeType === 'repo'}
               <!-- Repo scope: repo ID will be set by the auto-select effect -->
@@ -1383,66 +2899,210 @@
         {:else if graph}
           <div class="explorer-split">
             <div class="explorer-canvas-area">
-              {#if missingCallEdgesWarning}
-                <div class="toolchain-warning" role="alert">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                  <span>{missingCallEdgesWarning}</span>
-                  <button class="toolchain-warning-dismiss" onclick={() => { graphWarningsDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss warning">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  </button>
+              {#if missingCallEdgesWarning || largeGraphWarning}
+                <div class="canvas-warning-stack">
+                  {#if missingCallEdgesWarning}
+                    <div class="toolchain-warning" role="alert">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                      <span>{missingCallEdgesWarning}</span>
+                      <button class="toolchain-warning-dismiss" onclick={() => { graphWarningsDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss warning">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+                  {/if}
+                  {#if largeGraphWarning}
+                    <div class="toolchain-warning perf-warning" role="status" data-testid="large-graph-warning">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                      <span>{largeGraphWarning}</span>
+                      <button class="toolchain-warning-dismiss" onclick={() => { perfWarningDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss performance warning">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+                  {/if}
                 </div>
               {/if}
+              {#if timelineScrubActive && timelineMomentDetail}
+                <!-- Key moment narrative (system-explorer.md §6): click a key
+                     moment → the delta panel shows what changed and why. -->
+                <div class="timeline-moment-narrative" role="status" aria-label="Key moment narrative">
+                  <div class="timeline-moment-header">
+                    <span class="timeline-moment-title">Key moment</span>
+                    {#if timelineMomentDetail.timestamp}
+                      <span class="timeline-moment-date">{new Date(typeof timelineMomentDetail.timestamp === 'number' ? timelineMomentDetail.timestamp * 1000 : timelineMomentDetail.timestamp).toLocaleDateString()}</span>
+                    {/if}
+                    {#if timelineMomentDetail.spec_ref}
+                      <code class="timeline-moment-ref">{timelineMomentDetail.spec_ref}</code>
+                    {/if}
+                    <button
+                      class="timeline-moment-close"
+                      onclick={() => { timelineMomentDetail = null; }}
+                      title="Dismiss"
+                      type="button"
+                      aria-label="Dismiss key moment narrative"
+                    >×</button>
+                  </div>
+                  {#if timelineMomentDetail.narrative}
+                    <p class="timeline-moment-text">{timelineMomentDetail.narrative}</p>
+                  {:else}
+                    <p class="timeline-moment-text timeline-moment-empty">No narrative recorded for this moment.</p>
+                  {/if}
+                </div>
+              {/if}
+              {#if explorerViewMode === 'boundary'}
+              <!-- In-view filter panel row (ui-navigation.md §3): collapsible
+                   200px left panel INSIDE the Architecture content area —
+                   category filters + concepts, not the app sidebar. -->
+              <div class="explorer-boundary-row">
+              {#if filterPanelOpen}
+                <ExplorerFilterPanel
+                  nodes={effectiveGraph.nodes ?? []}
+                  bind:activeCategories={activeFilterCategories}
+                  bind:activeConcepts={activeFilterConcepts}
+                  manifestConcepts={manifestConcepts}
+                  activeManifestConcept={activeManifestConcept?.name ?? null}
+                  onToggleManifestConcept={toggleManifestConcept}
+                  onClose={() => { filterPanelOpen = false; }}
+                />
+              {/if}
+              <div class="explorer-boundary-main">
+              {#if LayoutRenderer}
+                <!-- Generated-view layout dispatch (ui-layout.md §10 Layout
+                     Engines): the ViewSpec `layout` field selects the renderer
+                     through the layout registry — hierarchical/layered render on
+                     the SVG canvas positioned by ELK, side-by-side on the CSS
+                     Grid composite, diff on the structural-diff component. The
+                     scope of the spec's ViewQuery filters the node set. -->
+                <div class="gen-layout-wrap" data-layout={activeLayout} data-testid="generated-layout">
+                  <div class="gen-layout-chip" role="status">
+                    <span class="gen-layout-chip-label">{$t(activeLayoutReg?.labelKey ?? 'explorer_view.layout_graph')}</span>
+                    <button
+                      class="gen-layout-chip-clear"
+                      onclick={clearGeneratedLayout}
+                      aria-label={$t('explorer_view.layout_dismiss')}
+                      title={$t('explorer_view.layout_dismiss')}
+                      type="button"
+                    >✕</button>
+                  </div>
+                  <div class="gen-layout-body">
+                    <LayoutRenderer
+                      nodes={generatedLayoutGraph.nodes}
+                      edges={generatedLayoutGraph.edges}
+                      repoId={selectedRepoId}
+                      engine={activeLayoutReg?.engine ?? 'graph'}
+                      onSelectNode={openNodeDetail}
+                    />
+                  </div>
+                </div>
+              {:else if activeLayout === 'list'}
+                <!-- ui-layout.md §10 `list` engine: native Svelte {#each} rows
+                     with virtual scrolling (registry component is null — the
+                     shell owns the list renderer). -->
+                <div class="gen-layout-wrap" data-layout="list" data-testid="generated-layout">
+                  <div class="gen-layout-chip" role="status">
+                    <span class="gen-layout-chip-label">{$t('explorer_view.layout_list')}</span>
+                    <button
+                      class="gen-layout-chip-clear"
+                      onclick={clearGeneratedLayout}
+                      aria-label={$t('explorer_view.layout_dismiss')}
+                      title={$t('explorer_view.layout_dismiss')}
+                      type="button"
+                    >✕</button>
+                  </div>
+                  <div class="gen-layout-body">
+                    <VirtualNodeList
+                      nodes={generatedLayoutGraph.nodes}
+                      viewportHeight={520}
+                    />
+                  </div>
+                </div>
+              {:else if graphDensity.mode === 'list'}
+                <!-- ui-layout.md §10 Canvas Rendering: >1000 nodes even after
+                     the public filter → list layout with virtual scrolling +
+                     a warning (the shell owns the fallback swap). -->
+                <div class="density-list-fallback" role="region" aria-label="Graph as virtualized list">
+                  <div class="density-list-banner" role="status">
+                    Graph too large for canvas rendering ({graphDensity.total} nodes) —
+                    switched to list layout with virtual scrolling.
+                  </div>
+                  <VirtualNodeList
+                    nodes={effectiveGraph.nodes ?? []}
+                    viewportHeight={520}
+                  />
+                </div>
+              {:else}
+              <!-- windowEscape={false}: ExplorerView owns the window-level Escape
+                   cascade (onWindowKeydown: spec editor → query editor → detail panel →
+                   active view query) and already exits trace mode through it; a second
+                   window Escape listener in the canvas would clear the trace on the same
+                   keypress that closes an overlay above it. -->
               <ExplorerCanvas
                 repoId={selectedRepoId}
+                rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
+                layout={activeLayout}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
-                filter={explorerFilter}
-                lens={explorerLens}
-                filters={null}
+                bind:filter={explorerFilter}
+                bind:lens={explorerLens}
+                gateStatusBySpec={gateStatusBySpec}
+                specApprovals={specApprovals}
                 bind:canvasState={explorerCanvasState}
-                onNodeDetail={(n) => {
-                  detailNode = n;
-                  highlightedSpanId = null;
-                  if (n?._action === 'view_spec' && n.spec_path) {
-                    openSpecEditor(n.spec_path);
-                  } else if (n?._action === 'create_spec') {
-                    // Open spec editor with a template for the uncovered node
-                    const suggestedPath = n.suggested_spec_path || `specs/system/${(n.name ?? 'new').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
-                    specEditorOpen = true;
-                    specEditorPath = suggestedPath;
-                    const template = `# ${n.name ?? 'New Spec'}\n\nStatus: Draft\n\n## Purpose\n\nGoverns the \`${n.qualified_name ?? n.name}\` ${n.node_type ?? 'component'}.\n\n## Requirements\n\n- TODO: Define requirements\n`;
-                    specEditorContent = template;
-                    specEditorOriginal = '';
-                    specEditorError = '';
-                  } else if (n?._action === 'view_code' && n.file_path) {
-                    // Open in code: show file in detail panel.
-                    // The NodeDetailPanel displays Location (file_path:line).
-                    // This preserves canvas state unlike opening a new browser tab.
-                    detailNode = n;
-                  }
-                }}
-                onInteractiveQuery={(q) => { activeViewQuery = q; }}
+                onNodeDetail={openNodeDetail}
+                onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                 ghostOverlays={mergedGhostOverlays}
                 {traceData}
+                playbackRequest={tracePlaybackRequest}
                 queryResult={viewQueryResult}
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
                 {highlightedSpanId}
-                timeline={graphTimeline ?? []}
+                focusRequest={traceFocusRequest}
+                windowEscape={false}
+                timeline={timelineArray}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
+                timelineReconciliationEvents={reconciliationEvents}
+                {gateRecords}
+                riskByNode={explorerLens === 'evaluative' ? riskByNode : {}}
+                riskEntries={explorerLens === 'evaluative' ? riskEntries : []}
+                hiddenNodeIds={explorerHiddenNodeIds}
+                hiddenCategories={explorerHiddenCategories}
+                filterConcepts={activeFilterConcepts}
+                conceptNodeIds={explorerConceptNodeIds}
+                onCreateConcept={openConceptDialog}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
-                  if (!timelineScrubActive) timelineScrubIndex = -1;
-                  else if (graphTimeline?.length) timelineScrubIndex = graphTimeline.length - 1;
+                  if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
+                  else if (timelineArray.length) timelineScrubIndex = timelineArray.length - 1;
                 }}
                 onTimelineScrub={(idx) => { timelineScrubIndex = idx; }}
-                onTimelineMarkerClick={(_delta) => {}}
+                onTimelineMarkerClick={(delta) => { timelineMomentDetail = delta; }}
                 {timelineDeltaStats}
               />
-              <!-- Architecture Insights — collapsible panel inside canvas area -->
-              {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+              {/if}
+              </div><!-- /explorer-boundary-main -->
+              </div><!-- /explorer-boundary-row -->
+              {:else if explorerViewMode === 'spec-realization'}
+                <!-- HSI §3 Spec Realization View: specs ↔ linked graph nodes -->
+                <SpecRealizationView
+                  repoId={selectedRepoId}
+                  {graph}
+                  onOpenSpec={(path) => openSpecEditor(path)}
+                  onSelectNode={navigateToBoundaryNode}
+                />
+              {:else if explorerViewMode === 'change'}
+                <!-- HSI §3 Change View: architectural deltas since last visit -->
+                <ChangeView
+                  repoId={selectedRepoId}
+                  {graph}
+                  onNavigateToNode={navigateToBoundaryNode}
+                />
+              {:else if explorerViewMode === 'system-trace'}
+                <!-- HSI §3 System Trace View: SDLC timeline for an MR -->
+                <SystemTraceView repoId={selectedRepoId} />
+              {/if}
+              <!-- Architecture Insights — collapsible panel inside canvas area (Boundary view only) -->
+              {#if explorerViewMode === 'boundary' && selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
                 <div class="arch-insights-overlay">
                   <div class="arch-insights-toggle">
                     <button
@@ -1463,7 +3123,17 @@
                         <p class="arch-insight-desc">Structs, enums, and type definitions extracted from the codebase.</p>
                         <div class="arch-type-grid">
                           {#each graphTypes.slice(0, 20) as node}
-                            <div class="arch-type-card" title={node.qualified_name ?? node.name}>
+                            <div
+                              class="arch-type-card"
+                              title={node.qualified_name ?? node.name}
+                              tabindex="0"
+                              role="button"
+                              aria-label="{node.name ?? node.qualified_name} ({node.node_type ?? 'type'})"
+                              onclick={(e) => cardClick(e, node)}
+                              onmouseenter={(e) => emitCardViewEvent(e, node)}
+                              oncontextmenu={(e) => { e.preventDefault(); emitCardViewEvent(e, node); }}
+                              onkeydown={(e) => cardKeydown(e, node)}
+                            >
                               <span class="arch-type-kind">{node.node_type ?? 'type'}</span>
                               <span class="arch-type-name">{node.name ?? node.qualified_name}</span>
                               {#if node.doc_comment}
@@ -1542,7 +3212,16 @@
                         <p class="arch-insight-desc">Nodes scored for complexity, coupling, or churn that may warrant attention.</p>
                         <ul class="arch-risk-list">
                           {#each repoRisks.slice(0, 10) as node}
-                            <li class="arch-risk-item">
+                            <li
+                              class="arch-risk-item"
+                              tabindex="0"
+                              role="button"
+                              aria-label="{node.qualified_name ?? node.name} risk hotspot"
+                              onclick={(e) => cardClick(e, node)}
+                              onmouseenter={(e) => emitCardViewEvent(e, node)}
+                              oncontextmenu={(e) => { e.preventDefault(); emitCardViewEvent(e, node); }}
+                              onkeydown={(e) => cardKeydown(e, node)}
+                            >
                               <span class="arch-risk-name">{node.qualified_name ?? node.name}</span>
                               <span class="arch-risk-score" title="Risk score">{node.risk_score ?? node.score ?? '\u2014'}</span>
                               {#if node.risk_reason ?? node.reason}
@@ -1564,7 +3243,7 @@
                             class:active={timelineScrubActive}
                             onclick={() => {
                               timelineScrubActive = !timelineScrubActive;
-                              if (!timelineScrubActive) timelineScrubIndex = -1;
+                              if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
                               else timelineScrubIndex = graphTimeline.length - 1;
                             }}
                             type="button"
@@ -1634,10 +3313,29 @@
                   edges={graph.edges ?? []}
                   onClose={() => { detailNode = null; highlightedSpanId = null; }}
                   onNavigate={(n) => { detailNode = n; }}
-                  onInteractiveQuery={(q) => { activeViewQuery = q; }}
+                  onTraceStepNavigate={(step) => {
+                    // Show the step's node in the detail panel and pan/zoom
+                    // the canvas to it (explorer-canvas.md §6 step 6). The
+                    // step list is carried onto the target so the panel
+                    // keeps showing the full clickable trace across
+                    // navigation clicks.
+                    const target = traceStepTargetNode(detailNode, step, graph.nodes ?? []);
+                    if (target) detailNode = target;
+                    traceFocusNonce += 1;
+                    traceFocusRequest = { nodeId: step.nodeId, nonce: traceFocusNonce };
+                  }}
+                  onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
                   onSpanSelect={(span) => { highlightedSpanId = span?.span_id ?? null; }}
+                  repoId={selectedRepoId || null}
+                  onAgentProvenance={(agentId) => {
+                    // Agent references in the moldable views open the agent's
+                    // provenance (full agent detail: conversation SHA, MRs,
+                    // cost, provenance chain).
+                    if (openDetailPanelCtx) openDetailPanelCtx({ type: 'agent', id: agentId });
+                  }}
+                  onEditSpec={(specPath) => openSpecEditor(specPath)}
                 />
                 {#if detailNode.spec_path}
                   <div class="edit-spec-action">
@@ -1936,9 +3634,82 @@
                 </div>
               </div>
             {/if}
+            {#if viewSpecEditorOpen}
+              <!-- View spec editor (ui-navigation.md §3): collapsible JSON editor
+                   for the view spec grammar — data / layout / encoding / highlight
+                   layers. Apply translates the spec to a ViewQuery and re-renders
+                   the canvas live. -->
+              <div class="query-editor-panel" role="complementary" aria-label="View spec editor" data-testid="view-spec-editor">
+                <div class="query-editor-header">
+                  <h3 class="query-editor-title">View Spec Editor</h3>
+                  <button class="query-editor-close" onclick={() => { viewSpecEditorOpen = false; }} aria-label="Close view spec editor" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                      <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                  </button>
+                </div>
+                <div class="query-editor-body">
+                  <textarea
+                    class="query-editor-textarea"
+                    bind:value={viewSpecText}
+                    placeholder={'{\n  "name": "My view",\n  "layout": "graph",\n  "data": { "node_types": ["endpoint"] },\n  "encoding": { "color": "spec_coverage", "size": "complexity" },\n  "highlight": {}\n}'}
+                    spellcheck="false"
+                    aria-label="View spec JSON"
+                    data-testid="view-spec-textarea"
+                  ></textarea>
+                </div>
+                {#if viewSpecError}
+                  <div class="query-editor-error" role="alert">
+                    {viewSpecError}
+                  </div>
+                {/if}
+                <div class="query-editor-actions">
+                  <button
+                    class="query-editor-clear-btn"
+                    onclick={() => { viewSpecText = JSON.stringify(currentViewSpecForEditor(), null, 2); viewSpecError = ''; }}
+                    type="button"
+                  >Reset</button>
+                  <button
+                    class="query-editor-run-btn"
+                    onclick={applyViewSpecEditor}
+                    disabled={!viewSpecText.trim()}
+                    type="button"
+                  >Apply</button>
+                </div>
+              </div>
+            {/if}
             {#if !chatCollapsed}
               <div class="explorer-chat-area">
                 <div class="chat-collapse-bar">
+                  <!-- HSI §3: chat column mode — Explorer agent (ask) vs LLM view
+                       generator (generate). -->
+                  <div class="chat-mode-tabs" role="tablist" aria-label="Chat mode">
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'ask'}
+                      role="tab"
+                      aria-selected={chatMode === 'ask'}
+                      onclick={() => { chatMode = 'ask'; }}
+                      type="button"
+                    >{$t('explorer_chat.title')}</button>
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'generate'}
+                      role="tab"
+                      aria-selected={chatMode === 'generate'}
+                      onclick={() => { chatMode = 'generate'; }}
+                      type="button"
+                    >{$t('generated_view.title')}</button>
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'explore'}
+                      role="tab"
+                      aria-selected={chatMode === 'explore'}
+                      data-testid="chat-mode-explore"
+                      onclick={() => { chatMode = 'explore'; }}
+                      type="button"
+                    >{$t('conversational_explorer.title')}</button>
+                  </div>
                   <button
                     class="chat-collapse-btn"
                     onclick={() => { chatCollapsed = true; }}
@@ -1949,17 +3720,49 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
                   </button>
                 </div>
+                {#if chatMode === 'ask'}
                 <ExplorerChat
                   repoId={selectedRepoId}
                   canvasState={explorerCanvasState}
-                  onViewQuery={(q) => { activeViewQuery = q; pushInteraction(`view:${q?.scope?.type ?? 'query'}`); }}
+                  onViewQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: q?.scope?.type ?? 'query' }); }}
                   onOpenSpec={(path) => openSpecEditor(path)}
                   savedViews={explorerSavedViews}
-                  onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
+                  onSavedViewsUpdate={(views) => {
+                    // The socket's SavedViewSummary carries no query — keep
+                    // the query/spec fields already fetched via REST for ids
+                    // that survive the replace.
+                    const prev = new Map(explorerSavedViews.map((v) => [v.id, v]));
+                    explorerSavedViews = (views ?? []).map((v) =>
+                      prev.has(v.id) ? { ...prev.get(v.id), ...v } : v
+                    );
+                  }}
+                  onLoadView={(view) => pushInteraction({ action: 'query', preset: view?.name ?? null })}
                   {graphHints}
                   graphNodes={graph?.nodes ?? []}
                   graphEdges={graph?.edges ?? []}
                 />
+                {:else if chatMode === 'explore'}
+                <!-- Conversational exploration (system-explorer.md §8):
+                     knowledge-graph-grounded Q&A with clickable entity
+                     references and canvas actions. -->
+                <ConversationalExplorer
+                  workspaceId={scope?.workspaceId ?? ''}
+                  repoId={selectedRepoId}
+                  onApplyView={applyGeneratedViewSpec}
+                  onOpenNode={conversationOpenNode}
+                  onOpenSpec={conversationOpenSpec}
+                  onOpenCommit={conversationOpenCommit}
+                  onShowAgent={conversationShowAgent}
+                  onHighlightNodes={conversationHighlightNodes}
+                  onPrediction={conversationApplyPrediction}
+                />
+                {:else}
+                <GeneratedViewChat
+                  workspaceId={scope?.workspaceId ?? ''}
+                  repoId={selectedRepoId}
+                  onApplyView={applyGeneratedViewSpec}
+                />
+                {/if}
               </div>
             {/if}
             {#if chatCollapsed}
@@ -1976,16 +3779,102 @@
             {/if}
           </div>
         {/if}
-
-        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
       </div>
+        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
     </div>
   </div>
 {/if}
 
+<!-- ── Ad-hoc concept creation dialog (system-explorer.md §4, task-182) ──── -->
+{#if conceptDialog}
+  <div
+    class="concept-dialog-backdrop"
+    onclick={closeConceptDialog}
+    oncontextmenu={(e) => { e.preventDefault(); closeConceptDialog(); }}
+    role="presentation"
+  ></div>
+  <div
+    class="concept-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Create concept"
+    data-testid="concept-dialog"
+  >
+    <h3 class="concept-dialog-title">Create concept</h3>
+    <p class="concept-dialog-desc">
+      Group {conceptDialog.nodes.length} selected nodes into a named concept. Saving stores it
+      as an explorer view you can reload from the view selector.
+    </p>
+    <label class="concept-dialog-label" for="concept-dialog-name">Concept name</label>
+    <input
+      id="concept-dialog-name"
+      class="concept-dialog-input"
+      type="text"
+      bind:value={conceptDialog.name}
+      placeholder="e.g. Authentication"
+      data-testid="concept-dialog-name"
+      disabled={conceptDialog.saving}
+    />
+    {#if conceptDialog.error}
+      <p class="concept-dialog-error" role="alert">{conceptDialog.error}</p>
+    {/if}
+    <div class="concept-dialog-actions">
+      <button
+        class="concept-dialog-save"
+        onclick={saveConceptDialog}
+        disabled={conceptDialog.saving}
+        data-testid="concept-dialog-save"
+        type="button"
+      >{conceptDialog.saving ? 'Saving…' : 'Save concept'}</button>
+      <button
+        class="concept-dialog-cancel"
+        onclick={closeConceptDialog}
+        disabled={conceptDialog.saving}
+        type="button"
+      >Cancel</button>
+    </div>
+  </div>
+{/if}
+
+<!-- ── Uniform ViewEvent surfaces (ui-layout.md §10 Interaction Events) ────── -->
+<!-- Hover tooltip fed by ViewEvents from non-integrated emitters (SVG canvas,
+     list rows, cards). ExplorerCanvas renders its own tooltip internally. -->
+{#if viewTooltip}
+  <div
+    class="viewevent-tooltip"
+    style="left: {viewTooltip.x + 14}px; top: {viewTooltip.y + 14}px;"
+    role="tooltip"
+    aria-hidden="true"
+  >
+    <span class="viewevent-tooltip-type">{viewTooltip.type}</span>
+    <span class="viewevent-tooltip-name">{viewTooltip.name}</span>
+  </div>
+{/if}
+
+<!-- Context-menu actions fed by ViewEvents -->
+{#if viewMenu}
+  <div class="viewevent-menu-backdrop" onclick={() => (viewMenu = null)} oncontextmenu={(e) => { e.preventDefault(); viewMenu = null; }} role="presentation"></div>
+  <div
+    class="viewevent-menu"
+    style="left: {viewMenu.x}px; top: {viewMenu.y}px;"
+    role="menu"
+    aria-label="Entity actions"
+  >
+    <div class="viewevent-menu-title">{viewMenu.data?.name ?? viewMenu.data?.id ?? viewMenu.entity}</div>
+    <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('details')}>View details</button>
+    {#if viewMenu.data?.file_path}
+      <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('code')}>Open in code</button>
+    {/if}
+    {#if viewMenu.data?.spec_path}
+      <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('spec')}>View governing spec</button>
+    {/if}
+    <button class="viewevent-menu-item" role="menuitem" onclick={() => viewMenuAction('copy_id')}>Copy ID</button>
+  </div>
+{/if}
+
 <style>
-  /* ── Workspace scope repo list ──────────────────────────────────────── */
-  .ws-repo-list {
+  /* ── Workspace scope: realized architecture graph (§5) ───────────── */
+  .ws-arch-view {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
@@ -2007,76 +3896,179 @@
     color: var(--color-text-muted);
   }
 
-  .ws-repo-grid {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+  .ws-arch-canvas-loading {
+    padding: var(--space-4);
   }
 
-  .ws-repo-card {
+  .ws-arch-empty {
+    flex: 1;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: center;
+  }
+
+  .ws-arch-body {
+    display: flex;
     gap: var(--space-4);
-    padding: var(--space-4) var(--space-5);
+    align-items: stretch;
+    min-height: 420px;
+    flex: 1;
+  }
+
+  .ws-arch-canvas {
+    flex: 1;
+    min-width: 0;
+    position: relative;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
-    cursor: pointer;
-    text-align: left;
-    font-family: var(--font-body);
-    transition: border-color var(--transition-fast), background var(--transition-fast);
-    width: 100%;
+    overflow: hidden;
   }
 
-  .ws-repo-card:hover {
-    border-color: var(--color-focus);
+  .ws-dep-warning {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
     background: var(--color-surface-elevated);
+    border: 1px solid var(--color-warning, #eab308);
+    border-radius: var(--radius);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
   }
 
-  .ws-repo-card:focus-visible {
+  .ws-dep-warning .chip-clear {
+    background: none;
+    border: none;
+    color: var(--color-link);
+    cursor: pointer;
+    padding: 0;
+    font-size: var(--text-sm);
+  }
+
+  /* Repo metadata detail panel (single-click, §5) */
+  .ws-repo-detail {
+    width: 300px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow-y: auto;
+  }
+
+  .ws-repo-detail-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .ws-repo-detail-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow-wrap: anywhere;
+  }
+
+  .ws-repo-detail-close {
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    padding: var(--space-1);
+    line-height: 1;
+  }
+
+  .ws-repo-detail-close:hover { color: var(--color-text); }
+
+  .ws-repo-detail-close:focus-visible,
+  .enter-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
 
-  .ws-repo-card-left {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    min-width: 0;
+  .ws-repo-detail-desc {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.5;
   }
 
-  .ws-repo-icon {
+  .ws-repo-detail-external {
+    margin: 0;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
-    flex-shrink: 0;
+    font-style: italic;
   }
 
-  .ws-repo-info {
+  .ws-repo-detail-meta {
+    margin: 0;
     display: flex;
     flex-direction: column;
-    gap: var(--space-1);
-    min-width: 0;
+    gap: var(--space-2);
   }
 
-  .ws-repo-name {
-    font-size: var(--text-sm);
+  .meta-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .meta-row dt {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
     font-weight: 600;
+  }
+
+  .meta-row dd {
+    margin: 0;
+    font-size: var(--text-sm);
     color: var(--color-text);
   }
 
-  .ws-repo-description {
+  .ws-repo-detail .mono {
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
-  .ws-repo-explore {
-    font-size: var(--text-sm);
+  .ws-repo-detail-actions {
+    margin-top: auto;
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .enter-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: transparent;
+    border: none;
     color: var(--color-link);
-    flex-shrink: 0;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
     font-weight: 500;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .enter-btn:hover { color: var(--color-link-hover); }
+
+  @media (max-width: 900px) {
+    .ws-arch-body { flex-direction: column; }
+    .ws-repo-detail { width: 100%; }
   }
 
   /* ── Repo scope: graph view styles ───────────────────────────────────── */
@@ -2110,6 +4102,46 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
+  }
+
+  /* Control-bar sub-tabs at repo scope (ui-navigation.md §2): Graph | Briefing */
+  .arch-subtabs {
+    display: flex;
+    gap: 0;
+    border-bottom: none;
+    margin-top: var(--space-2);
+  }
+
+  .arch-subtab-btn {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-muted, var(--color-text));
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .arch-subtab-btn.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+  }
+
+  .arch-subtab-btn:not(.active):hover {
+    color: var(--color-text);
+  }
+
+  .arch-subtab-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .arch-briefing-wrap {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
   }
 
   .header-right {
@@ -2194,6 +4226,42 @@
   .delta-add { color: #4ade80; font-weight: 600; }
   .delta-remove { color: #f87171; font-weight: 600; }
   .delta-modify { color: #fbbf24; font-weight: 600; }
+
+  /* ── Key moment narrative panel (system-explorer.md §6) ─────────────── */
+  .timeline-moment-narrative {
+    display: flex; flex-direction: column; gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated, #16161f);
+    border: 1px solid var(--color-border, #334155);
+    border-left: 3px solid #a855f7;
+    border-radius: var(--radius, 8px);
+    margin-bottom: var(--space-2);
+  }
+  .timeline-moment-header {
+    display: flex; align-items: center; gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+  .timeline-moment-title {
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+    color: #a855f7; font-size: var(--text-xs);
+  }
+  .timeline-moment-date {
+    color: var(--color-text-muted); font-family: var(--font-mono);
+  }
+  .timeline-moment-ref {
+    font-family: var(--font-mono); font-size: var(--text-xs);
+    color: var(--color-text-secondary, #94a3b8);
+  }
+  .timeline-moment-close {
+    margin-left: auto; background: transparent; border: none; color: var(--color-text-muted);
+    font-size: 14px; cursor: pointer; padding: 0 var(--space-1); border-radius: var(--radius-sm);
+  }
+  .timeline-moment-close:hover { color: var(--color-text-primary, #e2e8f0); background: var(--color-surface, #1e293b); }
+  .timeline-moment-text {
+    margin: 0; font-size: var(--text-sm); line-height: 1.5;
+    color: var(--color-text-primary, #e2e8f0);
+  }
+  .timeline-moment-empty { color: var(--color-text-muted); font-style: italic; }
 
   /* ── Back to repos button (workspace scope) ───────────────────────── */
   .back-to-repos-btn {
@@ -2294,6 +4362,99 @@
     flex-wrap: wrap;
   }
 
+  /* HSI §3 / ui-navigation.md §3 view selector dropdown (task-178):
+     built-in views → saved views → "Generate view..." option. */
+  .explorer-view-select {
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .view-select-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: var(--space-1) var(--space-3);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .view-select-btn:hover { border-color: var(--color-border-strong); }
+  .view-select-btn[aria-expanded='true'] { border-color: var(--color-focus); }
+
+  .view-select-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 60;
+    min-width: 220px;
+    max-height: 320px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    padding: var(--space-1);
+  }
+
+  .view-select-section {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+
+  .view-select-option {
+    border: none;
+    background: none;
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    text-align: left;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm, 6px);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .view-select-option:hover { background: var(--color-surface); }
+  .view-select-option.active { font-weight: 600; box-shadow: inset 2px 0 0 var(--color-focus); }
+  .view-select-generate { color: var(--color-focus, #3b82f6); font-style: italic; }
+
+  .view-select-divider {
+    height: 1px;
+    background: var(--color-border);
+    margin: var(--space-1) 0;
+  }
+
+  /* In-view filter panel row (task-178): filter panel left, canvas right. */
+  .explorer-boundary-row {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    align-items: stretch;
+  }
+
+  .explorer-boundary-main {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+  }
+
   .search-input-wrap {
     display: flex;
     align-items: center;
@@ -2364,7 +4525,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; }
-    .ws-repo-card,
     .go-admin-btn,
     .chip-clear,
     .graph-error button { transition: none; }
@@ -2403,6 +4563,107 @@
 
   .chip-clear:hover { opacity: 1; }
   .chip-clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* Active concept filter chip (system-explorer.md §4) — distinct accent
+     from the search result chip: the concept view is a filter, not a
+     search result. */
+  .concept-filter-chip {
+    background: color-mix(in srgb, #a78bfa 12%, transparent);
+    border-color: color-mix(in srgb, #a78bfa 40%, transparent);
+    color: #c4b5fd;
+  }
+
+  /* ── Ad-hoc concept creation dialog (system-explorer.md §4) ─────── */
+  .concept-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.6);
+    z-index: 300;
+  }
+
+  .concept-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 301;
+    width: min(400px, calc(100vw - 48px));
+    padding: var(--space-5);
+    background: var(--color-bg-secondary, #0f172a);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius-lg, 10px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+
+  .concept-dialog-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text-primary, #e2e8f0);
+  }
+
+  .concept-dialog-desc {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted, #94a3b8);
+    line-height: 1.5;
+  }
+
+  .concept-dialog-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted, #94a3b8);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .concept-dialog-input {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-bg-primary, #0f0f1a);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius-md, 6px);
+    color: var(--color-text-primary, #e2e8f0);
+    font-size: var(--text-sm);
+  }
+  .concept-dialog-input:focus-visible {
+    outline: 2px solid var(--color-focus, #3b82f6);
+    outline-offset: 1px;
+  }
+
+  .concept-dialog-error {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-danger, #ef4444);
+  }
+
+  .concept-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .concept-dialog-save,
+  .concept-dialog-cancel {
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md, 6px);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .concept-dialog-save {
+    background: var(--color-focus, #3b82f6);
+    color: #fff;
+    border-color: var(--color-focus, #3b82f6);
+  }
+  .concept-dialog-save:disabled { opacity: 0.6; cursor: default; }
+  .concept-dialog-cancel {
+    background: transparent;
+    color: var(--color-text-muted, #94a3b8);
+    border-color: var(--color-border-strong, #334155);
+  }
 
   /* ── Workspace repo error ─────────────────────────────────────────────── */
   .error-banner {
@@ -2826,10 +5087,16 @@
     overflow: hidden;
     min-width: 0;
     position: relative;
+    display: flex;
+    flex-direction: column;
   }
 
-  .toolchain-warning {
+  .canvas-warning-stack {
     position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 45;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    max-width: 600px;
+  }
+  .toolchain-warning {
     display: flex; align-items: center; gap: 8px;
     padding: 6px 14px; background: rgba(120, 53, 15, 0.85); border: 1px solid rgba(245, 158, 11, 0.4);
     border-radius: 8px; font-size: 11px; color: #fbbf24; max-width: 600px;
@@ -3659,13 +5926,46 @@
 
   /* ── Chat panel collapse/expand controls ─────────────────────────── */
   .chat-collapse-bar {
-    display: none;
+    display: flex;
     flex-shrink: 0;
     align-items: center;
-    justify-content: center;
-    padding: var(--space-1) 0;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--color-border);
     background: var(--color-surface);
+  }
+
+  /* HSI §3: chat mode tabs (Explorer agent | Generated Views) */
+  .chat-mode-tabs {
+    display: flex;
+    gap: var(--space-1);
+  }
+
+  .chat-mode-tab {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .chat-mode-tab:hover { color: var(--color-text); }
+
+  .chat-mode-tab.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border-strong);
+    font-weight: 600;
+  }
+
+  .chat-mode-tab:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .chat-collapse-btn {
@@ -3809,5 +6109,146 @@
     .chat-expand-btn {
       display: none !important;
     }
+  }
+  .arch-risk-item {
+    cursor: pointer;
+  }
+
+  .arch-type-card {
+    cursor: pointer;
+  }
+  .arch-type-card:focus-visible,
+  .arch-risk-item:focus-visible {
+    outline: 2px solid var(--color-focus, #3b82f6);
+    outline-offset: 1px;
+  }
+
+  /* ── Density list fallback (ui-layout.md §10: >1000 nodes → list) ───── */
+  .density-list-fallback {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    min-height: 320px;
+    padding: var(--space-3, 12px);
+    box-sizing: border-box;
+  }
+  .density-list-banner {
+    padding: 8px 12px;
+    border: 1px solid #f87171;
+    border-radius: 8px;
+    background: rgba(30, 41, 59, 0.9);
+    color: #f87171;
+    font-size: 13px;
+  }
+
+  /* ── Generated-view layout dispatch (ui-layout.md §10 Layout Engines) ── */
+  .gen-layout-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    min-height: 320px;
+  }
+  .gen-layout-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    padding: 3px 6px 3px 10px;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    background: rgba(30, 41, 59, 0.9);
+    color: #cbd5e1;
+    font-size: 12px;
+  }
+  .gen-layout-chip-clear {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .gen-layout-chip-clear:hover {
+    color: #e2e8f0;
+    background: #1e293b;
+  }
+  .gen-layout-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── ViewEvent surfaces (ui-layout.md §10 Interaction Events) ───────── */
+  .viewevent-tooltip {
+    position: fixed;
+    z-index: 300;
+    background: rgba(15, 15, 26, 0.95);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 6px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    pointer-events: none;
+    max-width: 320px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  }
+  .viewevent-tooltip-type {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+  }
+  .viewevent-tooltip-name {
+    font-size: 13px;
+    color: #e2e8f0;
+    word-break: break-all;
+  }
+
+  .viewevent-menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 290;
+  }
+  .viewevent-menu {
+    position: fixed;
+    z-index: 300;
+    min-width: 200px;
+    background: var(--color-surface, #111827);
+    border: 1px solid var(--color-border, #334155);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+  }
+  .viewevent-menu-title {
+    font-size: 12px;
+    color: #94a3b8;
+    padding: 6px 10px 8px;
+    border-bottom: 1px solid #1e293b;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 280px;
+  }
+  .viewevent-menu-item {
+    background: transparent;
+    border: none;
+    color: #e2e8f0;
+    text-align: left;
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .viewevent-menu-item:hover {
+    background: #1e293b;
   }
 </style>

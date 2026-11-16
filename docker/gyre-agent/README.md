@@ -41,9 +41,32 @@ The Gyre server injects these automatically at spawn time — you do not need to
 | `GYRE_REPO_ID` | Repository UUID |
 | `GYRE_AGENT_COMMAND` | _(optional)_ Command to exec after bootstrap (e.g. a CI script path inside the image) |
 
+<<<<<<< HEAD
 ## Preview Mode
 
 When a human previews a draft meta-spec (`POST /api/v1/meta-specs/preview`), the server spawns the agent with `GYRE_PREVIEW_ID` in place of `GYRE_TASK_ID`, plus the three `GYRE_META_SPEC_*` / `GYRE_TARGET_SPEC_PATH` vars above. The runner reads the draft meta-spec and target spec from those vars and builds the prompt itself, withholds the task-mutating MCP tools (`gyre_list_tasks`, `gyre_create_task`, `gyre_update_task`), and stops after the agent's query loop with a single log line. There is no task to read or update, no conversation upload, no `POST /api/v1/agents/{id}/complete` call and no merge request — the push to `preview/<preview_id>/<slug>` is the entire deliverable, and the server reads the diff off that branch, kills the agent and deletes the branch. Providing `GYRE_TASK_PROMPT` together with `GYRE_PREVIEW_ID` is an operator override and restores the normal (completing) path.
+=======
+### cred-proxy (optional overrides)
+
+The credential proxy reads these at startup; unset values fall back to the
+listed defaults:
+
+| Variable | Default | Description |
+|---|---|---|
+| `GYRE_ANTHROPIC_BASE` | `https://api.anthropic.com` | Upstream for `/v1/*` LLM calls (Anthropic-compatible gateways) |
+| `GYRE_PRICING_JSON` | _(built-in table)_ | Cost table override: `{"claude-<model>":[input_per_million_usd, output_per_million_usd], ...}` |
+| `GYRE_CRED_SOCK_PATH` | `/run/gyre/cred.sock` | Unix socket path for the primary proxy listener |
+| `GYRE_CRED_ALLOWED_HOSTS` | `api.anthropic.com,gitlab.com,api.github.com` | Destination allowlist for `POST /proxy` |
+
+### Usage reporting
+
+After each proxied LLM call, cred-proxy reports token usage back to the
+server via `POST $GYRE_SERVER_URL/api/v1/agents/$GYRE_AGENT_ID/usage`
+(authenticated with `GYRE_AUTH_TOKEN`). The server aggregates usage per
+workspace and runs the budget enforcement cascade (agent-runtime.md §4:
+80% warn / 100% graceful stop / beyond-limit hard kill). Reports are
+best-effort and never fail the LLM call itself.
+>>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
 
 ## What the Entrypoint Does
 

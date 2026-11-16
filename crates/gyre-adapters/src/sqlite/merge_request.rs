@@ -54,6 +54,7 @@ struct MergeRequestRow {
     atomic_group: Option<String>,
     workspace_id: String,
     reverted_at: Option<i64>,
+    merge_commit_sha: Option<String>,
     revert_commit_sha: Option<String>,
     spec_ref: Option<String>,
 }
@@ -103,6 +104,7 @@ impl MergeRequestRow {
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
             workspace_id: Id::new(self.workspace_id),
+            merge_commit_sha: self.merge_commit_sha,
             reverted_at: self.reverted_at.map(|v| v as u64),
             revert_commit_sha: self.revert_commit_sha,
         })
@@ -130,6 +132,7 @@ struct NewMergeRequestRow<'a> {
     depends_on: &'a str,
     atomic_group: Option<&'a str>,
     workspace_id: &'a str,
+    merge_commit_sha: Option<&'a str>,
     reverted_at: Option<i64>,
     revert_commit_sha: Option<&'a str>,
     spec_ref: Option<&'a str>,
@@ -140,6 +143,11 @@ impl MergeRequestRepository for SqliteStorage {
     async fn create(&self, mr: &MergeRequest) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let m = mr.clone();
+        // Persist under the storage handle's tenant scope (mirrors
+        // TaskRepository::create): the tenant is a real configured scope,
+        // never a fabricated "default" literal — a tenant-scoped handle
+        // must not write rows invisible to its own tenant-filtered reads.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let reviewer_strs: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
@@ -160,10 +168,11 @@ impl MergeRequestRepository for SqliteStorage {
                 diff_insertions: m.diff_stats.as_ref().map(|d| d.insertions as i64),
                 diff_deletions: m.diff_stats.as_ref().map(|d| d.deletions as i64),
                 has_conflicts: m.has_conflicts.map(|v| if v { 1i32 } else { 0 }),
-                tenant_id: "default",
+                tenant_id: &tenant,
                 depends_on: &depends_on_json,
                 atomic_group: m.atomic_group.as_deref(),
                 workspace_id: m.workspace_id.as_str(),
+                merge_commit_sha: m.merge_commit_sha.as_deref(),
                 reverted_at: m.reverted_at.map(|v| v as i64),
                 revert_commit_sha: m.revert_commit_sha.as_deref(),
                 spec_ref: m.spec_ref.as_deref(),
@@ -187,6 +196,7 @@ impl MergeRequestRepository for SqliteStorage {
                     merge_requests::depends_on.eq(row.depends_on),
                     merge_requests::atomic_group.eq(row.atomic_group),
                     merge_requests::workspace_id.eq(row.workspace_id),
+                    merge_requests::merge_commit_sha.eq(row.merge_commit_sha),
                     merge_requests::reverted_at.eq(row.reverted_at),
                     merge_requests::revert_commit_sha.eq(row.revert_commit_sha),
                     merge_requests::spec_ref.eq(row.spec_ref),
@@ -292,6 +302,7 @@ impl MergeRequestRepository for SqliteStorage {
                         .eq(m.has_conflicts.map(|v| if v { 1i32 } else { 0 })),
                     merge_requests::depends_on.eq(&depends_on_json),
                     merge_requests::atomic_group.eq(m.atomic_group.as_deref()),
+                    merge_requests::merge_commit_sha.eq(m.merge_commit_sha.as_deref()),
                     merge_requests::reverted_at.eq(m.reverted_at.map(|v| v as i64)),
                     merge_requests::revert_commit_sha.eq(m.revert_commit_sha.as_deref()),
                     merge_requests::spec_ref.eq(m.spec_ref.as_deref()),
@@ -379,6 +390,7 @@ mod tests {
         MergeRequest::new(
             Id::new(id),
             Id::new(repo_id),
+            Id::new("default"),
             format!("MR {}", id),
             "feat/x",
             "main",
@@ -398,6 +410,37 @@ mod tests {
             .unwrap();
         assert_eq!(found.title, "MR mr1");
         assert_eq!(found.status, MrStatus::Open);
+    }
+
+    /// A tenant-scoped storage handle must persist MRs under ITS tenant
+    /// scope, not a fabricated "default" literal — otherwise the handle's
+    /// own tenant-filtered reads (find_by_id / list_by_repo) cannot see the
+    /// rows it just wrote. Killing test for the `tenant_id: "default"`
+    /// fabrication this create() used to perform: with the old code the row
+    /// is stored under tenant "default" while the scoped handle reads
+    /// filter by "t1", so both lookups below come back empty.
+    #[tokio::test]
+    async fn create_persists_under_the_handles_tenant_scope() {
+        let (_tmp, s) = setup();
+        let scoped = s.with_tenant("t1");
+        create_repo(&s, "p1", "r1").await;
+        let mr = make_mr("mr-tenant-scoped", "r1");
+        MergeRequestRepository::create(&scoped, &mr).await.unwrap();
+
+        let found = MergeRequestRepository::find_by_id(&scoped, &mr.id)
+            .await
+            .unwrap()
+            .expect("a tenant-scoped handle must see the MR it just created");
+        assert_eq!(found.id, mr.id);
+
+        let listed = MergeRequestRepository::list_by_repo(&scoped, &Id::new("r1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "a tenant-scoped handle's list_by_repo must include the MR it created"
+        );
     }
 
     #[tokio::test]
