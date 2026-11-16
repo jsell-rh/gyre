@@ -766,6 +766,181 @@ fn verify_output_signatures(chain: &[gyre_common::Attestation]) -> gyre_common::
     }
 }
 
+// ── SLSA provenance mapping (supply-chain.md §SLSA Provenance Integration) ───
+
+#[derive(Deserialize)]
+pub struct SlsaProvenanceQuery {
+    /// Ref (SHA, tag, or branch) the statement attests to. Defaults to the
+    /// repo's default branch HEAD.
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
+}
+
+/// Map a Gyre attestation level (supply-chain.md §Attestation Levels) to a
+/// SLSA Build Level:
+/// - Level 1 (raw git push, no attestation) → SLSA 0 — no provenance.
+/// - Level 2 (Gyre CLI, signed self-report) → SLSA 1–2: authenticated
+///   provenance; the repo's committed `gyre-stack.lock` supplies the
+///   version-controlled build process, so Level 2 maps to SLSA 2 when the
+///   release ref pins a lockfile and SLSA 1 otherwise.
+/// - Level 3 (Gyre-managed runtime) → SLSA 3 (hermetic, infrastructure-
+///   attested build environment).
+fn gyre_level_to_slsa(gyre_level: u8, lockfile_pinned: bool) -> u8 {
+    match gyre_level {
+        3 => 3,
+        2 => {
+            if lockfile_pinned {
+                2
+            } else {
+                1
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// GET /api/v1/repos/:id/slsa-provenance
+///   ?ref={sha_or_tag} — the ref the statement attests to (default: the
+///                     repo's default branch HEAD)
+///
+/// Maps Gyre's provenance data to the SLSA provenance attestation format
+/// (in-toto Statement v1, predicateType https://slsa.dev/provenance/v1).
+/// The subject is the resolved ref's commit; `predicate.internalParameters`
+/// carries the Gyre-specific mapping — per-commit agent attribution with
+/// Gyre attestation levels and their SLSA Build Level equivalents, and the
+/// overall SLSA Build Level of the subject (the weakest link: the minimum
+/// across all agent-attributed commits, since one unattested commit caps
+/// what the artifact can claim).
+pub async fn get_slsa_provenance(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    Query(params): Query<SlsaProvenanceQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Validate the caller-supplied ref against git flag injection.
+    if let Some(r) = &params.git_ref {
+        if !super::aibom::is_valid_ref(r) {
+            return Err(ApiError::InvalidInput(
+                "invalid 'ref': must be a valid SHA or tag name".to_string(),
+            ));
+        }
+    }
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let ref_used = params
+        .git_ref
+        .clone()
+        .unwrap_or_else(|| format!("refs/heads/{}", repo.default_branch));
+    let sha = super::aibom::git_rev_parse(&git_bin, &repo.path, &ref_used)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("cannot resolve ref '{ref_used}' in repo {repo_id}"))
+        })?;
+
+    // A committed gyre-stack.lock at the subject ref supplies the
+    // version-controlled build process (SLSA 2 requirement) for Level-2
+    // (CLI) contributions.
+    let lockfile_pinned = crate::spec_registry::read_git_file(
+        &git_bin,
+        &repo.path,
+        &sha,
+        "gyre-stack.lock",
+    )
+    .await
+    .is_some_and(|content| {
+        gyre_domain::stack::StackLockfile::parse(&content)
+            .map(|l| l.verify_integrity().is_ok())
+            .unwrap_or(false)
+    });
+
+    // Per-commit agent attribution with Gyre level → SLSA Build Level.
+    let commits = state
+        .agent_commits
+        .find_by_repo(&repo.id)
+        .await
+        .map_err(ApiError::Internal)?;
+    let mut per_commit: Vec<serde_json::Value> = Vec::with_capacity(commits.len());
+    let mut slsa_build_level: Option<u8> = None;
+    let mut earliest_ts: Option<u64> = None;
+    for ac in &commits {
+        let gyre_level =
+            gyre_domain::stack::attestation_level_from_label(ac.attestation_level.as_deref());
+        let commit_slsa = gyre_level_to_slsa(gyre_level, lockfile_pinned);
+        slsa_build_level = Some(match slsa_build_level {
+            Some(min) => min.min(commit_slsa),
+            None => commit_slsa,
+        });
+        earliest_ts = Some(match earliest_ts {
+            Some(t) => t.min(ac.timestamp),
+            None => ac.timestamp,
+        });
+        per_commit.push(serde_json::json!({
+            "commit_sha": ac.commit_sha,
+            "agent_id": ac.agent_id.to_string(),
+            "gyre_attestation_level": gyre_level,
+            "attestation_level": ac.attestation_level,
+            "slsa_build_level": commit_slsa,
+        }));
+    }
+    // No agent-attributed commits at all → nothing provenance-bearing to
+    // claim beyond SLSA 0.
+    let slsa_build_level = slsa_build_level.unwrap_or(0);
+
+    let repo_name = repo.name.clone();
+    let workspace_uri = format!("git+gyre://{workspace}/{repo_name}", workspace = repo.workspace_id);
+
+    let statement = serde_json::json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{
+            "name": repo_name,
+            "digest": { "gitCommit": sha },
+        }],
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {
+            "buildDefinition": {
+                "buildType": "https://gyre.dev/buildtypes/agent-contribution/v1",
+                "externalParameters": {
+                    "repository": repo_id,
+                    "ref": ref_used,
+                },
+                "internalParameters": {
+                    "gyre": {
+                        "slsaBuildLevel": slsa_build_level,
+                        "lockfilePinned": lockfile_pinned,
+                        "levelMapping": {
+                            "gyre_level_1_raw_push": 0,
+                            "gyre_level_2_cli": if lockfile_pinned { 2 } else { 1 },
+                            "gyre_level_3_managed": 3,
+                        },
+                        "commits": per_commit,
+                    },
+                },
+                "resolvedDependencies": [{
+                    "uri": workspace_uri,
+                    "digest": { "gitCommit": sha },
+                }],
+            },
+            "runDetails": {
+                "builder": {
+                    "id": format!("https://gyre.dev/forge/{repo_id}"),
+                },
+                "metadata": {
+                    "invocationId": format!("urn:gyre:slsa-provenance:{repo_id}:{sha}"),
+                    "startedOn": earliest_ts
+                        .map(gyre_domain::decisions::format_iso8601_utc),
+                },
+            },
+        },
+    });
+
+    Ok(Json(statement))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -802,6 +977,28 @@ mod tests {
             )
             .await
             .unwrap();
+        let json = body_json(resp).await;
+        let repo_id = json["id"].as_str().unwrap().to_string();
+        (app, repo_id)
+    }
+
+    /// `create_repo` with an explicit repo name (unique per call so parallel
+    /// git-backed tests never share a git dir under the shared `repos_root`).
+    async fn create_repo_named(app: Router, name: &str) -> (Router, String) {
+        let body = serde_json::json!({"workspace_id": "ws-1", "name": name});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         let repo_id = json["id"].as_str().unwrap().to_string();
         (app, repo_id)
@@ -1007,5 +1204,328 @@ mod tests {
             "Tampered gate attestation must fail verification"
         );
         assert!(!bad_result.children[0].valid);
+    }
+
+    // ── SLSA provenance mapping (supply-chain.md §SLSA Provenance) ────────
+
+    /// Real-git setup: an API-created repo record (the API's `init_bare` is
+    /// NoopGitOps under `test_state`, so the bare git dir + initial commit
+    /// are created here) plus `extra` file commits, returning the repo id,
+    /// repo path, and final HEAD SHA. The repo name is unique per call —
+    /// parallel tests in this binary share `repos_root` (keyed by pid), so
+    /// same-named repos would collide on the same git dir.
+    async fn git_repo_with_commits(
+        extra: &[(&str, String)],
+    ) -> (Router, std::sync::Arc<crate::AppState>, String, String, String) {
+        use std::io::Write as _;
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let repo_name = format!("slsa-{}", uuid::Uuid::new_v4().simple());
+        let (app, repo_id) = create_repo_named(app, &repo_name).await;
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .expect("repo record");
+        let repo_path = repo.path.clone();
+
+        // Real bare repo.
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let out = std::process::Command::new("git")
+            .args(["init", "--bare", &repo_path])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init --bare failed");
+
+        let run_git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // Initial (parentless) commit on an empty tree.
+        let child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("mktree")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let empty_tree = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout)
+            .trim()
+            .to_string();
+        let mut head = run_git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit-tree",
+            &empty_tree,
+        ]);
+        for (path, content) in extra {
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(content.as_bytes())
+                .unwrap();
+            let blob = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout)
+                .trim()
+                .to_string();
+            let tree_input = format!("100644 blob {blob}\t{path}\n");
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("mktree")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(tree_input.as_bytes())
+                .unwrap();
+            let tree = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout)
+                .trim()
+                .to_string();
+            head = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &head,
+                ])
+                .output()
+                .map(|o| {
+                    assert!(o.status.success(), "commit-tree failed");
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                })
+                .unwrap();
+        }
+        run_git(&["update-ref", "refs/heads/main", &head]);
+
+        (app, state, repo_id, repo_path, head)
+    }
+
+    fn record_commit(
+        state: &std::sync::Arc<crate::AppState>,
+        id: &str,
+        repo_id: &str,
+        sha: &str,
+        agent: &str,
+        level: Option<&str>,
+    ) {
+        let ac = AgentCommit::new(
+            Id::new(id),
+            Id::new(agent),
+            Id::new(repo_id),
+            sha,
+            "refs/heads/main",
+            1_700_000_000,
+        )
+        .with_attestation_level(level.unwrap_or("unattested"));
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(state.agent_commits.record(&ac))
+                .unwrap();
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slsa_provenance_statement_shape_and_level_mapping() {
+        // HEAD is agent-attributed at two levels: server-verified (→ SLSA 3)
+        // and unattested (→ SLSA 0). Weakest link caps the subject at 0.
+        let (app, state, repo_id, _repo_path, head) =
+            git_repo_with_commits(&[("src/a.rs", "fn a() {}".to_string())]).await;
+        record_commit(&state, "sc-1", &repo_id, &head, "agent-3", Some("server-verified"));
+        record_commit(&state, "sc-2", &repo_id, "head-parent-unused", "agent-1", None);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/slsa-provenance"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        // in-toto Statement v1 envelope.
+        assert_eq!(json["_type"], "https://in-toto.io/Statement/v1");
+        assert_eq!(json["predicateType"], "https://slsa.dev/provenance/v1");
+        let subject = &json["subject"][0];
+        assert_eq!(subject["digest"]["gitCommit"], head);
+        assert!(subject["name"].as_str().unwrap().contains("test-repo"));
+
+        // Builder + invocation identity.
+        let run_details = &json["predicate"]["runDetails"];
+        assert!(run_details["builder"]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://gyre.dev/forge/"));
+        assert!(run_details["metadata"]["invocationId"]
+            .as_str()
+            .unwrap()
+            .contains(&head));
+
+        // Gyre mapping: per-commit levels + weakest-link overall level.
+        let gyre = &json["predicate"]["buildDefinition"]["internalParameters"]["gyre"];
+        assert_eq!(gyre["slsaBuildLevel"], 0, "unattested commit caps the claim");
+        let commits = gyre["commits"].as_array().unwrap();
+        let by_sha = |sha: &str| {
+            commits
+                .iter()
+                .find(|c| c["commit_sha"] == sha)
+                .unwrap_or_else(|| panic!("no per-commit entry for {sha}"))
+                .clone()
+        };
+        let verified = by_sha(&head);
+        assert_eq!(verified["gyre_attestation_level"], 3);
+        assert_eq!(verified["slsa_build_level"], 3);
+        let unattested = by_sha("head-parent-unused");
+        assert_eq!(unattested["gyre_attestation_level"], 1);
+        assert_eq!(unattested["slsa_build_level"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slsa_level2_maps_to_1_without_lockfile_2_with() {
+        // Without a lockfile: CLI (self-reported, level 2) → SLSA 1.
+        let (app, state, repo_id, _repo_path, head) =
+            git_repo_with_commits(&[("src/b.rs", "fn b() {}".to_string())]).await;
+        record_commit(&state, "sc-3", &repo_id, &head, "agent-2", Some("self-reported"));
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/slsa-provenance"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let gyre = &json["predicate"]["buildDefinition"]["internalParameters"]["gyre"];
+        assert_eq!(gyre["slsaBuildLevel"], 1);
+        assert_eq!(gyre["lockfilePinned"], false);
+        assert_eq!(gyre["levelMapping"]["gyre_level_2_cli"], 1);
+
+        // With a committed, internally-consistent gyre-stack.lock: the
+        // lockfile supplies the version-controlled build process → SLSA 2.
+        let stack = gyre_domain::stack::AgentStack {
+            agents_md_hash: "h".to_string(),
+            hooks: vec![],
+            mcp_servers: vec![],
+            model: "m".to_string(),
+            cli_version: "1".to_string(),
+            settings_hash: "s".to_string(),
+            persona_hash: None,
+        };
+        let lock = gyre_domain::stack::StackLockfile::from_stack(&stack, 0);
+        let (app2, state2, repo_id2, _p2, head2) = git_repo_with_commits(&[(
+            "gyre-stack.lock",
+            lock.to_toml().unwrap(),
+        )])
+        .await;
+        record_commit(&state2, "sc-4", &repo_id2, &head2, "agent-2", Some("self-reported"));
+
+        let resp = app2
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id2}/slsa-provenance"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let gyre = &json["predicate"]["buildDefinition"]["internalParameters"]["gyre"];
+        assert_eq!(gyre["slsaBuildLevel"], 2);
+        assert_eq!(gyre["lockfilePinned"], true);
+        assert_eq!(gyre["levelMapping"]["gyre_level_2_cli"], 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slsa_provenance_ref_validation_and_resolution() {
+        let (app, _state, repo_id, _repo_path, head) =
+            git_repo_with_commits(&[("src/c.rs", "fn c() {}".to_string())]).await;
+
+        // Explicit ref resolves to the same subject.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/slsa-provenance?ref=refs/heads/main"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["subject"][0]["digest"]["gitCommit"], head);
+
+        // Flag-injection ref → 400.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/slsa-provenance?ref=--upload-pack%3Devil"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Unresolvable ref → 404.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/slsa-provenance?ref=refs/tags/missing"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
