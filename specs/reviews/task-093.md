@@ -82,3 +82,29 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Verification-repair review — task-093 (round 4)
+
+Trigger: verification attempt 3cb8d80b (`cargo test --all` on the merge with base `c66ee2ac`) failed one test — `orchestrator_spawn_denied_across_tenants` got 500 instead of 201 at the same-tenant positive control (api_integration.rs:1728). Candidate under review: `303502d39528a6d9d4f7c775b778a4170fc1cf63`; repair commit `ebb879f5` (fixture-only, +9 lines).
+
+Verdict: **complete** (approved), with deferred probes recorded below.
+
+What this round checked and found:
+
+- **The repair is fixture-only and assertions are untouched.** The base→candidate diff for `tests/api_integration.rs` is exactly the `seed_builtin_meta_specs(&ctx.state)` call plus comment; the cross-tenant 403, no-agent-persisted, and same-tenant 201 assertions are byte-identical to the failing version.
+- **Root cause independently confirmed in source.** `validate_persona` (`api/orchestrator.rs`) is fail-closed by design — `ApiError::Internal` (HTTP 500) when the persona meta-spec is absent or unapproved — and runs after tenant containment but before the entity-layer persona resolution in `spawn_workspace_orchestrator_core`. The base `c66ee2ac` has no `validate_persona` (entity-layer resolution only); the test fixture was authored against the base's weaker contract and seeded only entity-layer personas, so under the branch's stricter core the positive control failed closed at exactly that layer. Production always satisfies the layer (`main.rs:59` seeds the built-in meta-specs at startup, including the approved `workspace-orchestrator`/`repo-orchestrator` persona meta-specs), so the fixture mirroring startup is parity, not masking.
+- **The fix pattern is proven in-tree.** The lib-test fixture `seed()` (`orchestrator.rs` tests), `signal_chain`, `ralph_loop`, `api/specs`, and the mcp `orch_state` fixtures all use the same seeding. In the failing verification run all 2398 lib tests passed — including full spawn happy paths with seeding — while only this one unseeded fixture failed.
+- **The repair is sufficient.** Production files on the orchestrator spawn path (`orchestrator.rs`, `spawn.rs`, `stale_agents.rs`, `mcp.rs`, `lib.rs`) are identical between the verified-failing source `4fb9dd13` and the candidate; the fixture seeding is the only relevant delta. Every other layer of the positive-control path (containment, one-live, budget, entity persona, `agent_signing_key` mint, keypair bootstrap) is proven green by the base's own green run of the same test shape and by the lib suite.
+- **No sibling gap.** No other integration test hits the orchestrator spawn endpoints (grep across `crates/gyre-server/tests/*.rs`); `search_wiring.rs` mints orchestrator JWTs directly without the spawn core.
+- **Round-2/3 invariants re-verified present:** both orchestrator routes in the ABAC resolver (`abac_middleware.rs:259,543`, absent from exemptions), tenant containment before persona validation in both spawn cores, budget decrement on the stale-abort path + budget-gated restart, `disconnected_behavior` inheritance by replacements, `handle_orchestrator_death` on stale-abort/fail/stop with terminal-state idempotency guards protecting exactly-one-live, `gyre_message_send` in the `needs_write` gate with an empty exemptions file.
+- **Mechanical checks pass:** ABAC route registry, MCP write-tools (7 gated), ABAC exempt-handlers (85), arch, inert-enforcement — all exit 0. `cargo check -p gyre-server --tests` exit 0 (fixture compiles). `cargo test -p gyre-domain` 572 passed.
+- **Non-blocking observation:** `ebb879f5`'s commit-message narrative ("leaning on state another test binary left behind") is imprecise — `Ctx::new` builds a fresh mem state per test, so the pre-fix test failed deterministically in isolation; the accurate story is that the base-authored fixture predated the branch's fail-closed meta-spec layer. The fix itself is correct and the material claims (fail-closed core, production parity) are true.
+
+Deferred probes for the independent verifier (server test codegen is wrapper-blocked in the review stage; evidence in `/tmp/stage/review-evidence/`):
+
+- `cargo test --all` — the originally failing suite, must be fully green.
+- `cargo test -p gyre-server --test api_integration` — 67 tests; specifically `orchestrator_spawn_denied_across_tenants`.
+- `cargo test -p gyre-server --lib api::orchestrator` — 16 tests.
+- `cargo test -p gyre-server --lib -- mcp::tests` — orchestrator-tier tools + `gyre_message_send` RBAC gate tests.
+
+— Reviewer, 2026-11-16
