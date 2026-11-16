@@ -34,6 +34,15 @@ pub struct RegisterAgentResponse {
     pub status: String,
     pub auth_token: String,
 }
+/// GET /api/v1/agents/:id/stack response. `agent_id` echoes the request
+/// path; kept for response-shape fidelity with the server, not read locally.
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct AgentStackResponse {
+    pub agent_id: String,
+    pub stack: gyre_domain::stack::AgentStack,
+    pub fingerprint: String,
+}
 
 #[derive(Deserialize, Debug, Clone)]
 #[allow(dead_code)]
@@ -570,6 +579,23 @@ impl GyreClient {
             anyhow::bail!("get agent failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing agent response")
+    }
+
+    /// Fetch an agent's registered stack (stack attestation).
+    pub async fn get_agent_stack(&self, agent_id: &str) -> Result<AgentStackResponse> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/agents/{agent_id}/stack", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get agent stack failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing agent stack response")
     }
 
     /// GET /api/v1/tasks/:id — live task detail. Search index facets are

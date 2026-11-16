@@ -231,6 +231,11 @@ enum Commands {
         #[command(subcommand)]
         command: RepoCommands,
     },
+    /// Stack operations (lockfile generation)
+    Stack {
+        #[command(subcommand)]
+        command: StackCommands,
+    },
     /// Budget governance: show usage and set limits
     ///
     /// The budget governance boundary is the workspace — repo scope (the
@@ -778,6 +783,18 @@ enum ReleaseCommands {
         /// Output changelog markdown to stdout instead of summary
         #[arg(long)]
         markdown: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum StackCommands {
+    /// Generate gyre-stack.lock from the agent's registered stack
+    /// (supply-chain.md §gyre-stack.lock) and write it to the repo.
+    Lock {
+        /// Output path (default: gyre-stack.lock in the current directory,
+        /// intended to be run from the repo root)
+        #[arg(long)]
+        output: Option<String>,
     },
 }
 
@@ -2257,6 +2274,12 @@ async fn main() -> Result<()> {
             },
         },
 
+        Commands::Stack { command } => match command {
+            StackCommands::Lock { output } => {
+                run_stack_lock(output).await?;
+            }
+        },
+
         Commands::Budget { command } => {
             let cfg = config::Config::load()?;
             let token = cfg.require_token()?;
@@ -2649,6 +2672,38 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// ── Stack lockfile (supply-chain.md §gyre-stack.lock) ─────────────────────────
+
+/// `gyre stack lock`: fetch the agent's registered stack from the server,
+/// build a `gyre-stack.lock` from it, and write the file. Run from the repo
+/// root; the lockfile is then committed with the code, pinning the exact
+/// agent configuration required to contribute (the server enforces it at
+/// push time and flags drift).
+async fn run_stack_lock(output: Option<String>) -> Result<()> {
+    let cfg = config::Config::load()?;
+    let token = cfg.require_token()?;
+    let agent_id = cfg.require_agent_id()?;
+
+    let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+    let resp = api.get_agent_stack(agent_id).await?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let lock = gyre_domain::stack::StackLockfile::from_stack(&resp.stack, now);
+    let content = lock.to_toml().map_err(anyhow::Error::msg)?;
+
+    let path = output.unwrap_or_else(|| "gyre-stack.lock".to_string());
+    std::fs::write(&path, &content)?;
+
+    println!("Wrote {path}");
+    println!("  Fingerprint: {}", resp.fingerprint);
+    println!("  Model:       {}", lock.model);
+    println!("  CLI:         {}", lock.cli_version);
+    println!("Commit gyre-stack.lock to pin this stack for the repo.");
+    Ok(())
+}
 // ── Bootstrap (platform-model.md §8) ──────────────────────────────────────────
 
 struct BootstrapArgs {
