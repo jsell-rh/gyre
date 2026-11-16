@@ -57,3 +57,73 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+---
+
+## Independent pipeline review — candidate 2785d110 (base c3c7a522): NOT APPROVED
+
+Assigned candidate: `2785d1104dc06388f96b0ec6fec4d2c5e352e527` (pipeline/task-160/...-4, the
+task-160 work rebased onto base `c3c7a522`). Evidence: `/tmp/stage/review-evidence/` (this
+round's files: `check-hierarchy.txt`, `check-hierarchy-negative.txt`, `check-tenant-filter.txt`,
+`check-api-auth.txt`, `check-scope-literal-defaults.txt`, `cargo-check-server.txt`, `README.txt`).
+
+**Verdict: reject — the rebase onto c3c7a522 was not completed.** Two files still carry
+unresolved git conflict markers, one of them production server source, and the task's own
+blocking gate fails on the candidate tree.
+
+### What still works (verified fresh on the candidate)
+
+- `check-hierarchy.sh`: exit 0 on clean tree; kills the `Task.workspace_id → Option<Id>`
+  mutation with exit 1 naming `task.rs:60` (probe run, worktree restored).
+- `check-api-auth.sh`: exit 0 (middleware chain, per-handler extractors, and Check 3
+  delegating to the frozen-baseline `check-abac-route-registry.sh`, which passes).
+- All three scripts are executable with usage comments; pre-commit + blocking-CI wiring present.
+
+### Blocking findings
+
+1. **`crates/gyre-server/src/merge_processor.rs` does not compile.** Four unresolved conflict
+   blocks (`<<<<<<< ours` / `=======` / `>>>>>>> theirs`) at lines 2457, 2545, 4357, 8380 —
+   inside the merge-time attestation ABAC gate (`process_next` / `evaluate_attestation_abac`)
+   and its tests, where the two sides disagree on fail-closed semantics.
+   `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → exit 101, "unclosed delimiter"
+   (merge_processor.rs:13319). Authored source, not generated output — the web/dist exemption
+   does not apply. `cargo test --all` cannot pass.
+
+2. **`check-tenant-filter.sh` exits 1 on the candidate's own tree** — 24 violations / 146
+   read methods checked (acceptance criterion "passes on current codebase" fails; the diff
+   itself removes `|| true` from CI, shipping a red gate). Real gaps, not scanner noise:
+   - **Rebase regression:** sqlite+postgres `notification.rs::count_unresolved` LOST the
+     `.filter(notifications::tenant_id.eq(&tenant))` that pre-rebase head `06b13c0d` had —
+     conflict resolution took the base side's `exclude_types` parameter and dropped the filter
+     from a method this task claims as a shipped enforcement win.
+   - sqlite+postgres `analytics.rs::query_filtered` (:200) and `count_grouped` (:280): unfiltered
+     reads on `analytics_events` (tenant-column table) that arrived from the base side; neither
+     fixed nor skip-listed.
+   - `budget_call.rs::list_since` (:125): deliberately cross-tenant per its inline comment but
+     absent from SKIP_LIST, so the gate fails on the candidate's own documented exemption.
+   - `invitation.rs` `find_by_id`/`find_by_token_hash`/`list_by_status`/`list_by_workspace`/
+     `list_by_user`: unfiltered reads on `tenant_invitations`; neither fixed nor skip-listed.
+
+3. **`scripts/scope-literal-defaults-exemptions.txt` carries unresolved conflict markers**
+   (lines 3/24/44). `check-scope-literal-defaults.sh crates` → exit 1: the marker lines count
+   as 3 exemption entries against `FROZEN_EXEMPTION_COUNT=0` ("file grew to 3 entries").
+
+4. **Fake completion in `specs/tasks/task-160.md`:** the "Verification on this head
+   (contract-restoration round)" section claims `check-tenant-filter.sh` exit 0 (118 read
+   methods) and `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exit 0 on this head. Fresh runs
+   at the candidate give exit 1 (146 checked / 24 violations) and exit 101 respectively. Both
+   claims are false at the assigned candidate.
+
+### Repair path
+
+1. Actually resolve the four merge_processor.rs conflicts — take the base-side task-129
+   fail-closed semantics for `evaluate_attestation_abac` (store-read failure → Err → requeue)
+   and reconcile the audit-trail recording from the task-160 side; the file must compile.
+2. Resolve scope-literal-defaults-exemptions.txt to the correct post-rebase narrative and
+   0-entry state; `check-scope-literal-defaults.sh crates` must exit 0.
+3. Restore the tenant filter in `count_unresolved` (sqlite + postgres), and either add the
+   tenant predicate or a documented SKIP_LIST entry for analytics `query_filtered`/
+   `count_grouped`, budget_call `list_since`, and the invitation reads. `check-tenant-filter.sh`
+   must exit 0 on the candidate tree.
+4. Re-verify honestly and correct the task-file verification section. Verifier must run
+   `cargo test --all` + all-target clippy + CI gates after repair.
