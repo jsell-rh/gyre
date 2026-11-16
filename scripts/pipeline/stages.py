@@ -33,7 +33,9 @@ def prompt(execution, task):
                         'Exact assignment:\n' + json.dumps(execution.claim['input']),
                         'Current requirement inputs:\n' + json.dumps((task['data'].get('requirements') or {}).get('components', {})),
                         'Previous assignment outcome:\n' + str(execution.claim.get('result') or 'none')[-4000:],
-                        'Durable findings:\n' + json.dumps(findings)))
+                        'Durable findings:\n' + json.dumps(findings),
+                        ('Authorized amendment paths (exact paths; no other edits):\n' +
+                         json.dumps(task['data']['decision_allowed_paths'])) if task['data'].get('source_decision') else ''))
 
 
 def triage(execution, task):
