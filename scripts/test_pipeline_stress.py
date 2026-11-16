@@ -58,3 +58,8 @@ class StressGuardTests(unittest.TestCase):
             if i<2:self.assertIsNone(observe(self.s))
         self.assertIn('provisioning',observe(self.s)['reason'])
         self.assertEqual(self.s.setting('slots'),100)
+
+    def test_confirmed_backend_capacity_backs_off_without_pausing_other_work(self):
+        self.failures('backend_capacity')
+        self.assertIsNone(observe(self.s))
+        self.assertIsNotNone(self.s.claim('implement','other',task='task-3',concurrency=100,capacity=100))

@@ -100,7 +100,10 @@ the §User Management coverage row stays task-assigned over them:
   total count).
 - **`PUT /api/v1/users/{id}/deactivate`** — TenantAdmin-only soft
   deactivation with a real cascade: migration
-  `2026-11-13-000063_user_deactivated_at` adds `users.deactivated_at`;
+  `2026-11-13-000066_user_deactivated_at` (renumbered from 000063 when
+  the task-110 branch landed its `invitations` migration under the same
+  Diesel version 20261113000063 — only one runs per version) adds
+  `users.deactivated_at`;
   the auth extractor, WebSocket, and SSO paths reject deactivated
   accounts; deactivating a workspace Owner fires the ownerless-workspace
   flow with an inline TenantAdmin notification; impersonation sessions

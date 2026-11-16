@@ -13,7 +13,9 @@ def snapshot(store):
     from .execution import gateway
     from .capacity import summary
     capacity=summary(store)
+    from .progress import blockers, delivery
     records = store.tasks()
+    by_name = {task['name']: task for task in records}
     work = [dict(row) for row in store.db.execute('SELECT * FROM work ORDER BY created DESC')]
     tasks, attempts, counts = [], [], {}
     graph = {task['name']: task['data'].get('dependencies') or [] for task in records}
@@ -45,6 +47,9 @@ def snapshot(store):
                      (json.loads((attention or retry)['result']).get('message') if attention or retry else None) or
                      (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or
                      ('Requirements changed; independent assessment pending' if pending(data) else None))
+        reasons = blockers(store, task, by_name, related)
+        if not condition and reasons:
+            condition = reasons[0]['message']
         if shared_wait and not condition:
             condition = 'Waiting for shared CI environment repair: ' + data['repair']['prerequisite']
         history = [json.loads(row['data']).get('delivered') for row in store.db.execute(
@@ -58,7 +63,7 @@ def snapshot(store):
                       'observed_generation': task['generation'] if satisfied(data) else None,
                       'merge_sha': (shipped or {}).get('sha'), 'ever_shipped':bool(shipped),
                       'current_satisfied':satisfied(data), 'assessment':data.get('assessment'), 'pr': data.get('pr'),
-                      'condition': condition, 'feedback': data.get('repair'), 'ci':data.get('ci'),'priority':priority,
+                      'condition': condition, 'blockers': reasons, 'feedback': data.get('repair'), 'ci':data.get('ci'),'priority':priority,
                       'retry_at': retry['retry_at'] if retry else None, 'attempts': len(related)})
         counts[state] = counts.get(state, 0) + 1
     by_id = {item['id']: item for item in work}
@@ -97,7 +102,7 @@ def snapshot(store):
             'resources': {'used': store.compute_used(), 'deletion_pending': dict(resources).get('deleting', 0),
                           'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
             'health': {'condition': 'Paused' if store.setting('admission_paused', False) else capacity['condition'] if not capacity['allowed'] else store.setting('admission_condition', 'Reconciling'),
-                       'capacity':capacity,
+                       'capacity':capacity, 'delivery':delivery(store,tasks),
                        'stress_guard':store.setting('stress_watch_alert'),
                        'gateway_auth':gateway.auth_status(store.directory,store.setting('gateway','gyre-gyre')),
                        'inference':{key:value for key,value in store.setting('inference_health',{}).items() if key in ('condition','expires','failures')},

@@ -225,6 +225,8 @@ def discover(store, stage, base):
                 # a new verified head, refresh a green base, merge, or confirm.
                 if not published or merge_ready:
                     inputs = {'candidate': candidate, 'base': base, 'verified': verified}
+                    if data.get('publication_epoch'):
+                        inputs['publication_epoch'] = data['publication_epoch']
         if inputs is not None:
             priority = 1000 if repair else 0
             selected.append(store.enqueue(stage, name, task['generation'], inputs, priority))
