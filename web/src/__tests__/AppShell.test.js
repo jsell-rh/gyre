@@ -41,9 +41,17 @@ function parseUrl(pathname) {
     return { mode: 'user_profile', slug: null, repoName: null, tab: null, username: raw[0].slice(1) };
   }
 
-  // /invite/:workspaceId — pending invitation accept page (§UI Pages)
+  // /invite/:workspaceId OR /invite/:token — pending invitation accept
+  // page (§UI Pages). A 64-char lowercase-hex segment is a task-110
+  // magic-link token; anything else is the authenticated flow's
+  // workspace id (a UUID).
   if (raw[0] === 'invite' && raw.length === 2) {
-    return { mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: raw[1] };
+    const isToken = /^[0-9a-f]{64}$/.test(raw[1]);
+    return {
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: isToken ? null : raw[1],
+      inviteToken: isToken ? raw[1] : null,
+    };
   }
 
   // /all  or  /all/settings  (cross-workspace view §10)
@@ -69,10 +77,13 @@ function parseUrl(pathname) {
 
 function urlFor(parsed) {
   if (!parsed) return '/';
-  const { mode: m, slug, repoName, tab, username, inviteId } = parsed;
+  const { mode: m, slug, repoName, tab, username, inviteId, inviteToken } = parsed;
   if (m === 'profile') return '/profile';
   if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
-  if (m === 'invite_accept') return `/invite/${encodeURIComponent(inviteId ?? '')}`;
+  if (m === 'invite_accept') {
+    const seg = inviteToken ?? inviteId ?? '';
+    return `/invite/${encodeURIComponent(seg)}`;
+  }
   if (m === 'cross_workspace') {
     return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
   }
@@ -225,13 +236,40 @@ describe('urlFor', () => {
 
   it('parses /invite/:id as invite_accept', () => {
     expect(parseUrl('/invite/ws-9')).toEqual({
-      mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: 'ws-9',
+      mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: 'ws-9', inviteToken: null,
+    });
+    // A UUID workspace id is never mistaken for a token.
+    expect(parseUrl('/invite/3f8a2b1e-9c4d-4e2a-8f1b-0d5c6e7a8b9c')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: '3f8a2b1e-9c4d-4e2a-8f1b-0d5c6e7a8b9c', inviteToken: null,
+    });
+  });
+
+  it('parses /invite/:token (64-hex magic link) as invite_accept with the token, not a workspace id', () => {
+    const token = 'a'.repeat(64);
+    expect(parseUrl(`/invite/${token}`)).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: null, inviteToken: token,
+    });
+    // Uppercase hex is not a minted token (tokens are lowercase hex);
+    // it falls through to the workspace-id shape.
+    expect(parseUrl('/invite/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', inviteToken: null,
     });
   });
 
   it('generates /@username and /invite/:id URLs', () => {
     expect(urlFor({ mode: 'user_profile', username: 'asmith' })).toBe('/@asmith');
     expect(urlFor({ mode: 'invite_accept', inviteId: 'ws-9' })).toBe('/invite/ws-9');
+    // Token form takes precedence in the canonical URL.
+    const token = 'b'.repeat(64);
+    expect(urlFor({ mode: 'invite_accept', inviteId: null, inviteToken: token })).toBe(`/invite/${token}`);
+  });
+
+  it('round-trips a magic-link /invite/:token URL through parseUrl → urlFor byte-for-byte', () => {
+    const token = 'c0ffee'.padEnd(64, '0');
+    const parsed = parseUrl(`/invite/${token}`);
+    expect(urlFor(parsed)).toBe(`/invite/${token}`);
   });
 
   it('URL-encodes handles in /@username', () => {

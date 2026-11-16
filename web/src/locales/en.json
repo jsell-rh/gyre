@@ -1966,7 +1966,8 @@
       "workspaces": "Workspaces",
       "audit": "Audit",
       "health": "Health",
-      "jobs": "Jobs"
+      "jobs": "Jobs",
+      "invitations": "Invitations"
     },
     "users": {
       "title": "Users",
@@ -1994,7 +1995,9 @@
       "status_deactivated": "Deactivated",
       "deactivate": "Deactivate",
       "deactivate_reason_prompt": "Reason for deactivating {name} (recorded in the audit trail):",
-      "deactivate_confirm": "Deactivate {name}? Their sessions are revoked and they can no longer authenticate."
+      "deactivate_confirm": "Deactivate {name}? Their sessions are revoked and they can no longer authenticate.",
+      "role_change_confirm": "Change {name} role from {from} to {to}?",
+      "role_change_failed": "Failed to change role"
     },
     "compute": {
       "title": "Compute Targets",
@@ -2093,7 +2096,40 @@
     "error_load_health": "Failed to load health status",
     "error_load_jobs": "Failed to load jobs",
     "error_load_workspaces": "Failed to load workspaces",
-    "error_create_workspace": "Failed to create workspace"
+    "error_create_workspace": "Failed to create workspace",
+    "invitations": {
+      "title": "Invitations",
+      "desc": "Tenant invitation management: pending, expired, and accepted invitations, bulk invite, and revoke.",
+      "loading": "Loading invitations…",
+      "error_load": "Failed to load invitations.",
+      "no_invitations": "No invitations.",
+      "invite": "Invite",
+      "bulk_invite": "Bulk invite",
+      "invite_email_label": "Email",
+      "invite_role_label": "Role",
+      "invite_expiry_label": "Expires in (days, optional)",
+      "invite_submit": "Send invitation",
+      "invite_saving": "Inviting…",
+      "invite_success": "Invitation created. Copy the invitation link now — it will not be shown again.",
+      "invite_failed": "Failed to create invitation",
+      "bulk_label": "Email addresses (one per line)",
+      "bulk_submit": "Send invitations",
+      "bulk_success": "{created} invitation(s) created, {errors} failed.",
+      "bulk_failed": "Bulk invite failed",
+      "status_filter_all": "All statuses",
+      "col_email": "Email",
+      "col_role": "Role",
+      "col_workspaces": "Workspaces",
+      "col_status": "Status",
+      "col_expires": "Expires",
+      "col_created": "Created",
+      "revoke": "Revoke",
+      "revoke_confirm": "Revoke the invitation for {email}? The link stops working immediately.",
+      "copy_link": "Copy link",
+      "link_copied": "Link copied",
+      "not_admin_note": "Invitation management requires the TenantAdmin role.",
+      "expired_label": "expired"
+    }
   },
   "common": {
     "cancel": "Cancel",
@@ -2274,7 +2310,21 @@
     "invited_role": "Invited as",
     "invited_on": "Invited on",
     "accept": "Accept",
-    "decline": "Decline"
+    "decline": "Decline",
+    "token_title": "You're invited",
+    "token_subtitle": "You have been invited to join.",
+    "invited_email": "Invitation for",
+    "token_not_found_title": "Invitation not found",
+    "token_not_found_desc": "This invitation link is invalid or has been removed.",
+    "token_none_title": "Invitation no longer pending",
+    "token_none_desc": "This invitation link has already been used, expired, or was revoked (status: {status}).",
+    "token_no_workspaces": "No pre-assigned workspaces",
+    "account_created_desc": "Your account is ready. Save your API key below — it is your sign-in credential and will not be shown again.",
+    "account_linked_desc": "An existing account for your email was linked to this invitation.",
+    "api_key_note": "Copy your API key now — it will not be shown again.",
+    "copy_key": "Copy API key",
+    "copied": "Copied",
+    "workspaces_activated": "Workspaces you joined"
   },
   "notifications": {
     "bell": {

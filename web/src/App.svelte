@@ -35,11 +35,17 @@
   // ── Public profile / invitation accept state ────────────────────────
   // /@username — tenant-public profile (user-management.md §User Profile
   // Page); the shared route state also serves the drawer's deep links.
-  // /invite/:id — pending workspace invitation accept page. The path
-  // segment is the workspace id (task-124 models a pending invitation as
-  // a membership row keyed by workspace; the token form belongs to the
-  // tenant-invitation flow, task-110).
+  // /invite/:workspaceId — the authenticated invitee's pending workspace
+  // invitation accept page (GET /users/me/invitations → POST
+  // /workspaces/{id}/invite/accept|decline).
+  // /invite/:token — the magic-link form (task-110): a 64-hex-char
+  // CSPRNG token is the auth factor (no session needed); the page
+  // previews via GET /invite/{token}/preview and accepts/declines via
+  // the token endpoints. The two shapes are disjoint — workspace ids
+  // are UUIDs (36 chars with dashes), invitation tokens are 64 hex
+  // chars — so the segment alone disambiguates.
   let inviteWorkspaceId = $state(null);
+  let inviteToken = $state(null);
 
   // ── Workspace / repo state ───────────────────────────────────────────
   let workspaces = $state([]);
@@ -253,6 +259,7 @@
   // /profile                                   → user profile (self)
   // /@username                                 → tenant-public profile (user-management.md §UI Pages)
   // /invite/:workspaceId                       → pending invitation accept page (§UI Pages)
+  // /invite/:token (64-hex magic link)         → token-form accept page (task-110)
 
   const REPO_TABS = ['specs', 'tasks', 'mrs', 'agents', 'architecture', 'decisions', 'code', 'settings'];
   const ENTITY_TABS = ['mrs', 'tasks', 'agents'];
@@ -294,10 +301,19 @@
       };
     }
 
-    // /invite/:workspaceId — pending invitation accept page
-    // (user-management.md §UI Pages > Pending Invitation Accept Page).
+    // /invite/:workspaceId OR /invite/:token — pending invitation accept
+    // page (user-management.md §UI Pages > Pending Invitation Accept
+    // Page). A 64-char lowercase-hex segment is a task-110 magic-link
+    // token (CSPRNG, auth factor in the URL); anything else is the
+    // authenticated flow's workspace id (a UUID). The shapes are
+    // disjoint, so the segment alone disambiguates.
     if (raw[0] === 'invite' && raw.length === 2) {
-      return { mode: 'invite_accept', slug: null, repoName: null, tab: null, entityType: null, entityId: null, inviteId: raw[1] };
+      const isToken = /^[0-9a-f]{64}$/.test(raw[1]);
+      return {
+        mode: 'invite_accept', slug: null, repoName: null, tab: null, entityType: null, entityId: null,
+        inviteId: isToken ? null : raw[1],
+        inviteToken: isToken ? raw[1] : null,
+      };
     }
 
     // /settings/notifications (user-management.md §In-App Notification UI:
@@ -363,10 +379,15 @@
 
   export function urlFor(parsed) {
     if (!parsed) return '/';
-    const { mode: m, slug, repoName, tab, entityType, entityId, username, inviteId } = parsed;
+    const { mode: m, slug, repoName, tab, entityType, entityId, username, inviteId, inviteToken } = parsed;
     if (m === 'profile') return '/profile';
     if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
-    if (m === 'invite_accept') return `/invite/${encodeURIComponent(inviteId ?? '')}`;
+    if (m === 'invite_accept') {
+      // Token form takes precedence: the magic-link URL must round-trip
+      // byte-for-byte through the canonical-URL rewrite on page load.
+      const seg = inviteToken ?? inviteId ?? '';
+      return `/invite/${encodeURIComponent(seg)}`;
+    }
     if (m === 'notification_settings') return '/settings/notifications';
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
@@ -650,6 +671,7 @@
   function goToInviteAccept(workspaceId) {
     mode = 'invite_accept';
     inviteWorkspaceId = workspaceId;
+    inviteToken = null;
     currentRepo = null;
     fadeContent();
     window.history.pushState(
@@ -671,7 +693,8 @@
       userProfileUsername = p.username;
     } else if (p.mode === 'invite_accept') {
       mode = 'invite_accept';
-      inviteWorkspaceId = p.inviteId;
+      inviteWorkspaceId = p.inviteId ?? null;
+      inviteToken = p.inviteToken ?? null;
     } else if (p.mode === 'profile') {
       mode = 'profile';
     } else if (p.mode === 'notification_settings') {
@@ -1238,6 +1261,7 @@
     } else if (parsed?.mode === 'invite_accept') {
       mode = 'invite_accept';
       inviteWorkspaceId = parsed.inviteId ?? null;
+      inviteToken = parsed.inviteToken ?? null;
     } else if (parsed?.mode === 'notification_settings') {
       mode = 'notification_settings';
     } else if (parsed?.mode === 'cross_workspace') {
@@ -1333,6 +1357,7 @@
       // to /invite/ / /@ and a later refresh loses the deep link entirely.
       username: mode === 'user_profile' ? userProfileUsername : null,
       inviteId: mode === 'invite_accept' ? inviteWorkspaceId : null,
+      inviteToken: mode === 'invite_accept' ? inviteToken : null,
     });
     window.history.replaceState(
       { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab, entityType: entityDetail?.type ?? null, entityId: entityDetail?.id ?? null },
@@ -1373,13 +1398,16 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: histUsername, inviteId: pInviteId } = e.state;
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: histUsername, inviteId: pInviteId, inviteToken: pInviteToken } = e.state;
         mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'user_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
           ? m : 'workspace_home';
         if (m === 'user_profile') {
           userProfileUsername = histUsername ?? parseUrl(window.location.pathname)?.username ?? null;
         }
-        if (m === 'invite_accept') inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
+        if (m === 'invite_accept') {
+          inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
+          inviteToken = pInviteToken ?? parseUrl(window.location.pathname)?.inviteToken ?? null;
+        }
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
         // Restore entity detail state from history with repo_id for data loading
@@ -1431,6 +1459,7 @@
         } else if (p.mode === 'invite_accept') {
           mode = 'invite_accept';
           inviteWorkspaceId = p.inviteId ?? null;
+          inviteToken = p.inviteToken ?? null;
         } else if (p.mode === 'notification_settings') {
           mode = 'notification_settings';
         } else if (p.mode === 'cross_workspace') {
@@ -2020,7 +2049,7 @@
         {:else if mode === 'user_profile'}
           <PublicUserProfile username={userProfileUsername} workspaces={workspaces} />
         {:else if mode === 'invite_accept'}
-          <InvitationAccept inviteId={inviteWorkspaceId} />
+          <InvitationAccept inviteId={inviteWorkspaceId} token={inviteToken} />
         {:else if mode === 'notification_settings'}
           <NotificationSettings />
         {/if}

@@ -1,22 +1,28 @@
 <script>
   /**
    * InvitationAccept.svelte — pending invitation accept page
-   * (`/invite/{workspaceId}`, user-management.md §UI Pages).
+   * (`/invite/{workspaceId}` and `/invite/{token}`, user-management.md
+   * §UI Pages > Pending Invitation Accept Page).
    *
-   * Shows a workspace preview and Accept / Decline actions for the
-   * caller's own pending workspace invitation. Backed by task-110's
-   * WorkspaceInvitation model:
-   *   - GET  /api/v1/workspaces/{id}            (workspace preview)
-   *   - GET  /api/v1/users/me/invitations       (my pending invitations)
-   *   - POST /api/v1/workspaces/{id}/invite/accept
-   *   - POST /api/v1/workspaces/{id}/invite/decline
+   * Two disjoint URL shapes (App.svelte parseUrl disambiguates —
+   * workspace ids are UUIDs, magic-link tokens are 64 hex chars):
    *
-   * The path segment is the workspace id: the InvitationReceived
-   * notification carries the workspace id, and the authenticated
-   * accept/decline routes locate the invitation by (workspace, caller)
-   * with no token. The `/invite/{token}` magic-link form belongs to the
-   * tenant-invitation flow (task-110's POST /api/v1/invite/{token}/accept
-   * — no UI surface yet).
+   *  - `/invite/{workspaceId}` — the authenticated invitee flow:
+   *    GET /workspaces/{id} (workspace preview) +
+   *    GET /users/me/invitations (resolve my Pending WorkspaceInvitation),
+   *    then POST /workspaces/{id}/invite/accept | /decline.
+   *
+   *  - `/invite/{token}` — the task-110 magic-link flow: the 256-bit
+   *    CSPRNG token in the URL is the auth factor (no session needed;
+   *    api.js sends no Bearer header on these calls). Preview via
+   *    GET /invite/{token}/preview (workspace preview, invited email and
+   *    role, expiry), then accept / decline via the token endpoints:
+   *    POST /invite/{token}/accept | /decline (tenant invitations) and
+   *    POST /workspaces/invitations/{token}/accept | /decline (workspace
+   *    invitations). A local-mode tenant accept mints the account's
+   *    FIRST API key — returned exactly once and displayed here with a
+   *    copy action (the platform has no password login; the key is the
+   *    credential).
    */
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
@@ -28,16 +34,25 @@
   const goToWorkspaceHome = getContext('goToWorkspaceHome');
   const goToCrossWorkspace = getContext('goToCrossWorkspace');
 
-  let { inviteId = '', onDone = undefined } = $props();
+  let { inviteId = '', token = '', onDone = undefined } = $props();
 
   let workspace = $state(null);
   let invitation = $state(null); // my pending WorkspaceInvitation row, if any
+  let preview = $state(null); // magic-link preview: { kind, status, email, role, workspaces, expires_at, ... }
+  let acceptResult = $state(null); // tenant token-accept response (may carry the minted first API key)
   let loading = $state(true);
   let notFound = $state(false);
   let loadError = $state(null);
   let accepting = $state(false);
   let declining = $state(false);
   let outcome = $state(null); // 'accepted' | 'declined' | null
+  let keyCopied = $state(false);
+
+  const isTokenMode = $derived(!!token);
+  // The magic-link preview's workspace rows are the "workspace preview"
+  // for the token flow; the workspace fetch is the preview for the
+  // authenticated flow.
+  const previewWorkspaces = $derived(preview?.workspaces ?? []);
 
   function fmtDate(ts) {
     if (!ts) return '—';
@@ -58,50 +73,89 @@
     return `expires in ${secs}m`;
   }
 
+  async function copyKey() {
+    const key = acceptResult?.api_key?.key;
+    if (!key) return;
+    try {
+      await navigator.clipboard.writeText(key);
+      keyCopied = true;
+    } catch { /* clipboard unavailable — the key is still displayed for manual copy */ }
+  }
+
   async function load() {
     loading = true;
     notFound = false;
     loadError = null;
     invitation = null;
+    preview = null;
+    acceptResult = null;
+    outcome = null;
+    keyCopied = false;
     try {
-      workspace = await api.workspace(inviteId);
+      if (isTokenMode) {
+        // Magic-link flow: the token resolves the invitation; only a
+        // Pending preview is acceptable (Accepted/Declined/Expired/
+        // Revoked links render the none state).
+        preview = await api.invitationPreview(token);
+      } else {
+        workspace = await api.workspace(inviteId);
+        // Resolve my pending invitation for this workspace through the
+        // invitee-facing listing (task-110: a pending invitation is a
+        // WorkspaceInvitation row with status/expires_at, not an
+        // unaccepted membership row). Only a Pending invitation is
+        // acceptable; Expired, Revoked, Accepted and Declined rows all
+        // render the none state.
+        try {
+          const raw = await api.myInvitations();
+          invitation = (raw?.invitations ?? []).find(
+            inv => inv.workspace_id === inviteId && inv.status === 'Pending'
+          ) ?? null;
+        } catch { /* no resolvable identity — leave invitation null */ }
+      }
     } catch (e) {
       if (e?.status === 404) { notFound = true; loading = false; return; }
       // Non-404 failure (e.g. HTTP 500): the preview cannot be rendered —
       // surface the load-error state instead of an invite card with an
       // empty workspace name.
       loadError = e?.message ?? String(e);
-      loading = false;
-      return;
     }
-    // Resolve my pending invitation for this workspace through the
-    // invitee-facing listing (task-110: a pending invitation is a
-    // WorkspaceInvitation row with status/expires_at, not an unaccepted
-    // membership row). Only a Pending invitation is acceptable; Expired,
-    // Revoked, Accepted and Declined rows all render the none state.
-    try {
-      const raw = await api.myInvitations();
-      invitation = (raw?.invitations ?? []).find(
-        inv => inv.workspace_id === inviteId && inv.status === 'Pending'
-      ) ?? null;
-    } catch { /* no resolvable identity — leave invitation null */ }
     loading = false;
   }
 
   $effect(() => {
-    if (inviteId) load();
+    if (inviteId || token) load();
   });
 
   async function accept() {
-    if (accepting || !invitation) return;
+    if (accepting) return;
+    if (isTokenMode ? !preview : !invitation) return;
     accepting = true;
     try {
-      // 204 No Content on success — the activated membership is visible
-      // through the workspace surface the page navigates to.
-      await api.acceptWorkspaceInvitation(inviteId);
-      outcome = 'accepted';
-      showToast($t('invite_accept.accepted_toast', { values: { name: workspace?.name ?? '' } }), { type: 'success' });
-      onDone?.('accepted', workspace);
+      if (isTokenMode) {
+        if (preview.kind === 'tenant') {
+          // Local mode: the response carries the account's first API key
+          // (minted exactly once) and the activated workspaces.
+          const result = await api.acceptTenantInvitationByToken(token, {});
+          acceptResult = result ?? null;
+          outcome = 'accepted';
+          showToast($t('invite_accept.accepted_toast', { values: { name: previewWorkspaces[0]?.name ?? '' } }), { type: 'success' });
+          onDone?.('accepted', previewWorkspaces[0] ?? null);
+        } else {
+          // 204 No Content — the activated membership is visible through
+          // the workspace surface the page navigates to.
+          await api.acceptWorkspaceInvitationByToken(token);
+          outcome = 'accepted';
+          showToast($t('invite_accept.accepted_toast', { values: { name: previewWorkspaces[0]?.name ?? '' } }), { type: 'success' });
+          onDone?.('accepted', previewWorkspaces[0] ?? null);
+        }
+      } else {
+        // 204 No Content on success — the activated membership is visible
+        // through the workspace surface the page navigates to.
+        await api.acceptWorkspaceInvitation(inviteId);
+        outcome = 'accepted';
+        showToast($t('invite_accept.accepted_toast', { values: { name: workspace?.name ?? '' } }), { type: 'success' });
+        onDone?.('accepted', workspace);
+      }
     } catch (e) {
       showToast($t('invite_accept.accept_failed') + ': ' + (e?.message ?? e), { type: 'error' });
     } finally {
@@ -110,13 +164,22 @@
   }
 
   async function decline() {
-    if (declining || !invitation) return;
+    if (declining) return;
+    if (isTokenMode ? !preview : !invitation) return;
     declining = true;
     try {
-      await api.declineWorkspaceInvitation(inviteId);
+      if (isTokenMode) {
+        if (preview.kind === 'tenant') {
+          await api.declineTenantInvitationByToken(token);
+        } else {
+          await api.declineWorkspaceInvitationByToken(token);
+        }
+      } else {
+        await api.declineWorkspaceInvitation(inviteId);
+      }
       outcome = 'declined';
       showToast($t('invite_accept.declined_toast'), { type: 'info' });
-      onDone?.('declined', workspace);
+      onDone?.('declined', isTokenMode ? (previewWorkspaces[0] ?? null) : workspace);
     } catch (e) {
       showToast($t('invite_accept.decline_failed') + ': ' + (e?.message ?? e), { type: 'error' });
     } finally {
@@ -130,17 +193,64 @@
     <p class="invite-note" role="status">{$t('common.loading')}</p>
   {:else if notFound}
     <EmptyState
-      title={$t('invite_accept.not_found_title')}
-      description={$t('invite_accept.not_found_desc')}
+      title={isTokenMode ? $t('invite_accept.token_not_found_title') : $t('invite_accept.not_found_title')}
+      description={isTokenMode ? $t('invite_accept.token_not_found_desc') : $t('invite_accept.not_found_desc')}
     />
   {:else if loadError}
     <EmptyState title={$t('invite_accept.load_error_title')} description={loadError} />
+  {:else if outcome === 'accepted' && acceptResult}
+    <!-- Tenant magic-link accept: local mode minted the account's first
+         API key (shown exactly once) or an existing SSO account was
+         linked (mode "linked", no key). -->
+    <div class="invite-card" data-testid="invite-accepted-card">
+      <h1 class="invite-title">{$t('invite_accept.accepted_title')}</h1>
+      <p class="invite-subtitle">
+        {acceptResult.mode === 'linked'
+          ? $t('invite_accept.account_linked_desc')
+          : $t('invite_accept.account_created_desc')}
+      </p>
+      <div class="ws-preview" data-testid="invite-account-summary">
+        <div class="ws-preview-head">
+          <span class="ws-preview-name">@{acceptResult.username}</span>
+        </div>
+        {#if (acceptResult.workspaces ?? []).length > 0}
+          <div class="ws-preview-meta">
+            <span>{$t('invite_accept.workspaces_activated')}:</span>
+            <ul class="ws-list">
+              {#each acceptResult.workspaces as wsId (wsId)}
+                <li class="mono">{wsId}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+      </div>
+      {#if acceptResult.api_key?.key}
+        <div class="api-key-banner" data-testid="invite-minted-key">
+          <p>{$t('invite_accept.api_key_note')}</p>
+          <code class="mono">{acceptResult.api_key.key}</code>
+          <div class="invite-actions">
+            <button class="btn-primary" onclick={copyKey} data-testid="invite-copy-key-btn">
+              {keyCopied ? $t('invite_accept.copied') : $t('invite_accept.copy_key')}
+            </button>
+          </div>
+        </div>
+      {/if}
+      <div class="invite-actions">
+        <button class="btn-primary" onclick={() => goToCrossWorkspace?.()} data-testid="invite-go-all">
+          {$t('invite_accept.go_to_all')}
+        </button>
+      </div>
+    </div>
   {:else if outcome === 'accepted'}
     <EmptyState
-      title={$t('invite_accept.accepted_title', { values: { name: workspace?.name ?? '' } })}
+      title={$t('invite_accept.accepted_title', { values: { name: (isTokenMode ? previewWorkspaces[0]?.name : workspace?.name) ?? '' } })}
       description={$t('invite_accept.accepted_desc')}
     >
-      <button class="btn-primary" onclick={() => goToWorkspaceHome?.(workspace)} data-testid="invite-go-workspace">
+      <button
+        class="btn-primary"
+        onclick={() => goToWorkspaceHome?.(isTokenMode ? previewWorkspaces[0] : workspace)}
+        data-testid="invite-go-workspace"
+      >
         {$t('invite_accept.go_to_workspace')}
       </button>
     </EmptyState>
@@ -153,11 +263,71 @@
         {$t('invite_accept.go_to_all')}
       </button>
     </EmptyState>
-  {:else if !invitation}
+  {:else if isTokenMode && preview?.status !== 'Pending'}
+    <!-- Terminal-status magic link (already used / expired / revoked):
+         nothing to accept. -->
+    <EmptyState
+      title={$t('invite_accept.token_none_title')}
+      description={$t('invite_accept.token_none_desc', { values: { status: preview?.status ?? '' } })}
+    />
+  {:else if !isTokenMode && !invitation}
     <EmptyState
       title={$t('invite_accept.none_title')}
       description={$t('invite_accept.none_desc')}
     />
+  {:else if isTokenMode}
+    <!-- Magic-link preview card: workspace preview + invited email/role
+         + expiry, with token-form accept/decline. -->
+    <div class="invite-card" data-testid="invite-card">
+      <h1 class="invite-title">{$t('invite_accept.token_title')}</h1>
+      <p class="invite-subtitle">{$t('invite_accept.token_subtitle')}</p>
+
+      {#if preview?.email}
+        <p class="invite-note" data-testid="invite-invited-email">
+          {$t('invite_accept.invited_email')}: <strong>{preview.email}</strong>
+        </p>
+      {/if}
+
+      <div class="ws-preview" data-testid="invite-workspace-preview">
+        {#each previewWorkspaces as ws (ws.id)}
+          <div class="ws-preview-head">
+            <span class="ws-preview-name">{ws.name}</span>
+            <Badge variant="info" value={ws.role} />
+          </div>
+          {#if ws.description}
+            <p class="ws-preview-desc">{ws.description}</p>
+          {/if}
+        {:else}
+          <div class="ws-preview-head">
+            <span class="ws-preview-name">{$t('invite_accept.token_no_workspaces')}</span>
+          </div>
+        {/each}
+        <div class="ws-preview-meta">
+          {#if preview?.role}
+            <span>{$t('invite_accept.invited_role')}: <strong>{preview.role}</strong></span>
+          {/if}
+          <span>{$t('invite_accept.invited_on')}: {fmtDate(preview?.created_at)}</span>
+          {#if expiryLabel(preview)}
+            <span data-testid="invite-expiry">{expiryLabel(preview)}</span>
+          {/if}
+        </div>
+      </div>
+
+      <div class="invite-actions">
+        <button
+          class="btn-primary"
+          onclick={accept}
+          disabled={accepting || declining}
+          data-testid="invite-accept-btn"
+        >{accepting ? '…' : $t('invite_accept.accept')}</button>
+        <button
+          class="btn-secondary"
+          onclick={decline}
+          disabled={accepting || declining}
+          data-testid="invite-decline-btn"
+        >{declining ? '…' : $t('invite_accept.decline')}</button>
+      </div>
+    </div>
   {:else}
     <div class="invite-card" data-testid="invite-card">
       <h1 class="invite-title">{$t('invite_accept.title')}</h1>
@@ -229,6 +399,18 @@
   .ws-preview-name { font-size: 16px; font-weight: 600; }
   .ws-preview-desc { margin: 0; font-size: 13px; color: var(--color-text-secondary, #666); }
   .ws-preview-meta { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  .ws-list { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
+  .api-key-banner {
+    border: 1px solid var(--color-border, #ddd);
+    border-radius: 8px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--color-surface-elevated, #f7f8fa);
+  }
+  .api-key-banner p { margin: 0; font-size: 13px; }
+  .mono { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
   .invite-actions { display: flex; gap: 10px; }
   .btn-primary, .btn-secondary {
     border-radius: 8px;

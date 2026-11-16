@@ -33,12 +33,16 @@ async function request(path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const { headers: customHeaders, ...restOptions } = options;
+    // skipAuth: magic-link token flows — the 256-bit token in the URL is
+    // the auth factor, and a logged-in session of a DIFFERENT user must
+    // not be presented on those calls (the server rejects a mismatched
+    // authenticated identity, and an anonymous accept is the normal path).
+    const { headers: customHeaders, skipAuth = false, ...restOptions } = options;
     const res = await fetch(`${API_BASE}${path}`, {
       ...restOptions,
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${getAuthToken()}`,
+        ...(skipAuth ? {} : { 'Authorization': `Bearer ${getAuthToken()}` }),
         ...customHeaders,
       },
       signal: controller.signal,
@@ -558,6 +562,33 @@ export const api = {
     request(`/workspaces/${id}/invite/decline`, { method: 'POST' }),
   revokeWorkspaceInvitation: (id, invitationId) =>
     request(`/workspaces/${id}/invitations/${invitationId}`, { method: 'DELETE' }),
+  // Tenant invitation management (user-management.md §UI Pages > Tenant
+  // Invitation Management; task-110 endpoints): TenantAdmin-gated list
+  // (status filter), single + bulk invite (create responses carry the
+  // one-time magic-link invite_url), and revoke.
+  tenantInvitations: (status) =>
+    request(`/tenant/invitations${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  inviteToTenant: (data) =>
+    request('/tenant/invite', { method: 'POST', body: JSON.stringify(data) }),
+  bulkInviteToTenant: (data) =>
+    request('/tenant/invite/bulk', { method: 'POST', body: JSON.stringify(data) }),
+  revokeTenantInvitation: (id) =>
+    request(`/tenant/invitations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // Magic-link token surface for the /invite/{token} accept page
+  // (task-110): the 256-bit token in the URL is the auth factor, so these
+  // skip the Bearer header. The preview is read-only (kind, status,
+  // invited email/role, workspace names); accept returns the local-mode
+  // account's first API key exactly once.
+  invitationPreview: (token) =>
+    request(`/invite/${encodeURIComponent(token)}/preview`, { skipAuth: true }),
+  acceptTenantInvitationByToken: (token, data = {}) =>
+    request(`/invite/${encodeURIComponent(token)}/accept`, { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
+  declineTenantInvitationByToken: (token) =>
+    request(`/invite/${encodeURIComponent(token)}/decline`, { method: 'POST', body: JSON.stringify({}), skipAuth: true }),
+  acceptWorkspaceInvitationByToken: (token) =>
+    request(`/workspaces/invitations/${encodeURIComponent(token)}/accept`, { method: 'POST', skipAuth: true }),
+  declineWorkspaceInvitationByToken: (token) =>
+    request(`/workspaces/invitations/${encodeURIComponent(token)}/decline`, { method: 'POST', skipAuth: true }),
   // Teams (user-management.md §API > Teams, task-122/125)
   createTeam: (id, data) =>
     request(`/workspaces/${id}/teams`, { method: 'POST', body: JSON.stringify(data) }),
@@ -609,6 +640,12 @@ export const api = {
   },
   deactivateUser: (id, reason) =>
     request(`/users/${id}/deactivate`, { method: 'PUT', body: JSON.stringify({ reason }) }),
+  // Inline global-role management (user-management.md §UI Pages > Tenant
+  // User Management "role management (TenantAdmin only)"): role is the
+  // tenant-level GlobalRole ("Member" | "TenantAdmin"), same vocabulary
+  // as the invitation API.
+  updateUserGlobalRole: (id, { role, reason } = {}) =>
+    request(`/users/${encodeURIComponent(id)}/role`, { method: 'PUT', body: JSON.stringify({ role, reason }) }),
   provisionUser: (data) =>
     request('/users', { method: 'POST', body: JSON.stringify(data) }),
   // Active sessions (user-management.md §UI Pages > Session Management;

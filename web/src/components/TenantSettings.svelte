@@ -33,6 +33,7 @@
 
   const TABS = [
     { id: 'users',      labelKey: 'tenant_settings.tabs.users' },
+    { id: 'invitations', labelKey: 'tenant_settings.tabs.invitations' },
     { id: 'compute',    labelKey: 'tenant_settings.tabs.compute' },
     { id: 'workspaces', labelKey: 'tenant_settings.tabs.workspaces' },
     { id: 'budget',     labelKey: 'tenant_settings.tabs.budget' },
@@ -65,6 +66,31 @@
   let provisionSaving = $state(false);
   let provisionError = $state(null);
   let provisionedApiKey = $state(null); // raw key shown once after creation
+  let roleSavingId = $state(null); // inline global-role change in flight
+
+  // ── Invitations (user-management.md §UI Pages > Tenant Invitation
+  // Management; task-110 endpoints: GET /tenant/invitations,
+  // POST /tenant/invite, POST /tenant/invite/bulk,
+  // DELETE /tenant/invitations/{id}) ──────────────────────────────
+  let invitations = $state([]);
+  let invitationsLoading = $state(false);
+  let invitationsError = $state(null);
+  let invitationsNotAdmin = $state(false); // listing is TenantAdmin-gated
+  let invitationsStatusFilter = $state(''); // '' = all statuses
+  let inviteModalOpen = $state(false);
+  let inviteForm = $state({ email: '', role: 'Member', expiresInDays: '' });
+  let inviteSaving = $state(false);
+  let inviteError = $state(null);
+  // Created invitation's one-time magic link (shown with a copy action —
+  // the link is the delivery channel; the server has no mailer).
+  let inviteResultUrl = $state(null);
+  let inviteResultEmail = $state(null);
+  let revokingInvitationId = $state(null);
+  let bulkModalOpen = $state(false);
+  let bulkForm = $state({ emails: '', role: 'Member', expiresInDays: '' });
+  let bulkSaving = $state(false);
+  let bulkError = $state(null);
+  let bulkResult = $state(null); // { created, errors, created_count, error_count }
 
   let filteredTenantUsers = $derived.by(() => {
     const q = usersSearch.trim().toLowerCase();
@@ -216,6 +242,9 @@
     if (tab === 'users') {
       if (untrack(() => !currentUser && !usersLoading)) loadUsers();
     }
+    if (tab === 'invitations') {
+      if (untrack(() => invitations.length === 0 && !invitationsLoading)) loadInvitations();
+    }
     if (tab === 'compute') {
       if (untrack(() => computeTargets.length === 0 && !computeLoading)) loadCompute();
     }
@@ -320,6 +349,130 @@
     } finally {
       provisionSaving = false;
     }
+  }
+
+  // Inline global-role change (user-management.md §UI Pages > Tenant
+  // User Management: "role management (TenantAdmin only)"). PUT
+  // /users/{id}/role is TenantAdmin-gated server-side; the UI hides the
+  // control for self and deactivated accounts (both rejected with 409).
+  async function changeUserRole(user, newRole) {
+    if (roleSavingId || !newRole || newRole === user.global_role) return;
+    const name = user.username ?? user.id;
+    const ok = window.confirm($t('tenant_settings.users.role_change_confirm', {
+      values: { name, from: user.global_role ?? '—', to: newRole },
+    }));
+    if (!ok) return;
+    roleSavingId = user.id;
+    try {
+      await api.updateUserGlobalRole(user.id, { role: newRole });
+      await loadUsers();
+    } catch (e) {
+      showToast($t('tenant_settings.users.role_change_failed') + ': ' + (e?.message ?? e), { type: 'error' });
+      await loadUsers(); // re-sync the select with the stored role
+    } finally {
+      roleSavingId = null;
+    }
+  }
+
+  // ── Tenant Invitation Management (task-110 endpoints) ────────────
+  async function loadInvitations() {
+    invitationsLoading = true;
+    invitationsError = null;
+    try {
+      const raw = await api.tenantInvitations(invitationsStatusFilter || undefined);
+      invitations = Array.isArray(raw?.invitations) ? raw.invitations : [];
+      invitationsNotAdmin = false;
+    } catch {
+      // GET /tenant/invitations is TenantAdmin-only — a forbidden listing
+      // is not an error state for a non-admin viewer.
+      invitations = [];
+      invitationsNotAdmin = true;
+    } finally {
+      invitationsLoading = false;
+    }
+  }
+
+  async function submitInvite() {
+    const email = inviteForm.email.trim();
+    if (inviteSaving || !email) return;
+    inviteSaving = true;
+    inviteError = null;
+    try {
+      const data = { email, role: inviteForm.role };
+      const days = parseInt(inviteForm.expiresInDays, 10);
+      if (Number.isFinite(days) && days > 0) data.expires_in_days = days;
+      const result = await api.inviteToTenant(data);
+      inviteResultUrl = result?.invite_url ?? null;
+      inviteResultEmail = result?.email ?? email;
+      inviteModalOpen = false;
+      inviteForm = { email: '', role: 'Member', expiresInDays: '' };
+      await loadInvitations();
+    } catch (e) {
+      inviteError = e?.message ?? String(e);
+    } finally {
+      inviteSaving = false;
+    }
+  }
+
+  async function submitBulkInvite() {
+    if (bulkSaving || !bulkForm.emails.trim()) return;
+    bulkSaving = true;
+    bulkError = null;
+    try {
+      const emails = bulkForm.emails
+        .split(/[\n,;]+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+      const invitationsPayload = emails.map(email => ({ email }));
+      const data = { invitations: invitationsPayload };
+      const days = parseInt(bulkForm.expiresInDays, 10);
+      if (Number.isFinite(days) && days > 0) data.expires_in_days = days;
+      bulkResult = await api.bulkInviteToTenant(data);
+      bulkModalOpen = false;
+      bulkForm = { emails: '', role: 'Member', expiresInDays: '' };
+      await loadInvitations();
+    } catch (e) {
+      bulkError = e?.message ?? String(e);
+    } finally {
+      bulkSaving = false;
+    }
+  }
+
+  async function revokeInvitation(inv) {
+    if (revokingInvitationId) return;
+    const ok = window.confirm($t('tenant_settings.invitations.revoke_confirm', {
+      values: { email: inv.email },
+    }));
+    if (!ok) return;
+    revokingInvitationId = inv.id;
+    try {
+      await api.revokeTenantInvitation(inv.id);
+      await loadInvitations();
+    } catch (e) {
+      invitationsError = e?.message ?? String(e);
+    } finally {
+      revokingInvitationId = null;
+    }
+  }
+
+  let inviteLinkCopied = $state(false);
+  async function copyInviteLink() {
+    if (!inviteResultUrl) return;
+    try {
+      await navigator.clipboard.writeText(inviteResultUrl);
+      inviteLinkCopied = true;
+    } catch { /* clipboard unavailable — the link stays displayed */ }
+  }
+
+  function invitationExpiryLabel(inv) {
+    if (!inv?.expires_at) return '—';
+    const secs = inv.expires_at - Math.floor(Date.now() / 1000);
+    if (secs <= 0) return $t('tenant_settings.invitations.expired_label');
+    const days = Math.floor(secs / 86400);
+    if (days >= 1) return `${days}d`;
+    const hours = Math.floor(secs / 3600);
+    if (hours >= 1) return `${hours}h`;
+    return `${Math.max(1, Math.floor(secs / 60))}m`;
   }
 
   async function loadCompute() {
@@ -829,7 +982,27 @@
                         <span class="user-display-name">{user.display_name}</span>
                       {/if}
                     </td>
-                    <td>{user.global_role ?? '—'}</td>
+                    <td>
+                      <!-- Inline global-role management (spec §UI Pages >
+                           Tenant User Management). Hidden for self and
+                           deactivated accounts (server rejects both with
+                           409); a plain badge is shown instead. -->
+                      {#if user.id !== currentUser?.id && !user.deactivated_at}
+                        <select
+                          class="role-select"
+                          value={user.global_role ?? 'Member'}
+                          onchange={(e) => changeUserRole(user, e.target.value)}
+                          disabled={roleSavingId === user.id}
+                          aria-label={$t('tenant_settings.users.role')}
+                          data-testid={`user-role-select-${user.id}`}
+                        >
+                          <option value="Member">Member</option>
+                          <option value="TenantAdmin">TenantAdmin</option>
+                        </select>
+                      {:else}
+                        {user.global_role ?? '—'}
+                      {/if}
+                    </td>
                     <td>
                       {#if user.deactivated_at}
                         <span class="role-badge status-deactivated">{$t('tenant_settings.users.status_deactivated')}</span>
@@ -856,6 +1029,188 @@
           {/if}
         {/if}
       </div>
+
+    <!-- ── Invitations (user-management.md §UI Pages > Tenant Invitation
+         Management: pending/expired/accepted invitations, bulk invite,
+         revoke — TenantAdmin only, task-110 endpoints) ────────── -->
+    {:else if activeTab === 'invitations'}
+      <div id="tab-panel-invitations" role="tabpanel" aria-label="Invitations" class="tab-panel" data-testid="tenant-tab-invitations">
+        <div class="panel-header">
+          <h2 class="panel-title">{$t('tenant_settings.invitations.title')}</h2>
+          <p class="panel-desc">{$t('tenant_settings.invitations.desc')}</p>
+        </div>
+
+        {#if invitationsLoading}
+          <div class="panel-loading" aria-live="polite">{$t('tenant_settings.invitations.loading')}</div>
+        {:else if invitationsError}
+          <div class="panel-error" role="alert">{invitationsError}</div>
+        {/if}
+
+        {#if invitationsNotAdmin}
+          <div class="panel-note">
+            <p>{$t('tenant_settings.invitations.not_admin_note')}</p>
+          </div>
+        {:else}
+          <div class="users-toolbar">
+            <select
+              class="users-search"
+              value={invitationsStatusFilter}
+              onchange={(e) => { invitationsStatusFilter = e.target.value; loadInvitations(); }}
+              aria-label={$t('tenant_settings.invitations.col_status')}
+              data-testid="invitations-status-filter"
+            >
+              <option value="">{$t('tenant_settings.invitations.status_filter_all')}</option>
+              <option value="Pending">Pending</option>
+              <option value="Accepted">Accepted</option>
+              <option value="Declined">Declined</option>
+              <option value="Expired">Expired</option>
+              <option value="Revoked">Revoked</option>
+            </select>
+            <button class="btn-primary" onclick={() => { inviteError = null; inviteResultUrl = null; inviteModalOpen = true; }} data-testid="invite-to-tenant-btn">
+              {$t('tenant_settings.invitations.invite')}
+            </button>
+            <button class="btn-secondary" onclick={() => { bulkError = null; bulkResult = null; bulkModalOpen = true; }} data-testid="bulk-invite-btn">
+              {$t('tenant_settings.invitations.bulk_invite')}
+            </button>
+          </div>
+
+          {#if inviteResultUrl}
+            <div class="info-card api-key-banner" data-testid="invite-link-banner">
+              <p>{$t('tenant_settings.invitations.invite_success')}</p>
+              <code class="mono">{inviteResultEmail} — {inviteResultUrl}</code>
+              <div class="users-toolbar">
+                <button class="btn-primary" onclick={copyInviteLink} data-testid="copy-invite-link-btn">
+                  {inviteLinkCopied ? $t('tenant_settings.invitations.link_copied') : $t('tenant_settings.invitations.copy_link')}
+                </button>
+                <button class="btn-secondary" onclick={() => { inviteResultUrl = null; inviteLinkCopied = false; }}>{$t('common.close')}</button>
+              </div>
+            </div>
+          {/if}
+
+          {#if bulkResult}
+            <div class="info-card api-key-banner" data-testid="bulk-invite-result">
+              <p>{$t('tenant_settings.invitations.bulk_success', { values: { created: bulkResult.created_count ?? 0, errors: bulkResult.error_count ?? 0 } })}</p>
+              {#if (bulkResult.created ?? []).length > 0}
+                <ul class="invite-list">
+                  {#each bulkResult.created as c (c.email)}
+                    <li class="mono invite-list-item">{c.email}: {c.invite_url}</li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if (bulkResult.errors ?? []).length > 0}
+                <ul class="invite-list">
+                  {#each bulkResult.errors as err (err.index)}
+                    <li class="mono invite-list-item">{err.error}</li>
+                  {/each}
+                </ul>
+              {/if}
+              <button class="btn-secondary" onclick={() => (bulkResult = null)}>{$t('common.close')}</button>
+            </div>
+          {/if}
+
+          {#if invitations.length === 0}
+            <div class="panel-empty">{$t('tenant_settings.invitations.no_invitations')}</div>
+          {:else}
+            <table class="users-table" data-testid="tenant-invitations-table">
+              <thead>
+                <tr>
+                  <th scope="col">{$t('tenant_settings.invitations.col_email')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_role')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_workspaces')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_status')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_expires')}</th>
+                  <th scope="col">{$t('tenant_settings.invitations.col_created')}</th>
+                  <th scope="col"><span class="sr-only">{$t('common.actions')}</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each invitations as inv (inv.id)}
+                  <tr data-testid="tenant-invitation-row">
+                    <td>{inv.email}</td>
+                    <td>{inv.role}</td>
+                    <td>{(inv.workspace_ids ?? []).length}</td>
+                    <td>
+                      <span class="role-badge" class:status-deactivated={inv.status !== 'Pending'}>{inv.status}</span>
+                    </td>
+                    <td>{invitationExpiryLabel(inv)}</td>
+                    <td>{inv.created_at ? absoluteTime(inv.created_at) : '—'}</td>
+                    <td>
+                      {#if inv.status === 'Pending'}
+                        <button
+                          class="btn-danger"
+                          onclick={() => revokeInvitation(inv)}
+                          disabled={revokingInvitationId === inv.id}
+                          data-testid={`revoke-invitation-${inv.id}`}
+                        >{revokingInvitationId === inv.id ? '…' : $t('tenant_settings.invitations.revoke')}</button>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        {/if}
+      </div>
+
+      <!-- Invite modal (single) -->
+      {#if inviteModalOpen}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div class="modal-backdrop" role="presentation" onclick={() => (inviteModalOpen = false)}>
+          <div class="modal-card" role="dialog" aria-modal="true" tabindex="-1" aria-label={$t('tenant_settings.invitations.invite')} onclick={(e) => e.stopPropagation()} data-testid="invite-modal">
+            <h3>{$t('tenant_settings.invitations.invite')}</h3>
+            <form onsubmit={(e) => { e.preventDefault(); submitInvite(); }}>
+              <label class="info-label">{$t('tenant_settings.invitations.invite_email_label')}
+                <input class="users-search" type="email" bind:value={inviteForm.email} placeholder="user@example.com" data-testid="invite-email-input" required autocomplete="off" />
+              </label>
+              <label class="info-label">{$t('tenant_settings.invitations.invite_role_label')}
+                <select class="users-search" bind:value={inviteForm.role} data-testid="invite-role-select">
+                  <option value="Member">Member</option>
+                  <option value="TenantAdmin">TenantAdmin</option>
+                </select>
+              </label>
+              <label class="info-label">{$t('tenant_settings.invitations.invite_expiry_label')}
+                <input class="users-search" type="number" min="1" bind:value={inviteForm.expiresInDays} placeholder="14" data-testid="invite-expiry-input" />
+              </label>
+              {#if inviteError}
+                <p class="panel-error" role="alert" data-testid="invite-error">{inviteError}</p>
+              {/if}
+              <div class="modal-actions">
+                <button type="button" class="btn-primary" onclick={() => (inviteModalOpen = false)}>{$t('common.cancel')}</button>
+                <button type="submit" class="btn-primary" disabled={inviteSaving || !inviteForm.email.trim()} data-testid="invite-submit-btn">
+                  {inviteSaving ? $t('tenant_settings.invitations.invite_saving') : $t('tenant_settings.invitations.invite_submit')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Bulk invite modal -->
+      {#if bulkModalOpen}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div class="modal-backdrop" role="presentation" onclick={() => (bulkModalOpen = false)}>
+          <div class="modal-card" role="dialog" aria-modal="true" tabindex="-1" aria-label={$t('tenant_settings.invitations.bulk_invite')} onclick={(e) => e.stopPropagation()} data-testid="bulk-invite-modal">
+            <h3>{$t('tenant_settings.invitations.bulk_invite')}</h3>
+            <form onsubmit={(e) => { e.preventDefault(); submitBulkInvite(); }}>
+              <label class="info-label">{$t('tenant_settings.invitations.bulk_label')}
+                <textarea class="users-search" rows="6" bind:value={bulkForm.emails} data-testid="bulk-emails-input" placeholder="alice@example.com&#10;bob@example.com"></textarea>
+              </label>
+              <label class="info-label">{$t('tenant_settings.invitations.invite_expiry_label')}
+                <input class="users-search" type="number" min="1" bind:value={bulkForm.expiresInDays} placeholder="14" data-testid="bulk-expiry-input" />
+              </label>
+              {#if bulkError}
+                <p class="panel-error" role="alert" data-testid="bulk-invite-error">{bulkError}</p>
+              {/if}
+              <div class="modal-actions">
+                <button type="button" class="btn-primary" onclick={() => (bulkModalOpen = false)}>{$t('common.cancel')}</button>
+                <button type="submit" class="btn-primary" disabled={bulkSaving || !bulkForm.emails.trim()} data-testid="bulk-submit-btn">
+                  {bulkSaving ? $t('tenant_settings.invitations.invite_saving') : $t('tenant_settings.invitations.bulk_submit')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      {/if}
 
     <!-- ── Compute Targets ────────────────────────────────────────────── -->
     {:else if activeTab === 'compute'}
@@ -2623,6 +2978,19 @@
   .modal-card .info-label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); }
   .modal-card .users-search { max-width: none; }
   .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  /* Inline global-role select in the Users table (task-127). */
+  .role-select {
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+  }
+  .role-select:disabled { opacity: 0.6; }
+  /* Created-invitation link / bulk-result lists (task-127). */
+  .invite-list { margin: var(--space-1) 0 0; padding-left: 18px; }
+  .invite-list-item { font-size: var(--text-sm); word-break: break-all; }
   .btn-secondary { background: var(--color-surface-elevated); color: var(--color-text); border: 1px solid var(--color-border); }
   .btn-secondary:hover:not(:disabled) { border-color: var(--color-border-strong); }
   .btn-danger-sm {
