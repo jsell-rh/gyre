@@ -14,7 +14,7 @@ COMMANDS = [['bash', '/tmp/stage/checks.sh'], ['cargo', 'test', '--all', '--quie
 
 
 POLICY_FILES=('pipeline-verify.py','dev-static-gate.py','check-rustfmt-diff.py',
-              'check-clippy-diff.py','verifier-script-overlay.py','pipeline-artifacts.py',
+              'check-clippy-diff.py','verifier-script-overlay.py','pipeline-artifacts.py','dev-coverage.py',
               'pipeline-build-env.py','pipeline-cache.py','dev-cargo-clean.py','pipeline-usage.py')
 
 
@@ -116,7 +116,7 @@ def run(execution, path, identity, probe=None):
         image = store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image'])
         bundle = execution.directory / 'verification-input'
         bundle.mkdir(exist_ok=True)
-        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py', 'pipeline-usage.py', 'pipeline-build-env.py', 'pipeline-cache.py', 'dev-cargo-clean.py'):
+        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-usage.py', 'pipeline-build-env.py', 'pipeline-cache.py', 'dev-cargo-clean.py'):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)

@@ -25,7 +25,12 @@ def check(execution, task):
         paths.append(name)
     if not paths:
         raise Retry('Review preflight could not read conflict paths; no model or code repair was authorized')
-    source, _ = source_findings([{'file': name, 'detail': 'merge conflict'} for name in paths])
+    summary = 'specs/coverage/SUMMARY.md'
+    summary_only = not any(name.startswith('specs/coverage/') and name != summary for name in paths)
+    source, _ = source_findings([{'file': name, 'detail': 'merge conflict'} for name in paths
+                                if name != summary or not summary_only])
+    if not summary_only and summary in paths:
+        source.append({'file': summary, 'detail': 'coverage matrices require a source merge'})
     if not source:
         return None  # The verifier already owns deterministic web/dist recovery.
     finding = {'id': execution.claim['id'], 'category': 'rebase', 'source': candidate,
