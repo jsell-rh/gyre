@@ -2303,71 +2303,87 @@ async fn register_spawned_agent(
 async fn monitor_spawned_agent_exit(state: Arc<AppState>, agent_id: String) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(EXIT_MONITOR_POLL_SECS)).await;
-
-        let handle = {
-            let registry = state.process_registry.lock().await;
-            match registry.get(&agent_id) {
-                Some(h) => h.clone(),
-                // Already unregistered (killed, or another monitor iteration
-                // finished first) — nothing left to watch.
-                None => break,
-            }
-        };
-
-        // Probe the backend that owns this handle. Clone the Arc out and
-        // DROP the lock before awaiting: an SSH probe can block for the
-        // TCP connect timeout, and holding the lock across it would stall
-        // admin kills and every new spawn registration.
-        let backend = {
-            let backends = state.spawned_backends.lock().await;
-            match backends.get(&agent_id) {
-                Some(b) => std::sync::Arc::clone(b),
-                // Already unregistered (killed, or another monitor iteration
-                // finished first) — nothing left to watch.
-                None => break,
-            }
-        };
-        let alive = gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle)
-            .await
-            .unwrap_or(false);
-
-        if !alive {
-            state.process_registry.lock().await.remove(&agent_id);
-            state.spawned_backends.lock().await.remove(&agent_id);
-
-            // M19.3: Update the audit record on container exit. No-op when
-            // no audit record exists (local/SSH-bare spawns) —
-            // `capture_exit_audit` returns early on missing records.
-            container_audit::capture_exit_audit(state.container_audits.as_ref(), &agent_id).await;
-
-            // M23: Emit container_stopped audit event (best-effort).
-            {
-                let audit_rec = state
-                    .container_audits
-                    .find_by_agent_id(&agent_id)
-                    .await
-                    .ok()
-                    .flatten();
-                let exit_code = audit_rec.as_ref().and_then(|r| r.exit_code);
-                let ctx = crate::container_audit::AuditCtx {
-                    audit: state.audit.as_ref(),
-                    broadcast_tx: &state.audit_broadcast_tx,
-                    search: state.search.as_ref(),
-                };
-                let container_id_for_evt = audit_rec.map(|r| r.container_id).unwrap_or_default();
-                crate::container_audit::emit_stopped(
-                    &ctx,
-                    &agent_id,
-                    &container_id_for_evt,
-                    exit_code,
-                )
-                .await;
-            }
-
-            on_agent_process_exit(&state, &agent_id).await;
+        if !monitor_poll_once(&state, &agent_id).await {
             break;
         }
     }
+}
+
+/// A single exit-monitor iteration. Returns `true` while the agent should
+/// keep being polled, `false` once the monitor is done (agent unregistered
+/// or reported not-alive). Split out of the loop so tests can drive one
+/// iteration without the poll sleep.
+async fn monitor_poll_once(state: &AppState, agent_id: &str) -> bool {
+    let handle = {
+        let registry = state.process_registry.lock().await;
+        match registry.get(agent_id) {
+            Some(h) => h.clone(),
+            // Already unregistered (killed, or another monitor iteration
+            // finished first) — nothing left to watch. Drop the backend
+            // entry too if a kill path removed only the handle: leaving
+            // it would leak one Arc<SpawnBackend> per agent for the
+            // lifetime of the server.
+            None => {
+                drop(registry);
+                state.spawned_backends.lock().await.remove(agent_id);
+                return false;
+            }
+        }
+    };
+
+    // Probe the backend that owns this handle. Clone the Arc out and
+    // DROP the lock before awaiting: an SSH probe can block for the
+    // TCP connect timeout, and holding the lock across it would stall
+    // admin kills and every new spawn registration.
+    let backend = {
+        let backends = state.spawned_backends.lock().await;
+        match backends.get(agent_id) {
+            Some(b) => std::sync::Arc::clone(b),
+            // Already unregistered — nothing left to watch. Drop the
+            // handle entry too, symmetric with the branch above.
+            None => {
+                drop(backends);
+                state.process_registry.lock().await.remove(agent_id);
+                return false;
+            }
+        }
+    };
+    let alive = gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle)
+        .await
+        .unwrap_or(false);
+
+    if !alive {
+        state.process_registry.lock().await.remove(agent_id);
+        state.spawned_backends.lock().await.remove(agent_id);
+
+        // M19.3: Update the audit record on container exit. No-op when
+        // no audit record exists (local/SSH-bare spawns) —
+        // `capture_exit_audit` returns early on missing records.
+        container_audit::capture_exit_audit(state.container_audits.as_ref(), agent_id).await;
+
+        // M23: Emit container_stopped audit event (best-effort).
+        {
+            let audit_rec = state
+                .container_audits
+                .find_by_agent_id(agent_id)
+                .await
+                .ok()
+                .flatten();
+            let exit_code = audit_rec.as_ref().and_then(|r| r.exit_code);
+            let ctx = crate::container_audit::AuditCtx {
+                audit: state.audit.as_ref(),
+                broadcast_tx: &state.audit_broadcast_tx,
+                search: state.search.as_ref(),
+            };
+            let container_id_for_evt = audit_rec.map(|r| r.container_id).unwrap_or_default();
+            crate::container_audit::emit_stopped(&ctx, agent_id, &container_id_for_evt, exit_code)
+                .await;
+        }
+
+        on_agent_process_exit(state, agent_id).await;
+        return false;
+    }
+    true
 }
 
 /// Shared process-exit transition for every compute-target monitor.
@@ -3656,6 +3672,7 @@ async fn create_derived_input_for_agent(
 mod tests {
     use super::complete_agent;
     use super::create_interrogation_policies_in;
+    use super::monitor_poll_once;
     use super::register_spawned_agent;
     use super::spawn_agent_core;
     use super::CompleteAgentRequest;
@@ -6517,6 +6534,112 @@ mod tests {
             .lock()
             .await
             .contains_key("agt-kill-1"));
+    }
+
+    /// F2 regression (task-206 review): a monitor iteration that finds only
+    /// half of the registration — a handle whose backend was already reaped
+    /// by a kill path, or a backend whose handle was — must purge the other
+    /// half too instead of just breaking. Otherwise one Arc<SpawnBackend>
+    /// (or ProcessHandle) leaks per affected agent for the lifetime of the
+    /// server: the kill paths remove both entries, but any path that removes
+    /// only one used to park the other here forever.
+    #[tokio::test]
+    async fn monitor_iteration_purges_half_registered_entries() {
+        let state = test_state();
+
+        // Handle registered, backend already reaped: the iteration must end
+        // the monitor AND remove the orphaned handle.
+        state.process_registry.lock().await.insert(
+            "agt-half-1".to_string(),
+            gyre_ports::ProcessHandle {
+                id: "half-1".to_string(),
+                target_type: "local".to_string(),
+                pid: None,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        assert!(
+            !monitor_poll_once(&state, "agt-half-1").await,
+            "a missing backend must end the monitor"
+        );
+        assert!(
+            !state
+                .process_registry
+                .lock()
+                .await
+                .contains_key("agt-half-1"),
+            "the orphaned handle entry must be purged, not leaked"
+        );
+
+        // Backend registered, handle already reaped: symmetric.
+        state.spawned_backends.lock().await.insert(
+            "agt-half-2".to_string(),
+            std::sync::Arc::new(SpawnBackend::Local),
+        );
+        assert!(
+            !monitor_poll_once(&state, "agt-half-2").await,
+            "a missing handle must end the monitor"
+        );
+        assert!(
+            !state
+                .spawned_backends
+                .lock()
+                .await
+                .contains_key("agt-half-2"),
+            "the orphaned backend entry must be purged, not leaked"
+        );
+    }
+
+    /// A fully registered, still-alive agent keeps its monitor polling:
+    /// `monitor_poll_once` returns true and touches neither entry. Uses a
+    /// real process so the liveness probe is the production one.
+    #[tokio::test]
+    async fn monitor_iteration_keeps_polling_alive_agent() {
+        let state = test_state();
+        let spawn_cfg = gyre_ports::SpawnConfig {
+            name: "monitor-alive-probe".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            env: std::collections::HashMap::new(),
+            work_dir: "/tmp".to_string(),
+        };
+        let handle = gyre_adapters::compute::LocalTarget
+            .spawn_process(&spawn_cfg)
+            .await
+            .expect("spawning sleep should work on linux");
+
+        state
+            .process_registry
+            .lock()
+            .await
+            .insert("agt-alive-1".to_string(), handle.clone());
+        state.spawned_backends.lock().await.insert(
+            "agt-alive-1".to_string(),
+            std::sync::Arc::new(SpawnBackend::Local),
+        );
+
+        assert!(
+            monitor_poll_once(&state, "agt-alive-1").await,
+            "an alive agent must keep its monitor polling"
+        );
+        assert!(state
+            .process_registry
+            .lock()
+            .await
+            .contains_key("agt-alive-1"));
+        assert!(state
+            .spawned_backends
+            .lock()
+            .await
+            .contains_key("agt-alive-1"));
+
+        // Cleanup: kill the process and drop both entries so no monitor or
+        // process outlives the test.
+        let _ =
+            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+                .await;
+        state.process_registry.lock().await.remove("agt-alive-1");
+        state.spawned_backends.lock().await.remove("agt-alive-1");
     }
     /// TASK-077 (F6): `create_interrogation_policies` must fail closed — if
     /// a policy cannot be created (e.g. duplicate id), the error propagates

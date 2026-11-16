@@ -956,14 +956,32 @@ pub async fn post_meta_spec_preview(
     }
 
     // Persist before launching: a fast agent can exit — and report — before the
-    // first launch call returns.
+    // first launch call returns. A persist failure rolls back every provisioned
+    // agent (same compensation as a provision failure): without it, N Active
+    // agent rows, live tokens, held budget slots, branches and worktrees would
+    // be orphaned with no preview record and no preview_agents index entries —
+    // invisible to the GC orphan pass, which iterates that index.
     let record = PreviewRecord {
         preview_id: preview_id.clone(),
         requested_by: Some(auth.agent_id.clone()),
         created_at: now,
         agents: provisioned.iter().map(|p| p.agent_ref.clone()).collect(),
     };
-    persist_preview(&state, &record).await?;
+    if let Err(e) = persist_preview(&state, &record).await {
+        for p in &provisioned {
+            rollback_preview_agent(&state, &p.agent_ref).await;
+        }
+        // A partial persist may have stored the run record before an index
+        // write failed — drop it too, or a record whose agents were all
+        // rolled back lingers until the GC sweep.
+        if let Err(rm_err) = state.kv_store.kv_remove(PREVIEW_NS, &preview_id).await {
+            tracing::warn!(
+                preview_id = %preview_id,
+                "failed to drop partially-persisted preview record: {rm_err}"
+            );
+        }
+        return Err(e);
+    }
 
     tracing::info!(
         preview_id = %preview_id,
@@ -1519,8 +1537,11 @@ async fn provision_preview_agent(
     // non-atomic-create:ok - the agent row is written before the worktree row
     // across two stores with no cross-repo transaction, but every failure
     // path after the first create routes through rollback_preview_agent,
-    // which deletes the partially-provisioned agent row, worktree rows and
-    // branch — the compensation is proven by the launch-failure tests.
+    // which deletes the partially-provisioned agent row, worktree rows,
+    // branch and index entry — and the caller applies the same rollback to
+    // every already-provisioned target when a later step (provision or
+    // persist_preview) fails. The compensation is proven by the
+    // launch-failure and persist-failure tests.
     let repo = &target.repo;
 
     // Pin the branch to the default-branch tip so the diff a human reads is
@@ -1873,10 +1894,23 @@ async fn teardown_preview_agent(state: &AppState, agent_ref: &PreviewAgentRef) {
 /// Undo provisioning of an agent that never launched, for a POST being
 /// rejected. Unlike teardown it also drops the agent row: nothing ever
 /// referenced it, so leaving it would be ledger noise from a failed request.
+/// Also drops the preview_agents index entry `persist_preview` may have
+/// written before the request failed — otherwise the orphan would wait for
+/// the hourly GC pass while holding its budget slot.
 async fn rollback_preview_agent(state: &AppState, agent_ref: &PreviewAgentRef) {
     remove_preview_worktree(state, agent_ref).await;
     delete_preview_branch(state, agent_ref).await;
     revoke_preview_token(state, &agent_ref.agent_id).await;
+    if let Err(e) = state
+        .kv_store
+        .kv_remove(PREVIEW_AGENTS_NS, &agent_ref.agent_id)
+        .await
+    {
+        tracing::warn!(
+            agent_id = %agent_ref.agent_id,
+            "preview agent index cleanup failed: {e:#}"
+        );
+    }
     if let Ok(wts) = state
         .worktrees
         .find_by_agent(&Id::new(&agent_ref.agent_id))
@@ -1899,11 +1933,28 @@ async fn rollback_preview_agent(state: &AppState, agent_ref: &PreviewAgentRef) {
     }
 }
 
+/// Kill a preview agent's runtime through the backend recorded at spawn
+/// time (`state.spawned_backends`) — the same invariant the admin kill path
+/// (api/admin.rs) and the manifest gate teardown implement. Reconstructing
+/// the target from the handle alone cannot reach two of the backends preview
+/// agents launch on: an SshDocker handle's id is a remote container id that
+/// `SshTarget::from_handle` refuses, and a Kubernetes handle carries no pid,
+/// so a LocalTarget kill is a silent no-op while the Pod keeps running. Both
+/// registry entries (handle and backend) are removed together so the exit
+/// monitor's missing-handle break cannot leak the backend slot.
 async fn kill_preview_process(state: &AppState, agent_id: &str) {
     let handle = state.process_registry.lock().await.remove(agent_id);
+    let backend = state.spawned_backends.lock().await.remove(agent_id);
     match handle {
         Some(handle) => {
-            if let Err(e) = super::spawn::kill_process_handle(&handle).await {
+            let kill_result = match backend.as_deref() {
+                Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
+                // No recorded backend (pre-registration record): reconstruct
+                // from the handle, which at least refuses malformed ssh ids
+                // instead of killing an unrelated local pid.
+                None => super::spawn::kill_process_handle(&handle).await,
+            };
+            if let Err(e) = kill_result {
                 tracing::warn!(agent_id, "preview process kill failed: {e:#}");
             }
         }
@@ -2054,8 +2105,10 @@ async fn release_preview_slot(state: &AppState, agent_ref: &PreviewAgentRef) {
 
 #[cfg(test)]
 mod tests {
+    use super::kill_preview_process;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_ports::ComputeTarget as _;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -2656,6 +2709,19 @@ mod tests {
         ttl_secs: u64,
         max_concurrent: Option<u64>,
     ) -> (Router, std::sync::Arc<crate::AppState>, String) {
+        let (state, repo_id, _ws_id) = preview_state(repos_root, ttl_secs, max_concurrent).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        (app, state, repo_id)
+    }
+
+    /// The state half of [`preview_app`], split so tests that need to swap a
+    /// store adapter (e.g. a failing kv namespace) can do so before the
+    /// router is built. Returns (state, repo_id, workspace_id).
+    async fn preview_state(
+        repos_root: &std::path::Path,
+        ttl_secs: u64,
+        max_concurrent: Option<u64>,
+    ) -> (std::sync::Arc<crate::AppState>, String, gyre_common::Id) {
         use gyre_domain::{Repository, Workspace};
         use std::sync::Arc;
 
@@ -2693,7 +2759,6 @@ mod tests {
             ttl_secs,
             max_concurrent,
         );
-        let app = crate::api::api_router().with_state(state.clone());
 
         let ws = Workspace::new(
             gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
@@ -2713,7 +2778,7 @@ mod tests {
         );
         state.repos.create(&repo).await.unwrap();
 
-        (app, state, repo.id.to_string())
+        (state, repo.id.to_string(), ws.id)
     }
 
     fn preview_body(repo_id: &str, spec_paths: &[&str]) -> serde_json::Value {
@@ -3059,6 +3124,21 @@ mod tests {
                 reg.contains_key(&agent_id).then_some(())
             })
             .await;
+            // Registration is complete only when the backend that owns the
+            // handle is recorded too — kills must route through it.
+            soon(|| {
+                let backends = state.spawned_backends.try_lock().ok()?;
+                backends.contains_key(&agent_id).then_some(())
+            })
+            .await;
+            let agent_pid = {
+                let reg = state.process_registry.lock().await;
+                reg.get(&agent_id).and_then(|h| h.pid)
+            };
+            assert!(
+                agent_pid.is_some(),
+                "local preview spawn must record a pid so the kill is observable"
+            );
 
             let repo = state
                 .repos
@@ -3071,6 +3151,40 @@ mod tests {
 
             let del = delete_preview(&app, &preview_id).await;
             assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+            // The runtime process is actually dead — DELETE must kill
+            // through the recorded backend, not just forget the registry
+            // entries (a forgotten-but-alive sleep process holds the pid
+            // and the worktree CWD).
+            let mut dead = false;
+            for _ in 0..50 {
+                let alive = gyre_ports::ComputeTarget::is_alive(
+                    &gyre_adapters::compute::LocalTarget,
+                    &gyre_ports::ProcessHandle {
+                        id: agent_pid.unwrap().to_string(),
+                        target_type: "local".to_string(),
+                        pid: agent_pid,
+                        options: std::collections::HashMap::new(),
+                    },
+                )
+                .await
+                .unwrap_or(false);
+                if !alive {
+                    dead = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            assert!(
+                dead,
+                "DELETE must terminate the preview agent process (pid {})",
+                agent_pid.unwrap()
+            );
+            // Both lifecycle registries are purged together: a handle
+            // removed without its backend leaks one Arc<SpawnBackend> per
+            // killed agent for the lifetime of the server.
+            assert!(!state.process_registry.lock().await.contains_key(&agent_id));
+            assert!(!state.spawned_backends.lock().await.contains_key(&agent_id));
 
             // Branch gone, worktree gone, kv records gone.
             assert!(!state
@@ -3120,6 +3234,225 @@ mod tests {
             assert_eq!(del2.status(), StatusCode::NOT_FOUND);
         })
         .await;
+    }
+
+    /// F1 regression: the preview kill must be dispatched through the
+    /// backend recorded at spawn time (`spawned_backends`), never
+    /// reconstructed from the handle's shape alone. Two production
+    /// backends cannot be reconstructed: an SshDocker handle's id is a
+    /// remote container id that `SshTarget::from_handle` refuses, and a
+    /// Kubernetes handle carries no pid, so a LocalTarget reconstruction
+    /// is a silent no-op while the Pod keeps running. No remote host is
+    /// available in tests, so the contract is pinned with a REAL process
+    /// registered behind an ssh-shaped handle (malformed for
+    /// reconstruction) whose recorded backend is Local: the kill must
+    /// reach the process. The pre-fix code path (`kill_process_handle`)
+    /// refuses the malformed ssh id and leaves the process alive.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_kill_routes_through_recorded_backend_not_handle_shape() {
+        let state = crate::mem::test_state();
+
+        // A real process to kill.
+        let spawn_cfg = gyre_ports::SpawnConfig {
+            name: "preview-kill-routing".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            env: std::collections::HashMap::new(),
+            work_dir: "/tmp".to_string(),
+        };
+        let handle = gyre_adapters::compute::LocalTarget
+            .spawn_process(&spawn_cfg)
+            .await
+            .expect("spawning sleep should work on linux");
+        let pid = handle.pid.expect("local spawn sets pid");
+
+        // Register it the way a remote-container launch would: the handle
+        // id is a remote container id an SshTarget cannot be reconstructed
+        // from, and the backend that owns the handle is recorded alongside.
+        let mislabeled = gyre_ports::ProcessHandle {
+            id: "f00f00f00f00remote-container".to_string(),
+            target_type: "ssh".to_string(),
+            pid: Some(pid),
+            options: std::collections::HashMap::new(),
+        };
+        state
+            .process_registry
+            .lock()
+            .await
+            .insert("agt-preview-kill-routing".to_string(), mislabeled);
+        state.spawned_backends.lock().await.insert(
+            "agt-preview-kill-routing".to_string(),
+            std::sync::Arc::new(crate::api::spawn::SpawnBackend::Local),
+        );
+
+        kill_preview_process(&state, "agt-preview-kill-routing").await;
+
+        // Both lifecycle entries are gone together...
+        assert!(!state
+            .process_registry
+            .lock()
+            .await
+            .contains_key("agt-preview-kill-routing"));
+        assert!(!state
+            .spawned_backends
+            .lock()
+            .await
+            .contains_key("agt-preview-kill-routing"));
+        // ...and the process is actually dead.
+        let mut dead = false;
+        for _ in 0..50 {
+            let alive = gyre_ports::ComputeTarget::is_alive(
+                &gyre_adapters::compute::LocalTarget,
+                &gyre_ports::ProcessHandle {
+                    id: pid.to_string(),
+                    target_type: "local".to_string(),
+                    pid: Some(pid),
+                    options: std::collections::HashMap::new(),
+                },
+            )
+            .await
+            .unwrap_or(false);
+            if !alive {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            dead,
+            "preview kill must reach the process through the recorded backend (pid {pid})"
+        );
+    }
+
+    /// kv wrapper whose writes to one namespace fail — forces the
+    /// `persist_preview` failure path at a chosen step.
+    struct NamespaceFailingKv {
+        inner: std::sync::Arc<dyn gyre_ports::KvJsonStore>,
+        fail_namespace: &'static str,
+    }
+
+    impl NamespaceFailingKv {
+        fn new(
+            inner: std::sync::Arc<dyn gyre_ports::KvJsonStore>,
+            fail_namespace: &'static str,
+        ) -> Self {
+            Self {
+                inner,
+                fail_namespace,
+            }
+        }
+    }
+
+    #[axum::async_trait]
+    impl gyre_ports::KvJsonStore for NamespaceFailingKv {
+        async fn kv_set(&self, namespace: &str, _key: &str, _value: String) -> anyhow::Result<()> {
+            if namespace == self.fail_namespace {
+                anyhow::bail!("injected kv write failure for namespace {namespace}");
+            }
+            self.inner.kv_set(namespace, _key, _value).await
+        }
+        async fn kv_get(&self, namespace: &str, key: &str) -> anyhow::Result<Option<String>> {
+            self.inner.kv_get(namespace, key).await
+        }
+        async fn kv_remove(&self, namespace: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.kv_remove(namespace, key).await
+        }
+        async fn kv_list(&self, namespace: &str) -> anyhow::Result<Vec<(String, String)>> {
+            self.inner.kv_list(namespace).await
+        }
+        async fn kv_clear(&self, namespace: &str) -> anyhow::Result<()> {
+            self.inner.kv_clear(namespace).await
+        }
+    }
+
+    /// F3 regression: a `persist_preview` failure must roll back every
+    /// provisioned agent. Without the rollback, N Active agent rows, live
+    /// tokens, held budget slots, branches and worktrees are orphaned with
+    /// no run record — invisible to the GC orphan pass, which iterates the
+    /// `preview_agents` index that never finished writing. The failure is
+    /// injected at the latest possible step (per-agent index writes, after
+    /// the run record and every per-agent token landed).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_persist_failure_rolls_back_every_provisioned_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+
+        let mut failing = (*state).clone();
+        failing.kv_store = std::sync::Arc::new(NamespaceFailingKv::new(
+            state.kv_store.clone(),
+            "preview_agents",
+        ));
+        let app = crate::api::api_router().with_state(std::sync::Arc::new(failing));
+
+        let resp = post_preview(
+            &app,
+            preview_body(
+                &repo_id,
+                &["specs/system/search.md", "specs/system/identity.md"],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // No preview agent rows survive the failed persist...
+        let agents = state.agents.list().await.unwrap();
+        let leftovers: Vec<String> = agents
+            .iter()
+            .filter(|a| a.name.starts_with("preview-"))
+            .map(|a| a.name.clone())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "persist failure must roll back every provisioned agent row, found {leftovers:?}"
+        );
+        // ...nor their tokens, index entries, run record, branches, worktrees
+        // or budget slots.
+        assert!(state
+            .kv_store
+            .kv_list("preview_agents")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .kv_store
+            .kv_list("meta_spec_previews")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .kv_store
+            .kv_list("agent_tokens")
+            .await
+            .unwrap()
+            .is_empty());
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let branches = state.git_ops.list_branches(&repo.path).await.unwrap();
+        assert!(
+            branches.iter().all(|b| !b.name.starts_with("preview/")),
+            "persist failure must delete every preview branch"
+        );
+        let worktrees = state.git_ops.list_worktrees(&repo.path).await.unwrap();
+        assert!(
+            worktrees.iter().all(|w| !w.contains("preview")),
+            "persist failure must remove every preview worktree"
+        );
+        let ws_key = crate::api::budget::workspace_key(ws_id.as_str());
+        let active = state
+            .budget_usages
+            .get_usage(&ws_key)
+            .await
+            .unwrap()
+            .map(|u| u.active_agents)
+            .unwrap_or(0);
+        assert_eq!(
+            active, 0,
+            "persist failure must release every held workspace budget slot"
+        );
     }
 
     /// A preview agent that finishes lands in Stopped (never Idle), its
