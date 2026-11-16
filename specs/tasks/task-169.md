@@ -2,10 +2,10 @@
 title: "Spec registry — supply chain AIBOM integration"
 spec_ref: "spec-registry.md §Supply Chain (supply-chain.md)"
 depends_on: [task-165]
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "spec-registry.md §Supply Chain (supply-chain.md)"
-commits: ["ad473d3c0846cbdb5888f4973b3ea8e406f09586", "a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -54,76 +54,3 @@ The spec registry should integrate with the supply chain system to include manif
 ## Agent Instructions
 
 Read `specs/system/spec-registry.md` §"Supply Chain (supply-chain.md)". The AIBOM endpoint is registered in `api/mod.rs` at `GET /api/v1/repos/:id/aibom`. The spec registry is in `crates/gyre-server/src/spec_registry.rs` — the `SpecLedgerEntry` type has all the status and approval data. The release endpoint is in `api/release.rs`. The AIBOM generation logic is in the handler for the `/aibom` route.
-
-## Shipped
-
-The spec registry now contributes manifest state to AIBOM artifacts and release
-metadata (spec-registry.md §Supply Chain). New module
-`crates/gyre-server/src/aibom_spec_registry.rs` builds one shared `spec_registry`
-section from real storage, embedded verbatim by both surfaces:
-
-- `GET /api/v1/repos/:id/aibom` — new `spec_registry` field on `AibomResponse`
-  (`aibom_version` bumped 1.1 → 1.2 for the schema extension).
-- `POST /api/v1/release/prepare` — new `spec_registry` field on
-  `ReleasePrepareResponse`, so release metadata and the standalone AIBOM are
-  built by the same function and cannot disagree.
-
-### What the section contains (all from real queries)
-
-- Every ledger approval status for the repo's specs — approved, pending,
-  deprecated, revoked, rejected — with per-status counts and `total_specs`
-  (coverage summary). Ledger entries are scoped by `repo_id`; other repos'
-  entries do not leak in.
-- Approval chain for approved specs: the active approval events for the
-  current version from the approval event history — `approved_at` (earliest),
-  `approved_by` (ids), and a full `approval_chain` (approver_id, approver_type,
-  persona, approved_at). Stale-SHA events and revoked events are excluded.
-  `approval_mode` comes from the ledger entry.
-- Drift risk per spec-registry.md: `drift_status` per spec plus a `drifted`
-  count.
-- `manifest_version`: git blob SHA of `specs/manifest.yaml` at HEAD via
-  `git rev-parse`; reported `null` when there is no manifest — never
-  fabricated.
-- Spec-to-code binding status: every repo MR carrying a `spec_ref`, with
-  `approved_at_merge_time` evaluated against the same per-SHA approval ledger
-  the merge gate (`verify_spec_ref`) enforces — an approval counts only when
-  granted at or before the merge and not revoked/rejected at or before it.
-  Merged-then-reverted MRs report merge-time approval as indeterminable
-  (`null`) because the MR record's `updated_at` is the revert time; evaluating
-  against it would misjudge approvals withdrawn between merge and revert.
-  A `bindings_summary` totals bindings, merges, and merge-time approvals.
-
-Storage failures propagate (`anyhow::Result` → `ApiError::Internal`) so the
-section cannot silently under-report spec provenance; only genuine absence
-(no manifest, no events, no MRs) is reported as empty/null.
-
-### Test evidence
-
-`cargo check -p gyre-server` and `cargo check -p gyre-server --tests` passed at
-`a4c24fc1`; after the verification repair (rustfmt + removal of one useless
-`format!` — whitespace-only otherwise) `cargo fmt --check -p gyre-server` and
-`cargo clippy -p gyre-server --lib` (no new warnings, in particular no
-`useless_format` in `aibom_spec_registry.rs`) pass at head `ad473d3c`. The
-sandbox build wrapper blocks gyre-server test code
-generation ("exceeds 4 GiB") — an infrastructure limit recorded in
-`/tmp/stage/review-evidence/task-169-probes.md`, not a code defect. The
-independent verifier must run:
-
-- `cargo test -p gyre-server --lib aibom_spec_registry` — 3 tests, including
-  ones that fail on real defects: an approval granted after the merge and an
-  approval revoked before the merge both yield `approved_at_merge_time: false`
-  (a "currently approved" check would wrongly say true); stale/revoked approval
-  events are excluded from approval chains; cross-repo ledger entries do not
-  leak; `manifest_version` equals `git rev-parse HEAD:specs/manifest.yaml` in
-  a real temp git repo.
-- `cargo test -p gyre-server --lib api::aibom` — includes the e2e
-  `aibom_includes_spec_registry_section` (router-level: section present with
-  counts, chain, and a merged MR bound to an approved spec).
-- `cargo test -p gyre-server --lib api::release` — includes
-  `release_prepare_includes_spec_registry_metadata`.
-- `cargo test --all` — acceptance criterion; deferred to the verifier per the
-  sandbox memory budget.
-
-Mechanical guards pass: check-arch, in-memory-state-stores,
-fail-open-ref-resolution, unwired-port-methods, inert-enforcement,
-relative-path-defaults, scope-literal-defaults, mem-port-contracts.
