@@ -82,3 +82,42 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Rebase review — task-093 (round 5)
+
+Assignment: candidate `1f20df441bfb625fadada7ce2743d3b75beeca92` on base `4d6759a0bfd637e899bbf65e725f91b07f745c69` (merge commit `bdb88ef2`). Verdict: **complete**.
+
+Scope reviewed: the full base→candidate delta (15 files: `orchestrator.rs`, `spawn.rs`, `stale_agents.rs`, `mcp.rs`, `abac_middleware.rs`, `main.rs`, `search_wiring.rs`, 5 script/exemption files, 2 spec files, `.done` deletion). The base already carried round-1 task-093 content (OrchestratorType, migration `2026-09-30-000052`, spawn endpoints, MCP tools, stale-detector restart); this candidate contributes the round-2–4 fixes the upstream base never got, plus the rebase resolution.
+
+Independent evidence (this sandbox, exact checkout of the candidate branch):
+
+- `cargo check -p gyre-server --tests` → clean, 7m19s, zero Rust warnings (only build-script web-asset notes). All production and test code type-checks together after the 18-file merge.
+- `cargo test -p gyre-domain` → 412 passed, 0 failed.
+- `cargo fmt --check` → clean.
+- All 20 AGENTS.md-enforced mechanical checks exit 0 on the candidate tree: arch, abac-route-registry, abac-exempt-handlers (86 handlers), mcp-write-tools (7 gated, exemptions empty), migration-versions, dead-message-kinds, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, mem-port-contracts, fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults, migration-sql-portability, forged-scope-fields, forwarded-header-trust, in-memory-state-stores, unbounded-external-http, inert-enforcement, warn-continue-creation.
+- `check-task-commit-attribution.sh` → OK against the exact candidate tree (verified in a clean worktree at `1f20df44`); the failure inside the staged checkout is solely the controller's unstaged task-file reset to the 2-commit assignment state, not a candidate defect. All 11 commits in the candidate's frontmatter are real ancestors.
+- Advisory checks that fail (silent-result-discard, conditional-test-guards, dead-components, llm-endpoint-hygiene, mcp-wrapper-parity, hardcoded-defaults, template-substitution, cli-spec-parity, type-simplification, unnamed-tuple-carriers): violation sets are byte-identical (modulo line shifts) to the assigned base — zero new violations introduced.
+- Exemption arithmetic: `abac-route-registry-exemptions.txt` 52 → 50 entries (both orchestrator routes moved into the resolver with `("repo"/"workspace", Some("write"))` mappings); `FROZEN_EXEMPTION_COUNT` 52 → 50 matches exactly. `abac-exempt-handlers` and `inert-enforcement` exemptions shrink to zero task-093-owned entries. All deletions-only, the sanctioned direction.
+
+Source audit of the delta (every acceptance criterion re-checked against production code):
+
+- **Tenant containment (F2/F3)**: both REST wrappers load the scoped entity and compare its tenant against `auth.tenant_id`, `Forbidden` on mismatch — the base's workspace wrapper had *no* containment, so the candidate strictly strengthens it. The repo wrapper layers it after `check_repo_abac`. MCP `gyre_spawn_repo_orchestrator` enforces same-workspace via the JWT `workspace_id` claim + repo lookup (cryptographic scope, not caller-supplied).
+- **Persona enforcement**: `validate_persona` returns `Result` and is propagated with `?` — missing/unapproved persona fails the spawn before any agent row is persisted (kill-tests `orchestrator_spawn_fails_without_persona` / `..._unapproved_persona` assert no persistence). Personas seeded approved and idempotently by `seed_builtin_meta_specs`.
+- **Exactly-one-live (§3.2)**: enforced at three layers — spawn cores (409 on live conflict), `restart_orchestrator`'s own occupancy gate (refuses to mint while a live orchestrator holds the scope; store-listing failure is conservative-no-restart), and terminal-state guards in `fail_agent`/`stop_agent` (corpse re-entry is idempotent 200). Default-name respawn auto-suffixes past dead tombstones while explicit names stay strict 400.
+- **Restart semantics (F4/F5/F6)**: shared `handle_orchestrator_death` on all three terminal paths (stale Abort, `/fail`, `/stop`); stale Abort decrements budget before restart; replacement passes `check_spawn_budget`, inherits `disconnected_behavior`, re-claims the slot (net active_agents stays 1); exhausted budget leaves the orchestrator dead (no spin).
+- **Escalation (F8)**: payload names the replacement and sets `informational: true` when one was spawned.
+- **MCP gate (F7)**: `gyre_message_send` in the `needs_write` RBAC gate; base's exemption entry removed, not maintained. ReadOnly API-key denial kill-test asserts nothing persisted.
+- **Wrapper parity (F9/F10)**: `cross_repo_task_core` shared; four wrapper-level tenant tests exercise the axum handlers directly.
+
+Deferred to the independent verifier (runtime constraint — large gyre-server test compilation runs there, not in this review sandbox): `cargo test -p gyre-server --lib api::orchestrator`, `--lib api::spawn`, `--lib stale_agents`, `--lib mcp::tests`, `--lib abac_middleware`, the integration suites (`auth_integration`, `api_integration`, `git_integration`, `e2e_ralph_loop`, `conversation_integration`, `explorer_ws_integration`, `m18_oidc_integration`, `graph_integration`), full `cargo test --all`, and all-target Clippy. The Shipped round-5 notes record these as green at the merge commit; the code paths are otherwise identical to the round-2–4-approved revisions whose focused runs are recorded above.
+
+Non-blocking observations:
+
+- `specs/coverage/system/platform-model.md` rows 15–17 still read `task-assigned`/not-started although the implementation has been integrated since round 1 — stale in the honest (understating) direction, process-owned; update at completion.
+- The candidate tree's `specs/tasks/task-093.md` frontmatter retains `depends_on: [task-220]` (no such task file) and `progress: ready-for-review`; the assignment body (`depends_on: []`, `needs-revision`) is authoritative. Bookkeeping drift only.
+- This sandbox's `awk` is mawk 1.3.4, which cannot parse 8 gawk-dialect check scripts (crypto-verify, early-return-side-effects, notification-audience/priority, path-scope-binding, tenant-filter, transactional-side-effects, verification-completeness) — environmental, fails identically at base; the verifier should run them under gawk as CI does.
+- `fail_agent`/`stop_agent` themselves remain exemption-frozen legacy debt for tenant containment (pre-existing, unchanged surface; round 2 disposition stands — the new orchestrator branch only acts on agents reachable through that pre-existing surface and the restart re-validates budget).
+
+No blocking finding. The rebase preserves and strengthens every previously verified behavior; all enforced gates pass; the delta contains no new violation of any advisory check.
+
+— Reviewer, round 5 (rebase onto `4d6759a0`)
