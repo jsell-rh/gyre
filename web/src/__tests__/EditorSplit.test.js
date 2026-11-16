@@ -13,6 +13,9 @@ vi.mock('../lib/api.js', () => ({
   api: {
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     graphPredict: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    specLinks: vi.fn().mockResolvedValue([]),
+    mergeRequests: vi.fn().mockResolvedValue([]),
+    mrDiff: vi.fn().mockResolvedValue({ files: [] }),
     specsAssist: vi.fn(),
     metaSpecsAssist: vi.fn(),
     specsSave: vi.fn().mockResolvedValue({ mr_id: 42 }),
@@ -239,12 +242,14 @@ describe('EditorSplit', () => {
 
   // ── Graph loading ──────────────────────────────────────────────────────────
 
-  it('triggers graphPredict on mount when repoId is set', async () => {
+  it('triggers graphPredict on mount when repoId is set (debounced, §3 fast tier)', async () => {
     const { api } = await import('../lib/api.js');
     render(EditorSplit, { props: { content: '', repoId: 'repo-1', specPath: 'specs/auth.md' } });
+    // §3: the prediction call is debounced (1.2s after the edit pause),
+    // so the mount-time call lands after the debounce window.
     await waitFor(() => {
       expect(api.graphPredict).toHaveBeenCalledWith('repo-1', expect.objectContaining({ spec_path: 'specs/auth.md' }));
-    });
+    }, { timeout: 4000 });
   });
 
   it('does not trigger graphPredict when no repoId', async () => {
@@ -1082,4 +1087,257 @@ describe('EditorSplit', () => {
     expect(ta.value).not.toContain('## Timeouts');
     expect(api.specsSave).not.toHaveBeenCalled();
   });
+});
+
+// ── §3 Progressive Preview: instant tier, debounced fast tier, ghost modes ──
+
+describe('EditorSplit — system-explorer.md §3 progressive preview', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('instant tier: impact bar shows connected specs, repos implementing, governed nodes', async () => {
+    const { api } = await import('../lib/api.js');
+    api.specLinks.mockResolvedValueOnce([
+      // One inbound implements link from another repo, one outbound link.
+      { source_path: 'specs/other.md', target_path: 'specs/auth.md', link_type: 'implements', source_repo_id: 'repo-9' },
+      { source_path: 'specs/auth.md', target_path: 'specs/dependency-graph.md', link_type: 'references' },
+    ]);
+    api.repoGraph.mockResolvedValue({
+      nodes: [
+        { id: 'n1', name: 'Auth', spec_path: 'specs/auth.md' },
+        { id: 'n2', name: 'Session', spec_path: 'specs/auth.md' },
+        { id: 'n3', name: 'Unrelated', spec_path: null },
+      ],
+      edges: [],
+    });
+    render(EditorSplit, {
+      props: { content: '# auth', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    const bar = await screen.findByTestId('impact-bar');
+    await waitFor(() => {
+      expect(screen.getByTestId('impact-connected-specs').textContent).toContain('2 connected');
+      expect(screen.getByTestId('impact-repos').textContent).toContain('2 repos');
+      expect(screen.getByTestId('impact-governed-nodes').textContent).toContain('2 governed');
+    });
+    expect(api.specLinks).toHaveBeenCalledWith('specs/auth.md', 'repo-1');
+    expect(bar).toBeTruthy();
+  });
+
+  it('fast tier: prediction is debounced — one call after the edit pause, not per keystroke', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      api.graphPredict.mockResolvedValue({ predictions: [] });
+      render(EditorSplit, {
+        props: { content: '', repoId: 'repo-1', specPath: 'specs/auth.md' },
+      });
+      const ta = screen.getByTestId('editor-split-textarea');
+      // Three keystrokes inside the debounce window…
+      await fireEvent.input(ta, { target: { value: 'a' } });
+      await fireEvent.input(ta, { target: { value: 'ab' } });
+      await fireEvent.input(ta, { target: { value: 'abc' } });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(api.graphPredict).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(800); // past the 1.2s debounce
+      await vi.waitFor(() => expect(api.graphPredict).toHaveBeenCalledTimes(1));
+      expect(api.graphPredict).toHaveBeenCalledWith('repo-1', {
+        spec_path: 'specs/auth.md',
+        draft_content: 'abc',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('fast tier: shows the Predicting… indicator while the call is in flight', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      let resolvePredict;
+      api.graphPredict.mockImplementationOnce(
+        () => new Promise((resolve) => { resolvePredict = resolve; }),
+      );
+      render(EditorSplit, {
+        props: { content: 'draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+      });
+      await vi.advanceTimersByTimeAsync(1300);
+      await vi.waitFor(() => expect(screen.getByTestId('predicting-chip')).toBeTruthy());
+      resolvePredict({ predictions: [] });
+      await vi.waitFor(() =>
+        expect(screen.queryByTestId('predicting-chip')).toBeNull(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('fast tier: prediction response renders ghosts with the §3 visual language', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      api.repoGraph.mockResolvedValue({
+        nodes: [
+          { id: 'n1', name: 'SearchQuery', spec_path: 'specs/auth.md', node_type: 'type' },
+        ],
+        edges: [],
+      });
+      api.graphPredict.mockResolvedValueOnce({
+        predictions: [
+          { action: 'add', node_type: 'Type', name: 'VectorIndex', confidence: 0.85, reason: 'vector search', parent_trait: 'SearchQuery' },
+          { action: 'modify', node_id: 'n1', name: 'SearchQuery', confidence: 0.9, reason: 'needs modes' },
+          { action: 'remove', node_id: 'n1', name: 'SearchQuery', confidence: 0.7, reason: 'superseded' },
+        ],
+      });
+      render(EditorSplit, {
+        props: { content: 'draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+      });
+      await vi.advanceTimersByTimeAsync(1300);
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll('[data-testid="ghost-node"]').length).toBe(3),
+      );
+      const add = document.querySelector('[data-action="add"] .ghost-border');
+      expect(add.getAttribute('stroke')).toBe('#22c55e');
+      expect(Number(add.getAttribute('opacity'))).toBeGreaterThan(0.5);
+      const remove = document.querySelector('[data-action="remove"]');
+      expect(remove.querySelector('[data-testid="ghost-strikethrough"]')).toBeTruthy();
+      // New relationship (add → parent) renders a dotted green edge.
+      const edge = document.querySelector('[data-testid="ghost-edge"]');
+      expect(edge).toBeTruthy();
+      expect(edge.getAttribute('stroke')).toBe('#22c55e');
+      // Ghost tooltip carries the prediction reason.
+      await fireEvent.mouseEnter(document.querySelector('[data-action="modify"]'));
+      expect(document.querySelector('[data-testid="ghost-tooltip"]').textContent).toContain('needs modes');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('ghost overlay clears when the spec is saved (and does not re-predict the saved draft)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      api.repoGraph.mockResolvedValue({
+        nodes: [{ id: 'n1', name: 'SearchQuery', spec_path: 'specs/auth.md' }],
+        edges: [],
+      });
+      api.graphPredict.mockResolvedValue({
+        predictions: [{ action: 'add', name: 'VectorIndex', confidence: 0.9, reason: 'r' }],
+      });
+      api.specsSave.mockResolvedValueOnce({ mr_id: 9 });
+      render(EditorSplit, {
+        props: { content: 'draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+      });
+      await vi.advanceTimersByTimeAsync(1300);
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll('[data-testid="ghost-node"]').length).toBe(1),
+      );
+      await fireEvent.click(screen.getByRole('button', { name: /save/i }));
+      await waitFor(() => expect(api.specsSave).toHaveBeenCalled());
+      // Overlay cleared after the save…
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll('[data-testid="ghost-node"]').length).toBe(0),
+      );
+      // …and the unchanged saved draft is not re-predicted.
+      const calls = api.graphPredict.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(api.graphPredict.mock.calls.length).toBe(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('thorough tier: ghosts pulse while the preview agent runs and turn solid on completion', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      api.repoGraph.mockResolvedValue({
+        nodes: [{ id: 'n1', name: 'SearchQuery', spec_path: 'specs/auth.md' }],
+        edges: [],
+      });
+      api.graphPredict.mockResolvedValue({
+        predictions: [{ action: 'modify', node_id: 'n1', name: 'SearchQuery', confidence: 0.9, reason: 'r' }],
+      });
+      api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-pulse', agent_id: 'agent-1' });
+      api.taskStatus
+        .mockResolvedValueOnce({ status: 'running' })
+        .mockResolvedValueOnce({ status: 'completed' });
+      render(EditorSplit, {
+        props: { content: 'draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+      });
+      await vi.advanceTimersByTimeAsync(1300);
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll('[data-testid="ghost-node"]').length).toBe(1),
+      );
+      await fireEvent.click(screen.getByTestId('preview-btn'));
+      // While the agent runs: the ghost pulses (§3 "Pulsing border").
+      await vi.waitFor(() => {
+        const ghost = document.querySelector('[data-testid="ghost-node"]');
+        expect(ghost).toBeTruthy();
+        expect(ghost.classList.contains('ghost-previewing')).toBe(true);
+      });
+      await vi.advanceTimersByTimeAsync(10000);
+      await vi.advanceTimersByTimeAsync(10000);
+      // On completion the ghost becomes solid (§3 "Confirmed by actual
+      // implementation").
+      await vi.waitFor(() => {
+        const ghost = document.querySelector('[data-testid="ghost-node"]');
+        expect(ghost).toBeTruthy();
+        expect(ghost.classList.contains('ghost-confirmed')).toBe(true);
+        expect(ghost.classList.contains('ghost-previewing')).toBe(false);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('thorough tier: completion resolves the preview MR and renders its real diff', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-mr', agent_id: 'agent-7' });
+      api.taskStatus.mockResolvedValueOnce({ status: 'completed' });
+      api.mergeRequests.mockResolvedValueOnce([
+        { id: 'mr-old', task_id: 'other-task', author_agent_id: 'someone-else', repository_id: 'repo-1' },
+        { id: 'mr-1', task_id: 'task-mr', author_agent_id: 'agent-7', repository_id: 'repo-1' },
+      ]);
+      api.mrDiff.mockResolvedValueOnce({
+        files_changed: 1,
+        insertions: 2,
+        deletions: 1,
+        files: [
+          {
+            path: 'src/search.rs',
+            status: 'Modified',
+            hunks: [
+              {
+                header: '@@ -1,2 +1,3 @@',
+                lines: [
+                  { line_type: 'context', content: 'fn search() {' },
+                  { line_type: 'delete', content: '    old();' },
+                  { line_type: 'add', content: '    new();' },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+      render(EditorSplit, {
+        props: { content: 'draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+      });
+      await fireEvent.click(await screen.findByTestId('preview-btn'));
+      await vi.advanceTimersByTimeAsync(10000);
+      await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
+      // The MR was resolved via the spawned agent / task linkage…
+      expect(api.mergeRequests).toHaveBeenCalledWith({ repository_id: 'repo-1' });
+      expect(api.mrDiff).toHaveBeenCalledWith('mr-1');
+      // …and its real hunks render in the Code Diff tab.
+      await fireEvent.click(screen.getByTestId('tab-code-diff'));
+      const panel = await screen.findByTestId('code-diff-panel');
+      expect(panel.textContent).toContain('src/search.rs');
+      expect(panel.textContent).toContain('new();');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
 });
