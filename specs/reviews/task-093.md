@@ -82,3 +82,23 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Merge-resolution review — task-093 (round 4)
+
+Candidate: `251de098eb6f8e1e69468a2d6f9d22b6ef4aa6ed` (base `047d652495dde3b1ae6ddbea4f8cf1b077a3c18f`).
+Scope: the merge resolution `34baa737` finishing the fold of main into the branch (the pre-merge tip `b08dcaaa` was an interrupted merge with committed conflict markers); the core product behavior was approved in rounds 2-3 and is unchanged in substance. Verdict: **needs-revision**.
+
+Probes (evidence: `/tmp/stage/review-evidence/`): `cargo check -p gyre-server` and `-p gyre-cli -p gyre-domain` pass; conflict-marker scan clean; ABAC route-registry, MCP write-tools, exempt-handlers (85), arch, inert-enforcement, forwarded-header, forged-scope, unbounded-HTTP checks all pass; task-commit attribution passes on the committed tree (the contract-restored working-tree frontmatter fails it — artifact, not the candidate). gyre-server test builds are blocked by the 4 GiB wrapper here; required verifier probes recorded in `verifier-probes.txt`.
+
+Verified intact: both spawn routes resolver-registered with exemption entries removed (honest shrink); `gyre_message_send` in the write gate with the exemption emptied; F2/F3 tenant containment on both tiers (wrapper + core); one-live-per-scope and budget checks; F4 budget symmetry (decrement on Abort, budget-gated restart, scope-occupancy re-check); F5 disconnect-behavior inheritance; F6 shared death handling on all three terminal paths with broadened idempotency guards; F8 informational escalation payload; fail-closed persona enforcement; main's single-source persona defs and drifted-policy refresh seeding adopted; no conflict markers remain; no main-side test loss in mcp.rs / spawn.rs / stale_agents.rs.
+
+Findings:
+
+- **R4-F1 (major): the merge resolution silently dropped two of main's tests.** Main's `orchestrator_spawn_emits_agent_spawned_analytics_event` and `orchestrator_spawn_analytics_reports_resolved_compute_target` (base `047d652`, orchestrator.rs lines 1813/1854) pin the f3f37604 regression — `agent.spawned` analytics reporting the resolved compute target instead of hardcoded `"local"` — and the null `task_id` / persona properties. Neither test exists anywhere in the candidate; they were on main's side of the conflicted test region and were lost in `34baa737`'s manual resolution, whose commit message claims the "launch/analytics tests" were unioned in (only the launch half was). The production fix is present in `spawn_orchestrator` and the tests call the candidate's current 5-arg core signature, so nothing forced their removal — this is a pure loss of a kill-test for a real prior bug, invisible to `cargo test --all`. Fix: restore both tests verbatim from base.
+- **R4-F2 (major, formatting): the rustfmt changed-lines gate fails on the candidate.** `python3 scripts/check-rustfmt-diff.py 047d6524` → exit 1: orchestrator.rs changed lines 2453-2459 (unformatted `let second_renamed = state\n .agents\n .find_by_id...` chain), 2656 (double blank line), 2930 (trailing blank line at EOF) — reproduced independently with `rustfmt --check` (3 diffs). The same gate class blocked the round-3 integration candidate; the branch's own history (d7e588d9) shows the fix protocol. Fix: `rustfmt` the file (or just those regions) — zero semantic change.
+
+The dropped `explicit_name_conflict_still_rejected_when_dead_agent_holds_it` (branch-side) is NOT a finding: it contradicted main's supersede-rename semantics, which the merge correctly adopts (§8 resume semantics), it is documented in the resolution commit message, and explicit-name supersede coverage is re-pinned by main's kept `spawn_frees_name_of_stopped_predecessor`.
+
+Both findings are small, mechanical repairs; no production-behavior defect was found in the resolution itself.
+
+— Verifier, 2026-11-16
