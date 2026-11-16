@@ -19,6 +19,7 @@ Enter / l         Open selected run
 Esc / h           Back
 
 WORK LISTS AND HISTORY
+D                 Open human decisions (three options; explicit selection)
 /                 Filter by issue, title, agent or status
 Enter             Keep filter
 Esc               Cancel editing; clear an applied filter

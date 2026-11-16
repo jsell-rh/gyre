@@ -132,6 +132,10 @@ def main():
             outcome[report] = json.loads(verdict.read_text())
         else:
             outcome['valid'] = False
+    if role == 'triage' and job['input'].get('decision_request'):
+        report=STAGE/'decision.json'
+        if report.exists():outcome['decision']=json.loads(report.read_text())
+        else:outcome['valid']=False
     record_outcome(outcome)
     # This private, claim-specific branch can never overwrite another worker.
     # Lost push responses are resolved by inspecting the exact remote head.
