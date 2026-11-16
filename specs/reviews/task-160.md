@@ -57,3 +57,55 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 7 — independent review at candidate `d236efd4` (base `e402e1ed`) — verdict: approved
+
+Fresh full review of the exact assigned candidate (11 attributed commits, all ancestors of HEAD,
+`check-task-commit-attribution.sh` exit 0 on the candidate tree). Every prior-round property
+re-verified independently on this head, plus the round-5/6 merge-adaptation commits
+(`1724c6a3` patrol escalation, `55a6c1f2` tenant meta-spec emit) that earlier rounds had not seen:
+
+- **Scripts pass clean**: `check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0
+  (118 read methods on tenant-column tables, 0 violations); `check-api-auth.sh` exit 0
+  (middleware chain + 4 non-ABAC handlers + delegated frozen-baseline route registry).
+- **Kill sensitivity re-probed this round** (isolated worktree, restored after each):
+  `Task.workspace_id → Option<Id>` → exit 1 naming task.rs:60; `Task.repo_id` renamed away →
+  exit 1 (missing-field); tenant predicate stripped from `sqlite/workspace.rs::find_by_id` and
+  `sqlite/notification.rs::list_recent` → exit 1 each with file:line; unregistered route
+  `/api/v1/zz-review-probe` in `api/mod.rs` → api-auth exit 1.
+- **End-to-end isolation is a hard test**: `tenant_isolation.rs` 2/2 passed, and stripping the
+  workspace `find_by_id` tenant filter makes it FAIL with the exact leak diagnostic
+  (`find_by_id leaked tenant B's workspace id to tenant A`) — not a self-confirming test.
+  `cargo test -p gyre-adapters --lib`: 462 passed, 0 failed.
+- **The sibling-attempt E0308 does not apply**: `SKIP_WEB_BUILD=1 cargo check -p gyre-server`
+  exit 0 on this candidate — `emit_tenant_meta_spec_set_updated` emits through
+  `AppState::emit_tenant_event` (real tenant Id from the authenticated caller, `workspace_id:
+  None` broadcast, never persisted, never a fabricated scope), and patrol escalation
+  (`1724c6a3`) routes through the scoped `emit_event` with skip-and-log on workspaceless
+  findings — the quiet-channel test proves nothing is emitted for an unscoped finding.
+- **Scoped-emit refactor is coherent**: `emit_event(ws, …)` / `emit_tenant_event(tenant, …)` /
+  shared `emit_scoped_event`; every call site in the diff (`git_http`, `merge_processor`,
+  `ralph_loop`, `signal_chain`, `mcp`, `speculative_merge`, `constraint_check`, api handlers)
+  adapts mechanically to the `Id` contract; unscoped emissions are skipped-and-logged, never
+  defaulted. Merge-time attestation ABAC decisions are now recorded (`record_abac_decision`)
+  and enforced, with a real audit-trail test.
+- **All sibling invariant gates pass on the candidate**: arch, fabricated-scope-defaults,
+  scope-literal-defaults (0 exemptions — `bootstrap_workspace()` is the documented §1
+  Bootstrap Behavior contract, spec-cited, not a fabricated fallback), inert-enforcement,
+  dead-message-kinds, mem-port-contracts, mcp-write-tools, abac-exempt-handlers.
+- **CI/pre-commit wiring**: all three lints blocking in CI (no `|| true`) and in pre-commit;
+  scripts mode 100755 with usage comments. Coverage matrix rows 10/14/27 task-assigned →
+  implemented with dated, mutation-cited notes.
+
+Server suites the verifier must run on this head (sandbox build budget): `cargo test --all`
+(incl. `-p gyre-server` — `spec_lifecycle_patrol`, `api::specs`, `merge_processor`,
+`api::admin` test mods changed by the scoped-emit/patrol adaptations), all-target clippy,
+and the full frozen-baseline script gates.
+
+Non-material observation (no action required): coverage row 14's note says "five
+structurally-isolated adapters" and lists `user_workspace_state.rs` twice; the SKIP_LIST
+actually carries six entries (message, user_workspace_state, workspace_membership, tenant,
+user, kv_store). Documentation typo only.
+
+Evidence: `/tmp/stage/review-evidence/task-160-round7/` — clean runs, all mutation probes,
+server check, invariant-gate outputs, attribution run on the candidate tree.
