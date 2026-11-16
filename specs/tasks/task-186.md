@@ -5,7 +5,7 @@ depends_on: [task-178, task-185]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §3. Inline Spec Editing with Progressive Preview"
-commits: ["44310fa1fcf02864c93460b3496601f12b89d516", "343ff8c8c4d5a55504571c5c3a53abba9280da5f"]
+commits: ["343ff8c8c4d5a55504571c5c3a53abba9280da5f", "44310fa1fcf02864c93460b3496601f12b89d516", "2e6b190d8db841a5b62b99a0f4152ecc93e733cb"]
 ---
 
 ## Spec Excerpt
@@ -103,11 +103,11 @@ Read `system-explorer.md` §3 "Inline Spec Editing with Progressive Preview" for
 
 ## Shipped
 
-The §3 progressive-preview loop now runs end to end with real data on every
-tier: instant link-graph impact, debounced LLM structural prediction rendered
-as the spec's ghost visual language, and a thorough preview that really spawns
-an implementation agent on a throwaway branch whose completion MR carries the
-code diff.
+The §3 progressive-preview loop runs end to end with real data on every
+ tier: instant link-graph impact, debounced LLM structural prediction rendered
+ as the spec's ghost visual language, and a thorough preview that really spawns
+ an implementation agent on a throwaway branch whose completion MR carries the
+ code diff.
 
 ### Ghost visual language (shared model + SVG layer)
 
@@ -138,7 +138,7 @@ code diff.
 `{spec_path, draft_content}` 1.2 s after every edit pause (one call per
 pause, not per keystroke), shows a `Predicting…` chip while in flight, and
 renders the response's predictions as ghosts. Server side, the spec-edit path
-of `predict_graph` now appends the §3 output contract to the LLM system
+of `predict_graph` appends the §3 output contract to the LLM system
 prompt (so predictions come back with action/confidence/reason) and returns
 real context fields: `affected_specs` (other side of every spec link touching
 the spec), `affected_repos` (workspace repos whose graphs contain live nodes
@@ -164,8 +164,10 @@ graph. Each segment degrades independently; none blocks editing.
   `POST /agents/spawn`). Returns `{repo_id, task_id, agent_id, branch,
   process_launched}`; a failed spawn rolls the preview task back (no
   orphaned Backlog work for the scheduler).
-- `EditorSplit` polls the task with the real status vocabulary (`review`/
-  `done` = complete, `blocked`/`cancelled` = failed), keeps the ghost canvas
+- `EditorSplit` polls the task with exactly the real wire vocabulary that
+  `GET /api/v1/tasks/{id}` serializes (`task_status_str`:
+  backlog/in_progress/review/done/blocked/cancelled): `review`/`done` =
+  complete, `blocked`/`cancelled` = failed. It keeps the ghost canvas
   visible under the progress strip so ghosts pulse while the agent runs, and
   on completion resolves the agent's MR (`GET /merge-requests?repository_id=`,
   matched by task/agent) and renders its real diff
@@ -184,17 +186,23 @@ graph. Each segment degrades independently; none blocks editing.
   per action (colors, dotted strokes, strikethrough), confidence opacity,
   tooltip show/hide/focus with reason + changes, pulse/solid modes,
   non-navigation.
-- `web/src/__tests__/EditorSplit.test.js` — new §3 describe block: impact
-  bar segments, debounced single predict call after an edit pause,
+- `web/src/__tests__/EditorSplit.test.js` (62 tests) — §3 describe block:
+  impact bar segments, debounced single predict call after an edit pause,
   Predicting… indicator lifecycle, ghost rendering from a prediction
   response (colors/edge/tooltip), ghost clearing on save without
-  re-prediction, pulse→solid transition across a thorough preview, and
-  completion MR diff rendering. The pre-existing mount-predict test was
-  updated for the debounced timing (same assertion, longer waitFor).
-- Full frontend suite: 124 files, 2485 passed, 41 skipped.
-- Server: `cargo check -p gyre-server --tests` clean; the mechanical
-  guards pass (ABAC route registry, architecture lint, mem port contracts,
-  inert enforcement, in-memory state stores).
+  re-prediction, pulse→solid transition across a thorough preview,
+  completion MR diff rendering, and the thorough-tier failure path
+  (`blocked`/`cancelled` → error banner, editor unlocked, no MR fetch).
+  Every thorough-preview mock uses the real task-status vocabulary.
+- Full frontend suite after the F3 repair: 124 files, 2487 passed, 41
+  skipped (locked deps via `npm ci`).
+- Mutation probes on the repaired tests: regressing the completion
+  condition to the fictional `'completed'` fails 3 tests; regressing the
+  failure condition to the fictional `'failed'` fails 5 tests. Both real-
+  vocabulary branches are now load-bearing for the suite.
+- Server: `cargo check -p gyre-server --tests` clean at the F1/F2 repair
+  round; the mechanical guards pass (ABAC route registry, architecture
+  lint, mem port contracts, inert enforcement, in-memory state stores).
 
 ### Deferred to the independent verifier (server test binaries)
 
@@ -208,27 +216,24 @@ budget. Execute:
 - `cargo test -p gyre-server --lib api::graph::tests::predict_graph` (pre-existing predict regressions)
 - `cargo test -p gyre-server --lib api::spawn` (spawn-core regressions — the thorough preview delegates to it)
 
-### Repair round (review 74d337d3 — findings F1/F2)
+### Repair rounds
 
-Both findings were test-assertion defects in
-`crates/gyre-server/src/api/graph.rs`; production behavior was correct and is
-unchanged (commit 44310fa1):
-
-- **F1** — the `thorough_preview` spec-stem sanitizer whitelists
-  `[A-Za-z0-9_-]` and maps `.` to `-`, so `specs/system/search.md` yields the
-  throwaway branch `preview/search-md-<id8>`. The test now expects that
-  prefix (verified by direct simulation of the char map; the conservative
-  sanitizer stays).
-- **F2** — axum 0.7.9 (Cargo.lock-pinned) rejects a `Json<T>` body missing a
-  required field with 422 Unprocessable Entity before the handler runs (the
-  contract already asserted in `release.rs`). The missing-`spec_path` case
-  now asserts 422; the in-handler empty-field validations still return 400.
-- The candidate commit also left ten unformatted regions in `graph.rs` that
-  fail the CI `cargo fmt --all -- --check` gate; `cargo fmt -p gyre-server`
-  was applied (mechanical whitespace only, `--check` now clean).
-
-In-sandbox evidence: `cargo check -p gyre-server` clean (build wrapper,
-42 s incremental after the fmt pass); focused web suites green —
-`ghostOverlay.test.js` + `GhostOverlay.test.js` (2 files, 42 tests) and
-`ArchPreviewCanvas.test.js` + `EditorSplit.test.js` (2 files, 98 tests).
-Evidence retained at `/tmp/stage/review-evidence/repair-F1-F2-test-assertions.md`.
+- **F1/F2 (review 74d337d3, commit 44310fa1)** — server test-assertion
+  defects in `graph.rs`; production unchanged. F1: the spec-stem sanitizer
+  maps `.` to `-`, so the throwaway branch is `preview/search-md-<id8>` and
+  the test now expects that prefix. F2: axum 0.7.9 rejects a `Json<T>` body
+  missing a required field with 422 before the handler runs; the
+  missing-`spec_path` case now asserts 422 (in-handler empty-field
+  validations still return 400). Ten unformatted `graph.rs` regions were
+  fixed with `cargo fmt -p gyre-server`.
+- **F3 (review 0b52dfad, commit 2e6b190d)** — the thorough-tier
+  completion/failure detection was proven only through wire statuses the
+  server never emits. Production `pollPreviewTask` now matches the real
+  `task_status_str` vocabulary exactly (`review`/`done` complete,
+  `blocked`/`cancelled` fail; the fictional `'completed'`/`'failed'` and
+  their false "wire compatibility" comment are gone), every thorough-
+  preview test mocks the real vocabulary (`in_progress` while running,
+  `review`/`done` for completion), and a new failure-path test covers
+  `blocked` and `cancelled`. Mutation probes confirm both branches are
+  load-bearing (see above). Evidence:
+  `/tmp/stage/review-evidence/finding-F3-repair-real-task-statuses.md`.
