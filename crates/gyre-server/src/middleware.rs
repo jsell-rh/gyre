@@ -392,6 +392,7 @@ mod tests {
             ws_tickets: base.ws_tickets.clone(),
             meta_specs: base.meta_specs.clone(),
             meta_spec_bindings: base.meta_spec_bindings.clone(),
+            message_dispatch_rx: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             attestation_storage: base.attestation_storage.clone(),
             rekor: base.rekor.clone(),
         });
