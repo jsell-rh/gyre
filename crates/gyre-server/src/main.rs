@@ -1,8 +1,8 @@
 use anyhow::Result;
 use gyre_server::{
     abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
-    merge_processor, procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
-    seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
+    merge_processor, message_dispatcher, procfs_monitor, register_default_compute_target,
+    seed_builtin_meta_specs, seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
     spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_session_cleanup,
     spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
 };
@@ -164,6 +164,12 @@ async fn main() -> Result<()> {
     spawn_llm_rate_limiter_cleanup(state.clone());
     gyre_server::api::invitations::spawn_invitation_expiry(state.clone());
     spawn_session_cleanup(state.clone());
+
+    // Message bus: drain the dispatch channel into registered consumers
+    // (notification bridge) and run the hourly Event-TTL expiry job
+    // (message-bus.md §Relationship to Notifications, §Implementation Notes).
+    message_dispatcher::spawn_message_consumer(state.clone()).await;
+    message_dispatcher::spawn_message_expiry(state.clone());
 
     let app = build_router(state);
 

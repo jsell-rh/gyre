@@ -347,6 +347,11 @@ pub async fn notify_spec_policy_violation(
 ///
 /// De-duplicated per (user, MR): callers fire this from gate completion, so
 /// without the guard the last-finishing gates would repeat the announcement.
+///
+/// (Gate *failures* are NOT notified from the gate executor — the
+/// notification bridge in message_dispatcher.rs consumes GateFailure events
+/// off the message bus and delegates to `notify_gate_failure`, one trigger
+/// path per HSI §8 p3 amendment, task-162.)
 pub async fn notify_gate_passed(
     state: &AppState,
     author_agent_id: &Id,
