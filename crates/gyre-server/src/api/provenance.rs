@@ -197,15 +197,11 @@ pub async fn get_verification(
     }
 
     // ── Phase 2: Collect all constraints ──
-    // Find root SignedInput.
-    let signed_input = chain.iter().find_map(|att| match &att.input {
-        gyre_common::AttestationInput::Signed(si) => Some(si),
-        _ => None,
-    });
-
-    // Accumulate constraints from the full chain (explicit + gate).
-    let (_root, explicit_from_chain, gate_from_chain) =
-        crate::git_http::accumulate_chain_constraints(&chain);
+    // Accumulate constraints from the full chain (explicit + gate); the
+    // accumulator also surfaces the root SignedInput (root-first chain
+    // ordering), replacing a separate chain walk here.
+    let chain_constraints = crate::git_http::accumulate_chain_constraints(&chain);
+    let signed_input = chain_constraints.root_input.as_ref();
 
     // Derive strategy-implied constraints from workspace config.
     let workspace = state
@@ -242,9 +238,9 @@ pub async fn get_verification(
 
     // Collect all constraints.
     let all_constraints = gyre_domain::constraint_evaluator::collect_all_constraints(
-        &explicit_from_chain,
+        &chain_constraints.explicit_constraints,
         &strategy_constraints,
-        &gate_from_chain,
+        &chain_constraints.gate_constraints,
     );
 
     // Compute the diff for the commit.

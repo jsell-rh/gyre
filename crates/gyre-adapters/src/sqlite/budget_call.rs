@@ -24,6 +24,7 @@ struct BudgetCallRow {
     output_tokens: i64,
     cost_usd: f64,
     model: String,
+    prompt_template_sha: Option<String>,
     timestamp: i64,
 }
 
@@ -37,18 +38,19 @@ impl From<BudgetCallRow> for BudgetCallRecord {
             agent_id: r.agent_id.map(Id::new),
             task_id: r.task_id.map(Id::new),
             usage_type: r.usage_type,
-            input_tokens: r.input_tokens as u64,
-            output_tokens: r.output_tokens as u64,
+            input_tokens: r.input_tokens.max(0) as u64,
+            output_tokens: r.output_tokens.max(0) as u64,
             cost_usd: r.cost_usd,
             model: r.model,
-            timestamp: r.timestamp as u64,
+            prompt_template_sha: r.prompt_template_sha,
+            timestamp: r.timestamp.max(0) as u64,
         }
     }
 }
 
 #[derive(Insertable)]
 #[diesel(table_name = budget_call_records)]
-struct BudgetCallNew<'a> {
+struct NewBudgetCallRow<'a> {
     id: &'a str,
     tenant_id: &'a str,
     workspace_id: &'a str,
@@ -60,6 +62,7 @@ struct BudgetCallNew<'a> {
     output_tokens: i64,
     cost_usd: f64,
     model: &'a str,
+    prompt_template_sha: Option<&'a str>,
     timestamp: i64,
 }
 
@@ -67,27 +70,28 @@ struct BudgetCallNew<'a> {
 impl BudgetCallRepository for SqliteStorage {
     async fn save(&self, record: &BudgetCallRecord) -> Result<()> {
         let pool = Arc::clone(&self.pool);
-        let r = record.clone();
+        let rec = record.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            let row = BudgetCallNew {
-                id: r.id.as_str(),
-                tenant_id: r.tenant_id.as_str(),
-                workspace_id: r.workspace_id.as_str(),
-                repo_id: r.repo_id.as_ref().map(|id| id.as_str()),
-                agent_id: r.agent_id.as_ref().map(|id| id.as_str()),
-                task_id: r.task_id.as_ref().map(|id| id.as_str()),
-                usage_type: &r.usage_type,
-                input_tokens: r.input_tokens as i64,
-                output_tokens: r.output_tokens as i64,
-                cost_usd: r.cost_usd,
-                model: &r.model,
-                timestamp: r.timestamp as i64,
+            let row = NewBudgetCallRow {
+                id: rec.id.as_str(),
+                tenant_id: rec.tenant_id.as_str(),
+                workspace_id: rec.workspace_id.as_str(),
+                repo_id: rec.repo_id.as_ref().map(|i| i.as_str()),
+                agent_id: rec.agent_id.as_ref().map(|i| i.as_str()),
+                task_id: rec.task_id.as_ref().map(|i| i.as_str()),
+                usage_type: &rec.usage_type,
+                input_tokens: rec.input_tokens as i64,
+                output_tokens: rec.output_tokens as i64,
+                cost_usd: rec.cost_usd,
+                model: &rec.model,
+                prompt_template_sha: rec.prompt_template_sha.as_deref(),
+                timestamp: rec.timestamp as i64,
             };
             diesel::insert_into(budget_call_records::table)
                 .values(&row)
                 .execute(&mut *conn)
-                .context("insert budget_call_record")?;
+                .context("insert budget call record")?;
             Ok(())
         })
         .await?
@@ -108,10 +112,34 @@ impl BudgetCallRepository for SqliteStorage {
                 .filter(budget_call_records::tenant_id.eq(&tenant_id))
                 .filter(budget_call_records::workspace_id.eq(&ws))
                 .filter(budget_call_records::timestamp.ge(since as i64))
+                .order_by(budget_call_records::timestamp.desc())
+                .then_order_by(budget_call_records::id.desc())
+                .limit(limit)
+                .load::<BudgetCallRow>(&mut *conn)
+                .context("list budget call records by workspace")?;
+            Ok(rows.into_iter().map(BudgetCallRecord::from).collect())
+        })
+        .await?
+    }
+
+    async fn list_since(&self, since: u64, limit: i64) -> Result<Vec<BudgetCallRecord>> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<Vec<BudgetCallRecord>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Deliberately NOT filtered by this handle's tenant scope:
+            // the only caller is the hourly rolling-24h-window resync
+            // (`apply_rolling_24h_window`), which runs on the BASE
+            // storage handle (tenant scope "default") yet recomputes
+            // usage entries for every workspace in the deployment and
+            // the storage-wide `tenant:global` ceiling. A tenant filter
+            // here drops every non-default tenant's records, zeroing
+            // their counters hourly (fail-open on 80%/100% enforcement).
+            let rows = budget_call_records::table
+                .filter(budget_call_records::timestamp.ge(since as i64))
                 .order(budget_call_records::timestamp.desc())
                 .limit(limit)
                 .load::<BudgetCallRow>(&mut *conn)
-                .context("list budget_call_records by workspace")?;
+                .context("list budget_call_records since cutoff")?;
             Ok(rows.into_iter().map(BudgetCallRecord::from).collect())
         })
         .await?
@@ -136,12 +164,13 @@ mod tests {
             workspace_id: Id::new(ws),
             repo_id: Some(Id::new("repo-1")),
             agent_id: None,
-            task_id: None,
+            task_id: Some(Id::new("task-1")),
             usage_type: "llm_query".into(),
             input_tokens: 120,
             output_tokens: 240,
             cost_usd: 0.0042,
             model: "test-model".into(),
+            prompt_template_sha: Some("a".repeat(40)),
             timestamp: ts,
         }
     }
@@ -165,6 +194,8 @@ mod tests {
         assert!((r.cost_usd - 0.0042).abs() < f64::EPSILON);
         assert_eq!(r.model, "test-model");
         assert_eq!(r.timestamp, 1_000);
+        // Prompt-template provenance round-trips (ui-layout.md §2).
+        assert_eq!(r.prompt_template_sha.as_deref(), Some(&"a".repeat(40)[..]));
     }
 
     #[tokio::test]
@@ -186,6 +217,55 @@ mod tests {
         assert_eq!(since.len(), 2);
         let limited = s.list_by_workspace("ws-1", 0, 1).await.unwrap();
         assert_eq!(limited.len(), 1);
+        // Other workspace unaffected.
+        assert_eq!(s.list_by_workspace("ws-2", 0, 10).await.unwrap().len(), 1);
+    }
+
+    /// TASK-119 (agent-runtime.md §4 Budget Reset): list_since returns
+    /// records across ALL workspaces inside the rolling window, newest
+    /// first — the input the hourly window job recomputes counters from.
+    #[tokio::test]
+    async fn list_since_spans_workspaces_inside_the_window() {
+        let (_tmp, s) = setup();
+        for (id, ws, ts) in [("a", "ws-1", 10), ("b", "ws-2", 20), ("c", "ws-1", 30)] {
+            s.save(&record(id, ws, ts)).await.unwrap();
+        }
+
+        let in_window = s.list_since(15, 10).await.unwrap();
+        assert_eq!(
+            in_window.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b"],
+            "records older than the cutoff drop out; newest first"
+        );
+
+        let all = s.list_since(0, 10).await.unwrap();
+        assert_eq!(all.len(), 3);
+        let limited = s.list_since(0, 2).await.unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    /// TASK-119 F2 (agent-runtime.md §4 Budget Reset): `list_since`
+    /// feeds the deployment-wide rolling-window resync, which runs on
+    /// the BASE storage handle (tenant scope "default") while records
+    /// are saved with the workspace's real tenant id. It must NOT filter
+    /// by the handle's tenant scope, or non-default tenants' records
+    /// vanish from the resync and their usage entries get zeroed hourly
+    /// (fail-open on 80%/100% enforcement). Matches the mem adapter.
+    #[tokio::test]
+    async fn list_since_spans_tenants_inside_the_window() {
+        let (_tmp, s) = setup(); // handle scoped to tenant-1
+        let mut other_tenant = record("t2", "ws-9", 30);
+        other_tenant.tenant_id = Id::new("tenant-2");
+        s.save(&record("t1", "ws-1", 20)).await.unwrap();
+        s.save(&other_tenant).await.unwrap();
+
+        let got = s.list_since(0, 10).await.unwrap();
+        assert_eq!(
+            got.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["t2", "t1"],
+            "list_since is deployment-wide: a record saved under another \
+             tenant must be returned despite the handle's tenant scope"
+        );
     }
 
     #[tokio::test]

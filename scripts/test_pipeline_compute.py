@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from pipeline.store import Store
 from pipeline.compute import profile, record_oom, from_usage
 from pipeline.runtime import observe, failure, restart, snapshot, ensure_workspace
-from pipeline.execution import Execution, Attention
+from pipeline.execution import Execution, Attention, Retry
 
 class ComputeTests(unittest.TestCase):
     def setUp(self):
@@ -17,7 +17,7 @@ class ComputeTests(unittest.TestCase):
         self.execution=Execution(self.store,self.store.claim('implement','test',capacity=10))
         self.store.reserve('owned',self.work,self.execution.claim['token'],'sandbox',10,{'compute':profile(self.store,'task-001','implement')})
 
-    def test_fixed_budget_ignores_historical_escalation_and_oom_requires_attention(self):
+    def test_historical_escalation_and_incomplete_oom_proof_never_raise_memory(self):
         self.store.set_setting('compute_memory:task-001:implement',8)
         self.assertEqual(profile(self.store,'task-001','implement')['memory'],'4Gi')
         first=record_oom(self.store,'task-001','implement',4,{'reason':'OOMKilled'})
@@ -31,9 +31,56 @@ class ComputeTests(unittest.TestCase):
         usage={'memory.events':{'oom_kill':'1'},'memory.max':str(4*1024**3),'memory.peak':str(4*1024**3)}
         error=from_usage(self.execution,'owned',usage)
         self.assertEqual(error.category,'sandbox_oom')
-        self.assertIsInstance(error,Attention)
-        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'4Gi')
+        self.assertIsInstance(error,Retry)
+        self.assertNotIsInstance(error,Attention)
+        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'6Gi')
         self.assertIsNone(from_usage(self.execution,'owned',{'memory.events':{'oom_kill':'0'}}))
+
+    def test_oom_retry_is_scoped_and_six_gib_is_a_hard_ceiling(self):
+        usage={'memory.events':{'oom_kill':1},'memory.max':str(4*1024**3)}
+        self.assertNotIsInstance(from_usage(self.execution,'owned',usage),Attention)
+        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'6Gi')
+        self.assertEqual(profile(self.store,'task-001','review')['memory'],'4Gi')
+        self.assertEqual(profile(self.store,'task-002','implement')['memory'],'4Gi')
+        # A configuration change affects the next allocation, not the live one.
+        current=json.loads(self.store.db.execute("SELECT data FROM resources WHERE name='owned'").fetchone()[0])
+        self.assertEqual(current['compute']['memory'],'4Gi')
+        self.assertIsInstance(from_usage(self.execution,'owned',usage | {'memory.max':str(6*1024**3)}),Attention)
+        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'6Gi')
+        self.store.put_task('task-001','new-requirements','changed spec',{})
+        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'4Gi')
+
+    def test_four_gib_ceiling_and_invalid_settings_never_expand_allocations(self):
+        usage={'memory.events':{'oom_kill':1},'memory.max':str(4*1024**3)}
+        for ceiling in (4,8,'6',True):
+            self.store.set_setting('worker_memory_max_gib',ceiling)
+            with self.subTest(ceiling=ceiling):
+                self.assertIsInstance(from_usage(self.execution,'owned',usage),Attention)
+                self.assertEqual(profile(self.store,'task-001','implement')['memory'],'4Gi')
+
+    def test_oom_evidence_must_belong_to_the_current_task_stage(self):
+        proof={'source':'cgroup','sandbox':'not-owned','memory.events':{'oom_kill':1},'memory.max':str(4*1024**3)}
+        self.assertIsInstance(record_oom(self.store,'task-001','implement',4,proof),Attention)
+        proof['sandbox']='owned'
+        self.assertIsInstance(record_oom(self.store,'task-001','review',4,proof),Attention)
+        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'4Gi')
+        self.assertEqual(profile(self.store,'task-001','review')['memory'],'4Gi')
+
+    def test_retry_waits_for_old_allocation_cleanup_before_using_six_gib(self):
+        error=from_usage(self.execution,'owned',{'memory.events':{'oom_kill':1},'memory.max':str(4*1024**3)})
+        self.store.retry(self.work,self.execution.claim['token'],{'category':error.category},delay=0)
+        self.assertIsNone(self.store.claim('implement','retry',capacity=10))
+        self.store.resource_state('owned','absent')
+        claim=self.store.claim('implement','retry',capacity=10)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim['token'],self.execution.claim['token']+1)
+        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'6Gi')
+
+    def test_gateway_not_honoring_six_gib_cannot_create_an_automatic_retry_loop(self):
+        usage={'memory.events':{'oom_kill':1},'memory.max':str(4*1024**3)}
+        self.assertNotIsInstance(from_usage(self.execution,'owned',usage),Attention)
+        self.store.resource_state('owned','present',{'compute':profile(self.store,'task-001','implement')})
+        self.assertIsInstance(from_usage(self.execution,'owned',usage),Attention)
 
     def test_full_workspace_or_inodes_holds_work_without_raising_memory(self):
         for disk in ({'total':1024**3,'free':0,'inode_free':100},
@@ -106,7 +153,7 @@ class ComputeTests(unittest.TestCase):
         self.assertEqual(d['compute']['build_jobs'],1)
         self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='sandbox_terminated'").fetchone()[0],1)
         self.assertEqual(failure(self.execution,'owned').category,'sandbox_oom')
-        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'4Gi')
+        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'6Gi')
 
     def test_lost_health_query_is_unknown_not_evidence_for_reallocation(self):
         import subprocess

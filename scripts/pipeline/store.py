@@ -153,7 +153,12 @@ class Store:
         return f'runtime_hold:{task}:{stage}:{generation}'
 
     def runtime_held(self, work):
-        return bool(self.setting(self.runtime_hold_key(work['task'],work['stage'],work['generation'])))
+        return bool(self.setting(self.runtime_hold_key(work['task'],work['stage'],work['generation']))) or (
+            self.setting(self.capacity_retry_key(work),{}).get('retry_at',0)>time.time())
+
+    @staticmethod
+    def capacity_retry_key(work):
+        return f"backend_retry:{work['task']}:{work['stage']}:{work['generation']}"
 
     def claim(self, stage, owner, concurrency=1, lease_seconds=90, now=None, task=None, eligible=None,
               ident=None, capacity=None):
@@ -191,9 +196,9 @@ class Store:
                 except PriorityError:
                     return False
             row = next((row for row in rows
-                        if (not compute or not self.db.execute(
-                            "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
+                        if (not compute or not self.blocking_resources(task=row['task']))
                         and not self.runtime_held(row)
+                        and (not compute or self.admission_available(stage,capacity,work=row))
                         and self.integration_available(dict(row))
                         and valid_priority(row)
                         and (eligible is None or eligible(dict(row)))), None)
@@ -204,9 +209,11 @@ class Store:
             claimed = dict(self.db.execute('SELECT * FROM work WHERE id=?', (row['id'],)).fetchone())
             claimed['input'] = json.loads(claimed['input'])
             if compute:
+                from .compute import profile
+                budget=profile(self,claimed['task'],claimed['stage'])
                 name = self.admission_name(claimed['id'], claimed['token'])
                 self.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
-                                (name, claimed['id'], claimed['token'], 'admission', 'intent', '{}', now))
+                                (name, claimed['id'], claimed['token'], 'admission', 'intent', json.dumps({'compute':budget}), now))
                 self.event('admitted', {'resource': name, 'stage': stage}, claimed['task'], claimed['id'])
             from .priority import info
             self.event('claimed', {'stage': stage, 'token': claimed['token'], 'owner': owner,
@@ -217,19 +224,36 @@ class Store:
     def admission_name(ident, token):
         return f'admission-{ident}-{token}'
 
-    def compute_resources(self):
-        """Cleanup debt occupies compute until fresh scoped runtime evidence says otherwise."""
+    def compute_released(self, row):
+        """Fresh, assignment-scoped evidence of a deleting sandbox's absent pod."""
         context,namespace=self.setting('runtime_kube_context'),self.setting('runtime_namespace')
-        now=time.time()
-        result=[]
-        for row in self.db.execute("SELECT * FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'"):
-            proof=json.loads(row['data']).get('compute_observation') or {}
-            released=(row['kind']=='sandbox' and row['state']=='deleting' and context and namespace
-                and proof.get('context')==context and proof.get('namespace')==namespace
-                and proof.get('work')==row['work'] and proof.get('token')==row['token']
-                and proof.get('absent') is True and 0<=now-proof.get('at',0)<180)
-            if not released:result.append(row)
-        return result
+        proof=json.loads(row['data']).get('compute_observation') or {}
+        return bool(row['kind']=='sandbox' and row['state']=='deleting' and context and namespace
+            and proof.get('context')==context and proof.get('namespace')==namespace
+            and proof.get('work')==row['work'] and proof.get('token')==row['token']
+            and proof.get('absent') is True and 0<=time.time()-proof.get('at',0)<180)
+
+    def compute_resources(self):
+        """Cleanup debt occupies compute until fresh scoped evidence says otherwise."""
+        return [row for row in self.db.execute("SELECT * FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'")
+                if not self.compute_released(row)]
+
+    def blocking_resources(self, *, task=None, work=None):
+        """Keep cleanup debt separate from a live runtime or unsalvaged source.
+
+        Read-only stages own no production source. An implementer may bypass
+        old metadata only with a recorded never-started source disposition.
+        Provider deletion remains tracked, but a run-scoped credential owns no
+        compute and must not strand an otherwise independent next attempt.
+        """
+        rows=self.db.execute("""SELECT r.*,w.stage FROM resources r JOIN work w ON w.id=r.work
+            WHERE r.state<>'absent' AND (? IS NULL OR w.task=?) AND (? IS NULL OR r.work=?)""",
+            (task,task,work,work)).fetchall()
+        return [row for row in rows if row['kind']!='provider' and not (
+            self.compute_released(row) and (row['stage'] in ('review','verify','assess')
+                or ((json.loads(row['data']).get('source_capture') or {}).get('state')=='not_started'
+                    and (json.loads(row['data']).get('source_capture') or {}).get('work')==row['work']
+                    and (json.loads(row['data']).get('source_capture') or {}).get('token')==row['token'])))]
 
     def compute_used(self):
         return len(self.compute_resources())
@@ -238,11 +262,16 @@ class Store:
         capacity=self.setting('slots',8) if capacity is None else capacity
         return min(self.setting('verification_slots',1),max(0,capacity-1))
 
-    def admission_available(self, stage, capacity=None):
+    def admission_available(self, stage, capacity=None, work=None):
         if stage not in ('triage','assess','implement','review','verify'):
             return True
+        if self.setting('admission_paused',False):
+            return False
         capacity=self.setting('slots',8) if capacity is None else capacity
         if self.compute_used() >= capacity:
+            return False
+        from .capacity import decision
+        if not decision(self,work)['allowed']:
             return False
         if stage == 'verify':
             return True
@@ -330,7 +359,7 @@ class Store:
                         continue
                     self.db.execute("UPDATE work SET state='obsolete',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?",(time.time(),victim['id']))
                     self.event('verification_superseded_by_ci',{'observation':ident},row['task'],victim['id'])
-            if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):
+            if row['stage'] == 'review' and ((updates or {}).get('review') or {}).get('approved'):
                 self.db.execute('UPDATE findings SET resolved_by=? WHERE task=? AND generation=? AND resolved_by IS NULL',
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
             if (updates or {}).get('delivered'):
@@ -338,23 +367,30 @@ class Store:
                 self.db.execute('INSERT INTO task_history(task,generation,body,data,at) VALUES(?,?,?,?,?)',
                     (saved['name'],saved['generation'],saved['body'],json.dumps(saved['data']),time.time()))
             self.event('completed', result, row['task'], ident)
+            self.db.execute('DELETE FROM settings WHERE key=?',(self.capacity_retry_key(row),))
 
     def retry(self, ident, token, reason, delay=None, count_failure=True, attention=False):
         with self.transaction():
             row = self._current(ident, token)
             failures = row['failures'] + 1 if count_failure else 0
             delay = min(self.setting('retry_max_seconds', 900), self.setting('retry_base_seconds', 5) * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
+            if reason.get('category')=='backend_capacity':
+                key=self.capacity_retry_key(row);previous=self.setting(key,{})
+                attempt=previous.get('failures',0)+1
+                delay=min(self.setting('retry_max_seconds',900),60*2**min(attempt-1,5))
+                self.db.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                                (key,json.dumps({'failures':attempt,'retry_at':time.time()+delay,'capacity':reason.get('capacity')})))
             retry_at=time.time()+delay
             self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
             self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
-            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage','requirements_triage','repair_stalled','ci_infrastructure'):
+            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport','verification_timeout','sandbox_storage','requirements_triage','repair_stalled','ci_infrastructure','publication_mismatch','assessment_report'):
                 self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
                     (self.runtime_hold_key(row['task'],row['stage'],row['generation']),json.dumps(reason)))
 
     def reserve(self, name, ident, token, kind, limit, data=None):
         with self.transaction():
-            self._current(ident, token)
+            claim=dict(self._current(ident, token))
             admission = self.admission_name(ident, token)
             admitted = kind == 'sandbox' and bool(self.db.execute(
                 "SELECT 1 FROM resources WHERE name=? AND kind='admission' AND state='intent'", (admission,)).fetchone())
@@ -365,6 +401,18 @@ class Store:
                 if admitted:
                     self.db.execute("UPDATE resources SET state='absent',updated=? WHERE name=?", (time.time(), admission))
             old = self.db.execute('SELECT * FROM resources WHERE name=?', (name,)).fetchone()
+            if old and (old['work'] != ident or old['token'] > token):
+                raise StaleClaim('resource belongs to another claim')
+            if kind=='sandbox':
+                from .compute import assigned_profile
+                from .capacity import decision
+                budget=assigned_profile(self,claim)
+                # Re-adoption retains an existing allocation's size. New
+                # reservations replace their admission rather than counting it twice.
+                if not old or old['state']=='absent':
+                    if not decision(self,claim,budget,replace=(admission,name),name=name)['allowed']:
+                        return False
+                data={**(data or {}),'compute':budget}
             if old:
                 if old['work'] != ident or old['token'] > token:
                     raise StaleClaim('resource belongs to another claim')

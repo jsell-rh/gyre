@@ -340,6 +340,41 @@ pub fn render_system_prompt(sections: &[PromptSection]) -> String {
     out
 }
 
+/// Render the system-managed PROTOCOL section of the agent prompt
+/// (agent-runtime.md §5): Ralph loop rules, MCP tool usage, heartbeat,
+/// escalation, and completion signaling. Not user-editable and not part of
+/// the meta-spec registry — it defines how agents interact with Gyre
+/// infrastructure. Delivered at spawn (GYRE_PROTOCOL_PROMPT) and on demand
+/// via the MCP `system://protocol` prompt.
+pub fn render_protocol_prompt() -> String {
+    let mut out = String::new();
+    out.push_str("# Gyre Agent Protocol (system-managed)\n\n");
+    out.push_str("## Ralph loop rules\n");
+    out.push_str("- Read your task via the MCP tools, implement the change, run focused tests.\n");
+    out.push_str("- Commit with conventional commit messages; push your branch.\n");
+    out.push_str("- Signal completion with `agent.complete` — never leave work uncommitted.\n");
+    out.push_str(
+        "- On gate failure, read the failure messages, fix, commit, push, complete again.\n\n",
+    );
+    out.push_str("## MCP tools\n");
+    out.push_str("- `gyre_task_read` / task context: your task, spec ref, acceptance criteria.\n");
+    out.push_str("- `gyre_agent_complete`: create the completion MR and start review.\n");
+    out.push_str("- `gyre_agent_escalate`: ask a human when blocked on a decision.\n");
+    out.push_str("- See `tools/list` for the full set (resources, specs, graph, inbox).\n\n");
+    out.push_str("## Heartbeat\n");
+    out.push_str("- Send a heartbeat every 60 seconds; missing heartbeats mark you Dead.\n\n");
+    out.push_str("## Escalation\n");
+    out.push_str(
+        "- Escalate when: the spec is ambiguous after reading the referenced spec blob,\n",
+    );
+    out.push_str("  a decision requires human judgment, or infrastructure blocks progress.\n\n");
+    out.push_str("## Completion\n");
+    out.push_str(
+        "- `agent.complete` creates the MR, revokes your token, and hands off to gates.\n",
+    );
+    out
+}
+
 /// Stored prompt-set record (kv namespace "agent_meta_spec_sets"), keyed by
 /// agent id. The merge processor reads this at merge time to populate
 /// `MergeAttestation.meta_specs_used`.
@@ -351,6 +386,16 @@ pub struct AgentPromptSetRecord {
     pub set_sha: String,
     pub assembled_at: u64,
     pub meta_specs_used: Vec<MetaSpecUsed>,
+    /// The rendered meta-spec system prompt (the persona section of the
+    /// agent-runtime.md §5 prompt structure) as delivered to the agent at
+    /// spawn via `GYRE_META_SPEC_PROMPT`. Served verbatim by the MCP
+    /// `system://persona` prompt so on-demand reads return exactly what
+    /// the pinned assembly produced, not a re-render at current versions.
+    /// The system-managed protocol section is NOT part of this field — it
+    /// is served via `system://protocol`. `None` on records written before
+    /// task-119.
+    #[serde(default)]
+    pub rendered_prompt: Option<String>,
 }
 
 pub const PROMPT_SET_NAMESPACE: &str = "agent_meta_spec_sets";
@@ -537,11 +582,14 @@ async fn notify_stale_pin(
         );
         notif.source.entity_type = "spec".to_string();
         notif.source.entity_id = binding.spec_id.clone();
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             tracing::warn!(
                 user = %member.user_id,
                 "stale pin detection: failed to create notification: {e}"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 }
@@ -585,6 +633,106 @@ mod tests {
         t.workspace_id = Id::new("ws-1");
         t.spec_path = spec_path.map(String::from);
         t
+    }
+
+    #[tokio::test]
+    async fn stale_pin_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: stale-pin detection's MetaSpecDrift creation
+        // must go through the channel dispatcher — a configured email
+        // channel queues an outbox entry for the notified Admin.
+        let state = test_state();
+
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-chan"),
+            Id::new("tenant-1"),
+            "Channel Guard WS",
+            "chan-ws",
+            1,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let m = gyre_domain::WorkspaceMembership::new(
+            Id::new("mem-chan"),
+            Id::new("user-chan"),
+            Id::new("ws-chan"),
+            gyre_domain::WorkspaceRole::Admin,
+            Id::new("inviter"),
+            1,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-chan"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Workspace-scoped meta-spec at v2, bound with a stale pin at v1.
+        let mut ms = make_ms(
+            "chan-ms",
+            "channel-guard",
+            MetaSpecKind::Persona,
+            false,
+            MetaSpecScope::Workspace,
+            Some("ws-chan"),
+        );
+        ms.version = 2;
+        state.meta_specs.create(&ms).await.unwrap();
+        state
+            .meta_spec_bindings
+            .create(&MetaSpecBinding {
+                id: Id::new("b-chan"),
+                spec_id: "specs/chan.md".to_string(),
+                meta_spec_id: ms.id.clone(),
+                pinned_version: 1,
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+
+        detect_stale_pins(&state).await.unwrap();
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-chan"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == gyre_common::NotificationType::MetaSpecDrift),
+            "expected in-app MetaSpecDrift notification"
+        );
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-chan:")),
+            "stale-pin drift notification must reach the configured email channel"
+        );
     }
 
     #[tokio::test]
@@ -999,6 +1147,7 @@ mod tests {
                 required: true,
                 scope: "global".to_string(),
             }],
+            rendered_prompt: None,
         };
         store_prompt_set_record(&state, &rec).await;
         let loaded = load_prompt_set_record(&state, "ag-1")
@@ -1007,5 +1156,44 @@ mod tests {
         assert_eq!(loaded.set_sha, "abc");
         assert_eq!(loaded.meta_specs_used.len(), 1);
         assert_eq!(loaded.meta_specs_used[0].version, 3);
+    }
+
+    /// agent-runtime.md §5: the record retains the rendered prompt so the
+    /// MCP `system://persona` prompt can serve the pinned assembly verbatim.
+    #[tokio::test]
+    async fn record_retains_rendered_prompt() {
+        let state = test_state();
+        let rendered = format!(
+            "{}\n{}",
+            render_system_prompt(&[]),
+            render_protocol_prompt()
+        );
+        let rec = AgentPromptSetRecord {
+            agent_id: Id::new("ag-2"),
+            task_id: Id::new("t2"),
+            spec_path: None,
+            set_sha: "def".to_string(),
+            assembled_at: 43,
+            meta_specs_used: vec![],
+            rendered_prompt: Some(rendered),
+        };
+        store_prompt_set_record(&state, &rec).await;
+        let loaded = load_prompt_set_record(&state, "ag-2")
+            .await
+            .expect("record must load");
+        assert_eq!(loaded.rendered_prompt, rec.rendered_prompt);
+    }
+
+    /// The protocol section is system-managed content (§5): it must cover
+    /// the Ralph loop, MCP tools, heartbeat, escalation, and completion.
+    #[test]
+    fn protocol_prompt_covers_the_five_protocol_areas() {
+        let p = render_protocol_prompt();
+        assert!(p.contains("Ralph loop rules"));
+        assert!(p.contains("MCP tools"));
+        assert!(p.contains("Heartbeat"));
+        assert!(p.contains("Escalation"));
+        assert!(p.contains("Completion"));
+        assert!(p.contains("60 seconds"));
     }
 }

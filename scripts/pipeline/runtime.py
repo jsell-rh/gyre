@@ -33,6 +33,8 @@ def observe(store, force=False):
             listing=json.loads(value.stdout)
             if listing.get('metadata',{}).get('continue'):raise ValueError('incomplete pod inventory')
             pods=listing['items']
+            from .capacity import observe as observe_quota
+            observe_quota(store,pods)
             for pod in pods:
                 meta=pod['metadata'];name=meta['name']
                 if meta.get('labels',{}).get('openshell.ai/boundary-role')!='workload':continue

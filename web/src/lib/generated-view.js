@@ -42,7 +42,15 @@ export function normalizeEdgeType(t) {
  *
  * Mapping (ViewSpec → ViewQuery):
  *   data.concept      → scope {type:'concept', seed_nodes:[concept],
- *                       expand_edges, expand_depth: data.depth}
+ *                       seed_match:'substring', expand_edges,
+ *                       expand_depth: data.depth}
+ *                       (ui-layout.md §4 Data Layer: the ViewSpec `concept`
+ *                       field is a case-insensitive SUBSTRING search on node
+ *                       name/qualified_name — a text search, not the
+ *                       manifest-concept mechanism — so the translated
+ *                       concept scope marks its seeds for substring
+ *                       matching; exact seed matching remains the default
+ *                       for ad-hoc groupings and grammar-example queries)
  *   data.node_types   → scope {type:'filter', node_types}   (when no concept)
  *   data.filter.spec_path → scope {type:'filter', computed:"$governed_by('…')"}
  *   (none of the above) → scope {type:'all'}
@@ -63,13 +71,19 @@ export function viewSpecToViewQuery(spec) {
     scope = {
       type: 'concept',
       seed_nodes: [data.concept.trim()],
+      // ViewSpec data.concept is the substring mechanism (ui-layout.md §4):
+      // 'auth' seeds every node whose name/qualified_name contains it.
+      seed_match: 'substring',
       expand_direction: 'both',
     };
     const edges = (Array.isArray(data.edge_types) ? data.edge_types : [])
       .map(normalizeEdgeType)
       .filter(Boolean);
     if (edges.length > 0) scope.expand_edges = edges;
-    if (typeof data.depth === 'number' && data.depth >= 1) {
+    // ui-layout.md §4: depth 0 = matched nodes only (no expansion), so a
+    // depth of 0 pins expand_depth 0 rather than falling through to the
+    // concept scope's default expansion depth.
+    if (typeof data.depth === 'number' && data.depth >= 0) {
       scope.expand_depth = Math.min(Math.floor(data.depth), 100);
     }
   } else if (Array.isArray(data.node_types) && data.node_types.length > 0) {
@@ -118,6 +132,42 @@ export function viewSpecToViewQuery(spec) {
 
   query.zoom = 'fit';
   return query;
+}
+
+/**
+ * Translate a stored explorer-view document into the ViewQuery the canvas
+ * renders. Workspace explorer-views accept BOTH grammars (the server's
+ * create/update validation classifies by top-level keys — view-query-
+ * grammar.md ViewQuery or ui-layout.md §4 ViewSpec), so a stored record's
+ * `spec` may be either:
+ *
+ *   - a ViewQuery (e.g. an ad-hoc concept grouping saved by the canvas'
+ *     "Create concept" dialog — scope.type 'concept' with exact seeds):
+ *     returned as a deep copy, concept scope intact;
+ *   - a ViewSpec (e.g. a generated view saved from the Ask flow): passed
+ *     through viewSpecToViewQuery.
+ *
+ * Without this classification a ViewQuery-shaped spec would be flattened to
+ * {scope:{type:'all'}} by the ViewSpec translator — silently discarding the
+ * saved concept grouping on reload.
+ *
+ * @param {object} spec Stored explorer-view document (either grammar).
+ * @returns {object|null} A ViewQuery, or null when spec is not an object.
+ */
+export function viewDocumentToQuery(spec) {
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
+  // ViewQuery grammar marker: a top-level `scope` object with a string
+  // `type` (ViewSpec's top-level keys are name/data/layout/… — disjoint
+  // from `scope`, per the server's grammar classification).
+  if (
+    spec.scope &&
+    typeof spec.scope === 'object' &&
+    !Array.isArray(spec.scope) &&
+    typeof spec.scope.type === 'string'
+  ) {
+    return JSON.parse(JSON.stringify(spec));
+  }
+  return viewSpecToViewQuery(spec);
 }
 
 /**

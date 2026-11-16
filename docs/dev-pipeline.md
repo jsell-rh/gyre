@@ -24,20 +24,79 @@ The stages are triage, implementation, independent review, verification,
 publication/merge, CI observation, and cleanup. Review and verification bind to an exact candidate
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
+Verifier readiness uses the authorized verification timeout (four hours by
+default). Pinned Fullsend 0.50.0 constrains its readiness polling and create
+subprocess to 600 seconds; both its harness and CLI boundary stay within that
+supported bound (and any shorter authorized model budget). Readiness expiry is reported as provisioning failure,
+including to the stress guard.
+When the owned pod's latest scoped scheduler evidence confirms insufficient
+CPU/memory, provisioning failure instead becomes a backend-capacity retry.
+Its backoff grows from one to fifteen minutes across work identities and main
+advances, scoped to the task/stage/requirements generation. Successful stage
+completion clears that backoff. Confirmed capacity shortage does not trip the
+structural-fault guard; missing, foreign, stale or superseded scheduling evidence
+cannot downgrade a provisioning fault.
+
+Discovery reconciles obsolete runtime holds against installed recovery policy.
+An owned, current-generation 4 GiB OOM hold is released once when its evidence
+qualifies for the authorized 6 GiB profile. Historical unknown-verifier-health
+holds recover once after fresh gateway health and inventory observations.
+Manual task pauses, 6 GiB OOMs, storage failures, spec conflicts and unrelated
+stalled repairs remain held. Recovery records the original reason and policy;
+source receipts, historical attempts and exact-source review/verification stay
+intact. Desired slots remain an upper bound on useful dependency-ready work.
 
 ## Thin workers and runtime recovery
 
-Build-capable assignments always request one CPU and **4 GiB RAM**. Historical
-per-task 8 GiB settings are ignored. An OOM is retained as a resource failure
-requiring a lower-memory implementation or build strategy; it never authorizes
-larger allocations or cluster-policy changes. The harness does not read or
-change namespace admission policy to increase its budget.
+Build-capable assignments default to one CPU and **4 GiB RAM**. The operator's
+`worker_memory_max_gib` setting permits ceilings of 4 or 6 (default 6). A recorded,
+authoritative 4 GiB OOM permits a **6 GiB retry** for that task stage and requirements
+generation after the old allocation is cleaned up. An OOM at 6 GiB requires
+attention; there is no escalation to 8 GiB. Historical ad-hoc 8 GiB settings are
+ignored. The harness does not change namespace admission policy or cluster
+resources to increase its budget. Running allocations keep their assigned size.
+
+When the scoped runtime observer is configured, new compute admissions also
+respect the namespace's CPU, memory and pod quotas and container maxima. A fresh
+read-only observation accounts for every namespace pod (including other callers),
+supervisor overhead and admitted work not yet visible in Kubernetes. Reservations
+are atomic across dispatcher processes, transfer to sandbox ownership without
+double charging, and fix the assignment's resource size before creation. Quota
+waiting preserves desired slots and does not allocate/delete replacement sandboxes.
+Stale or unavailable capacity observations stop new compute; active workers,
+cleanup and CI observation continue. The cockpit and Configuration show the
+limiting resource. Raising desired slots does not increase platform quotas.
+The verification reserve includes real quota headroom for a ceiling-sized
+verifier, so a large desired slot count cannot let model jobs exhaust a smaller
+namespace envelope and strand the verification queue.
+
+The opt-in **Stress experiment guard** watches new experiment activity. Overlapping
+compute claims, or failures across three tasks in ten minutes (provisioning,
+exhausted bootstrap connection retries,
+lost leases, ledger locking, or OOM at the 6 GiB ceiling), pause new admissions
+and record a dashboard alert. Existing workers, cleanup, CI observation, source
+and the desired slot count are retained. Historical failures and ordinary
+candidate defects do not stop the experiment. Re-enabling the guard starts a
+new observation cohort after a structural fix; resume admission separately.
+
+Fullsend's upload staging commands retry the SDK's precise initial gateway
+connection failure up to three times in the same sandbox, within a two-minute
+deadline. Remote command failures, partial output, generic transport errors,
+and arbitrary commands are not replayed. The retry child's lifetime is bound
+to the wrapper, including when Fullsend kills it on deadline.
 
 Build commands share one sandbox lock, with one Cargo job and one test thread.
 Agent and verifier environments use the same settings: no incremental Rust
 compilation, no dev/test DWARF symbols, and one mold linker thread. Debug
 assertions, test selection, and required verification checks stay enabled.
 The coding agent's JavaScript heap is bounded separately from build tools.
+
+The trusted implementation finalizer restores accidentally toggled task
+checkbox markers only when every protected requirement otherwise matches the
+assignment exactly. It commits the restoration before publishing the checkpoint;
+normative edits still fail the contract guard. A repair specifically reviewed
+in the task's own document may advance to fresh review without an unrelated
+production edit. Only old holds matching these corrected cases recover once.
 
 Source/checkpoints and the agent spool remain on the gateway-provided workspace.
 Rebuildable Cargo target/registry and npm caches use disk-backed
@@ -56,7 +115,9 @@ cluster diagnostics are not a prerequisite for healthy gateway execution. Read-o
 cgroup counters also detect child-only OOM kills that leave the pod running;
 a compiler failure by itself never raises memory.
 An authoritative OOM and its allocation size are retained as diagnostics;
-no automatic memory escalation is permitted. The cockpit reports the actual runtime failure instead of calling
+only the bounded retry policy above permits a larger next allocation. Unknown
+limits, ordinary compiler failures and transport errors never raise memory.
+The cockpit reports the actual runtime failure instead of calling
 an OOM a model or generic transport failure.
 
 Agent polling refreshes expired gateway authentication. Failed polls preserve
@@ -68,6 +129,10 @@ a stop. Another stop requires
 attention. OOM recovery can salvage source before retiring the failed allocation;
 it does not restart the coding process at the insufficient tier. Verification
 also reconnects to its detached process and may resume after an owned restart.
+Unknown health during a control-plane outage keeps that same verifier and its
+output offsets within the assignment deadline; it does not purge the build or
+create a permanent hold after six failed polls. Authoritatively terminal
+sandboxes and the verification deadline still enforce safety stops.
 Infrastructure backoff retains its task checkpoint without blocking other
 candidates; claims and exact-source checks still gate publication.
 Cleanup salvages source only from implementation assignments; reviewers and
@@ -235,6 +300,12 @@ EnMaaS route. `toolchain.json` pins release archive/binary checksums and the
 public worker image digest. The system's independently installed fullsend is
 not overwritten; modified or mismatched runners are rejected before allocation.
 
+Assignment checkouts clone only the default branch with `blob:none`, then fetch
+the exact assigned candidate and base. Full commit ancestry is retained for
+attribution; unrelated historical attempt branches are excluded. Checkout blobs
+are materialized as needed and no host-local object alternates are copied into
+the sandbox. Remote Git access remains available for historical blob reads.
+
 The model is `gateway/rits/zai-org/glm-5-3`. Fullsend strips `gateway/` and calls
 `https://api.enmaas.devshift.net/v1/chat/completions`, using the inline pinned
 OpenAI-completions model entry and `supportsDeveloperRole: false`. The configured
@@ -303,6 +374,17 @@ without moving the reading position as output arrives; `f` or `G` returns to
 live output. The bordered pane shows follow state, active modes, and line/column
 ranges, including on short terminals. Full logs remain available rather than
 only the last 64 KiB.
+
+Delivery labels follow the current task and candidate, separately from each
+stage's saved outcome. Confirmed merges and upstream resolutions move into the
+completed list (`c`); history retains the original attempt result. Green CI on
+an older head cannot mark a replacement candidate ready. Integration refreshes
+show whether they are required, queued, running, or blocked for attention
+(including an out-of-memory failure), rather than remaining "awaiting merge".
+Known failures have a distinct needs-attention state and retain their diagnosis
+(out of memory, stalled repair, stopped sandbox, or spec/assessment issue).
+"Outcome unknown" is reserved for uncertain worker outcomes; the details of a
+known failure never claim that its result was lost.
 
 The terminal's **Configuration** tab is the third tab (`Tab`/`Shift-Tab`), or
 press `,` from a run/list view. Select a setting with `j`/`k`, press Enter to
@@ -549,8 +631,8 @@ Implementation and review use Fullsend/Pi. Verification is a model-free gateway
 job using the same pinned worker image and shared sandbox reservations. The local
 controller reconciles Git metadata and uploads a prerequisite Git bundle; Cargo,
 source guards, npm builds, and tests execute only in the disposable verifier.
-Verification uses the gateway resource defaults, just like coding workers;
-explicit `verification_cpu` and `verification_memory` settings override them.
+Verification uses the shared one-CPU, 4 GiB default and the bounded 6 GiB OOM
+retry policy, just like coding workers; gateway defaults cannot override them.
 Every verifier gets an isolated build target, so cross-checkout host cache
 invalidation is unnecessary. There is no host build fallback. Per-stage `limits`
 can bound verification concurrency independently without changing desired slots.
@@ -615,7 +697,7 @@ an independent, read-only Fullsend assignment through OpenShell, sharing the
 normal claim/admission/cleanup budget. Its structured report names the exact
 source and requirement fingerprint. Concrete gaps become durable
 `requirements_gap` findings for implementation. A no-gap decision must also pass
-the normal full deterministic verification in a 4 GiB remote sandbox before
+the normal full deterministic verification under the same 4/6 GiB policy before
 currentness is restored. Ambiguous evidence or failed checks require attention;
 they never silently close a task or request a speculative code rewrite.
 
@@ -729,3 +811,58 @@ Hosted CI installs the checksum-pinned upstream mold 2.40.4 release instead of
 resolving distro packages for every job. Download retries remain bounded and a
 checksum mismatch fails setup; linker availability and all build/test gates are
 still required.
+
+## Delivery recovery and progress reporting
+
+A task can have a previous-generation merged PR and a new verified candidate.
+Publication detaches that association only when the merged head and commit match
+its recorded previous delivery. The historical receipt remains; a generation-
+scoped delivery branch gets a new PR through normal checks. An unexplained merged
+head/tree mismatch instead becomes a durable attention condition, with observed
+and verified identities, rather than an unbounded execution retry.
+
+Completed source rejected solely for acceptance-checkbox markers can be repaired
+without a model round. The reconciler requires the original successful published
+receipt and exact protected-contract equality after marker restoration. It
+commits the restored task markers and attribution on the saved source, then
+requires fresh independent review, remote verification and CI. Changed requirement
+wording or a failed/incomplete agent receipt never qualifies.
+
+Malformed assessment reports get one fresh automatic report attempt for an exact
+candidate and requirement fingerprint. Repeated schema errors require diagnosis;
+contradictory task/spec requirements require a reviewed authoritative correction.
+A narrowly scoped policy retries legacy malformed reports once without clearing
+semantic conflicts, operator pauses or completed assessments.
+
+Provider cleanup waits for its owned sandbox to disappear before attempting
+provider deletion. Stuck sandbox deletion remains visible and charged according
+to observed compute occupancy; it never silently releases a potentially live pod.
+
+The cockpit distinguishes gateway/controller readiness from delivery progress.
+It reports the last confirmed merge and current task blockers, including named
+unfinished dependencies. A live scheduler with unfinished work and no merge for
+an hour reports delivery as stalled instead of implying healthy throughput.
+
+A deleting sandbox whose pod is proven absent may leave gateway metadata behind.
+That debt does not block another read-only attempt of the same task. A coding
+attempt may proceed only when source recovery was explicitly recorded as
+never-started, or the old resource has been deleted. Absence evidence must be
+fresh and match namespace, context, work identity and fencing token. An unknown
+or still-live pod and uncaptured implementation source continue to block safely;
+cleanup retries and provider tracking remain independent.
+
+A consumed implementation receipt that already produced the task's current
+repair is a source seed, never that repair's solution. Adoption skips that
+receipt and executes the recorded repair instead of replaying the same outcome.
+
+Before allocating a review sandbox, a Git-only preflight checks the exact saved
+candidate against observed main. Known source conflicts create a structured
+rebase finding and return to implementation without a model review. Clean
+merges and generated-web-only conflicts still require normal independent review;
+the verifier remains responsible for deterministic generated assets and checks
+the final exact merge tree. No existing approval is transferred to rebased code.
+
+Fullsend validation selects the sandbox by both work identity and current fencing
+token. A previous attempt's deleting metadata cannot invalidate or supply a new
+attempt's source receipt. Zero or multiple current-attempt sandboxes still fail
+closed rather than selecting an arbitrary runtime.

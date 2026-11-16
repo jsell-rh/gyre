@@ -654,18 +654,36 @@ impl GitOpsPort for Git2OpsAdapter {
             // pinned a spec at a SHA that does not resolve — that must not
             // silently look like "file absent" (fail-open ref resolution).
             let oid = git2::Oid::from_str(&sha).context("invalid SHA")?;
-            let commit = repo
-                .find_commit(oid)
-                .with_context(|| format!("commit '{sha}' not found"))?;
-            let tree = commit.tree()?;
-
-            match tree.get_path(std::path::Path::new(&file_path)) {
-                Ok(entry) => {
-                    let blob = repo.find_blob(entry.id())?;
-                    Ok(Some(blob.content().to_vec()))
+            // Two pin shapes share this port (agent-gates.md §Integration
+            // with Agent Gates): a commit SHA with a full tree path, or a
+            // blob SHA — the production shape, since MR spec_refs carry the
+            // spec ledger's blob SHA (`spec_ledger.current_sha`), whose
+            // ledger path ("system/foo.md") is not a repo tree path at all.
+            // Commit pin: path lookup in that commit's tree. Blob pin: the
+            // blob IS the content (path is informational).
+            let content = match repo.find_commit(oid) {
+                Ok(commit) => {
+                    let tree = commit.tree()?;
+                    match tree.get_path(std::path::Path::new(&file_path)) {
+                        Ok(entry) => repo.find_blob(entry.id())?.content().to_vec(),
+                        Err(_) => return Ok(None),
+                    }
                 }
-                Err(_) => Ok(None),
-            }
+                Err(commit_err) => {
+                    // Not a commit — a blob-pinned spec_ref resolves directly
+                    // to the blob's content. Anything else (tree, tag, absent)
+                    // is an unresolvable pin: error, never Ok(None).
+                    match repo.find_blob(oid) {
+                        Ok(blob) => blob.content().to_vec(),
+                        Err(_) => {
+                            return Err(anyhow::anyhow!(
+                                "SHA '{sha}' is neither a commit nor a blob: {commit_err}"
+                            ));
+                        }
+                    }
+                }
+            };
+            Ok(Some(content))
         })
         .await?
     }
@@ -1898,6 +1916,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, Some(b"# Vision v1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_at_commit_resolves_blob_pinned_sha() {
+        // Production MR spec_refs pin the spec ledger's BLOB sha with a
+        // ledger path ("system/foo.md") that is not a repo tree path — the
+        // blob IS the content. A commit-only lookup would error on the blob
+        // OID and the gate would never receive the spec.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+        let commit_sha = adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "main",
+                "specs/system/vision.md",
+                b"# Vision v1",
+                "Add vision spec v1",
+            )
+            .await
+            .unwrap();
+        // Advance the branch so the blob is only reachable via its OID.
+        adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "main",
+                "specs/system/vision.md",
+                b"# Vision v2",
+                "Add vision spec v2",
+            )
+            .await
+            .unwrap();
+
+        // Resolve the v1 blob OID: the tree entry at the pinned commit.
+        let blob_oid = {
+            let repo = git2::Repository::open(path.to_str().unwrap()).unwrap();
+            let commit = repo
+                .find_commit(git2::Oid::from_str(&commit_sha).unwrap())
+                .unwrap();
+            let entry = commit
+                .tree()
+                .unwrap()
+                .get_path(std::path::Path::new("specs/system/vision.md"))
+                .unwrap();
+            entry.id().to_string()
+        };
+
+        // Blob pin with a ledger-style path: content comes from the blob,
+        // not a tree lookup (the path does not exist in any tree).
+        let content = adapter
+            .read_file_at_commit(path.to_str().unwrap(), &blob_oid, "system/vision.md")
+            .await
+            .unwrap();
+        assert_eq!(
+            content,
+            Some(b"# Vision v1".to_vec()),
+            "blob-pinned spec_ref must resolve to the pinned blob content, not the tip"
+        );
     }
 
     #[tokio::test]

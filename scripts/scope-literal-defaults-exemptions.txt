@@ -1,5 +1,6 @@
 # scope-literal-defaults-exemptions.txt — legacy pre-existing sites that
 # fabricate a "default" tenant/workspace identity at construction time.
+<<<<<<< HEAD
 # Frozen at 0 entries (seeded at 24 by the task-099 process revision;
 # lowered to 18 by task-160 — the four adapter create() sites now stamp
 # the storage's real tenant; lowered to 12 in the task-160 repair round —
@@ -20,3 +21,24 @@
 # entity without it), then DELETE its line and lower FROZEN_EXEMPTION_COUNT
 # in scripts/check-scope-literal-defaults.sh.
 # NEVER add entries; NEVER raise the frozen count.
+=======
+# Seeded at 24 entries with 9 task-099-owned sites when the check was
+# introduced; those 9 were fixed and removed in the task-099 F1 revision
+# round; the domain Agent constructor default was fixed via the documented
+# `bootstrap_workspace` helper (13→12); the task-130 verification repair
+# fixed the domain MergeRequest and Task constructors and routed the
+# SQLite/PG merge_request/repository create() rows through the storage
+# handle's resolved tenant scope (12→6); the task-111 verification repair
+# round (merge of the task-146 base) fixed the last four construction
+# sites for real — the SQLite/PG analytics `record()` and `record_cost()`
+# rows now carry the storage handle's resolved tenant scope instead of a
+# fabricated "default" literal — and deleted the two dead activity.rs
+# lines (task-207 removed those adapter files), emptying the file (6→0).
+# Fix a site by resolving the real scope (or refusing to create the
+# entity without it), then DELETE its line and lower
+# FROZEN_EXEMPTION_COUNT in scripts/check-scope-literal-defaults.sh.
+# NEVER add entries; NEVER raise the frozen count.
+#
+# The file is intentionally empty: every seeded site has been fixed for
+# real (or referenced a file removed upstream). Keep it empty.
+>>>>>>> c3c7a522

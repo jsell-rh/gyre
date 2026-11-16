@@ -147,7 +147,7 @@ specs:
 | `title` | string | required | Human-readable name |
 | `owner` | string | required | User or team responsible |
 | `approval.mode` | enum | `human_and_agent` | `human_only`, `agent_only`, or `human_and_agent` |
-| `approval.human_approvers` | string[] | [owner] | Users who can approve |
+| `approval.human_approvers` | string[] | [owner] | Users who can approve; a `team:{slug}` entry counts every member of that workspace team as an approver (user-management.md §Team Management — spec ownership; an unresolvable team reference approves nobody) |
 | `approval.agent_approvers` | object[] | [] | Agent personas that can approve (see below) |
 | `gates` | object[] | [] | Gate agent configs for MRs referencing this spec (see below) |
 | `auto_create_tasks` | bool | true | Create tasks on spec change |

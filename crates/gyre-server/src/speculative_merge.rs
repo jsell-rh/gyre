@@ -598,6 +598,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new(mr_id),
             Id::new(repo_id),
+            Id::new("default"),
             &format!("MR for {branch}"),
             branch,
             "main",
@@ -714,6 +715,7 @@ mod tests {
         let mut mr_merged = gyre_domain::MergeRequest::new(
             Id::new("mr-merged"),
             Id::new("repo3"),
+            Id::new("default"),
             "Already merged",
             "feat/merged",
             "main",
@@ -975,6 +977,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new(mr_id),
             Id::new(repo_id),
+            Id::new("default"),
             &format!("MR for {branch}"),
             branch,
             "main",

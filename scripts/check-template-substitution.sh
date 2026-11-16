@@ -133,15 +133,31 @@ for const_name in $PROMPT_CONSTS; do
                 # briefing_ask/predict_graph under load). A here-string has no
                 # upstream writer to signal.
                 if ! grep -qF "replace(\"$var\"" <<< "$FN_BODY"; then
+                    # Shared-helper form (task-171): consumers may substitute
+                    # via llm_helpers::substitute_template(&tpl, &[("var", value), ...])
+                    # instead of an inline .replace chain — semantically
+                    # identical (the helper does out.replace("{{var}}", value)
+                    # for every tuple). Recognize a tuple whose first element
+                    # is the quoted bare var name, but ONLY in a function that
+                    # actually calls substitute_template — an unrelated
+                    # ("var", ...) tuple must not count. A blanked placeholder
+                    # ("var", "") still counts: the literal {{var}} text is
+                    # replaced either way, which is what this check enforces.
+                    var_bare=$(printf '%s' "$var" | tr -d '{}')
+                    if grep -qF 'substitute_template(' <<< "$FN_BODY" && grep -qF "(\"$var_bare\"," <<< "$FN_BODY"; then
+                        continue
+                    fi
                     echo ""
                     echo "MISSING TEMPLATE SUBSTITUTION: $consumer_file:$ref_lineno (fn $fn_name)"
                     echo "  Template $const_name declares variable $var"
-                    echo "  but this consumer does not call .replace(\"$var\", ...)."
+                    echo "  but this consumer neither calls .replace(\"$var\", ...) nor passes"
+                    echo "  a (\"$var_bare\", value) tuple to llm_helpers::substitute_template."
                     echo "  The literal text '$var' will appear in the LLM prompt."
                     echo ""
                     echo "  Fix: Add .replace(\"$var\", &value) to the template substitution"
-                    echo "  chain in this function. Load the value from the appropriate source"
-                    echo "  (see the other consumers of $const_name for the pattern)."
+                    echo "  chain in this function, or add a (\"$var_bare\", &value) tuple to"
+                    echo "  its substitute_template call. Load the value from the appropriate"
+                    echo "  source (see the other consumers of $const_name for the pattern)."
                     echo ""
                     echo "  Exempt with '// template-sub:ok — <reason>' on the $const_name line."
                     VIOLATIONS=$((VIOLATIONS + 1))

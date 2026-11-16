@@ -106,7 +106,7 @@ pub async fn evaluate_push_constraints(
                         event = "attestation.context_binding_mismatch",
                         binding = %child.label,
                         message = %child.message,
-                        "attestation.context_binding_mismatch (audit-only): {}",
+                        "attestation.context_binding_mismatch (audit-only): {}", // enforcement-mode:ok — audit-only mirror by design (Phase 2 observability); enforcement lives in enforce_push_constraints
                         child.message
                     );
                 }
@@ -414,13 +414,12 @@ pub async fn enforce_push_constraints(
     );
 
     // Collect all constraints from the full chain (§4.3 additive accumulation).
-    let (_root, explicit_from_chain, gate_from_chain) =
-        crate::git_http::accumulate_chain_constraints(&attestations);
+    let chain_constraints = crate::git_http::accumulate_chain_constraints(&attestations);
 
     let all_constraints = constraint_evaluator::collect_all_constraints(
-        &explicit_from_chain,
+        &chain_constraints.explicit_constraints,
         &strategy_constraints,
-        &gate_from_chain,
+        &chain_constraints.gate_constraints,
     );
 
     if all_constraints.is_empty() {
@@ -671,13 +670,12 @@ pub async fn enforce_merge_constraints(
     );
 
     // Collect all constraints from the full chain (§4.3 additive accumulation).
-    let (_root, explicit_from_chain, gate_from_chain) =
-        crate::git_http::accumulate_chain_constraints(&attestations);
+    let chain_constraints = crate::git_http::accumulate_chain_constraints(&attestations);
 
     let all_constraints = constraint_evaluator::collect_all_constraints(
-        &explicit_from_chain,
+        &chain_constraints.explicit_constraints,
         &strategy_constraints,
-        &gate_from_chain,
+        &chain_constraints.gate_constraints,
     );
 
     if all_constraints.is_empty() {
@@ -878,7 +876,7 @@ pub async fn evaluate_merge_constraints(
                         event = "attestation.context_binding_mismatch",
                         binding = %child.label,
                         message = %child.message,
-                        "attestation.context_binding_mismatch (audit-only): {}",
+                        "attestation.context_binding_mismatch (audit-only): {}", // enforcement-mode:ok — audit-only mirror by design (Phase 2 observability); enforcement lives in enforce_push_constraints
                         child.message
                     );
                 }
@@ -1683,12 +1681,15 @@ async fn create_violation_notifications(
             notif.source.repo_id = Some(Id::new(repo_id.to_string()));
             notif.source.entity_id = format!("task:{task_id}");
 
-            if let Err(e) = state.notifications.create(&notif).await {
+            if let Err(e) = state.create_notification(&notif).await {
                 warn!(
                     constraint = %violation.constraint_name,
                     error = %e,
                     "failed to create constraint violation notification"
                 );
+            } else {
+                // Channel fan-out per user-management.md §Delivery Channels.
+                crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
             }
         }
     }
@@ -2207,6 +2208,8 @@ mod tests {
                 None,
                 None,
                 Some("ConstraintViolation"),
+                None,
+                &[],
                 100,
                 0,
             )

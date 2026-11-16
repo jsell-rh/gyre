@@ -26,6 +26,7 @@ struct QualityGateRow {
     required: i32,
     gate_phase: String,
     timeout_secs: Option<i64>,
+    position: i32,
     created_at: i64,
 }
 
@@ -52,6 +53,7 @@ impl QualityGateRow {
             required: self.required != 0,
             gate_phase: GatePhase::parse(&self.gate_phase).unwrap_or_default(),
             timeout_secs: self.timeout_secs.map(|v| v as u64),
+            position: self.position.max(0) as u32,
             created_at: self.created_at as u64,
         }
     }
@@ -71,6 +73,7 @@ struct NewQualityGateRow<'a> {
     required: i32,
     gate_phase: &'a str,
     timeout_secs: Option<i64>,
+    position: i32,
     created_at: i64,
 }
 
@@ -104,6 +107,7 @@ impl QualityGateRepository for SqliteStorage {
                 required: if g.required { 1 } else { 0 },
                 gate_phase: g.gate_phase.as_str(),
                 timeout_secs: g.timeout_secs.map(|v| v as i64),
+                position: g.position as i32,
                 created_at: g.created_at as i64,
             };
             diesel::insert_into(quality_gates::table)
@@ -120,6 +124,7 @@ impl QualityGateRepository for SqliteStorage {
                     quality_gates::required.eq(row.required),
                     quality_gates::gate_phase.eq(row.gate_phase),
                     quality_gates::timeout_secs.eq(row.timeout_secs),
+                    quality_gates::position.eq(row.position),
                 ))
                 .execute(&mut *conn)
                 .context("upsert quality gate")?;
@@ -150,7 +155,8 @@ impl QualityGateRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = quality_gates::table
                 .filter(quality_gates::repo_id.eq(&repo_id))
-                .order(quality_gates::created_at.asc())
+                .order(quality_gates::position.asc())
+                .then_order_by(quality_gates::created_at.asc())
                 .load::<QualityGateRow>(&mut *conn)
                 .context("list quality gates by repo")?;
             Ok(rows.into_iter().map(QualityGateRow::into_gate).collect())
@@ -318,6 +324,22 @@ impl GateResultRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn delete_by_mr_id_and_gate_id(&self, mr_id: &str, gate_id: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let mr_id = mr_id.to_string();
+        let gate_id = gate_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::delete(gate_results::table)
+                .filter(gate_results::mr_id.eq(&mr_id))
+                .filter(gate_results::gate_id.eq(&gate_id))
+                .execute(&mut *conn)
+                .context("delete gate results by mr_id and gate_id")?;
+            Ok(())
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +367,7 @@ mod tests {
             required: true,
             gate_phase: GatePhase::PreMerge,
             timeout_secs: Some(30),
+            position: 0,
             created_at: 1000,
         }
     }
@@ -353,8 +376,9 @@ mod tests {
     /// EVERY mutable config column. The checkpoint that added
     /// `validation_type` accidentally dropped `required` from the set list —
     /// re-saving a gate silently kept the old blocking flag (PG kept it;
-    /// SQLite drifted). This test fails on that class of drift: flip both
-    /// columns, re-save, and assert the persisted row carries the new values.
+    /// SQLite drifted). This test fails on that class of drift: flip every
+    /// mutable column, re-save, and assert the persisted row carries the new
+    /// values.
     #[tokio::test]
     async fn save_upsert_updates_all_config_columns() {
         let (_tmp, storage) = tmp_storage();
@@ -364,6 +388,7 @@ mod tests {
         let mut updated = gate.clone();
         updated.required = false;
         updated.validation_type = Some("accessibility".to_string());
+        updated.position = 7;
         QualityGateRepository::save(&storage, &updated)
             .await
             .unwrap();
@@ -381,5 +406,114 @@ mod tests {
             !reloaded.required,
             "upsert must persist required changes — the task-134 checkpoint dropped this column from .set()"
         );
+        assert_eq!(
+            reloaded.position, 7,
+            "upsert must persist chain position changes (gate-chain reordering)"
+        );
+    }
+
+    /// task-135 (agent-gates.md §Gate Chains): the repo's gate list is the
+    /// ordered chain — `list_by_repo_id` must return rows ordered by
+    /// position with creation order as the tiebreak (pre-position rows all
+    /// sit at 0). A drift here silently scrambles every configured chain
+    /// while single-gate lookups stay green.
+    #[tokio::test]
+    async fn list_by_repo_orders_by_chain_position() {
+        let (_tmp, storage) = tmp_storage();
+        // Insert out of order: positions 2, 0, 1; created_at deliberately
+        // anti-correlated with position so only (position, created_at)
+        // ordering produces the expected sequence.
+        for (name, position, created_at) in [
+            ("third", 2u32, 100u64),
+            ("first", 0, 300),
+            ("second", 1, 200),
+        ] {
+            let mut g = sample_gate();
+            g.id = Id::new(format!("gate-order-{position}"));
+            g.name = name.to_string();
+            g.position = position;
+            g.created_at = created_at;
+            QualityGateRepository::save(&storage, &g).await.unwrap();
+        }
+
+        let listed = QualityGateRepository::list_by_repo_id(&storage, "repo-1")
+            .await
+            .unwrap();
+        let names: Vec<&str> = listed.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    /// task-136 (agent-gates.md §Merge Processor Integration retry path):
+    /// `delete_by_mr_id_and_gate_id` must remove exactly the (MR, gate)
+    /// pair's rows — a stale `Failed` row surviving a re-arm would veto
+    /// every re-enqueued MR — and leave other gates' rows on the same MR
+    /// untouched. Deleting an unknown pair is a no-op.
+    #[tokio::test]
+    async fn delete_by_mr_and_gate_scopes_to_the_pair() {
+        let (_tmp, storage) = tmp_storage();
+        for (id, gate_id, mr_id) in [
+            ("gr-1", "gate-a", "mr-1"),
+            ("gr-2", "gate-a", "mr-2"), // same gate, other MR
+            ("gr-3", "gate-b", "mr-1"), // other gate, same MR
+        ] {
+            GateResultRepository::save(
+                &storage,
+                &GateResult {
+                    id: Id::new(id),
+                    gate_id: Id::new(gate_id),
+                    mr_id: Id::new(mr_id),
+                    status: GateStatus::Failed,
+                    output: Some("boom".to_string()),
+                    started_at: Some(1),
+                    finished_at: Some(2),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        GateResultRepository::delete_by_mr_id_and_gate_id(&storage, "mr-1", "gate-a")
+            .await
+            .unwrap();
+
+        let remaining = GateResultRepository::list_by_mr_id(&storage, "mr-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only (mr-1, gate-b) survives: {remaining:?}"
+        );
+        assert_eq!(remaining[0].gate_id.as_str(), "gate-b");
+        let other_mr = GateResultRepository::list_by_mr_id(&storage, "mr-2")
+            .await
+            .unwrap();
+        assert_eq!(other_mr.len(), 1, "same gate on another MR is untouched");
+
+        // No-op on an unknown pair.
+        GateResultRepository::delete_by_mr_id_and_gate_id(&storage, "mr-x", "gate-x")
+            .await
+            .unwrap();
+    }
+
+    /// Same-position rows (all written before the position column existed)
+    /// fall back to creation order.
+    #[tokio::test]
+    async fn list_by_repo_position_tie_falls_back_to_created_at() {
+        let (_tmp, storage) = tmp_storage();
+        for (name, created_at) in [("old-a", 100u64), ("old-b", 200u64), ("old-c", 300u64)] {
+            let mut g = sample_gate();
+            g.id = Id::new(format!("gate-tie-{name}"));
+            g.name = name.to_string();
+            g.position = 0;
+            g.created_at = created_at;
+            QualityGateRepository::save(&storage, &g).await.unwrap();
+        }
+
+        let listed = QualityGateRepository::list_by_repo_id(&storage, "repo-1")
+            .await
+            .unwrap();
+        let names: Vec<&str> = listed.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["old-a", "old-b", "old-c"]);
     }
 }
