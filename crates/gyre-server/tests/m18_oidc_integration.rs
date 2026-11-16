@@ -28,6 +28,25 @@ async fn start_server() -> (String, reqwest::Client) {
     (base_url, client)
 }
 
+/// Create a workspace via the API and return its id.
+///
+/// Spawn fails closed when the repo's workspace row is missing
+/// (platform-model.md §1: the workspace row resolves the tenant scope claim
+/// for the agent JWT), so every fixture repo needs its workspace row first.
+async fn create_workspace(base: &str, client: &reqwest::Client, name: &str) -> String {
+    let ws: serde_json::Value = client
+        .post(format!("{base}/api/v1/workspaces"))
+        .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    ws["id"].as_str().unwrap().to_string()
+}
+
 // -- OIDC discovery -----------------------------------------------------------
 
 #[tokio::test]
@@ -99,11 +118,12 @@ async fn jwks_endpoint_returns_ed25519_key() {
 async fn spawn_returns_jwt_token() {
     let (base, client) = start_server().await;
 
-    // Create repo and task.
+    // Create workspace, repo and task.
+    let ws_id = create_workspace(&base, &client, "m18-ws").await;
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "m18-repo", "workspace_id": "ws-m18"}))
+        .json(&serde_json::json!({"name": "m18-repo", "workspace_id": ws_id}))
         .send()
         .await
         .unwrap()
@@ -157,11 +177,12 @@ async fn spawn_returns_jwt_token() {
 async fn jwt_token_authenticates_api_calls() {
     let (base, client) = start_server().await;
 
-    // Setup repo/task.
+    // Setup workspace/repo/task.
+    let ws_id = create_workspace(&base, &client, "jwt-auth-ws").await;
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "jwt-auth-repo", "workspace_id": "ws-jwt-auth"}))
+        .json(&serde_json::json!({"name": "jwt-auth-repo", "workspace_id": ws_id}))
         .send()
         .await
         .unwrap()
@@ -221,10 +242,11 @@ async fn token_info_for_jwt_agent_token() {
     let (base, client) = start_server().await;
 
     // Setup and spawn.
+    let ws_id = create_workspace(&base, &client, "info-ws").await;
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "info-repo", "workspace_id": "ws-info"}))
+        .json(&serde_json::json!({"name": "info-repo", "workspace_id": ws_id}))
         .send()
         .await
         .unwrap()
@@ -289,8 +311,22 @@ async fn token_info_for_jwt_agent_token() {
         "jwt_claims must be present for JWT tokens"
     );
     assert_eq!(claims["sub"].as_str().unwrap(), agent_id);
-    assert_eq!(claims["scope"].as_str().unwrap(), "agent");
+    // §1 Token Scoping: the worker JWT carries fine-grained scopes and
+    // hierarchy claims minted from the spawn context.
+    let scope = claims["scope"]
+        .as_array()
+        .expect("scope must be a fine-grained scope list");
+    assert!(
+        scope.iter().any(|s| s == "repo:info-repo:write"),
+        "worker scope must be repo-scoped write, got: {scope:?}"
+    );
     assert_eq!(claims["task_id"].as_str().unwrap(), task_id);
+    assert_eq!(claims["repo_id"].as_str().unwrap(), repo_id);
+    assert_eq!(claims["workspace_id"].as_str().unwrap(), ws_id);
+    assert!(
+        !claims["tenant_id"].as_str().unwrap().is_empty(),
+        "tenant_id claim must be resolved from the workspace row"
+    );
 }
 
 #[tokio::test]
@@ -314,10 +350,11 @@ async fn token_info_for_global_token() {
 async fn jwt_revoked_after_agent_complete() {
     let (base, client) = start_server().await;
 
+    let ws_id = create_workspace(&base, &client, "revoke-ws").await;
     let repo: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"name": "revoke-repo", "workspace_id": "ws-revoke"}))
+        .json(&serde_json::json!({"name": "revoke-repo", "workspace_id": ws_id}))
         .send()
         .await
         .unwrap()

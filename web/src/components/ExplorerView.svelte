@@ -21,6 +21,10 @@
   // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
   // workspace generate endpoint (read-only query translator).
   import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
+  // Conversational exploration (system-explorer.md §8, task-187):
+  // knowledge-graph-grounded Q&A with clickable entity references and
+  // canvas actions (view specs, ghost-overlay predictions, highlights).
+  import ConversationalExplorer from '../lib/ConversationalExplorer.svelte';
   import { viewSpecToViewQuery, viewDocumentToQuery } from '../lib/generated-view.js';
   import { FLOW_TEMPLATES, matchFlowTemplate, flowTemplateQuery, pickTraceMr } from '../lib/flow-templates.js';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -283,7 +287,9 @@
   // ── HSI §3 Generated Views (task-089) ──────────────────────────────────
   // Chat column mode: 'ask' is the repo-scoped Explorer agent (WebSocket);
   // 'generate' is the LLM view generator (workspace generate endpoint) that
-  // translates natural-language questions into ViewSpec documents.
+  // translates natural-language questions into ViewSpec documents;
+  // 'explore' is conversational exploration (system-explorer.md §8) —
+  // knowledge-graph-grounded Q&A with entity references.
   let chatMode = $state('ask');
   // Trace playback request for generated "flow" views: the nonce lets a new
   // flow view re-trigger the canvas particle animation.
@@ -339,6 +345,104 @@
     } else {
       explorerLens = 'structural';
     }
+  }
+
+  // ── Conversational exploration (system-explorer.md §8) ────────────
+  // Canvas actions dispatched by ConversationalExplorer entity-reference
+  // clicks and response payloads. Every action lands on the SAME canvas
+  // machinery the rest of the Explorer uses — concept-scope queries for
+  // highlighting, openNodeDetail/openSpecEditor for navigation, and ghost
+  // overlays for structural predictions.
+
+  /** Highlight specific nodes on the canvas (§8: "canvas highlights
+   *  matching nodes"). A concept scope seeded by node ids with no edge
+   *  expansion matches exactly the referenced nodes; emphasis colors them
+   *  and dims the rest — the same visual language as search highlighting. */
+  function conversationHighlightNodes(nodeIds) {
+    if (!Array.isArray(nodeIds) || nodeIds.length === 0) return;
+    explorerViewMode = 'boundary';
+    activeSavedViewName = null;
+    activeViewSpec = null;
+    activeViewQuery = {
+      scope: { type: 'concept', seed_nodes: [...nodeIds], expand_edges: [], expand_depth: 1 },
+      emphasis: { highlight: { matched: { color: '#fbbf24', label: 'mentioned' } }, dim_unmatched: 0.3 },
+    };
+    pushInteraction({ action: 'query', detail: 'conversation:highlight' });
+    showToast($t('conversational_explorer.highlighted_nodes', { values: { count: nodeIds.length } }), { type: 'info' });
+  }
+
+  /** Click a node entity reference → navigate to the entity: open the
+   *  detail panel and pan the canvas camera to the node. */
+  function conversationOpenNode(nodeId) {
+    const node = (graph?.nodes ?? []).find((n) => n.id === nodeId);
+    if (!node) {
+      showToast($t('conversational_explorer.node_not_in_view'), { type: 'warning' });
+      return;
+    }
+    explorerViewMode = 'boundary';
+    openNodeDetail(node);
+    traceFocusNonce += 1;
+    traceFocusRequest = { nodeId, nonce: traceFocusNonce };
+  }
+
+  /** Click a spec entity reference → open the spec inline (§8 spec
+   *  references "open inline"). */
+  function conversationOpenSpec(specPath) {
+    if (!selectedRepoId) {
+      showToast($t('conversational_explorer.spec_needs_repo'), { type: 'warning' });
+      return;
+    }
+    openSpecEditor(specPath);
+  }
+
+  /** Click a commit entity reference → open the commit in git. With a
+   *  configured remote (mirror URL) this opens the commit page; otherwise
+   *  the SHA is copied so the human can look it up in their git tooling. */
+  function conversationOpenCommit(sha) {
+    const repo = (repos ?? []).find((r) => r.id === selectedRepoId);
+    const base = repo?.mirror_url ?? null;
+    if (base) {
+      const url = `${base.replace(/\/+$/, '')}/commit/${encodeURIComponent(sha)}`;
+      try {
+        window.open(url, '_blank', 'noopener');
+        return;
+      } catch { /* popups blocked — fall through to copy */ }
+    }
+    try {
+      navigator.clipboard?.writeText(sha);
+      showToast($t('conversational_explorer.commit_link_copied'), { type: 'info' });
+    } catch {
+      showToast(sha, { type: 'info' });
+    }
+  }
+
+  /** Click an agent entity reference → show provenance: highlight the
+   *  nodes the agent last modified (§8 "agent (show provenance)"). */
+  function conversationShowAgent(agentId) {
+    const nodeIds = (graph?.nodes ?? [])
+      .filter((n) => n.last_modified_by === agentId)
+      .map((n) => n.id);
+    if (nodeIds.length === 0) {
+      showToast($t('conversational_explorer.no_agent_nodes'), { type: 'info' });
+      return;
+    }
+    conversationHighlightNodes(nodeIds);
+  }
+
+  /** "What would happen if…" response → structural prediction as ghost
+   *  overlays (§3 visual language, same mapping as the spec-edit
+   *  prediction flow). */
+  function conversationApplyPrediction(prediction) {
+    const overlays = predictionOverlays(prediction);
+    if (overlays.length === 0) {
+      showToast($t('conversational_explorer.prediction_empty'), { type: 'info' });
+      return;
+    }
+    ghostOverlays = overlays;
+    showToast(
+      $t('conversational_explorer.prediction_applied_toast', { values: { count: overlays.length } }),
+      { type: 'info' }
+    );
   }
 
   // ── Active generated-view layout (ui-layout.md §10 Layout Engines) ─────
@@ -841,6 +945,35 @@
     };
   });
 
+  /** Map a structural-prediction response (POST /repos/:id/graph/predict
+   *  or the conversational ask endpoint's prediction payload) to ghost
+   *  overlays. Shared by the spec-edit prediction flow and the
+   *  conversational "what would happen if…" flow so both render the same
+   *  visual language (§3 ghost overlays). */
+  function predictionOverlays(result) {
+    const overlays = [];
+    function addOverlay(item, defaultAction) {
+      const name = item?.name ?? item?.qualified_name;
+      if (!name || typeof name !== 'string') return; // Skip malformed items
+      const action = item?.action ?? defaultAction;
+      if (!['add', 'change', 'remove'].includes(action)) return; // Skip unknown actions
+      overlays.push({
+        id: item.id ?? `ghost-${action}-${overlays.length}`,
+        name,
+        type: item.node_type ?? item.type ?? 'unknown',
+        action,
+        confidence: item.confidence,
+        reason: item.reason,
+      });
+    }
+    for (const item of (result?.added ?? [])) addOverlay(item, 'add');
+    for (const item of (result?.changed ?? [])) addOverlay(item, 'change');
+    for (const item of (result?.removed ?? [])) addOverlay(item, 'remove');
+    // Also check for predictions array (alternative response format)
+    for (const item of (result?.predictions ?? [])) addOverlay(item, 'change');
+    return overlays;
+  }
+
   async function runPrediction() {
     if (!selectedRepoId || !specEditorPath || predictLoading) return;
     predictLoading = true;
@@ -860,29 +993,7 @@
       predictEstimatedCost = result?.estimated_agent_cost ?? result?.cost ?? null;
       predictConfidence = result?.confidence ?? null;
 
-      // Build ghost overlays with per-node confidence and reason.
-      // Validate each item has at minimum a name and action.
-      const overlays = [];
-      function addOverlay(item, defaultAction) {
-        const name = item?.name ?? item?.qualified_name;
-        if (!name || typeof name !== 'string') return; // Skip malformed items
-        const action = item?.action ?? defaultAction;
-        if (!['add', 'change', 'remove'].includes(action)) return; // Skip unknown actions
-        overlays.push({
-          id: item.id ?? `ghost-${action}-${overlays.length}`,
-          name,
-          type: item.node_type ?? item.type ?? 'unknown',
-          action,
-          confidence: item.confidence,
-          reason: item.reason,
-        });
-      }
-      for (const item of (result?.added ?? [])) addOverlay(item, 'add');
-      for (const item of (result?.changed ?? [])) addOverlay(item, 'change');
-      for (const item of (result?.removed ?? [])) addOverlay(item, 'remove');
-      // Also check for predictions array (alternative response format)
-      for (const item of (result?.predictions ?? [])) addOverlay(item, 'change');
-      ghostOverlays = overlays;
+      ghostOverlays = predictionOverlays(result);
     } catch (e) {
       predictError = e.message ?? 'Prediction failed';
     } finally {
@@ -1444,6 +1555,14 @@
     viewSelectOpen = false;
     chatCollapsed = false;
     chatMode = 'generate';
+  }
+
+  /** "Ask the graph…" — open the conversational exploration panel
+   *  (system-explorer.md §8) from the control bar's view selector. */
+  function openConversationalExplorer() {
+    viewSelectOpen = false;
+    chatCollapsed = false;
+    chatMode = 'explore';
   }
 
   let activeViewLabel = $derived(
@@ -2594,6 +2713,15 @@
                 title="Describe a view in natural language — the LLM generates it"
                 type="button"
               >Generate view…</button>
+              <button
+                class="view-select-option view-select-generate"
+                role="option"
+                aria-selected="false"
+                onclick={openConversationalExplorer}
+                data-testid="view-option-ask"
+                title="Ask a question — the answer is grounded in the knowledge graph with clickable references"
+                type="button"
+              >{$t('conversational_explorer.title')}…</button>
             </div>
           {/if}
         </div>
@@ -3572,6 +3700,15 @@
                       onclick={() => { chatMode = 'generate'; }}
                       type="button"
                     >{$t('generated_view.title')}</button>
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'explore'}
+                      role="tab"
+                      aria-selected={chatMode === 'explore'}
+                      data-testid="chat-mode-explore"
+                      onclick={() => { chatMode = 'explore'; }}
+                      type="button"
+                    >{$t('conversational_explorer.title')}</button>
                   </div>
                   <button
                     class="chat-collapse-btn"
@@ -3603,6 +3740,21 @@
                   {graphHints}
                   graphNodes={graph?.nodes ?? []}
                   graphEdges={graph?.edges ?? []}
+                />
+                {:else if chatMode === 'explore'}
+                <!-- Conversational exploration (system-explorer.md §8):
+                     knowledge-graph-grounded Q&A with clickable entity
+                     references and canvas actions. -->
+                <ConversationalExplorer
+                  workspaceId={scope?.workspaceId ?? ''}
+                  repoId={selectedRepoId}
+                  onApplyView={applyGeneratedViewSpec}
+                  onOpenNode={conversationOpenNode}
+                  onOpenSpec={conversationOpenSpec}
+                  onOpenCommit={conversationOpenCommit}
+                  onShowAgent={conversationShowAgent}
+                  onHighlightNodes={conversationHighlightNodes}
+                  onPrediction={conversationApplyPrediction}
                 />
                 {:else}
                 <GeneratedViewChat

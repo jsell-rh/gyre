@@ -410,7 +410,7 @@ pub enum ApprovalStatus {
 ```
 Status is derived from which timestamp column is non-null. Mutual exclusivity: the handler clears all other timestamp columns when setting a new status. Only one timestamp is non-null at any time.
 
-- Approval records support status transitions (Pending → Approved → Revoked, or Pending → Rejected). The handler clears other timestamp columns on transition to maintain mutual exclusivity. The *audit trail* of who approved/rejected and when is preserved via the timestamp values.
+- Approval records support status transitions (Pending → Approved → Revoked, Pending → Rejected, or Approved → Rejected). Approved → Rejected is the decline-after-approval path: `POST /specs/:path/reject` on an already-approved spec transitions the active approval row to Rejected and records the declining human in `rejected_by`, so the judgment surfaces in their HSI §12 judgment ledger. The handler clears other timestamp columns on transition to maintain mutual exclusivity. The *audit trail* of who approved/rejected and when is preserved via the timestamp values. Revoked and Rejected are terminal.
 - Revocation requires a reason and is audited.
 - Rejection closes the associated MR (per `human-system-interface.md` §8).
 - Multiple approvals can exist for the same spec (different versions).

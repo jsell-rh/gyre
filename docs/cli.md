@@ -103,6 +103,29 @@ gyre mr create --title "Fix bug" --repo-id <repo-uuid> \
   --source fix/my-bug --target main
 ```
 
+### Verify a merge attestation (agent-gates.md §Part 3)
+
+```bash
+# Verify the merge attestation bundle attached to a merge commit:
+# reads the bundle from the commit's git note
+# (refs/notes/merge-attestations), runs the verification protocol
+# (bundle signature, per-gate signatures, spec approval signature,
+# consistency) via POST /api/v1/attestations/verify, and prints the
+# per-component result. Exits 1 when the bundle fails verification.
+gyre verify-attestation <commit-sha>
+
+# From a different checkout / notes ref
+gyre verify-attestation <commit-sha> --repo /path/to/clone \
+  --notes-ref refs/notes/merge-attestations
+
+# Explicit server/token (default: ~/.gyre/config)
+gyre verify-attestation <commit-sha> --server http://localhost:3000 --token <token>
+```
+
+Notes live in a separate git ref; fetch them into a clone with
+`git fetch origin refs/notes/merge-attestations:refs/notes/merge-attestations`
+before verifying a merge made on the server.
+
 ---
 
 ## Spec Operations
@@ -207,6 +230,146 @@ Notes:
   selects the caller's tenant; otherwise workspace scope via
   `--workspace-name <slug>` or the git remote. `gyre secret delete/rotate`
   are name-keyed and resolve the id via the scope's list.
+
+---
+
+## Policies (abac-policy-engine.md §CLI)
+
+```bash
+# List all policies (id, name, scope, effect, priority, enabled, built-in)
+gyre policy list
+
+# Workspace-scoped policies for one workspace
+gyre policy list --scope workspace --workspace-id ws-1
+
+# Create a policy from a YAML definition (Admin only server-side)
+gyre policy create --file policy.yaml
+
+# Dry-run: would the current policy set allow this? (nothing is audited)
+gyre policy evaluate --subject user:jsell --action approve --resource spec:identity
+
+# Decision audit log with filters (newest first)
+gyre policy decisions --subject agent:worker-42 --decision deny --since 1d
+
+# "What can jsell do with specs?" — answered from the subject's real
+# stored attributes (roles, memberships, teams)
+gyre policy effective --subject user:jsell --resource-type spec
+```
+
+The `policy.yaml` file for `create` mirrors the `POST /api/v1/policies`
+body — required fields `name`, `scope` (tenant/workspace/repo), `priority`,
+`effect` (allow/deny), `actions`, `resource_types`; optional `description`,
+`scope_id`, `conditions`, `enabled` (default true):
+
+```yaml
+name: workspace-developer-push
+description: Allow developers to push in this workspace
+scope: workspace
+scope_id: ws-1
+priority: 200
+effect: allow
+conditions:
+  - attribute: subject.workspace_role
+    operator: equals
+    value: developer
+actions: [push, read]
+resource_types: [repo]
+```
+
+Notes:
+
+- Calls the real policy API (`GET/POST /api/v1/policies`,
+  `POST /api/v1/policies/evaluate`, `GET /api/v1/policies/decisions`,
+  `GET /api/v1/policies/effective`); create requires the Admin role
+  server-side (the seeded `builtin:policy-admin-only` policy).
+- `--subject`/`--resource` take the `{type}:{id}` form (`user:jsell`,
+  `spec:identity`); for `decisions` and `effective` the type prefix is CLI
+  syntax — the audit log and the effective explorer key on the subject id.
+- `decisions` applies the `--decision`/`--since` filters to the fetched
+  newest-first page (default 100 records; raise with `--limit` to scan
+  deeper into the log). `--since` accepts `s`/`m`/`h`/`d`/`w` durations.
+- Server-side failures (auth 403, validation 400, not-found 404) are
+  reported with the HTTP status and the server's message.
+
+---
+
+## User Management (user-management.md §CLI)
+
+```bash
+# Identity
+
+gyre whoami                                   # Current user profile
+
+gyre profile set --display-name "Jordan Sell" --timezone "America/New_York"
+gyre profile set --locale en-US               # Omitted fields keep their values
+
+# Active sessions
+
+gyre sessions list
+gyre sessions revoke <session-id>
+gyre sessions revoke-all
+
+# Tenant invitations (TenantAdmin only)
+
+gyre tenant invite alice@example.com                              # Invite to tenant
+gyre tenant invite alice@example.com --workspace platform --role Developer  # With workspace pre-assignment
+gyre tenant invite --bulk users.csv                               # Bulk invite from CSV
+                                                 # (columns: email[,workspace][,role])
+gyre tenant invitations list
+gyre tenant invitations revoke <invitation-id>
+
+# Workspace membership
+
+gyre workspace members list
+gyre workspace invite @alice --role Developer                     # By username (already in tenant)
+gyre workspace invite alice@example.com --role Developer          # By email (sends tenant invite if needed)
+gyre workspace members set-role @asmith Admin
+gyre workspace members set-role @asmith Owner --transfer          # Transfer ownership
+                                                 # (--transfer requires role Owner; audited server-side)
+gyre workspace members remove @asmith
+gyre workspace invitations list
+gyre workspace invitations revoke <invitation-id>
+
+# Teams
+
+gyre team create "Platform Team" --lead @jsell
+gyre team add @asmith --team "Platform Team"
+gyre team list
+gyre team remove @asmith --team "Platform Team"
+
+# Notifications
+
+gyre notifications list                      # Recent notifications
+gyre notifications list --unread --priority high
+gyre notifications preferences set --email-digest hourly --email-min-priority high
+gyre notifications preferences set --slack-url https://hooks.slack.com/...
+```
+
+Notes:
+
+- Identity, workspace-membership, team, and notification commands call the
+  real user-management API (`GET/PUT /api/v1/users/me`,
+  `GET/PUT .../workspaces/:id/members[...]/role`, `POST .../invite`,
+  `GET/DELETE .../invitations[/:id]`, team endpoints under
+  `.../workspaces/:id/teams`, and `GET/PUT /api/v1/notifications[/...]`).
+- `@handle` arguments are resolved to user ids via `GET /api/v1/users/:username`
+  (the tenant-public profile); email arguments take the tenant-invitation
+  path with the workspace pre-assigned.
+- The target workspace of `gyre workspace`/`gyre team` commands is
+  `--workspace <slug>` or the one inferred from the gyre git remote (the
+  same inference `gyre budget` uses).
+- `gyre notifications list --unread` filters the read flag client-side
+  (the API's filter surface is workspace/priority/type/repo); `--priority`
+  takes the four-level names (low/medium/high/urgent) and is enforced by
+  the server.
+- `gyre notifications preferences set` performs a read-merge-write: only
+  the channels you touch change (setting `--email-*` enables the email
+  channel; `in_app` is always on per the spec).
+- `gyre sessions ...` calls the §API > User Management session endpoints
+  (`/api/v1/users/me/sessions[...]`, owned by task-111) and `gyre tenant
+  invite`/`gyre tenant invitations ...` call the §API > Tenant Invitations
+  endpoints (`/api/v1/tenant/...`, owned by task-110); those command groups
+  become fully functional when their server-side endpoints land.
 
 ---
 

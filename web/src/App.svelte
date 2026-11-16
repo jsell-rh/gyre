@@ -4,11 +4,16 @@
   import { createWsStore } from './lib/ws.js';
   import { createPresenceHeartbeat } from './lib/presence.js';
   import { createLivenessTracker } from './lib/liveness.svelte.js';
+  import { attachNotificationStream } from './lib/notifications.svelte.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
+  import AnalyticsView from './components/AnalyticsView.svelte';
   import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
+  import PublicUserProfile from './components/PublicUserProfile.svelte';
+  import NotificationBell from './components/NotificationBell.svelte';
+  import NotificationSettings from './components/NotificationSettings.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
@@ -22,7 +27,7 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'workspace_settings' | 'repo' | 'profile'
+  // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' | 'notification_settings'
   let mode = $state('workspace_home');
 
   // ── Workspace / repo state ───────────────────────────────────────────
@@ -72,6 +77,11 @@
     const store = createWsStore();
     wsStore = store;
     const unsub = store.onStatus((s) => (wsStatus = s));
+    // Notification bell realtime (user-management.md §In-App Notification
+    // UI): NotificationPush messages on this connection bump the unread
+    // badge live. Rides the same socket as presence/liveness — the SPA
+    // holds one realtime channel per tab.
+    const detachNotifications = attachNotificationStream(store);
     // Presence heartbeat (HSI §1): send-on-connect, 30s timer, view-change
     // re-send (5s debounce), and disconnect on beforeunload. Without it the
     // server idle-evicts this tab after 60s and other users lose the
@@ -89,6 +99,7 @@
     });
     return () => {
       unsub();
+      detachNotifications();
       presenceHeartbeat.destroy();
       presenceHeartbeat = null;
       livenessTracker.destroy();
@@ -248,6 +259,27 @@
       return { mode: 'profile', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
     }
 
+    // /@{username} — tenant-scoped public user profile
+    // (user-management.md §User Profile Page). The handle is the URL-decoded
+    // first segment minus its leading '@'.
+    if (raw[0]?.startsWith('@') && raw[0].length > 1) {
+      return {
+        mode: 'user_profile',
+        slug: null,
+        repoName: null,
+        tab: null,
+        entityType: null,
+        entityId: null,
+        username: raw[0].slice(1),
+      };
+    }
+
+    // /settings/notifications (user-management.md §In-App Notification UI:
+    // notification preferences page in user settings)
+    if (raw[0] === 'settings' && raw[1] === 'notifications') {
+      return { mode: 'notification_settings', slug: null, repoName: null, tab: null, entityType: null, entityId: null };
+    }
+
     // /all  or  /all/settings  or  /all/agent-rules  (cross-workspace view §10)
     if (raw[0] === 'all') {
       const tab = raw[1] ?? null;
@@ -286,6 +318,11 @@
         return { mode: 'workspace_settings', slug, repoName: null, tab: null, entityType: null, entityId: null };
       }
 
+      // /workspaces/:slug/analytics (analytics.md §Analytics Dashboard)
+      if (raw[2] === 'analytics') {
+        return { mode: 'analytics', slug, repoName: null, tab: null, entityType: null, entityId: null };
+      }
+
       // /workspaces/:slug/agent-rules
       if (raw[2] === 'agent-rules') {
         return { mode: 'agent_rules', slug, repoName: null, tab: null, entityType: null, entityId: null };
@@ -300,14 +337,17 @@
 
   export function urlFor(parsed) {
     if (!parsed) return '/';
-    const { mode: m, slug, repoName, tab, entityType, entityId } = parsed;
+    const { mode: m, slug, repoName, tab, entityType, entityId, username } = parsed;
     if (m === 'profile') return '/profile';
+    if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
+    if (m === 'notification_settings') return '/settings/notifications';
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
     }
     if (!slug) return '/';
     if (m === 'workspace_home') return `/workspaces/${encodeURIComponent(slug)}`;
     if (m === 'workspace_settings') return `/workspaces/${encodeURIComponent(slug)}/settings`;
+    if (m === 'analytics') return `/workspaces/${encodeURIComponent(slug)}/analytics`;
     if (m === 'agent_rules') return `/workspaces/${encodeURIComponent(slug)}/agent-rules`;
     if (m === 'repo') {
       const base = `/workspaces/${encodeURIComponent(slug)}/r/${encodeURIComponent(repoName)}`;
@@ -333,6 +373,7 @@
       repoTab: parsed.tab ?? 'specs',
       entityType: parsed.entityType ?? null,
       entityId: parsed.entityId ?? null,
+      username: parsed.username ?? null,
     };
     window.history.pushState(stateObj, '', urlFor(parsed));
   }
@@ -541,6 +582,15 @@
     pushState({ mode: 'workspace_settings', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
   }
 
+  function goToAnalytics() {
+    if (!currentWorkspace) return;
+    mode = 'analytics';
+    currentRepo = null;
+    repoTab = 'specs';
+    fadeContent();
+    pushState({ mode: 'analytics', slug: wsSlug(currentWorkspace), repoName: null, tab: null });
+  }
+
   function goToAgentRules() {
     if (!currentWorkspace) return;
     mode = 'agent_rules';
@@ -554,6 +604,24 @@
     mode = 'profile';
     fadeContent();
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
+  }
+  // /@{username} — tenant-scoped public profile (user-management.md
+  // §User Profile Page). Exposed as a context so any surface rendering a
+  // user reference (@mentions, activity feeds, reviewer attribution) can
+  // link to the profile.
+  function goToUserProfile(username) {
+    if (!username) return;
+    mode = 'user_profile';
+    userProfileUsername = username;
+    currentRepo = null;
+    entityDetail = null;
+    fadeContent();
+    pushState({ mode: 'user_profile', slug: null, repoName: null, tab: null, username });
+  }
+  function goToNotificationSettings() {
+    mode = 'notification_settings';
+    fadeContent();
+    pushState({ mode: 'notification_settings', slug: null, repoName: null, tab: null });
   }
   function goToCrossWorkspace() {
     mode = 'cross_workspace';
@@ -630,6 +698,8 @@
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
+  setContext('goToNotificationSettings', () => goToNotificationSettings());
+  setContext('goToUserProfile', (username) => goToUserProfile(username));
   setContext('goToRepo', (repo, tab) => goToRepo(repo, tab));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
@@ -730,7 +800,7 @@
       if (detailPanel.open) { closeDetailPanel(); gKeyPending = false; return; }
       if (mode === 'repo' && entityDetail) { window.history.back(); gKeyPending = false; return; }
       if (mode === 'repo') { goToWorkspaceHome(currentWorkspace); gKeyPending = false; return; }
-      if (mode === 'workspace_settings' || mode === 'agent_rules') { window.history.back(); gKeyPending = false; return; }
+      if (mode === 'workspace_settings' || mode === 'agent_rules' || mode === 'analytics') { window.history.back(); gKeyPending = false; return; }
       if (mode === 'cross_workspace' && crossWorkspaceTab) { window.history.back(); gKeyPending = false; return; }
       gKeyPending = false;
       return;
@@ -823,6 +893,11 @@
   // Current user id — threaded into presence-aware components (ConcurrentEditBanner)
   // so a user's own other tabs are excluded from the concurrent-edit warning (HSI §7).
   let selfUserId = $state(null);
+  // Own handle for the top-nav avatar's public-profile link
+  // (user-management.md §User Profile Page navigation integration).
+  let selfUsername = $state(null);
+  // Routed /@{username} public-profile subject.
+  let userProfileUsername = $state(null);
 
   // ── Token modal ───────────────────────────────────────────────────────
   const TOKEN_KIND_LABELS = {
@@ -989,6 +1064,10 @@
     const repoName = currentRepo?.name ?? '';
     if (mode === 'profile') {
       document.title = 'Profile | Gyre';
+    } else if (mode === 'user_profile') {
+      document.title = userProfileUsername ? `@${userProfileUsername} | Gyre` : 'User | Gyre';
+    } else if (mode === 'notification_settings') {
+      document.title = 'Notification Settings | Gyre';
     } else if (mode === 'cross_workspace') {
       document.title = 'All Workspaces | Gyre';
     } else if (mode === 'agent_rules') {
@@ -1046,6 +1125,11 @@
 
     if (parsed?.mode === 'profile') {
       mode = 'profile';
+    } else if (parsed?.mode === 'user_profile') {
+      mode = 'user_profile';
+      userProfileUsername = parsed.username ?? null;
+    } else if (parsed?.mode === 'notification_settings') {
+      mode = 'notification_settings';
     } else if (parsed?.mode === 'cross_workspace') {
       mode = 'cross_workspace';
       crossWorkspaceTab = (parsed.tab === 'settings' || parsed.tab === 'agent-rules') ? parsed.tab : null;
@@ -1080,6 +1164,8 @@
           } catch { /* keep name-only ref */ }
         } else if (parsed.mode === 'workspace_settings') {
           mode = 'workspace_settings';
+        } else if (parsed.mode === 'analytics') {
+          mode = 'analytics';
         } else if (parsed.mode === 'agent_rules') {
           mode = 'agent_rules';
         } else {
@@ -1132,6 +1218,7 @@
       tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
       entityType: entityDetail?.type ?? null,
       entityId: entityDetail?.id ?? null,
+      username: mode === 'user_profile' ? userProfileUsername : null,
     });
     window.history.replaceState(
       { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab, entityType: entityDetail?.type ?? null, entityId: entityDetail?.id ?? null },
@@ -1144,6 +1231,7 @@
       const me = await api.me();
       userIsAdmin = me?.global_role === 'Admin' || me?.role === 'Admin' || me?.is_admin === true;
       selfUserId = me?.id ?? null;
+      selfUsername = me?.username ?? null;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
     const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
@@ -1169,9 +1257,12 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: histUsername } = e.state;
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'user_profile' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
           ? m : 'workspace_home';
+        if (m === 'user_profile') {
+          userProfileUsername = histUsername ?? parseUrl(window.location.pathname)?.username ?? null;
+        }
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
         // Restore entity detail state from history with repo_id for data loading
@@ -1181,7 +1272,7 @@
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m !== 'cross_workspace' && m !== 'profile') {
+        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'notification_settings') {
           // Try to recover workspace from URL slug if state doesn't have wsId
           const p2 = parseUrl(window.location.pathname);
           if (p2?.slug) {
@@ -1217,13 +1308,18 @@
       if (p) {
         if (p.mode === 'profile') {
           mode = 'profile';
+        } else if (p.mode === 'user_profile') {
+          mode = 'user_profile';
+          userProfileUsername = p.username ?? null;
+        } else if (p.mode === 'notification_settings') {
+          mode = 'notification_settings';
         } else if (p.mode === 'cross_workspace') {
           mode = 'cross_workspace';
           crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'analytics')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -1301,7 +1397,7 @@
       </button>
 
       <!-- Left side: workspace selector or back arrow + breadcrumb -->
-      {#if mode === 'agent_rules' || mode === 'workspace_settings'}
+      {#if mode === 'agent_rules' || mode === 'workspace_settings' || mode === 'analytics'}
         <!-- Sub-page mode: back arrow + WorkspaceName / Page Name -->
         <div class="topbar-left repo-context">
           <button
@@ -1323,7 +1419,7 @@
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
             <span class="breadcrumb-sep" aria-hidden="true">/</span>
-            <span class="breadcrumb-repo" aria-current="page">{mode === 'workspace_settings' ? $t('topbar.workspace_settings') : $t('topbar.agent_rules_label')}</span>
+            <span class="breadcrumb-repo" aria-current="page">{mode === 'workspace_settings' ? $t('topbar.workspace_settings') : mode === 'analytics' ? 'Analytics' : $t('topbar.agent_rules_label')}</span>
           </nav>
         </div>
       {:else if mode === 'repo'}
@@ -1418,6 +1514,18 @@
               </button>
               <button
                 class="ws-gear-btn"
+                onclick={() => goToAnalytics()}
+                aria-label="Analytics"
+                title="Analytics"
+                data-testid="ws-analytics-btn"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true">
+                  <path d="M3 3v18h18"/>
+                  <path d="M7 15l4-6 3 4 5-8"/>
+                </svg>
+              </button>
+              <button
+                class="ws-gear-btn"
                 onclick={() => goToWorkspaceSettings()}
                 aria-label={$t('topbar.workspace_settings')}
                 title={$t('topbar.workspace_settings') + ' (g s)'}
@@ -1477,6 +1585,24 @@
                   </svg>
                 </button>
               {/if}
+            </div>
+          {:else if mode === 'user_profile'}
+            <!-- Public profile page: back arrow + @username breadcrumb
+                (user-management.md §User Profile Page). -->
+            <div class="ws-name-wrap">
+              <button
+                class="back-btn"
+                onclick={() => window.history.back()}
+                aria-label={$t('topbar.back_to_workspace')}
+                data-testid="back-btn"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                  <path d="M19 12H5M12 5l-7 7 7 7"/>
+                </svg>
+              </button>
+              <nav class="breadcrumb" aria-label={$t('topbar.location')}>
+                <span class="breadcrumb-repo" aria-current="page" data-testid="user-profile-breadcrumb">&#64;{userProfileUsername}</span>
+              </nav>
             </div>
           {:else}
             <button
@@ -1603,6 +1729,13 @@
           {decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : ''}
         </span>
 
+        <!-- Notification bell (user-management.md §In-App Notification UI):
+            unread count badge + slide-out drawer. Distinct from the Decisions
+            badge (HSI §1.1): that one tracks unresolved items needing judgment
+            and navigates to the Decisions section; this one tracks read state
+            across ALL notifications. -->
+        <NotificationBell {workspaces} currentWorkspaceId={currentWorkspace?.id ?? null} />
+
         <!-- User avatar dropdown -->
         <div class="user-menu-wrap">
           <button
@@ -1634,6 +1767,22 @@
             >
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToProfile(); userMenuOpen = false; }}>
                 {$t('topbar.profile')}
+              </button>
+              <!-- Own public profile (user-management.md §User Profile Page
+                  navigation integration: the avatar menu links to /@{username}). -->
+              {#if selfUsername}
+                <button
+                  class="user-dropdown-item"
+                  role="menuitem"
+                  tabindex="-1"
+                  data-testid="user-menu-public-profile"
+                  onclick={() => { goToUserProfile(selfUsername); userMenuOpen = false; }}
+                >
+                  {$t('topbar.public_profile')}
+                </button>
+              {/if}
+              <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { goToNotificationSettings(); userMenuOpen = false; }} data-testid="user-menu-notification-settings">
+                {$t('topbar.notification_settings')}
               </button>
               <button class="user-dropdown-item" role="menuitem" tabindex="-1" onclick={() => { openTokenModal(); userMenuOpen = false; }}>
                 {$t('topbar.api_token')}
@@ -1687,6 +1836,16 @@
               >{item.label}</button>
             </li>
           {/each}
+          {#if currentWorkspace}
+            <li>
+              <button
+                class="drawer-link"
+                class:active={mode === 'analytics'}
+                onclick={() => { mobileDrawerOpen = false; goToAnalytics(); }}
+                data-testid="drawer-item-analytics"
+              >Analytics</button>
+            </li>
+          {/if}
         </ul>
       </nav>
     {/if}
@@ -1718,6 +1877,11 @@
           />
         {:else if mode === 'workspace_settings'}
           <WorkspaceSettings
+            workspace={currentWorkspace}
+            onBack={() => goToWorkspaceHome(currentWorkspace)}
+          />
+        {:else if mode === 'analytics'}
+          <AnalyticsView
             workspace={currentWorkspace}
             onBack={() => goToWorkspaceHome(currentWorkspace)}
           />
@@ -1764,6 +1928,10 @@
           {/if}
         {:else if mode === 'profile'}
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
+        {:else if mode === 'user_profile'}
+          <PublicUserProfile username={userProfileUsername} workspaces={workspaces} />
+        {:else if mode === 'notification_settings'}
+          <NotificationSettings />
         {/if}
       </div>
     </main>

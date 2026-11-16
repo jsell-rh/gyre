@@ -116,6 +116,11 @@ impl RepoRepository for SqliteStorage {
     async fn create(&self, repo: &Repository) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let r = repo.clone();
+        // Scope the row to this handle's tenant, exactly like every query
+        // method below (find_by_id/list filter by `self.tenant_id`). A
+        // literal here would file the row under a tenant whose handles
+        // never see it — and leak it to the "default"-scoped handle.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let status_str = r.status.to_string();
@@ -129,7 +134,7 @@ impl RepoRepository for SqliteStorage {
                 mirror_url: r.mirror_url.as_deref(),
                 mirror_interval_secs: r.mirror_interval_secs.map(|v| v as i64),
                 last_mirror_sync: r.last_mirror_sync.map(|v| v as i64),
-                tenant_id: "default",
+                tenant_id: tenant.as_str(),
                 workspace_id: r.workspace_id.as_str(),
                 description: r.description.as_deref(),
                 status: &status_str,
@@ -339,6 +344,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_is_scoped_to_the_handles_tenant() {
+        // Killing test for the create() tenant-scoping fix: create() used to
+        // file the row under the literal "default" tenant while every query
+        // method filters by the handle's `self.tenant_id`, so a tenant-scoped
+        // handle could not see its own creations — and the "default"-scoped
+        // handle saw rows it never created (cross-tenant leak).
+        let (_tmp, s) = setup();
+        let scoped = s.with_tenant("t1");
+        let r = make_repo("r-scoped", "ws1");
+        RepoRepository::create(&scoped, &r).await.unwrap();
+
+        // The handle that created the repo sees it...
+        assert_eq!(RepoRepository::list(&scoped).await.unwrap().len(), 1);
+        assert!(RepoRepository::find_by_id(&scoped, &r.id)
+            .await
+            .unwrap()
+            .is_some());
+        // ...and the default-scoped handle does not (tenant isolation).
+        assert!(RepoRepository::find_by_id(&s, &r.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(RepoRepository::list(&s).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
     async fn list_by_workspace() {
         let (_tmp, s) = setup();
         RepoRepository::create(&s, &make_repo("r1", "ws1"))
@@ -440,6 +471,7 @@ mod tests {
             max_cost_per_day: Some(12.5),
             max_concurrent_agents: Some(3),
             max_agent_lifetime_secs: Some(3600),
+            enforcement_action: Some(gyre_domain::BudgetEnforcementAction::QueuePause),
         });
         RepoRepository::create(&s, &r).await.unwrap();
 
@@ -455,6 +487,12 @@ mod tests {
         assert!((budget.max_cost_per_day.unwrap() - 12.5).abs() < 1e-9);
         assert_eq!(budget.max_concurrent_agents, Some(3));
         assert_eq!(budget.max_agent_lifetime_secs, Some(3600));
+        // The JSON document round-trips the whole BudgetConfig, including
+        // the task-191 per-level enforcement action override.
+        assert_eq!(
+            budget.enforcement_action,
+            Some(gyre_domain::BudgetEnforcementAction::QueuePause)
+        );
 
         // Update path: replace the override, then clear it.
         found.budget = Some(gyre_domain::BudgetConfig {

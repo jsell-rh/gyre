@@ -81,7 +81,9 @@ fn service_header(service: &str) -> Vec<u8> {
 ///      workspace (gyre bootstrap --dev creates tenant "dev" while the
 ///      system principal's tenant_id stays "default"), so a strict filter
 ///      would 404 the bootstrap flow's own push. The fallback grants
-///      nothing the token lacks elsewhere (it bypasses ABAC on REST), and
+///      nothing the token lacks elsewhere (on REST it is allowed by the
+///      seeded `system-full-access` policy through normal ABAC evaluation,
+///      not by a bypass), and
 ///      the repo is still resolved inside the workspace the slug names.
 ///   2. Look up the repo by name within that workspace.
 async fn resolve_repo_by_slug(
@@ -595,28 +597,26 @@ pub async fn git_receive_pack(
     // push code (agent-gates.md §Gate Agent Lifecycle: "read-only access").
     // Caller-scoped capability, exact-match (review F3): checked before
     // workspace/repo resolution so the denial does not depend on (or leak
-    // the existence of) the target.
-    if let Some(scope) = auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
+    // the existence of) the target. §1 Token Scoping: the scope claim is a
+    // list; read it through the extractor-derived `auth.scope` (mirrored
+    // from signature-verified claims), never the raw JSON string form —
+    // an array claim read as a string silently fails open.
+    if auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE || s == crate::auth::VALIDATION_REPORT_SCOPE)
     {
-        if scope == crate::auth::REVIEW_SUBMIT_SCOPE
-            || scope == crate::auth::VALIDATION_REPORT_SCOPE
-        {
-            warn!(
-                agent_id = %auth.agent_id,
-                workspace_slug = %workspace_slug,
-                repo_name = %repo_name,
-                "git-receive-pack 403: scoped gate-agent token cannot push"
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                "push rejected: gate-agent scoped tokens are read-only".to_string(),
-            )
-                .into_response();
-        }
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: scoped gate-agent token cannot push"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: gate-agent scoped tokens are read-only".to_string(),
+        )
+            .into_response();
     }
 
     let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
@@ -1092,47 +1092,39 @@ pub async fn git_receive_pack(
 
                     // TASK-061 (§7.2): Populate attestation chain ABAC subject
                     // attributes and evaluate policies with action=push,
-                    // resource_type=attestation. Audit-only — logged but not enforced.
+                    // resource_type=attestation. Audit-only — logged and
+                    // recorded to the decision audit trail (see
+                    // evaluate_push_attestation_abac), never enforced. A
+                    // store-read failure inside the evaluation is logged
+                    // and the evaluation skipped (review round 6): the
+                    // push itself is unaffected either way, but a store
+                    // error must be visible, never silently reshaped into
+                    // a tenant-scope-less evaluation.
                     if let Some(leaf) = attestations.iter().max_by_key(|a| a.metadata.chain_depth) {
                         let chain = state_clone
                             .chain_attestations
                             .load_chain(&leaf.id)
                             .await
                             .unwrap_or_default();
-                        let chain_depth = leaf.metadata.chain_depth;
-                        let signer = gyre_domain::root_signer(&chain);
-                        let cc = gyre_domain::constraint_count(&chain) as i64;
-
-                        let mut ctx = crate::policy_engine::AttributeContext::default();
-                        ctx.set("subject.type", "agent");
-                        ctx.set("subject.id", &agent_id);
-                        ctx.set("subject.tenant_id", &push_tenant_id);
-                        ctx.set_number("subject.chain_depth", chain_depth as i64);
-                        ctx.set_number("subject.constraint_count", cc);
-                        if let Some(ref rs) = signer {
-                            ctx.set("subject.root_signer", rs);
+                        if let Err(e) = evaluate_push_attestation_abac(
+                            &state_clone,
+                            tid,
+                            &repo_id_clone,
+                            &repo_workspace_id_str,
+                            &agent_id,
+                            &push_tenant_id,
+                            leaf,
+                            &chain,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                task_id = %tid,
+                                repo_id = %repo_id_clone,
+                                error = %e,
+                                "push attestation ABAC evaluation unavailable (audit-only, push proceeds)"
+                            );
                         }
-                        // An attestation chain was located for this push — the
-                        // attribute `builtin:require-signed-authorization`
-                        // (§7.2) keys its unless-clause on.
-                        ctx.set_bool("subject.attestation_chain_present", true);
-                        ctx.set("resource.type", "attestation");
-                        ctx.set("resource.repo_id", &repo_id_clone);
-
-                        let policies = state_clone.policies.list().await.unwrap_or_default();
-                        let eval_result =
-                            crate::policy_engine::evaluate(policies, &ctx, "push", "attestation");
-
-                        tracing::info!(
-                            task_id = %tid,
-                            repo_id = %repo_id_clone,
-                            chain_depth = chain_depth,
-                            root_signer = ?signer,
-                            constraint_count = cc,
-                            decision = ?eval_result.effect,
-                            matched_policy = ?eval_result.matched_policy,
-                            "attestation ABAC evaluation for push (audit-only)" // enforcement-mode:ok
-                        );
                     }
                 }
                 Ok(_) => {
@@ -1303,9 +1295,25 @@ pub async fn git_receive_pack(
             } else {
                 None
             };
+            // §API > Notifications: pass the broadcasting wrapper, not the
+            // bare repo — push-scoped notifications must fan out to live
+            // /notifications/stream subscribers (task-125 review repair) —
+            // plus channel fan-out after in-app create (user-management.md
+            // §Delivery Channels). The closure clones the state Arc so the
+            // boxed future is 'static.
+            let divergence_notifications = state_clone.broadcasting_notifications();
+            let fanout_state = std::sync::Arc::clone(&state_clone);
+            let on_created = move |notif: &gyre_common::Notification| {
+                let state = std::sync::Arc::clone(&fanout_state);
+                let notif = notif.clone();
+                futures_util::FutureExt::boxed(async move {
+                    crate::notification_dispatcher::dispatch_to_channels(&state, &notif).await;
+                })
+            };
             let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                notification_repo: state_clone.notifications.as_ref(),
+                notification_repo: &divergence_notifications,
                 membership_repo: state_clone.workspace_memberships.as_ref(),
+                on_created: Some(Box::new(on_created)),
             });
             // §9 spec-assertion notifications are scoped by the repo's
             // workspace — every push type notifies, not just agent pushes.
@@ -2444,8 +2452,13 @@ async fn process_persona_changes(
                             notif.source.entity_type = "persona".to_string();
                             notif.source.entity_id = slug.clone();
                             notif.source.repo_id = Some(repo.id.clone());
-                            if let Err(e) = state.notifications.create(&notif).await {
+                            if let Err(e) = state.create_notification(&notif).await {
                                 warn!(slug, "persona-push: failed to notify persona owner: {e}");
+                            } else {
+                                // Channel fan-out per user-management.md
+                                // §Delivery Channels.
+                                crate::notification_dispatcher::dispatch_to_channels(state, &notif)
+                                    .await;
                             }
                         }
                     }
@@ -2796,8 +2809,6 @@ async fn notify_cross_workspace_dependents(
         return;
     }
 
-    let now = crate::api::now_secs();
-
     // Collect unique source repo IDs from inbound links.
     let mut notified_workspaces: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -2854,7 +2865,6 @@ async fn notify_cross_workspace_dependents(
                 continue;
             }
 
-            let notif_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
             let display = link.target_display.as_deref().unwrap_or(changed_spec_path);
             let title = format!("Cross-workspace spec changed: {display}");
             let source_repo_name = state
@@ -2864,27 +2874,26 @@ async fn notify_cross_workspace_dependents(
                 .ok()
                 .flatten()
                 .map(|r| r.name.clone())
-                .unwrap_or_else(|| source_repo_id[..8.min(source_repo_id.len())].to_string());
+                .unwrap_or_else(|| source_repo_id.chars().take(8).collect());
             let body = format!(
                 "{display} changed in repo {source_repo_name}. Your spec {} depends on it. Review for impact.",
                 link.source_path
             );
-            let mut notif = gyre_common::Notification::new(
-                notif_id,
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notifications::notify_rich(
+                state,
                 dep_repo.workspace_id.clone(),
                 member.user_id,
                 gyre_common::NotificationType::CrossWorkspaceSpecChange,
                 title,
                 dep_workspace.tenant_id.to_string(),
-                now as i64,
-            );
-            notif.body = Some(body);
-            notif.source.entity_type = "spec".to_string();
-            notif.source.entity_id = changed_spec_path.to_string();
-
-            if let Err(e) = state.notifications.create(&notif).await {
-                tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
-            }
+                Some(body),
+                Some(changed_spec_path.to_string()),
+                None,
+                "spec",
+                None,
+            )
+            .await;
         }
     }
 }
@@ -4262,6 +4271,145 @@ pub(crate) async fn detect_breaking_changes_on_push(
 }
 
 // ---------------------------------------------------------------------------
+// Push-time attestation ABAC evaluation (TASK-006 §7.2 / task-129 audit)
+// ---------------------------------------------------------------------------
+
+/// TASK-006 (§7.2) push path: build the attestation-chain subject context and
+/// evaluate action=push / resource_type=attestation policies.
+///
+/// §Audit Integration (task-129): the PolicyDecision is PERSISTED to the
+/// policy-decision audit trail via `record_decision` — exactly like the
+/// middleware request path and the merge-time attestation gate — so
+/// push-time evaluations are queryable via GET /api/v1/policies/decisions.
+/// The gate itself remains audit-only (Phase 1): the result is logged and
+/// recorded, never enforced.
+///
+/// Returns `Err` when the workspace or policy store cannot be READ (review
+/// round 6, task-129): the previous `if let Ok(Some(ws))` swallow degraded
+/// a workspace-store failure to "no resource tenant scope", silently
+/// un-applying tenant-scoped Deny policies on this evaluation. The caller
+/// logs the failure and skips the audit evaluation (the gate is
+/// audit-only; the push itself is unaffected) — the point is that a store
+/// error is VISIBLE, never silently reshaped into a different decision.
+#[allow(clippy::too_many_arguments)]
+async fn evaluate_push_attestation_abac(
+    state: &AppState,
+    task_id: &str,
+    repo_id: &str,
+    repo_workspace_id: &str,
+    agent_id: &str,
+    subject_tenant_id: &str,
+    leaf: &gyre_common::Attestation,
+    chain: &[gyre_common::Attestation],
+) -> anyhow::Result<crate::policy_engine::EvalResult> {
+    use anyhow::Context as _;
+
+    let chain_depth = leaf.metadata.chain_depth;
+    let signer = gyre_domain::root_signer(chain);
+    let cc = gyre_domain::constraint_count(chain) as i64;
+
+    let mut ctx = crate::policy_engine::AttributeContext::default();
+    ctx.set("subject.type", "agent");
+    ctx.set("subject.id", agent_id);
+    ctx.set("subject.tenant_id", subject_tenant_id);
+    ctx.set_number("subject.chain_depth", chain_depth as i64);
+    ctx.set_number("subject.constraint_count", cc);
+    if let Some(ref rs) = signer {
+        ctx.set("subject.root_signer", rs);
+    }
+    // An attestation chain was located for this push — the attribute
+    // `builtin:require-signed-authorization` (§7.2) keys its unless-clause on.
+    ctx.set_bool("subject.attestation_chain_present", true);
+    ctx.set("resource.type", "attestation");
+    ctx.set("resource.repo_id", repo_id);
+    // Complete the resource scope chain so the engine's canonical scope
+    // filter (policy_engine::scope_applies) scopes policies on this
+    // audit path exactly like the HTTP middleware path. The resource
+    // tenant comes from the repo's workspace (entity lookup), never from
+    // the caller's tenant claim — and a store-read failure PROPAGATES
+    // (see doc comment) instead of silently dropping the tenant scope.
+    ctx.set("resource.workspace_id", repo_workspace_id);
+    let workspace = state
+        .workspaces
+        .find_by_id(&gyre_common::Id::new(repo_workspace_id))
+        .await
+        .context("push attestation ABAC: workspace store read failed")?;
+    if let Some(ws) = workspace {
+        ctx.set("resource.tenant_id", ws.tenant_id.to_string());
+    }
+
+    let policies = state
+        .policies
+        .list()
+        .await
+        .context("push attestation ABAC: policy store read failed")?;
+    let eval_result = crate::policy_engine::evaluate(policies, &ctx, "push", "attestation");
+
+    // Record the decision in the policy-decision audit trail, exactly as
+    // the ABAC middleware does for HTTP requests and evaluate_merge_abac /
+    // evaluate_attestation_abac do at merge time (task-129 §Audit
+    // Integration: every evaluation path records).
+    //
+    // `request_id`: this path has no HTTP request to key the decision on —
+    // the triggering push task IS the correlation key (the chain under
+    // evaluation was located via `find_by_task(task_id)`). Stamping the
+    // task id here, instead of the opaque random UUID `build_decision`
+    // generates, makes the persisted trail answer “which task's push
+    // produced this decision” when queried via
+    // GET /api/v1/policies/decisions.
+    let mut decision = crate::policy_engine::build_decision(
+        &eval_result,
+        agent_id,
+        "agent",
+        "push",
+        "attestation",
+        repo_id,
+    );
+    decision.request_id = task_id.to_string();
+    crate::policy_engine::record_decision_audit(state, &decision).await;
+
+    // §Audit Integration log-level contract (review round 6, task-129):
+    // denials at warn, allowances at debug. A Deny additionally emits an
+    // AbacDenied audit event marked enforced=false — this gate is
+    // audit-only by spec (TASK-006 Phase 1), so the push is NOT rejected;
+    // the event records that the policy evaluation returned Deny.
+    if eval_result.effect == gyre_domain::policy::PolicyEffect::Deny {
+        tracing::warn!(
+            task_id = %task_id,
+            repo_id = %repo_id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation for push denied (audit-only)" // enforcement-mode:ok
+        );
+        crate::abac_middleware::record_abac_denied_service(
+            state,
+            agent_id,
+            "attestation",
+            "push",
+            eval_result.matched_policy.as_deref(),
+            "git-push",
+            false,
+        )
+        .await;
+    } else {
+        tracing::debug!(
+            task_id = %task_id,
+            repo_id = %repo_id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            decision = ?eval_result.effect,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation for push (audit-only)" // enforcement-mode:ok
+        );
+    }
+
+    Ok(eval_result)
+}
+
+// ---------------------------------------------------------------------------
 // Audit-only attestation chain verification (TASK-006, Phase 1)
 // ---------------------------------------------------------------------------
 
@@ -4882,6 +5030,175 @@ mod tests {
             TEST_REPO_NAME.to_string(),
             repo_path_str,
         )
+    }
+
+    /// task-129 §Audit Integration (review round 5): the push-time
+    /// attestation evaluation records its PolicyDecision to the audit
+    /// trail (evaluate_push_attestation_abac). Previously this path only
+    /// logged at tracing::info, so push-time evaluations were invisible to
+    /// GET /api/v1/policies/decisions.
+    #[tokio::test]
+    async fn push_attestation_abac_records_decision_to_audit_trail() {
+        use gyre_common::{
+            Attestation, AttestationInput, AttestationMetadata, AttestationOutput, InputContent,
+            KeyBinding, OutputConstraint, PersonaRef, ScopeConstraint, SignedInput,
+        };
+        use gyre_domain::policy::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
+        };
+
+        let state = test_state();
+
+        // Workspace so the resource tenant resolves via entity lookup
+        // (repo → workspace), never the caller's tenant claim.
+        let ws = Workspace {
+            id: Id::new("ws-push-audit"),
+            tenant_id: Id::new("tenant-push-audit"),
+            name: "ws-push-audit".to_string(),
+            slug: "ws-push-audit".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        // Minimal single-root attestation chain (depth 0).
+        let leaf = Attestation {
+            id: "sha256:push-root".to_string(),
+            input: AttestationInput::Signed(SignedInput {
+                content: InputContent {
+                    spec_path: "specs/system/test.md".to_string(),
+                    spec_sha: "abc123".to_string(),
+                    workspace_id: "ws-push-audit".to_string(),
+                    repo_id: "repo-push-audit".to_string(),
+                    persona_constraints: vec![PersonaRef {
+                        name: "security".to_string(),
+                    }],
+                    meta_spec_set_sha: "def456".to_string(),
+                    scope: ScopeConstraint {
+                        allowed_paths: vec!["src/**".to_string()],
+                        forbidden_paths: vec![],
+                    },
+                },
+                output_constraints: vec![OutputConstraint {
+                    name: "scope-check".to_string(),
+                    expression: "output.check(\"scope-check\")".to_string(),
+                }],
+                valid_until: 1_700_000_000,
+                expected_generation: Some(1),
+                signature: vec![10, 20, 30],
+                key_binding: KeyBinding {
+                    public_key: vec![1, 2, 3, 4],
+                    user_identity: "user:test-signer".to_string(),
+                    issuer: "https://keycloak.example.com".to_string(),
+                    trust_anchor_id: "tenant-keycloak".to_string(),
+                    issued_at: 1_700_000_000,
+                    expires_at: 1_700_003_600,
+                    user_signature: vec![10, 20, 30, 40],
+                    platform_countersign: vec![50, 60, 70, 80],
+                },
+            }),
+            output: AttestationOutput {
+                content_hash: vec![1, 2, 3],
+                commit_sha: "aaa111".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-push-audit".to_string(),
+                repo_id: "repo-push-audit".to_string(),
+                task_id: "TASK-PUSH-AUDIT".to_string(),
+                agent_id: "agent:worker-push".to_string(),
+                chain_depth: 0,
+            },
+        };
+        let chain = vec![leaf.clone()];
+
+        // Seed an Allow keyed on the attestation-chain attribute so the
+        // recorded decision carries a real matched policy — a no-policy run
+        // would record the engine default deny with no matched_policy,
+        // which would not distinguish a faithful record from a stub that
+        // persists a hardcoded decision.
+        let allow = Policy {
+            id: Id::new("allow-attested-push"),
+            name: "allow-attested-push".to_string(),
+            description: "Allow pushes carrying an attestation chain".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 200,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.attestation_chain_present".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::Bool(true),
+            }],
+            actions: vec!["push".to_string()],
+            resource_types: vec!["attestation".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: Id::new("test"),
+            created_at: 0,
+            updated_at: 0,
+        };
+        state.policies.create(&allow).await.unwrap();
+
+        // The pushing subject belongs to the workspace's tenant
+        // ("tenant-push-audit"): the seeded builtin `tenant-isolation`
+        // Deny (950) is above this test's Allow (200), so a cross-tenant
+        // subject would flip the decision to the containment Deny — this
+        // test is about the DECISION RECORDING, not tenant containment.
+        let result = evaluate_push_attestation_abac(
+            &state,
+            "TASK-PUSH-AUDIT",
+            "repo-push-audit",
+            "ws-push-audit",
+            "agent:worker-push",
+            "tenant-push-audit",
+            &leaf,
+            &chain,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.effect, PolicyEffect::Allow);
+        assert_eq!(
+            result.matched_policy,
+            Some("allow-attested-push".to_string())
+        );
+
+        // The decision must be persisted and queryable via the audit
+        // store — the exact surface GET /api/v1/policies/decisions reads.
+        let decisions = state
+            .policies
+            .list_decisions(Some("agent:worker-push"), Some("attestation"), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            decisions.len(),
+            1,
+            "push-time evaluation must persist its decision"
+        );
+        let d = &decisions[0];
+        assert_eq!(d.subject_id, "agent:worker-push");
+        assert_eq!(d.subject_type, "agent");
+        assert_eq!(d.action, "push");
+        assert_eq!(d.resource_id, "repo-push-audit");
+        // The decision's request_id is the triggering push TASK — the
+        // correlation key for this path (no HTTP request exists), so the
+        // trail answers “which task's push produced this decision”.
+        assert_eq!(d.request_id, "TASK-PUSH-AUDIT");
+        assert_eq!(d.decision, PolicyEffect::Allow);
+        assert_eq!(
+            d.matched_policy.as_ref().map(|p| p.as_str()),
+            Some("allow-attested-push")
+        );
     }
 
     #[tokio::test]
@@ -7342,28 +7659,28 @@ specs:
             .find(|r| r.name == TEST_REPO_NAME)
             .unwrap();
         let mr_a_id = {
-            let mut mr = gyre_domain::MergeRequest::new(
+            let mr = gyre_domain::MergeRequest::new(
                 gyre_common::Id::new("mr-a"),
                 repo.id.clone(),
+                gyre_common::Id::new("ws-test"),
                 "A",
                 "feat/a".to_string(),
                 "main".to_string(),
                 0,
             );
-            mr.workspace_id = gyre_common::Id::new("ws-test");
             state.merge_requests.create(&mr).await.unwrap();
             mr.id.to_string()
         };
         let mr_b_id = {
-            let mut mr = gyre_domain::MergeRequest::new(
+            let mr = gyre_domain::MergeRequest::new(
                 gyre_common::Id::new("mr-b"),
                 repo.id.clone(),
+                gyre_common::Id::new("ws-test"),
                 "B",
                 "feat/b".to_string(),
                 "main".to_string(),
                 0,
             );
-            mr.workspace_id = gyre_common::Id::new("ws-test");
             state.merge_requests.create(&mr).await.unwrap();
             mr.id.to_string()
         };
@@ -8219,6 +8536,33 @@ specs:
         }
     }
 
+    /// Poll until the user has a notification of the given kind. Persona
+    /// owner notifications are written by a post-receive stage that runs
+    /// AFTER the approval task is created, so the notification can lag the
+    /// task — checking it exactly once races the background job.
+    async fn wait_for_notification(
+        state: &Arc<crate::AppState>,
+        user_id: &str,
+        kind: gyre_common::NotificationType,
+    ) -> gyre_common::Notification {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user_id), None, None, None, None, None, &[], 100, 0)
+                .await
+                .unwrap();
+            if let Some(n) = notifs.into_iter().find(|n| n.notification_type == kind) {
+                return n;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "notification of kind {kind:?} for user {user_id:?} was never created"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     #[test]
     fn parse_persona_changes_added_modified_deleted() {
         let input =
@@ -8331,6 +8675,26 @@ specs:
         // through the inbox.
         let owner = gyre_domain::User::new(Id::new("user-1"), "ext-user-1", "user-1", 0);
         state.users.create(&owner).await.unwrap();
+        // Email channel configured (Immediate, all bands) — the emitter-path
+        // guard below asserts the push-hook notification fans out to it.
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-1"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
 
         // Seed an APPROVED repo-scoped persona whose prompt matches the git
         // state before the push.
@@ -8451,24 +8815,43 @@ specs:
         // Exactly one approval task for this persona (no duplicates).
         assert_eq!(tasks.iter().filter(|t| t.title == title).count(), 1);
 
-        // The owner was notified.
-        let notifs = state
-            .notifications
-            .list_for_user(&Id::new("user-1"), None, None, None, None, 100, 0)
-            .await
-            .unwrap();
-        let notif = notifs
-            .iter()
-            .find(|n| {
-                n.notification_type == gyre_common::NotificationType::PersonaChangePendingApproval
-            })
-            .expect("owner must be notified");
+        // The owner was notified (polled: the notification is written after
+        // the approval task by the same background job).
+        let notif = wait_for_notification(
+            &state,
+            "user-1",
+            gyre_common::NotificationType::PersonaChangePendingApproval,
+        )
+        .await;
         assert_eq!(notif.title, title);
         assert_eq!(notif.source.entity_type, "persona");
         assert_eq!(notif.source.entity_id, "security");
         assert_eq!(notif.source.repo_id, Some(Id::new("repo-1")));
         assert_eq!(notif.workspace_id, Id::new("ws-test"));
         assert!(notif.body.as_deref().unwrap().contains("security"));
+
+        // Emitter-path guard (task-112 review F1): the persona-push hook's
+        // notification creation must go through the channel dispatcher —
+        // the configured email channel queued an outbox entry. Bounded
+        // poll: the dispatch runs in the post-receive task right after the
+        // record becomes visible.
+        let mut outbox_hit = false;
+        for _ in 0..40 {
+            let outbox = state
+                .kv_store
+                .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+                .await
+                .unwrap();
+            if outbox.iter().any(|(k, _)| k.starts_with("user-1:")) {
+                outbox_hit = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            outbox_hit,
+            "persona-push approval notification must reach the configured email channel"
+        );
     }
 
     /// End-to-end: pushing a NEW persona file registers a fresh

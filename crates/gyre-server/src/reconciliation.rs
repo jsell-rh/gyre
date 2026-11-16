@@ -1841,7 +1841,14 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
 }
 
 /// Create priority-6 MetaSpecDrift notifications for Admin/Developer/Owner
-/// members of a drifted workspace.
+/// members of a drifted workspace, plus the drifted meta-specs' owners
+/// (user-management.md §Who Gets Notified: "Spec drift detected" → Spec
+/// owner — the drift is against the workspace's effective meta-spec set,
+/// so each pinned spec's ledger owner is a recipient; owner refs resolve
+/// via `resolve_owner_ref`, `user:{name}` / `team:{slug}` forms). The
+/// member set is the meta-spec-reconciliation.md §10 accountability
+/// superset — misses no specced recipient; owners are added on top,
+/// deduplicated.
 async fn notify_drift_members(
     state: &Arc<AppState>,
     ws: &gyre_domain::Workspace,
@@ -1857,6 +1864,9 @@ async fn notify_drift_members(
         }
     };
 
+    // Recipients: role-based members + the effective set's spec owners.
+    let mut recipients: Vec<Id> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for member in &members {
         if !matches!(
             member.role,
@@ -1866,10 +1876,39 @@ async fn notify_drift_members(
         ) {
             continue;
         }
+        if seen.insert(member.user_id.as_str().to_string()) {
+            recipients.push(member.user_id.clone());
+        }
+    }
+    // The effective set's pinned specs are the specs the code drifted
+    // from — their owners (ledger `owner` field) are routing recipients.
+    if let Ok(effective) = resolve_effective_meta_spec_set(state, ws).await {
+        let pinned_paths: Vec<&str> = effective
+            .personas
+            .values()
+            .map(|e| e.path.as_str())
+            .chain(effective.principles.iter().map(|e| e.path.as_str()))
+            .chain(effective.standards.iter().map(|e| e.path.as_str()))
+            .chain(effective.process.iter().map(|e| e.path.as_str()))
+            .collect();
+        for path in pinned_paths {
+            let owner = match state.spec_ledger.find_by_path(path).await {
+                Ok(Some(entry)) => entry.owner,
+                _ => continue,
+            };
+            for owner_id in crate::notifications::resolve_owner_ref(state, &ws.id, &owner).await {
+                if seen.insert(owner_id.as_str().to_string()) {
+                    recipients.push(owner_id);
+                }
+            }
+        }
+    }
+
+    for user_id in &recipients {
         let mut notif = Notification::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             ws.id.clone(),
-            member.user_id.clone(),
+            user_id.clone(),
             NotificationType::MetaSpecDrift,
             format!(
                 "Meta-spec drift detected in workspace '{}' — code was produced under a superseded meta-spec set",
@@ -1887,12 +1926,15 @@ async fn notify_drift_members(
         );
         notif.source.entity_type = "workspace".to_string();
         notif.source.entity_id = ws.id.to_string();
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
-                user = %member.user_id,
+                user = %user_id,
                 error = %e,
                 "sweep: failed to create MetaSpecDrift notification"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 }
@@ -1932,6 +1974,163 @@ fn record_drift_metrics(state: &AppState, workspace_id: &str, drifted_repos: &[S
             .with_label_values(&[workspace_id, repo])
             .inc();
     }
+}
+
+// ---------------------------------------------------------------------------
+// §9 — Merge gate drift check
+// ---------------------------------------------------------------------------
+
+/// Synthetic gate id for the meta-spec drift warning recorded as a gate
+/// result on an MR (§9: the drift appears in the MR's gate results as
+/// `[WARN] meta-spec-drift: ...`). The gate result is informational — it
+/// carries `GateStatus::Passed` so it never blocks a merge by itself;
+/// blocking is decided by the workspace merge policy
+/// (`require_current_meta_spec_set`).
+pub const META_SPEC_DRIFT_GATE_ID: &str = "meta-spec-drift";
+
+/// A detected meta-spec set drift for one MR (§9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetaSpecDrift {
+    /// Meta-spec set SHA recorded in the MR's provenance attestation —
+    /// the set under which the code was produced.
+    pub produced_set_sha: String,
+    /// The workspace's current meta-spec set SHA.
+    pub current_set_sha: String,
+}
+
+/// Format the drift warning exactly as §9 specifies:
+/// `[WARN] meta-spec-drift: code produced under meta-spec set {old_sha},
+/// current is {new_sha}. Reconciliation may be needed.`
+pub fn format_meta_spec_drift_warning(drift: &MetaSpecDrift) -> String {
+    format!(
+        "[WARN] meta-spec-drift: code produced under meta-spec set {}, current is {}. \
+         Reconciliation may be needed.",
+        drift.produced_set_sha, drift.current_set_sha
+    )
+}
+
+/// Parse a drift warning produced by `format_meta_spec_drift_warning`.
+///
+/// The format and its parser live together so the merge-queue graph can
+/// surface a recorded drift warning gate result without re-deriving it from
+/// provenance. Returns `None` for any other output.
+pub fn parse_meta_spec_drift_warning(output: &str) -> Option<MetaSpecDrift> {
+    let rest = output.strip_prefix("[WARN] meta-spec-drift: code produced under meta-spec set ")?;
+    let (produced_set_sha, rest) = rest.split_once(", current is ")?;
+    let current_set_sha = rest.strip_suffix(". Reconciliation may be needed.")?;
+    if produced_set_sha.is_empty() || current_set_sha.is_empty() {
+        return None;
+    }
+    Some(MetaSpecDrift {
+        produced_set_sha: produced_set_sha.to_string(),
+        current_set_sha: current_set_sha.to_string(),
+    })
+}
+
+/// Extract a non-empty `meta_spec_set_sha` from an attestation's signed input.
+fn signed_meta_spec_set_sha(att: &gyre_common::Attestation) -> Option<&str> {
+    match &att.input {
+        gyre_common::AttestationInput::Signed(si) => {
+            Some(si.content.meta_spec_set_sha.as_str()).filter(|s| !s.is_empty())
+        }
+        gyre_common::AttestationInput::Derived(_) => None,
+    }
+}
+
+/// Resolve the meta-spec set SHA under which an MR's code was produced.
+///
+/// Looks up the MR's authorization provenance the same way the merge-time
+/// attestation note does: by the source branch head commit first, then by the
+/// author agent's current task. The recorded SHA comes from the chain's root
+/// `SignedInput` (the work authorization). Returns `None` when the MR has no
+/// attestation or the attestation records no set SHA — §9 skips the check
+/// gracefully in that case.
+pub async fn mr_attestation_meta_spec_set_sha(
+    state: &AppState,
+    mr: &gyre_domain::MergeRequest,
+) -> Option<String> {
+    let attestation = find_mr_attestation(state, mr).await?;
+    attestation_recorded_set_sha(state, &attestation).await
+}
+
+/// Find the provenance attestation for an MR (commit first, task fallback).
+async fn find_mr_attestation(
+    state: &AppState,
+    mr: &gyre_domain::MergeRequest,
+) -> Option<gyre_common::Attestation> {
+    // By source branch head commit — the commit the agent produced.
+    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
+        if let Some(source_sha) =
+            crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
+                .await
+        {
+            if let Ok(Some(att)) = state.chain_attestations.find_by_commit(&source_sha).await {
+                return Some(att);
+            }
+        }
+    }
+
+    // Fallback: the author agent's current task.
+    if let Some(ref author_id) = mr.author_agent_id {
+        if let Ok(Some(agent)) = state.agents.find_by_id(author_id).await {
+            if let Some(ref task_id) = agent.current_task_id {
+                if let Ok(atts) = state
+                    .chain_attestations
+                    .find_by_task(task_id.as_str())
+                    .await
+                {
+                    if let Some(leaf) = atts.iter().max_by_key(|a| a.metadata.chain_depth) {
+                        return Some(leaf.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Read the recorded meta-spec set SHA from an attestation, walking to the
+/// chain's root `SignedInput` when the found node is derived.
+async fn attestation_recorded_set_sha(
+    state: &AppState,
+    att: &gyre_common::Attestation,
+) -> Option<String> {
+    if let Some(sha) = signed_meta_spec_set_sha(att) {
+        return Some(sha.to_string());
+    }
+    // load_chain returns root → leaf; the root carries the work authorization.
+    let chain = state.chain_attestations.load_chain(&att.id).await.ok()?;
+    chain
+        .iter()
+        .find_map(signed_meta_spec_set_sha)
+        .map(|sha| sha.to_string())
+}
+
+/// §9 merge-gate drift evaluation for one MR.
+///
+/// Compares the meta-spec set SHA recorded in the MR's provenance attestation
+/// against the workspace's current set SHA. Returns `None` (no drift) when:
+/// - the workspace has no meta-spec set bound (nothing to conform to),
+/// - the MR has no attestation, or the attestation records no set SHA
+///   (produced before any set was bound — §9 skips the check gracefully),
+/// - the recorded SHA matches the current set (pass).
+pub async fn mr_meta_spec_drift(
+    state: &AppState,
+    mr: &gyre_domain::MergeRequest,
+) -> Option<MetaSpecDrift> {
+    let current_set_sha = crate::compute_meta_spec_set_sha(state, &mr.workspace_id).await;
+    if current_set_sha.is_empty() {
+        return None;
+    }
+    let produced_set_sha = mr_attestation_meta_spec_set_sha(state, mr).await?;
+    if produced_set_sha == current_set_sha {
+        return None;
+    }
+    Some(MetaSpecDrift {
+        produced_set_sha,
+        current_set_sha,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3176,15 +3375,15 @@ mod tests {
         task.repo_id = Id::new(repo_id);
         state.tasks.create(&task).await.unwrap();
 
-        let mut mr = gyre_domain::MergeRequest::new(
+        let mr = gyre_domain::MergeRequest::new(
             Id::new("mr-auto"),
             Id::new(repo_id),
+            Id::new(ws_id),
             "Reconcile backend-developer v4",
             "reconcile/abc/spec",
             "main",
             now(),
         );
-        mr.workspace_id = Id::new(ws_id);
         state.merge_requests.create(&mr).await.unwrap();
         (mr, task)
     }
@@ -3407,6 +3606,8 @@ mod tests {
                 Some(6),
                 Some(6),
                 None,
+                None,
+                &[],
                 10,
                 0,
             )
@@ -3450,6 +3651,184 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_drift_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: the sweep's MetaSpecDrift creation must go
+        // through the channel dispatcher — a configured email channel
+        // queues an outbox entry. Fails if the sweep bypasses
+        // dispatch_to_channels (review finding: fan-out wiring is easy to
+        // drop on new notification-creation paths).
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-sweep-chan").await;
+        let repo = make_repo(&state, "repo-chan", "ws-sweep-chan").await;
+
+        let set = make_set("ws-sweep-chan", vec![pin("backend-developer", "a1")]);
+        put_set(&state, "ws-sweep-chan", &set).await;
+
+        // Provenance under an OLD set SHA → drift.
+        let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-chan", "deadbeef", now());
+        state.chain_attestations.save(&old_att).await.unwrap();
+
+        // Admin member with an email channel configured (Immediate, all
+        // bands) — the dispatcher must fan the drift notification out to it.
+        let membership = WorkspaceMembership {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: Id::new("user-chan"),
+            workspace_id: ws.id.clone(),
+            role: WorkspaceRole::Admin,
+            invited_by: Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(now()),
+            created_at: now(),
+        };
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-chan"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        run_conformance_sweep(&state).await.unwrap();
+
+        // In-app record exists …
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-chan"),
+                Some(&ws.id),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MetaSpecDrift),
+            "expected in-app MetaSpecDrift notification"
+        );
+        // … and the configured email channel fired.
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-chan:")),
+            "sweep drift notification must reach the configured email channel"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_drift_notification_routes_to_meta_spec_owners() {
+        // user-management.md §Who Gets Notified: "Spec drift detected" →
+        // Spec owner. The conformance drift is against the workspace's
+        // effective meta-spec set, so the pinned specs' ledger owners are
+        // recipients — here a plain Viewer (no accountability role), who
+        // must receive MetaSpecDrift purely through owner routing.
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-sweep-own").await;
+        let repo = make_repo(&state, "repo-sown", "ws-sweep-own").await;
+
+        let set = make_set("ws-sweep-own", vec![pin("backend-developer", "a1")]);
+        put_set(&state, "ws-sweep-own", &set).await;
+
+        // Provenance under an OLD set SHA → drift.
+        let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-own", "deadbeef", now());
+        state.chain_attestations.save(&old_att).await.unwrap();
+
+        // The pinned spec's owner: a Viewer member (not
+        // Admin/Developer/Owner — only owner routing can reach them).
+        let mut owner = gyre_domain::User::new(
+            Id::new("owner-viewer"),
+            "ext-owner-viewer",
+            "owner-viewer",
+            1_000_000,
+        );
+        owner.username = "owner-viewer".to_string();
+        state.users.create(&owner).await.unwrap();
+        let membership = WorkspaceMembership {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: Id::new("owner-viewer"),
+            workspace_id: ws.id.clone(),
+            role: WorkspaceRole::Viewer,
+            invited_by: Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(now()),
+            created_at: now(),
+        };
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        // Ledger entry for the pinned spec naming that owner.
+        let entry = gyre_domain::SpecLedgerEntry {
+            path: "backend-developer".to_string(),
+            title: "Backend Developer persona".to_string(),
+            owner: "user:owner-viewer".to_string(),
+            kind: Some("meta:persona".to_string()),
+            current_sha: "a1".to_string(),
+            approval_mode: "human_only".to_string(),
+            approval_status: gyre_domain::ApprovalStatus::Approved,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+            repo_id: None,
+            workspace_id: Some("ws-sweep-own".to_string()),
+        };
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        run_conformance_sweep(&state).await.unwrap();
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("owner-viewer"),
+                Some(&ws.id),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            notifs.len(),
+            1,
+            "the drifted meta-spec's owner must receive the MetaSpecDrift notification"
+        );
+        assert_eq!(notifs[0].notification_type, NotificationType::MetaSpecDrift);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3935,6 +4314,8 @@ mod tests {
                 Some(6),
                 Some(6),
                 None,
+                None,
+                &[],
                 10,
                 0,
             )
@@ -4321,6 +4702,158 @@ mod tests {
         );
     }
 
+    // -- §9: merge-gate drift evaluation -------------------------------------
+
+    /// Create an MR whose author agent's current task carries the given
+    /// provenance attestation (the task-based lookup path — the commit-based
+    /// path needs a real git repo on disk).
+    async fn make_mr_with_task_attestation(
+        state: &Arc<AppState>,
+        mr_id: &str,
+        ws_id: &str,
+        repo: &Repository,
+        att: gyre_common::Attestation,
+    ) -> gyre_domain::MergeRequest {
+        let mut agent = gyre_domain::Agent::new(Id::new(format!("agent-{mr_id}")), "author", now());
+        agent.workspace_id = Id::new(ws_id);
+        agent.current_task_id = Some(Id::new(att.metadata.task_id.clone()));
+        state.agents.create(&agent).await.unwrap();
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new(mr_id),
+            repo.id.clone(),
+            Id::new(ws_id),
+            format!("MR {mr_id}"),
+            "feat/x",
+            "main",
+            now(),
+        );
+        mr.author_agent_id = Some(agent.id.clone());
+        state.merge_requests.create(&mr).await.unwrap();
+        mr
+    }
+
+    fn drift_test_set(ws_id: &str) -> crate::api::meta_specs::MetaSpecSet {
+        make_set(ws_id, vec![pin("backend-developer", "a1")])
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_matching_set_sha_passes() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-drift-1").await;
+        let repo = make_repo(&state, "repo-drift-1", "ws-drift-1").await;
+        put_set(&state, "ws-drift-1", &drift_test_set("ws-drift-1")).await;
+        let current = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
+        assert!(!current.is_empty());
+
+        // Provenance under the CURRENT set SHA → no drift (§9 pass case).
+        let att = sample_attestation(repo.id.as_str(), "ws-drift-1", &current, now());
+        let mr =
+            make_mr_with_task_attestation(&state, "mr-drift-1", "ws-drift-1", &repo, att).await;
+
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_mismatched_set_sha_reports_drift() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-drift-2").await;
+        let repo = make_repo(&state, "repo-drift-2", "ws-drift-2").await;
+        put_set(&state, "ws-drift-2", &drift_test_set("ws-drift-2")).await;
+        let current = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
+
+        // Provenance under an OLD set SHA → drift.
+        let att = sample_attestation(repo.id.as_str(), "ws-drift-2", "deadbeef", now());
+        let mr =
+            make_mr_with_task_attestation(&state, "mr-drift-2", "ws-drift-2", &repo, att).await;
+
+        let drift = mr_meta_spec_drift(&state, &mr)
+            .await
+            .expect("drift expected");
+        assert_eq!(drift.produced_set_sha, "deadbeef");
+        assert_eq!(drift.current_set_sha, current);
+
+        // The warning matches the §9 format exactly and round-trips.
+        let warning = format_meta_spec_drift_warning(&drift);
+        assert!(
+            warning.starts_with(
+                "[WARN] meta-spec-drift: code produced under meta-spec set deadbeef, current is "
+            ),
+            "warning must follow the §9 format: {warning}"
+        );
+        assert!(warning.ends_with(". Reconciliation may be needed."));
+        assert_eq!(
+            parse_meta_spec_drift_warning(&warning).as_ref(),
+            Some(&drift)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_mr_without_attestation_skips_gracefully() {
+        let state = test_state();
+        let _ws = make_workspace(&state, "ws-drift-3").await;
+        let repo = make_repo(&state, "repo-drift-3", "ws-drift-3").await;
+        put_set(&state, "ws-drift-3", &drift_test_set("ws-drift-3")).await;
+
+        // MR with no author agent and no attestation — the check must skip
+        // without crashing (§9: "MRs without attestation skip the check").
+        let mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-drift-3"),
+            repo.id.clone(),
+            Id::new("ws-drift-3"),
+            "MR no attestation",
+            "feat/y",
+            "main",
+            now(),
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_workspace_without_set_skips() {
+        let state = test_state();
+        let _ws = make_workspace(&state, "ws-drift-4").await;
+        let repo = make_repo(&state, "repo-drift-4", "ws-drift-4").await;
+        // No set bound — nothing to conform to.
+
+        let att = sample_attestation(repo.id.as_str(), "ws-drift-4", "deadbeef", now());
+        let mr =
+            make_mr_with_task_attestation(&state, "mr-drift-4", "ws-drift-4", &repo, att).await;
+
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_empty_recorded_sha_skips() {
+        let state = test_state();
+        let _ws = make_workspace(&state, "ws-drift-5").await;
+        let repo = make_repo(&state, "repo-drift-5", "ws-drift-5").await;
+        put_set(&state, "ws-drift-5", &drift_test_set("ws-drift-5")).await;
+
+        // Provenance recorded before any set was bound (empty SHA) — cannot
+        // assert drift against an unknown baseline, same rule as the sweep.
+        let att = sample_attestation(repo.id.as_str(), "ws-drift-5", "", now());
+        let mr =
+            make_mr_with_task_attestation(&state, "mr-drift-5", "ws-drift-5", &repo, att).await;
+
+        assert_eq!(mr_meta_spec_drift(&state, &mr).await, None);
+    }
+
+    #[test]
+    fn drift_warning_parse_rejects_foreign_output() {
+        assert_eq!(parse_meta_spec_drift_warning("[PASS] cargo test"), None);
+        assert_eq!(parse_meta_spec_drift_warning(""), None);
+        assert_eq!(
+            parse_meta_spec_drift_warning(
+                "[WARN] meta-spec-drift: code produced under meta-spec set , current is x. Reconciliation may be needed."
+            ),
+            None,
+            "empty produced SHA must not parse"
+        );
+    }
     // -- §8: tenant-scope meta-spec changes -----------------------------------
 
     fn make_tenant_set(

@@ -12,9 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tracing::{info, instrument};
 
-use crate::AppState;
-
 use crate::auth::AuthenticatedAgent;
+use crate::AppState;
 
 use super::error::ApiError;
 use super::{new_id, now_secs};
@@ -163,6 +162,14 @@ pub struct ReviewResponse {
     pub reviewer_agent_id: String,
     pub decision: String,
     pub body: Option<String>,
+    /// Gate persona attribution (agent-gates.md §Gate Agent Lifecycle):
+    /// the persona of the gate whose agent produced this review. `None` for
+    /// reviews not produced by a gate agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_persona: Option<String>,
+    /// Id of the gate whose agent produced this review, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_id: Option<String>,
     pub created_at: u64,
 }
 
@@ -174,6 +181,8 @@ impl From<Review> for ReviewResponse {
             reviewer_agent_id: r.reviewer_agent_id,
             decision: review_decision_str(&r.decision),
             body: r.body,
+            reviewer_persona: r.reviewer_persona,
+            gate_id: r.gate_id.map(|g| g.to_string()),
             created_at: r.created_at,
         }
     }
@@ -273,9 +282,20 @@ pub async fn create_mr(
 
     let now = now_secs();
     let repo_id = Id::new(req.repository_id);
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement). Refuse to create an MR whose scope cannot be resolved
+    // instead of fabricating a "default" workspace identity — a repo that
+    // does not exist has no workspace, and an MR without its mandatory
+    // scope would silently ride a fabricated identity downstream.
+    let repo = state
+        .repos
+        .find_by_id(&repo_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repository {repo_id} not found")))?;
     let mut mr = MergeRequest::new(
         new_id(),
         repo_id.clone(),
+        repo.workspace_id.clone(),
         req.title,
         req.source_branch.clone(),
         req.target_branch.clone(),
@@ -328,38 +348,35 @@ pub async fn create_mr(
     };
 
     // Compute diff stats, conflict detection, and auto-detect branch lineage deps.
-    if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        if let Ok(diff) = state
-            .git_ops
-            .diff(&repo.path, &req.target_branch, &req.source_branch)
-            .await
-        {
-            mr.diff_stats = Some(gyre_domain::DiffStats {
-                files_changed: diff.files_changed,
-                insertions: diff.insertions,
-                deletions: diff.deletions,
-            });
-        }
-        if let Ok(can_merge) = state
-            .git_ops
-            .can_merge(&repo.path, &req.source_branch, &req.target_branch)
-            .await
-        {
-            mr.has_conflicts = Some(!can_merge);
-        }
-        // Auto-detect branch lineage dependencies (P4).
-        let lineage_deps = detect_lineage_deps(
-            &state,
-            &repo_id,
-            &repo.path,
-            &req.source_branch,
-            &repo.default_branch,
-        )
-        .await;
-        if !lineage_deps.is_empty() {
-            mr.depends_on = lineage_deps;
-        }
+    if let Ok(diff) = state
+        .git_ops
+        .diff(&repo.path, &req.target_branch, &req.source_branch)
+        .await
+    {
+        mr.diff_stats = Some(gyre_domain::DiffStats {
+            files_changed: diff.files_changed,
+            insertions: diff.insertions,
+            deletions: diff.deletions,
+        });
+    }
+    if let Ok(can_merge) = state
+        .git_ops
+        .can_merge(&repo.path, &req.source_branch, &req.target_branch)
+        .await
+    {
+        mr.has_conflicts = Some(!can_merge);
+    }
+    // Auto-detect branch lineage dependencies (P4).
+    let lineage_deps = detect_lineage_deps(
+        &state,
+        &repo_id,
+        &repo.path,
+        &req.source_branch,
+        &repo.default_branch,
+    )
+    .await;
+    if !lineage_deps.is_empty() {
+        mr.depends_on = lineage_deps;
     }
 
     // Merge explicit deps with lineage deps: explicit takes precedence,
@@ -954,21 +971,52 @@ pub async fn transition_mr_status(
             .await;
     }
 
-    // Auto-track mr.merged analytics event
-    if is_merge {
-        let ev = AnalyticsEvent::new(
-            new_id(),
-            "mr.merged",
-            mr.author_agent_id.as_ref().map(|id| id.to_string()),
+    // Auto-track mr.merged / mr.closed analytics events (analytics.md §Auto-Emitted Events).
+    if is_merge || is_close {
+        // gate_count: number of gate results recorded for this MR.
+        let gate_count = state
+            .gate_results
+            .list_by_mr_id(mr.id.as_str())
+            .await
+            .map(|rs| rs.len() as u64)
+            .unwrap_or(0);
+        // queue_wait_secs: time from merge-queue enqueue to now, if the MR
+        // passed through the queue.
+        let queue_wait_secs = state
+            .merge_queue
+            .list_queue()
+            .await
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|e| e.merge_request_id == mr.id)
+                    .map(|e| ts.saturating_sub(e.enqueued_at))
+            });
+
+        let event_name = if is_merge { "mr.merged" } else { "mr.closed" };
+        let properties = if is_merge {
             serde_json::json!({
                 "mr_id": mr.id.to_string(),
-                // Scope facets (search.md §Searchable Entities: Activity
-                // Event is filterable by workspace/repo).
-                "workspace_id": mr.workspace_id.to_string(),
                 "repo_id": mr.repository_id.to_string(),
-            }),
+                "gate_count": gate_count,
+                "queue_wait_secs": queue_wait_secs,
+            })
+        } else {
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "reason": "closed_without_merge",
+            })
+        };
+        let ev = AnalyticsEvent::new(
+            new_id(),
+            event_name,
+            mr.author_agent_id.as_ref().map(|id| id.to_string()),
+            properties,
             ts,
-        );
+        )
+        .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
         let _ = state.analytics.record(&ev).await;
         // search.md §Searchable Entities: activity events are indexed on write.
         crate::search_indexer::index(&state, crate::search_indexer::activity_event_document(&ev))
@@ -1024,7 +1072,7 @@ pub async fn list_comments(
 #[instrument(skip(state, auth, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
-    auth: crate::auth::AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
@@ -1041,26 +1089,163 @@ pub async fn submit_review(
     // reviewer id. Exact-match capability (review F3); `validation:report`
     // validators have no review-submission capability at all (F2) and are
     // additionally blocked from this route by the ABAC allow-list.
-    let reviewer_agent_id = if let Some(scope) = auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
+    //
+    // The same binding applies to EVERY agent-token principal (review
+    // repair, manifest gates): an agent JWT or legacy agent UUID token
+    // authenticates exactly one agent, so a review it submits recorded
+    // under a request-body reviewer id would let any spawned agent forge a
+    // review attributed to a persona-holding, attested agent — defeating
+    // the manifest gates' min_attestation_level / stack_hash constraints
+    // (spec-registry.md §Agent Approver / Gate Schema).
+    //
+    // Human principals (user JWT / API key / impersonation) may record a
+    // review under the request-body reviewer id ONLY when it names their
+    // own verified identity (`auth.user_id` — the id the credential
+    // actually resolves to), mirroring task-193's approve_spec, which
+    // derives the approver identity from verified claims for every
+    // principal. A body reviewer naming a DIFFERENT agent from a human
+    // caller is attribution forgery against the same manifest-gate
+    // constraints (the Review row attributes only the named agent;
+    // nothing records the submitting human), so it is reserved for Admin
+    // principals recording on behalf of an agent. The comparison uses
+    // `user_id`, never `agent_id`: API-key/JWT auth fills `agent_id` from
+    // the user-controlled display name, so comparing against it would let
+    // a user named after a gate agent forge that agent's review. The
+    // server's system token keeps the request-body reviewer (server-
+    // internal flows).
+    //
+    // §1 Token Scoping: the scope claim is a list; read it through the
+    // extractor-derived `auth.scope` (mirrored from signature-verified
+    // claims), never the raw JSON string form — an array claim read as a
+    // string silently fails open.
+    let agent_token_principal = auth.user_id.is_none() && !auth.is_system_principal();
+    let reviewer_agent_id = if agent_token_principal
+        || auth
+            .scope
+            .iter()
+            .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE)
     {
-        if scope == crate::auth::REVIEW_SUBMIT_SCOPE {
-            auth.agent_id.clone()
-        } else {
-            req.reviewer_agent_id
+        auth.agent_id.clone()
+    } else if auth.user_id.is_some() {
+        let caller_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+        let own_identity =
+            auth.user_id.as_ref().map(|uid| uid.as_str()) == Some(req.reviewer_agent_id.as_str());
+        if !caller_admin && !own_identity {
+            return Err(ApiError::Forbidden(format!(
+                "a human caller may record a review only under its own identity; \
+                 recording a review for another reviewer requires an Admin principal \
+                 (requested reviewer: {})",
+                req.reviewer_agent_id
+            )));
         }
+        req.reviewer_agent_id
     } else {
         req.reviewer_agent_id
     };
 
     let decision = parse_review_decision(&req.decision)?;
-    let mut review = Review::new(new_id(), mr_id, reviewer_agent_id, decision, now_secs());
+    let mut review = Review::new(
+        new_id(),
+        mr_id.clone(),
+        reviewer_agent_id,
+        decision.clone(),
+        now_secs(),
+    );
     review.body = req.body;
 
+    // Gate-agent attribution (agent-gates.md §Gate Agent Lifecycle: "gate
+    // agent reviews are attributed — the review shows which gate persona
+    // produced it"). The scoped reviewer token's `task_id` claim carries the
+    // id of the gate that minted it (see `mint_scoped`), so the persona and
+    // gate binding are derived server-side from the token — a caller-
+    // supplied attribution would be forgeable exactly like a forged
+    // reviewer_agent_id. A token whose gate no longer exists records no
+    // attribution (the identity is still bound to the token subject above).
+    // §1 Token Scoping: the scope claim is a list; read it through the
+    // extractor-derived `auth.scope` (mirrored from signature-verified
+    // claims), never the raw JSON string form — an array claim read as a
+    // string silently fails open (this gate would never fire, stripping
+    // every gate review of its persona attribution).
+    if auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE)
+    {
+        let token_gate_id = auth
+            .jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("task_id"))
+            .and_then(|s| s.as_str());
+        if let Some(gate_id) = token_gate_id {
+            match state.quality_gates.find_by_id(gate_id).await {
+                Ok(Some(gate)) => {
+                    review.gate_id = Some(gate.id.clone());
+                    review.reviewer_persona = gate.persona.clone();
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        mr_id = %id,
+                        gate_id,
+                        "scoped reviewer token references a gate that no longer exists; review recorded without gate attribution"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        mr_id = %id,
+                        gate_id,
+                        error = %e,
+                        "gate lookup for review attribution failed; review recorded without gate attribution"
+                    );
+                }
+            }
+        }
+    }
+
     state.reviews.submit_review(&review).await?;
+
+    // HSI §12 Judgment Ledger: a human (not an agent acting unattended) approving
+    // an MR that has failing gate results is an override — the strongest judgment
+    // signal in the ledger. One event per failed gate result. Failure propagates:
+    // a silently dropped judgment event is audit theatre.
+    if decision == ReviewDecision::Approved && auth.user_id.is_some() {
+        let results = state.gate_results.list_by_mr_id(mr_id.as_str()).await?;
+        for r in results
+            .iter()
+            .filter(|r| r.status == gyre_common::GateStatus::Failed)
+        {
+            let gate = state.quality_gates.find_by_id(r.gate_id.as_str()).await?;
+            let event = gyre_domain::AuditEvent::new(
+                new_id(),
+                gyre_domain::AuditEventType::GateOverride,
+                None,
+                auth.user_id.clone(),
+                None,
+                Some(mr.workspace_id.clone()),
+                gate.as_ref().map(|g| g.repo_id.clone()),
+                "merge_request".to_string(),
+                Some(mr_id.as_str().to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({
+                    "mr_id": mr_id.as_str(),
+                    "gate_id": r.gate_id.as_str(),
+                    "gate_type": gate.as_ref().map(|g| g.gate_type.clone()),
+                    "gate_name": gate.as_ref().map(|g| g.name.clone()),
+                    "from_status": "failed",
+                    // The gate row itself is not mutated by a human approval —
+                    // "overridden" is the honest transition name.
+                    "to_status": "overridden",
+                }),
+                None,
+                None,
+                now_secs(),
+            );
+            state.audit.record(&event).await?;
+            let _ = state
+                .audit_broadcast_tx
+                .send(serde_json::to_string(&event).unwrap_or_default());
+        }
+    }
+
     // search.md §Searchable Entities + §Index Updates ("MR created/reviewed ->
     // index updated"): reviews are indexed on submission.
     crate::search_indexer::index(&state, crate::search_indexer::review_document(&review, &mr))
@@ -1327,12 +1512,29 @@ pub async fn get_attestation(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
     use gyre_domain::MergeRequest;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
+    async fn app() -> Router {
+        let state = test_state();
+        seed_repo(&state).await;
+        crate::api::api_router().with_state(state)
+    }
+
+    /// create_mr resolves the MR's workspace scope from its repository (M34
+    /// hierarchy enforcement) and refuses unknown repositories — seed the
+    /// repository these tests open MRs against.
+    async fn seed_repo(state: &crate::AppState) {
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-1"),
+            gyre_common::Id::new("ws1"),
+            "repo-1",
+            "/repos/repo-1",
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -1368,7 +1570,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_get_mr() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Add feature").await;
 
         let resp = app
@@ -1388,7 +1590,7 @@ mod tests {
 
     #[tokio::test]
     async fn mr_status_transition_valid() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Approve me").await;
 
         let body = serde_json::json!({ "status": "approved" });
@@ -1411,7 +1613,7 @@ mod tests {
 
     #[tokio::test]
     async fn mr_status_transition_invalid() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Invalid trans").await;
         let body = serde_json::json!({ "status": "merged" });
         let resp = app
@@ -1434,6 +1636,7 @@ mod tests {
     #[tokio::test]
     async fn closing_mr_deletes_gate_trace() {
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Close deletes trace").await;
 
@@ -1492,6 +1695,7 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
 
         let state = make_test_state_with_jwt();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, id) = create_test_mr(app, "Self-approve attempt").await;
 
@@ -1542,8 +1746,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn closing_mr_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: mr.closed carries mr_id, repo_id,
+        // reason; scope fields workspace_id/repo_id are attached for filtering.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Analytics close").await;
+
+        let body = serde_json::json!({ "status": "closed" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.closed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], mr_id);
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert!(
+            ev.properties["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "reason must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn merging_mr_emits_analytics_event_with_gate_count() {
+        // analytics.md §Auto-Emitted Events: mr.merged carries mr_id, repo_id,
+        // gate_count, queue_wait_secs.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Analytics merge").await;
+
+        // Approve first (Open → Merged is invalid; Open → Approved → Merged).
+        let body = serde_json::json!({ "status": "approved" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Seed two gate results so gate_count is non-zero.
+        for gid in ["gate-1", "gate-2"] {
+            state
+                .gate_results
+                .save(&gyre_domain::GateResult {
+                    id: gyre_common::Id::new(format!("gr-{gid}")),
+                    gate_id: gyre_common::Id::new(gid),
+                    mr_id: gyre_common::Id::new(&mr_id),
+                    status: gyre_domain::GateStatus::Passed,
+                    output: None,
+                    started_at: None,
+                    finished_at: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let body = serde_json::json!({ "status": "merged" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("mr.merged"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.merged event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], mr_id);
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert_eq!(
+            ev.properties["gate_count"], 2,
+            "gate_count counts gate results"
+        );
+        // The MR never entered the merge queue — queue_wait_secs is absent/null.
+        assert!(
+            ev.properties
+                .get("queue_wait_secs")
+                .is_none_or(|v| v.is_null()),
+            "queue_wait_secs must be null when the MR never queued"
+        );
+    }
+
+    #[tokio::test]
     async fn list_mrs_by_repository() {
-        let app = app();
+        let app = app().await;
         let (_, _) = create_test_mr(app.clone(), "MR for repo").await;
 
         let resp = app
@@ -1563,6 +1888,7 @@ mod tests {
     #[tokio::test]
     async fn list_mrs_per_page_keeps_newest() {
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, oldest) = create_test_mr(app, "oldest").await;
         let (app, middle) = create_test_mr(app, "middle").await;
@@ -1608,6 +1934,7 @@ mod tests {
     #[tokio::test]
     async fn get_mr_not_found() {
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-requests/no-such")
@@ -1621,7 +1948,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_and_list_comments() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Comment test").await;
 
         let body = serde_json::json!({
@@ -1660,7 +1987,7 @@ mod tests {
 
     #[tokio::test]
     async fn comment_with_file_and_line() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "File comment test").await;
 
         let body = serde_json::json!({
@@ -1686,8 +2013,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_gate_review_records_persona_attribution() {
+        // agent-gates.md §Gate Agent Lifecycle: "gate agent reviews are
+        // attributed — the review shows which gate persona produced it".
+        // A reviewer authenticating with a gate-agent scoped token gets its
+        // persona and gate binding derived server-side from the token's
+        // task_id claim (the gate id); nothing in the request body can
+        // forge or suppress it.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Attribution test").await;
+
+        // A real gate row: the persona the review must be attributed to.
+        let gate = gyre_domain::QualityGate {
+            id: gyre_common::Id::new("gate-attrib-1"),
+            repo_id: gyre_common::Id::new("repo-1"),
+            name: "security-review".to_string(),
+            gate_type: gyre_domain::GateType::AgentReview,
+            command: Some("true".to_string()),
+            required_approvals: None,
+            persona: Some("personas/security.md".to_string()),
+            validation_type: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            position: 0,
+            created_at: 1_700_000_000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        // Scoped reviewer token, minted exactly as the gate executor mints
+        // them: task_id carries the gate id, tenant resolved fail-closed
+        // from the MR's workspace (task-130 hierarchy claims), persona slug
+        // from the gate persona reference. The API-created MR binds to the
+        // seeded repo fixture's workspace (create_mr resolves the scope from
+        // the repository row), but the mem workspace store has no row for
+        // it, so seed that workspace row for the tenant resolution —
+        // never a fabricated literal at the mint site.
+        let mr = state
+            .merge_requests
+            .find_by_id(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap()
+            .expect("test MR");
+        if state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            let ws = gyre_domain::Workspace::new(
+                mr.workspace_id.clone(),
+                gyre_common::Id::new("default"),
+                format!("Test workspace {}", mr.workspace_id.as_str()),
+                mr.workspace_id.as_str().to_string(),
+                1_700_000_000,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
+        let workspace = state
+            .workspaces
+            .find_by_id(&mr.workspace_id)
+            .await
+            .unwrap()
+            .expect("test MR workspace");
+        let gate_agent_id = "gate-review-attrib".to_string();
+        let token = state
+            .agent_signing_key
+            .mint_scoped(
+                &gate_agent_id,
+                gate.id.as_str(),
+                "forge",
+                &state.base_url,
+                60,
+                crate::auth::REVIEW_SUBMIT_SCOPE,
+                workspace.tenant_id.as_str(),
+                Some("security"),
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &gate_agent_id, token.clone())
+            .await
+            .unwrap();
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "forged-reviewer",
+            "decision": "approved",
+            "body": "checked against the security persona"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], gate_agent_id);
+        assert_eq!(
+            json["reviewer_persona"], "personas/security.md",
+            "the review shows which gate persona produced it"
+        );
+        assert_eq!(json["gate_id"], "gate-attrib-1");
+
+        // Persisted with attribution (not just the response envelope).
+        let reviews = state
+            .reviews
+            .list_reviews(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(
+            reviews[0].reviewer_persona.as_deref(),
+            Some("personas/security.md")
+        );
+        assert_eq!(
+            reviews[0].gate_id,
+            Some(gyre_common::Id::new("gate-attrib-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_review_has_no_gate_attribution() {
+        // A regular (non-gate) reviewer gets no persona attribution — the
+        // fields are gate-agent concepts, derived from the scoped token.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "No attribution test").await;
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agent-1",
+            "decision": "approved",
+            "body": "LGTM"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert!(
+            json.get("reviewer_persona").is_none(),
+            "non-gate reviews carry no persona attribution"
+        );
+        assert!(json.get("gate_id").is_none());
+    }
+
+    #[tokio::test]
     async fn submit_approve_review() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Review test").await;
 
         let body = serde_json::json!({
@@ -1730,7 +2224,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_changes_requested_review() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Changes test").await;
 
         let body = serde_json::json!({
@@ -1755,8 +2249,229 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_review_binds_agent_token_caller_to_own_identity() {
+        // Review repair (manifest gates): an agent-token principal must
+        // submit under its own verified identity. A request-body
+        // reviewer_agent_id would let any spawned agent forge a review
+        // attributed to a persona-holding, attested agent, defeating the
+        // manifest gates' min_attestation_level / stack_hash constraints
+        // (spec-registry.md §Agent Approver / Gate Schema).
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Forge test").await;
+
+        // An unrelated agent holding an ordinary (non-scoped) agent JWT —
+        // exactly what every spawned agent receives at spawn.
+        let mut forger = gyre_domain::Agent::new(gyre_common::Id::new("agt-forger"), "forger", 100);
+        forger
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&forger).await.unwrap();
+        let token = state
+            .agent_signing_key
+            .mint(
+                "agt-forger",
+                "task-1",
+                "tester",
+                &state.base_url,
+                600,
+                "default",
+                "ws-1",
+                "repo-1",
+                "repo-1",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agt-forger", token.clone())
+            .await
+            .unwrap();
+
+        // The forger claims to be a different reviewer (e.g. a
+        // persona-holding gate agent whose id is discoverable).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-victim",
+            "decision": "approved",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["reviewer_agent_id"], "agt-forger",
+            "an agent-token caller's review must be recorded under its own verified \
+             identity, never the request-body reviewer id"
+        );
+    }
+
+    /// Seed a human principal (user row + API key) and return nothing — the
+    /// raw key authenticates the caller in subsequent requests.
+    async fn seed_human_caller(
+        state: &Arc<crate::AppState>,
+        user_id: &str,
+        display_name: &str,
+        roles: Vec<gyre_domain::UserRole>,
+        raw_key: &str,
+    ) {
+        let mut user = gyre_domain::User::new(
+            Id::new(user_id),
+            format!("external-{user_id}"),
+            display_name,
+            0,
+        );
+        user.roles = roles;
+        user.tenant_id = Some(Id::new("t-review-forge"));
+        state.users.create(&user).await.unwrap();
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "test")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_review_human_non_admin_cannot_forge_agent_reviewer() {
+        // Review repair (manifest gates): a human principal (user JWT /
+        // API key) honoring a request-body reviewer_agent_id naming a
+        // DIFFERENT agent would forge the exact reviewer identity the
+        // manifest gates evaluate (persona + min_attestation_level /
+        // stack_hash constraints) — the Review row attributes only the
+        // named agent; nothing records the submitting human. A non-admin
+        // human may record a review only under its own verified identity.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Human forge test").await;
+
+        seed_human_caller(
+            &state,
+            "u-dev-reviewer",
+            "dev-reviewer",
+            vec![gyre_domain::UserRole::Developer],
+            "gyre_test_dev_reviewer_key",
+        )
+        .await;
+
+        // The developer names the MR's forge-spawned gate agent as the
+        // reviewer (its id is discoverable via the agents listing; its
+        // persona and attestation satisfy the manifest gate).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-gate-security",
+            "decision": "approved",
+            "body": "forged"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_dev_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-admin human must not record a review attributed to another agent"
+        );
+        let reviews = state.reviews.list_reviews(&Id::new(&mr_id)).await.unwrap();
+        assert!(
+            reviews.is_empty(),
+            "the forged review must not be persisted"
+        );
+
+        // The same caller MAY record a review under its own verified user
+        // identity — an attributed human action. The comparison is against
+        // the verified user id, never the display name (which is
+        // user-controlled and could collide with an agent id).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "u-dev-reviewer",
+            "decision": "approved",
+            "body": "own identity"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_dev_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "a human recording a review under its own identity is an attributed action"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], "u-dev-reviewer");
+    }
+
+    #[tokio::test]
+    async fn submit_review_admin_can_record_on_behalf_of_agent() {
+        // The on-behalf escape hatch is reserved for Admin principals —
+        // the same trust level that can merge directly.
+        let state = test_state();
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Admin on-behalf test").await;
+
+        seed_human_caller(
+            &state,
+            "u-admin-reviewer",
+            "admin-reviewer",
+            vec![gyre_domain::UserRole::Admin],
+            "gyre_test_admin_reviewer_key",
+        )
+        .await;
+
+        let body = serde_json::json!({
+            "reviewer_agent_id": "agt-gate-security",
+            "decision": "approved",
+            "body": "admin-recorded"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer gyre_test_admin_reviewer_key")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "an Admin principal may record a review on behalf of an agent"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["reviewer_agent_id"], "agt-gate-security");
+    }
+
+    #[tokio::test]
     async fn review_bad_decision_rejected() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Bad decision").await;
 
         let body = serde_json::json!({
@@ -1768,6 +2483,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -1780,7 +2496,7 @@ mod tests {
 
     #[tokio::test]
     async fn diff_endpoint_returns_200() {
-        let app = app();
+        let app = app().await;
         let (app, mr_id) = create_test_mr(app, "Diff test").await;
 
         let resp = app
@@ -1806,6 +2522,7 @@ mod tests {
     async fn comment_on_missing_mr_returns_404() {
         let body = serde_json::json!({ "author_agent_id": "a1", "body": "hi" });
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1823,6 +2540,7 @@ mod tests {
     async fn review_on_missing_mr_returns_404() {
         let body = serde_json::json!({ "reviewer_agent_id": "a1", "decision": "approved" });
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1837,6 +2555,161 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// HSI §12 Judgment Ledger: a human approving an MR with a FAILED gate
+    /// result must write a `gate_override` audit event per failed gate,
+    /// carrying mr_id/gate_id/from/to — the event the judgment ledger
+    /// aggregates. An agent-token approval (no user identity) must NOT.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn human_approval_on_failed_gate_writes_gate_override_event() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::GateResult;
+        use gyre_ports::AuditQueryFilter;
+
+        let state = make_test_state_with_jwt();
+        // create_mr resolves the MR's workspace scope from its repository and
+        // refuses unknown repositories — seed repo-1 like every other
+        // state-building test in this module, or the POST 404s and
+        // create_test_mr panics on the missing `id`.
+        seed_repo(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Override test").await;
+
+        // Seed one FAILED and one PASSED gate result for the MR.
+        let failed = GateResult {
+            id: Id::new("gr-fail-1"),
+            gate_id: Id::new("gate-1"),
+            mr_id: Id::new(&mr_id),
+            status: gyre_common::GateStatus::Failed,
+            output: Some("exit 1".into()),
+            started_at: Some(1000),
+            finished_at: Some(1010),
+        };
+        let passed = GateResult {
+            id: Id::new("gr-pass-1"),
+            gate_id: Id::new("gate-2"),
+            mr_id: Id::new(&mr_id),
+            status: gyre_common::GateStatus::Passed,
+            output: None,
+            started_at: Some(1000),
+            finished_at: Some(1005),
+        };
+        state.gate_results.save(&failed).await.unwrap();
+        state.gate_results.save(&passed).await.unwrap();
+
+        // An agent-token approval (user_id None) — must not write an event.
+        let agent_body = serde_json::json!({
+            "reviewer_agent_id": "agent-1",
+            "decision": "approved"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&agent_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let events0 = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("gate_override".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            events0.is_empty(),
+            "agent-token approval must not write gate_override: {events0:?}"
+        );
+
+        // A human (OIDC JWT) approves — one gate_override per failed gate.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-sub-2",
+                "preferred_username": "judge-2",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let human_body = serde_json::json!({
+            "reviewer_agent_id": "judge-2",
+            "decision": "approved"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&human_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("gate_override".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "one event per FAILED gate, not per gate: {events:?}"
+        );
+        let ev = &events[0];
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-sub-2")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(
+            ev.user_id.as_ref().map(Id::as_str),
+            Some(acting_user.id.as_str())
+        );
+        assert_eq!(ev.detail["mr_id"], mr_id);
+        assert_eq!(ev.detail["gate_id"], "gate-1");
+        assert_eq!(ev.detail["from_status"], "failed");
+        assert_eq!(ev.detail["to_status"], "overridden");
+
+        // The judgment ledger surfaces it as a gate entry via /users/me/judgments.
+        let ledger = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=gate")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ledger.status(), StatusCode::OK);
+        let ledger_json = body_json(ledger).await;
+        let items = ledger_json["judgments"].as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "ledger must surface the override: {items:?}"
+        );
+        assert_eq!(items[0]["judgment_type"], "gate");
+        assert_eq!(items[0]["entity_ref"], mr_id);
+    }
+
     // ── Attestation tests ────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1844,6 +2717,7 @@ mod tests {
         use crate::attestation::{sign_attestation, MergeAttestation};
 
         let state = test_state();
+        seed_repo(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
         let (app, mr_id) = create_test_mr(app, "Merged MR").await;
 
@@ -1915,6 +2789,7 @@ mod tests {
     #[tokio::test]
     async fn attestation_missing_mr_returns_404() {
         let resp = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/merge-requests/no-such-mr/attestation")
@@ -1928,7 +2803,7 @@ mod tests {
 
     #[tokio::test]
     async fn attestation_unmerged_mr_returns_404() {
-        let app = app();
+        let app = app().await;
         let (app, id) = create_test_mr(app, "Not yet merged").await;
 
         // MR exists but has no attestation yet (not merged)
@@ -1989,6 +2864,7 @@ mod tests {
         use crate::mem::test_state;
 
         let state = test_state();
+        seed_repo(&state).await;
 
         // Create an MR so the GET endpoint can find it.
         let app = crate::api::api_router().with_state(state.clone());
@@ -2035,7 +2911,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_mr_with_depends_on() {
-        let app = app();
+        let app = app().await;
         let (app, dep_id) = create_test_mr(app, "Dependency MR").await;
 
         // Create MR with depends_on referencing the first one.
@@ -2070,7 +2946,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_mr_with_depends_on_nonexistent_rejected() {
-        let app = app();
+        let app = app().await;
 
         let body = serde_json::json!({
             "repository_id": "repo-1",
@@ -2096,7 +2972,7 @@ mod tests {
     #[tokio::test]
     async fn create_mr_without_depends_on_works() {
         // Omitting depends_on should still work (backward compat).
-        let app = app();
+        let app = app().await;
         let body = serde_json::json!({
             "repository_id": "repo-1",
             "title": "No deps MR",
@@ -2124,7 +3000,6 @@ mod tests {
     // These exercise detect_lineage_deps / reevaluate_lineage_deps against
     // a REAL on-disk git repository built with git plumbing (commit-tree),
     // through the REST MR-creation surface. No git mocks.
-    use gyre_common::Id;
     use std::sync::Arc;
 
     /// Scaffolding: AppState + bare repo with `main`, plus helpers to add
@@ -2620,12 +3495,12 @@ mod tests {
             let mut mr = MergeRequest::new(
                 gyre_common::Id::new(id),
                 gyre_common::Id::new("repo-list"),
+                ws.clone(),
                 title,
                 "feat/x",
                 "main",
                 updated_at,
             );
-            mr.workspace_id = ws.clone();
             mr.updated_at = updated_at;
             state.merge_requests.create(&mr).await.unwrap();
             mrs.push(id);
@@ -2744,12 +3619,12 @@ mod tests {
         let mut mr = MergeRequest::new(
             gyre_common::Id::new("mr-pinned-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "Pinned spec MR",
             "feat/pinned",
             "main",
             1000,
         );
-        mr.workspace_id = gyre_common::Id::new("ws-1");
         mr.spec_ref = Some(format!("system/identity.md@{v1_blob}"));
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2778,15 +3653,15 @@ mod tests {
         );
 
         // MR without a spec_ref: nothing to serve.
-        let mut mr_no_spec = MergeRequest::new(
+        let mr_no_spec = MergeRequest::new(
             gyre_common::Id::new("mr-no-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "No spec MR",
             "feat/nospec",
             "main",
             1001,
         );
-        mr_no_spec.workspace_id = gyre_common::Id::new("ws-1");
         state.merge_requests.create(&mr_no_spec).await.unwrap();
         let resp = app
             .clone()
@@ -2804,12 +3679,12 @@ mod tests {
         let mut mr_ghost = MergeRequest::new(
             gyre_common::Id::new("mr-ghost-spec"),
             repo.id.clone(),
+            gyre_common::Id::new("ws-1"),
             "Ghost spec MR",
             "feat/ghost",
             "main",
             1002,
         );
-        mr_ghost.workspace_id = gyre_common::Id::new("ws-1");
         mr_ghost.spec_ref = Some(format!("system/identity.md@{}", "e".repeat(40)));
         state.merge_requests.create(&mr_ghost).await.unwrap();
         let resp = app

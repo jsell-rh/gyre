@@ -132,6 +132,8 @@ diesel::table! {
         reviewer_agent_id -> Text,
         decision -> Text,
         body -> Nullable<Text>,
+        reviewer_persona -> Nullable<Text>,
+        gate_id -> Nullable<Text>,
         created_at -> BigInt,
     }
 }
@@ -192,6 +194,7 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        oidc_issuer -> Nullable<Text>,
         // TASK-099 F1: tenant binding; nullable for legacy OIDC users
         // (the auth extractor fail-closes on unbound users).
         username -> Text,
@@ -200,6 +203,8 @@ diesel::table! {
         last_login_at -> Nullable<BigInt>,
         tenant_id -> Nullable<Text>,
         global_role -> Text,
+        // TASK-124: soft deactivation stamp (NULL = active).
+        deactivated_at -> Nullable<BigInt>,
     }
 }
 
@@ -212,6 +217,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    user_channel_preferences (user_id) {
+        user_id -> Text,
+        channels -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     user_tokens (id) {
         id -> Text,
         user_id -> Text,
@@ -220,6 +233,20 @@ diesel::table! {
         created_at -> BigInt,
         last_used_at -> Nullable<BigInt>,
         expires_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    user_sessions (id) {
+        id -> Text,
+        user_id -> Text,
+        token_hash -> Text,
+        ip_address -> Text,
+        user_agent -> Text,
+        created_at -> BigInt,
+        last_active_at -> BigInt,
+        expires_at -> BigInt,
+        revoked -> Integer,
     }
 }
 
@@ -237,6 +264,10 @@ diesel::table! {
         id -> Text,
         event_name -> Text,
         agent_id -> Nullable<Text>,
+        user_id -> Nullable<Text>,
+        session_id -> Nullable<Text>,
+        workspace_id -> Nullable<Text>,
+        repo_id -> Nullable<Text>,
         properties -> Text,
         timestamp -> BigInt,
         tenant_id -> Text,
@@ -395,6 +426,39 @@ diesel::table! {
 }
 
 diesel::table! {
+    tenant_invitations (id) {
+        id -> Text,
+        tenant_id -> Text,
+        email -> Text,
+        invited_by -> Text,
+        role -> Text,
+        workspace_ids -> Text,
+        workspace_roles -> Text,
+        status -> Text,
+        token_hash -> Text,
+        expires_at -> BigInt,
+        created_at -> BigInt,
+        accepted_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    workspace_invitations (id) {
+        id -> Text,
+        tenant_id -> Text,
+        workspace_id -> Text,
+        user_id -> Text,
+        invited_by -> Text,
+        role -> Text,
+        status -> Text,
+        token_hash -> Text,
+        expires_at -> BigInt,
+        created_at -> BigInt,
+        accepted_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
     notifications (id) {
         id -> Text,
         workspace_id -> Text,
@@ -495,6 +559,7 @@ diesel::table! {
         max_cost_per_day -> Nullable<Double>,
         max_concurrent_agents -> Nullable<Integer>,
         max_agent_lifetime_secs -> Nullable<BigInt>,
+        enforcement_action -> Nullable<Text>,
         updated_at -> BigInt,
     }
 }
@@ -521,8 +586,8 @@ diesel::table! {
         required -> Integer,
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,
-        created_at -> BigInt,
         position -> Integer,
+        created_at -> BigInt,
     }
 }
 
@@ -774,7 +839,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     agent_worktrees,
     users,
     user_notification_preferences,
+    user_channel_preferences,
     user_tokens,
+    user_sessions,
     api_keys,
     analytics_events,
     cost_entries,
@@ -787,6 +854,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     teams,
     team_memberships,
     workspace_memberships,
+    tenant_invitations,
+    workspace_invitations,
     repo_access_overrides,
     notifications,
     policies,

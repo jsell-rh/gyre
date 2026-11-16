@@ -258,6 +258,22 @@ fn eval_condition(cond: &Condition, ctx: &AttributeContext) -> bool {
                 (ConditionOp::NotEquals, AttrValue::Bool(b), ConditionValue::Bool(expected)) => {
                     b != expected
                 }
+                // Set semantics for list-valued attributes (review round 6,
+                // task-129): a multi-role subject carries
+                // `subject.global_role` as a LIST, and Equals/NotEquals on
+                // a list test membership — "global_role Equals Agent" is
+                // true when Agent is among the caller's roles — instead of
+                // failing on a type mismatch. The previous `first()` pick
+                // at the extraction site made the single-value arms above
+                // hide every role but one.
+                (ConditionOp::Equals, AttrValue::List(list), ConditionValue::String(expected)) => {
+                    list.contains(expected)
+                }
+                (
+                    ConditionOp::NotEquals,
+                    AttrValue::List(list),
+                    ConditionValue::String(expected),
+                ) => !list.contains(expected),
                 // In: value must be in list
                 (ConditionOp::In, AttrValue::Single(s), ConditionValue::StringList(list)) => {
                     list.contains(s)
@@ -290,6 +306,58 @@ fn eval_condition(cond: &Condition, ctx: &AttributeContext) -> bool {
 /// Returns `true` if all conditions in the policy match the context.
 fn eval_policy_conditions(policy: &Policy, ctx: &AttributeContext) -> bool {
     policy.conditions.iter().all(|c| eval_condition(c, ctx))
+}
+
+/// Read a `Single` string attribute from the context.
+fn ctx_str<'a>(ctx: &'a AttributeContext, key: &str) -> Option<&'a str> {
+    match ctx.get(key) {
+        Some(AttrValue::Single(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Returns `true` if `policy`'s scope applies to the resource scope chain
+/// carried by `ctx` (§Evaluation Flow step 5: "collect applicable policies:
+/// repo → workspace → tenant scope"; §Policy Language scope column: "Tenant —
+/// applies to all tenants", "Workspace — applies to all repos in workspace",
+/// "Repo — applies to one repo").
+///
+/// Semantics (review round 4 — scope applicability on the evaluation path):
+///
+/// - `scope_id: None` means "all entities at this scope level": a Tenant
+///   policy with `None` is global (every seeded builtin), and a
+///   Workspace/Repo policy with `None` applies whenever a workspace/repo
+///   is addressed.
+/// - `scope_id: Some(id)` requires the addressed resource's scope-chain
+///   attribute (`resource.repo_id` / `resource.workspace_id` /
+///   `resource.tenant_id`) to be present AND equal. A ws-A policy never
+///   grants or restricts requests addressing ws-B (or another tenant's
+///   resources); a t-1 policy never governs t-2 resources.
+/// - When the scope level is not addressed at all (attribute absent), a
+///   policy scoped to that level does not apply — no scope is fabricated.
+///
+/// `Policy::applies_to` covers only actions/resource_types; scope
+/// applicability lives HERE, next to the other evaluation-ordering rules,
+/// as the single canonical filter every evaluation path (HTTP middleware,
+/// dry-run, effective-permissions, merge-time) shares.
+fn scope_applies(policy: &Policy, ctx: &AttributeContext) -> bool {
+    match policy.scope {
+        PolicyScope::Repo => match (&policy.scope_id, ctx_str(ctx, "resource.repo_id")) {
+            (None, Some(_)) => true,
+            (Some(sid), Some(rid)) => sid.as_str() == rid,
+            _ => false,
+        },
+        PolicyScope::Workspace => match (&policy.scope_id, ctx_str(ctx, "resource.workspace_id")) {
+            (None, Some(_)) => true,
+            (Some(sid), Some(wid)) => sid.as_str() == wid,
+            _ => false,
+        },
+        PolicyScope::Tenant => match (&policy.scope_id, ctx_str(ctx, "resource.tenant_id")) {
+            (None, _) => true,
+            (Some(sid), Some(tid)) => sid.as_str() == tid,
+            (Some(_), None) => false,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -360,8 +428,12 @@ pub fn evaluate(
         ctx.set_number("env.time", now as i64);
     }
 
-    // Filter to enabled policies that apply to this action/resource_type.
-    policies.retain(|p| p.enabled && p.applies_to(action, resource_type));
+    // Filter to enabled policies that apply to this action/resource_type
+    // AND whose scope applies to the addressed resource's scope chain
+    // (§Evaluation Flow step 5 — see `scope_applies`). The context's
+    // resource scope attributes are caller-resolved: the middleware and
+    // merge path look them up from the addressed entity before calling.
+    policies.retain(|p| p.enabled && p.applies_to(action, resource_type) && scope_applies(p, &ctx));
 
     let total = policies.len() as u32;
 
@@ -443,6 +515,29 @@ pub fn build_decision(
     }
 }
 
+/// Persist a `PolicyDecision` to the queryable audit store, WARNing when
+/// the write fails (§Audit Integration, review round 6 task-129).
+///
+/// The previous call sites discarded the result
+/// (`let _ = state.policies.record_decision(...)`), so a failing store
+/// silently blanked the audit trail: an operator querying
+/// GET /api/v1/policies/decisions could not distinguish "no decisions"
+/// from "decisions dropped". Every evaluation path that records a
+/// decision goes through this helper so a dropped audit write is at
+/// least visible in the server log.
+pub async fn record_decision_audit(state: &crate::AppState, decision: &PolicyDecision) {
+    if let Err(e) = state.policies.record_decision(decision).await {
+        tracing::warn!(
+            error = %e,
+            request_id = %decision.request_id,
+            subject_id = %decision.subject_id,
+            action = %decision.action,
+            resource_type = %decision.resource_type,
+            "policy decision audit write failed — decision not recorded"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -516,6 +611,87 @@ mod tests {
         };
         let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "push", "repo");
         assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    /// Review round 6 (task-129): a multi-role subject carries
+    /// `subject.global_role` as a LIST; Equals/NotEquals on list-valued
+    /// attributes use set (membership) semantics instead of failing on a
+    /// type mismatch. Killing direction: without the list arms in
+    /// `eval_condition`, both evaluations below return Deny (the Allow's
+    /// Equals cannot match a List).
+    #[test]
+    fn condition_equals_on_list_attribute_uses_set_semantics() {
+        let mut ctx = AttributeContext::default();
+        ctx.set_list(
+            "subject.global_role",
+            vec!["Admin".to_string(), "Agent".to_string()],
+        );
+
+        let cond = |op, expected: &str| Condition {
+            attribute: "subject.global_role".to_string(),
+            operator: op,
+            value: ConditionValue::String(expected.to_string()),
+        };
+
+        // Equals: membership — Agent is among the caller's roles.
+        let result = evaluate(
+            vec![allow_policy(10, vec![cond(ConditionOp::Equals, "Agent")])],
+            &ctx,
+            "read",
+            "repo",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "Equals on a list attribute must match when the value is among the elements"
+        );
+
+        // NotEquals: non-membership — ReadOnly is NOT among the roles, so
+        // the condition holds.
+        let result = evaluate(
+            vec![allow_policy(
+                10,
+                vec![cond(ConditionOp::NotEquals, "ReadOnly")],
+            )],
+            &ctx,
+            "read",
+            "repo",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "NotEquals on a list attribute must hold when the value is not among the elements"
+        );
+
+        // And the negative halves: Equals for an absent role fails, and
+        // NotEquals for a present role fails (a Deny keyed on it must not
+        // fire for a subject that DOES carry the role — the lower-priority
+        // blanket Allow is what grants when the Deny correctly misses).
+        let result = evaluate(
+            vec![allow_policy(
+                10,
+                vec![cond(ConditionOp::Equals, "ReadOnly")],
+            )],
+            &ctx,
+            "read",
+            "repo",
+        );
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        let result = evaluate(
+            vec![
+                deny_policy(20, vec![cond(ConditionOp::NotEquals, "Agent")]),
+                allow_policy(10, vec![]),
+            ],
+            &ctx,
+            "read",
+            "repo",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "a Deny keyed on global_role NotEquals Agent must not fire for a subject \
+             that carries the Agent role"
+        );
     }
 
     #[test]
@@ -636,6 +812,145 @@ mod tests {
         // Policy only applies to "approve", not "read".
         let result = evaluate(vec![p], &ctx, "read", "spec");
         assert_eq!(result.effect, PolicyEffect::Deny); // default deny
+    }
+
+    // --- Scope applicability (review round 4: §Evaluation Flow step 5, -----
+    // §Policy Language scope column, §Policy Composition)
+
+    fn scoped_allow_policy(scope: PolicyScope, scope_id: Option<&str>, priority: u32) -> Policy {
+        Policy {
+            id: Id::new(format!(
+                "p-scoped-{priority}-{}",
+                scope_id.unwrap_or("none")
+            )),
+            name: "scoped-allow".to_string(),
+            description: String::new(),
+            scope,
+            scope_id: scope_id.map(Id::new),
+            priority,
+            effect: PolicyEffect::Allow,
+            conditions: vec![],
+            actions: vec!["*".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: Id::new("system"),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn workspace_scoped_policy_does_not_apply_out_of_scope() {
+        // A ws-A Allow must not grant a request addressing ws-B — the exact
+        // escalation the round-4 finding describes (scoped policy evaluated
+        // against every workspace's resources).
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-B");
+        let p = scoped_allow_policy(PolicyScope::Workspace, Some("ws-A"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "a ws-A policy must not apply to a ws-B request"
+        );
+        assert!(
+            result.matched_policy.is_none(),
+            "out-of-scope policy must not be recorded as the match"
+        );
+
+        // In scope: the same policy addressing ws-A grants the request.
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-A");
+        let p = scoped_allow_policy(PolicyScope::Workspace, Some("ws-A"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "an in-scope ws-A policy must apply to a ws-A request"
+        );
+    }
+
+    #[test]
+    fn repo_scoped_policy_requires_matching_addressed_repo() {
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.repo_id", "repo-1");
+        ctx.set("resource.workspace_id", "ws-1");
+        let p = scoped_allow_policy(PolicyScope::Repo, Some("repo-2"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "a repo-2 policy must not apply to a repo-1 request"
+        );
+
+        // A repo-scoped policy does not apply when no repo is addressed,
+        // even inside the same workspace.
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-1");
+        let p = scoped_allow_policy(PolicyScope::Repo, Some("repo-1"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "a repo-scoped policy must not apply when no repo is addressed"
+        );
+    }
+
+    #[test]
+    fn tenant_scoped_policy_does_not_apply_across_tenants() {
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.tenant_id", "t-2");
+        let p = scoped_allow_policy(PolicyScope::Tenant, Some("t-1"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "a t-1 tenant policy must not apply to a t-2 request"
+        );
+
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.tenant_id", "t-1");
+        let p = scoped_allow_policy(PolicyScope::Tenant, Some("t-1"), 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    #[test]
+    fn scope_id_none_means_all_at_that_level_and_keeps_builtins_global() {
+        // Tenant/None is global: applies with no scope attributes at all —
+        // this is what keeps every seeded builtin (all Tenant/None)
+        // applicable on unscoped routes.
+        let ctx = AttributeContext::default();
+        let p = scoped_allow_policy(PolicyScope::Tenant, None, 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Workspace/None applies to any ADDRESSED workspace…
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-any");
+        let p = scoped_allow_policy(PolicyScope::Workspace, None, 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // …but not when no workspace is addressed (no scope fabricated).
+        let ctx = AttributeContext::default();
+        let p = scoped_allow_policy(PolicyScope::Workspace, None, 900);
+        let result = evaluate(vec![p], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn scoped_policy_still_overridden_by_immutable_deny_in_scope() {
+        // Scope filtering composes with the immutable-Deny-first rule: an
+        // in-scope high-priority Allow cannot bypass an immutable Deny.
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-A");
+        let allow = scoped_allow_policy(PolicyScope::Workspace, Some("ws-A"), 2000);
+        let deny = immutable_deny_policy(vec![]);
+        let result = evaluate(vec![allow, deny], &ctx, "approve", "spec");
+        assert_eq!(result.effect, PolicyEffect::Deny);
     }
 
     #[test]
@@ -875,6 +1190,438 @@ mod tests {
         assert_eq!(
             system_access.conditions[0].value,
             gyre_domain::ConditionValue::String("gyre-system-token".to_string())
+        );
+    }
+
+    // --- TASK-129: §Built-In Policies table rows --------------------------------
+
+    /// The domain builtin set must contain every §Built-In Policies table
+    /// row by name (the seeding filter in abac_middleware selects from this
+    /// set — a missing row means the policy can never be seeded).
+    #[test]
+    fn builtin_set_contains_spec_table_rows() {
+        let names: Vec<String> = gyre_domain::builtin_policies("system")
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        for required in [
+            "system-full-access",
+            "tenant-isolation",
+            "agent-repo-scope",
+            "workspace-membership-required",
+            "persona-human-approval",
+            "builtin:require-human-spec-approval",
+            "default-deny",
+        ] {
+            // default-deny is owned by the m34 seed list; the rest live in
+            // the domain set.
+            if required != "default-deny" {
+                assert!(
+                    names.iter().any(|n| n == required),
+                    "§Built-In Policies table row '{required}' must exist in the domain builtin set"
+                );
+            }
+        }
+    }
+
+    /// `agent-repo-scope` seed must match the §Policy Examples semantics
+    /// and actually enforce containment: enabled (the §Built-In Policies
+    /// table lists containment as a shipped invariant, not an opt-in),
+    /// dynamic-reference conditions (`subject.repo_scope not_equals
+    /// $resource.repo_id` — an Exists-only condition would deny
+    /// repo-scoped agents EVERYTHING, since worker tokens always carry a
+    /// repo_id claim), and priority above the m34 `agent-scoped-access`
+    /// role Allow (700), because composition is higher-priority-wins.
+    /// Killing directions: the pre-fix seed (enabled: false, Exists
+    /// condition, priority 100) fails the enabled, condition, and priority
+    /// assertions respectively.
+    #[test]
+    fn agent_repo_scope_seed_matches_spec_example() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let p = builtins
+            .iter()
+            .find(|p| p.name == "agent-repo-scope")
+            .expect("agent-repo-scope must exist in the domain builtin set")
+            .clone();
+
+        assert!(
+            p.enabled,
+            "containment is a shipped invariant (§Built-In Policies), not an opt-in"
+        );
+        assert_eq!(p.effect, PolicyEffect::Deny);
+        assert_eq!(p.actions, vec!["*".to_string()]);
+        assert_eq!(p.resource_types, vec!["*".to_string()]);
+        assert_eq!(p.conditions.len(), 2);
+        assert_eq!(p.conditions[0].attribute, "subject.type");
+        assert_eq!(p.conditions[0].operator, ConditionOp::Equals);
+        assert_eq!(
+            p.conditions[0].value,
+            ConditionValue::String("agent".to_string())
+        );
+        assert_eq!(p.conditions[1].attribute, "subject.repo_scope");
+        assert_eq!(p.conditions[1].operator, ConditionOp::NotEquals);
+        assert_eq!(
+            p.conditions[1].value,
+            ConditionValue::String("$resource.repo_id".to_string()),
+            "the spec's dynamic reference — an Exists-only condition would \
+             deny repo-scoped agents everything (worker tokens always carry \
+             a repo_id claim)"
+        );
+        assert!(
+            p.priority > 700,
+            "the containment Deny must outrank the m34 agent-scoped-access \
+             role Allow (priority 700): composition is higher-priority-wins, \
+             so a Deny at the §Policy Examples priority 100 enforces nothing"
+        );
+    }
+
+    /// Live-set behavior of the seeded `agent-repo-scope` against the REAL
+    /// m34 role Allow: in-scope access passes through to the Allow,
+    /// out-of-scope access is denied BY the containment builtin (matched
+    /// by id, not the default-deny catchall), and non-repo-addressed
+    /// resources fall through (the `$resource.repo_id` reference fails
+    /// closed, so containment governs only repo-scoped resources — the
+    /// spec example's exact semantics).
+    #[test]
+    fn agent_repo_scope_enforced_over_role_allow() {
+        let mut set = gyre_domain::builtin_policies("system");
+        set.extend(crate::abac_middleware::m34_builtin_policies());
+
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set("subject.global_role", "Agent");
+        ctx.set("subject.tenant_id", "t-1");
+        ctx.set("subject.repo_scope", "repo-a");
+        ctx.set("resource.repo_id", "repo-a");
+        ctx.set("resource.tenant_id", "t-1");
+
+        // In-scope read: the containment Deny does not match
+        // (repo_scope == resource.repo_id); the role Allow (700) grants.
+        let r = evaluate(set.clone(), &ctx, "read", "repo");
+        assert_eq!(r.effect, PolicyEffect::Allow);
+        assert_eq!(
+            r.matched_policy.as_deref(),
+            Some("builtin-agent-scoped-access")
+        );
+
+        // Out-of-scope read: denied BY the containment builtin — the
+        // killing case for a disabled/enabled-but-ineffective seed.
+        ctx.set("resource.repo_id", "repo-b");
+        let r = evaluate(set.clone(), &ctx, "read", "repo");
+        assert_eq!(r.effect, PolicyEffect::Deny);
+        assert_eq!(
+            r.matched_policy.as_deref(),
+            Some("builtin-agent-repo-scope"),
+            "the denial must come from the containment builtin, not the \
+             default-deny catchall"
+        );
+
+        // Non-repo-addressed resource: `$resource.repo_id` does not
+        // resolve, the NotEquals condition fails closed, the role Allow
+        // grants — containment only governs repo-scoped resources.
+        let mut ctx2 = AttributeContext::default();
+        ctx2.set("subject.type", "agent");
+        ctx2.set("subject.global_role", "Agent");
+        ctx2.set("subject.tenant_id", "t-1");
+        ctx2.set("subject.repo_scope", "repo-a");
+        let r = evaluate(set, &ctx2, "read", "spec");
+        assert_eq!(r.effect, PolicyEffect::Allow);
+    }
+
+    /// `tenant-isolation`: a subject whose tenant differs from the
+    /// resource's tenant is denied — even when a same-tenant Allow would
+    /// otherwise grant, and even for a global Admin role (the Allow at 900
+    /// is below the builtin Deny at 950). Same-tenant access passes through
+    /// to the rest of the policy set.
+    #[test]
+    fn tenant_isolation_denies_cross_tenant_even_for_admin() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let tenant_isolation = builtins
+            .iter()
+            .find(|p| p.name == "tenant-isolation")
+            .expect("tenant-isolation must exist")
+            .clone();
+
+        // Cross-tenant subject: an Admin (role allow at 900 would grant
+        // without the builtin).
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "user");
+        ctx.set("subject.tenant_id", "tenant-acme");
+        ctx.set("resource.tenant_id", "tenant-other");
+
+        let admin_allow = allow_policy(
+            900,
+            vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Admin".to_string()),
+            }],
+        );
+        let mut ctx_admin = ctx.clone();
+        ctx_admin.set("subject.global_role", "Admin");
+
+        let result = evaluate(
+            vec![admin_allow.clone(), tenant_isolation.clone()],
+            &ctx_admin,
+            "read",
+            "task",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "cross-tenant access must be denied even for a global Admin role"
+        );
+        assert_eq!(
+            result.matched_policy.as_deref(),
+            Some("builtin-tenant-isolation")
+        );
+
+        // Same tenant: the builtin does not match; the Admin allow grants.
+        let mut ctx_same = ctx;
+        ctx_same.set("resource.tenant_id", "tenant-acme");
+        ctx_same.set("subject.global_role", "Admin");
+        let result = evaluate(
+            vec![admin_allow, tenant_isolation],
+            &ctx_same,
+            "read",
+            "task",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "same-tenant access must fall through to the role allow"
+        );
+    }
+
+    /// `tenant-isolation` fails closed when either tenant attribute is
+    /// absent: the Exists conditions must not match, so evaluation falls
+    /// through to the rest of the policy set (no fabricated tenant).
+    #[test]
+    fn tenant_isolation_fails_closed_on_missing_attributes() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let tenant_isolation = builtins
+            .iter()
+            .find(|p| p.name == "tenant-isolation")
+            .unwrap()
+            .clone();
+
+        // resource.tenant_id unpopulated (collection route / no entity
+        // lookup): the builtin must NOT match — an Allow may grant.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.tenant_id", "tenant-acme");
+        let allow = allow_policy(500, vec![]);
+        let result = evaluate(vec![allow, tenant_isolation], &ctx, "read", "task");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "absent resource.tenant_id must fail the Exists condition, not fabricate a tenant"
+        );
+    }
+
+    /// `system-full-access` (priority 1000) outranks `tenant-isolation`
+    /// (950): the global token identity spans tenants by design — it is the
+    /// server itself, resolving the bootstrap tenant while administering
+    /// every tenant's resources.
+    #[test]
+    fn system_full_access_outranks_tenant_isolation() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let get = |name: &str| builtins.iter().find(|p| p.name == name).unwrap().clone();
+
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.id", "gyre-system-token");
+        ctx.set("subject.tenant_id", "default");
+        ctx.set("resource.tenant_id", "tenant-acme");
+
+        let result = evaluate(
+            vec![get("tenant-isolation"), get("system-full-access")],
+            &ctx,
+            "write",
+            "task",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "the global token identity must be allowed across tenants (priority 1000 > 950)"
+        );
+        assert_eq!(
+            result.matched_policy.as_deref(),
+            Some("builtin-system-access")
+        );
+    }
+
+    /// `workspace-membership-required`: a user who is not a member of the
+    /// addressed workspace is denied (the middleware derives
+    /// `subject.member_of_resource_workspace` from the real membership
+    /// store); a member falls through to the role allows. Agents carry no
+    /// user membership, so the subject.type condition keys them out.
+    #[test]
+    fn workspace_membership_required_denies_non_member_users() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let membership_required = builtins
+            .iter()
+            .find(|p| p.name == "workspace-membership-required")
+            .unwrap()
+            .clone();
+
+        let dev_allow = allow_policy(
+            800,
+            vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Developer".to_string()),
+            }],
+        );
+
+        // Non-member user: boolean false → denied even with the Developer
+        // role allow at 800 (the builtin Deny sits at 940).
+        let mut non_member = AttributeContext::default();
+        non_member.set("subject.type", "user");
+        non_member.set("subject.global_role", "Developer");
+        non_member.set_bool("subject.member_of_resource_workspace", false);
+        let result = evaluate(
+            vec![dev_allow.clone(), membership_required.clone()],
+            &non_member,
+            "read",
+            "task",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "a non-member user must be denied workspace resources regardless of global role"
+        );
+        assert_eq!(
+            result.matched_policy.as_deref(),
+            Some("builtin-workspace-membership-required")
+        );
+
+        // Member: boolean true → falls through to the Developer allow.
+        let mut member = non_member;
+        member.set_bool("subject.member_of_resource_workspace", true);
+        let result = evaluate(
+            vec![dev_allow, membership_required],
+            &member,
+            "read",
+            "task",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "a member must fall through to the role allow"
+        );
+    }
+
+    /// `persona-human-approval`: non-user subjects cannot approve personas,
+    /// outranking the agent role allow (700) that would otherwise permit
+    /// the approve action.
+    #[test]
+    fn persona_human_approval_denies_agents() {
+        let builtins = gyre_domain::builtin_policies("system");
+        let human_only = builtins
+            .iter()
+            .find(|p| p.name == "persona-human-approval")
+            .unwrap()
+            .clone();
+
+        let mut agent_allow = allow_policy(
+            700,
+            vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Agent".to_string()),
+            }],
+        );
+        agent_allow.actions = vec!["read".to_string(), "approve".to_string()];
+
+        // Agent approving a persona → denied by the builtin (950 > 700).
+        let mut agent = AttributeContext::default();
+        agent.set("subject.type", "agent");
+        agent.set("subject.global_role", "Agent");
+        let result = evaluate(
+            vec![agent_allow.clone(), human_only.clone()],
+            &agent,
+            "approve",
+            "persona",
+        );
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Deny,
+            "agents must not approve personas"
+        );
+        assert_eq!(
+            result.matched_policy.as_deref(),
+            Some("builtin-persona-human-approval")
+        );
+
+        // User approving a persona → allowed by the role allow.
+        let mut user = AttributeContext::default();
+        user.set("subject.type", "user");
+        user.set("subject.global_role", "Agent");
+        let result = evaluate(vec![agent_allow, human_only], &user, "approve", "persona");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "human users keep the role-allowed approve action on personas"
+        );
+    }
+
+    /// §Performance: "Target: <1ms per evaluation. With cached policies and
+    /// precomputed attributes, this is achievable." Verifies the ENGINE's
+    /// per-evaluation latency against the full built-in policy set (m34's
+    /// 12 policies + the 6 domain splices — the exact set a fresh server
+    /// seeds) with a fully populated attribute context. The mean over 200
+    /// evaluations must stay under 1ms; using the mean (not a single run)
+    /// keeps the assertion robust to scheduler noise in debug builds. A
+    /// regressed engine (e.g. per-policy store lookups, quadratic condition
+    /// evaluation) blows through this budget by orders of magnitude.
+    #[test]
+    fn evaluation_meets_latency_target() {
+        // The exact seeded set: m34 builtins + the domain splice.
+        let mut policies = crate::abac_middleware::m34_builtin_policies();
+        policies.extend(crate::abac_middleware::domain_builtin_policies());
+        assert!(
+            policies.len() >= 15,
+            "expected the full seeded builtin set, got {}",
+            policies.len()
+        );
+
+        // Fully populated context: subject, resource, and environment
+        // attributes, mirroring the middleware's extraction.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "user");
+        ctx.set("subject.id", "member-user");
+        ctx.set("subject.tenant_id", "tenant-acme");
+        ctx.set("subject.global_role", "Developer");
+        ctx.set("subject.workspace_role", "Developer");
+        ctx.set_list(
+            "subject.workspace_ids",
+            vec!["ws-1".to_string(), "ws-2".to_string()],
+        );
+        ctx.set_list("subject.team_ids", vec!["team-platform".to_string()]);
+        ctx.set("resource.id", "task-42");
+        ctx.set("resource.workspace_id", "ws-1");
+        ctx.set("resource.repo_id", "repo-1");
+        ctx.set("resource.tenant_id", "tenant-acme");
+        ctx.set("resource.owner", "user:alice");
+        ctx.set("resource.approval_status", "pending");
+        ctx.set("env.ip", "10.0.0.5");
+        ctx.set_number("env.budget_remaining", 600);
+        ctx.set("env.main_health", "green");
+
+        // Warmup (first call pays context-clone and sort setup).
+        let _ = evaluate(policies.clone(), &ctx, "read", "task");
+
+        const RUNS: usize = 200;
+        let mut total_ms = 0.0f64;
+        for _ in 0..RUNS {
+            let result = evaluate(policies.clone(), &ctx, "read", "task");
+            total_ms += result.evaluation_ms;
+        }
+        let mean_ms = total_ms / RUNS as f64;
+        assert!(
+            mean_ms < 1.0,
+            "mean evaluation latency {mean_ms:.3}ms over {RUNS} runs with {} policies \
+             must stay under the 1ms spec target (§Performance)",
+            policies.len()
         );
     }
 
@@ -1361,7 +2108,13 @@ mod tests {
         let allow = allow_policy(50, vec![]);
 
         // Developer managing a persona: not in [Owner, Admin] → deny.
+        // `resource.workspace_id` is set because the policy is
+        // Workspace-scoped: the engine's scope filter (round 4,
+        // §Evaluation Flow step 5) only admits a workspace-level policy
+        // when a workspace is actually addressed — a persona always lives
+        // in one, so the spec example's fixture must carry it.
         let mut ctx = AttributeContext::default();
+        ctx.set("resource.workspace_id", "ws-1");
         ctx.set("subject.workspace_role", "Developer");
         let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "write", "persona");
         assert_eq!(result.effect, PolicyEffect::Deny);
@@ -1402,6 +2155,9 @@ mod tests {
         let allow = allow_policy(50, vec![]);
 
         let mut ctx = AttributeContext::default();
+        // Workspace-scoped policy: the addressed workspace must be in the
+        // context for the scope filter to admit it (round 4).
+        ctx.set("resource.workspace_id", "ws-1");
         ctx.set("subject.workspace_role", "Viewer");
         let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "spawn", "agent");
         assert_eq!(result.effect, PolicyEffect::Deny);
@@ -1438,8 +2194,12 @@ mod tests {
         );
         let allow = allow_policy(50, vec![]);
 
-        // Level-2 agent reviewing a gate: < 3 → deny.
+        // Level-2 agent reviewing a gate: < 3 → deny. `resource.repo_id`
+        // is set because the policy is Repo-scoped: the engine's scope
+        // filter (round 4) only admits a repo-level policy when a repo is
+        // addressed — an MR always belongs to one.
         let mut ctx = AttributeContext::default();
+        ctx.set("resource.repo_id", "r-1");
         ctx.set("subject.type", "agent");
         ctx.set_number("subject.attestation_level", 2);
         let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "gate_review", "mr");

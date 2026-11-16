@@ -3,8 +3,8 @@ use gyre_server::{
     abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
     merge_processor, procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
     seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
-    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_stale_agent_detector,
-    spawn_stale_peer_detector, telemetry, JwtConfig,
+    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_session_cleanup,
+    spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -138,6 +138,15 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Email digest drain (user-management.md §Email Notifications) — every
+    // 60 s, per user's configured digest frequency. Registered in the job
+    // registry (manual trigger + status); spawn_job is the executing loop.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "email_digest".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     // Task-115 (agent-runtime.md §1 Phase 3): detect Delegation/Coordination
     // tasks and run repo orchestrators under per-repo registry locks.
@@ -153,6 +162,8 @@ async fn main() -> Result<()> {
     audit_simulator::spawn_audit_simulator(state.clone());
     spawn_budget_daily_reset(state.clone());
     spawn_llm_rate_limiter_cleanup(state.clone());
+    gyre_server::api::invitations::spawn_invitation_expiry(state.clone());
+    spawn_session_cleanup(state.clone());
 
     let app = build_router(state);
 
