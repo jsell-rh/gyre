@@ -456,9 +456,9 @@ describe('EditorSplit', () => {
       const { api } = await import('../lib/api.js');
       api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-9' });
       api.taskStatus
-        .mockResolvedValueOnce({ status: 'running' })
+        .mockResolvedValueOnce({ status: 'in_progress' })
         .mockResolvedValueOnce({
-          status: 'completed',
+          status: 'review',
           predictions: [{ node_id: 'ErrorHandler', change_type: 'new' }],
           code_diff: [{ path: 'src/error.rs', diff: [{ op: 'context', text: 'y' }] }],
         });
@@ -482,7 +482,7 @@ describe('EditorSplit', () => {
   it('cancel during a running preview returns to the editing state', async () => {
     const { api } = await import('../lib/api.js');
     api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-10' });
-    api.taskStatus.mockResolvedValue({ status: 'running' });
+    api.taskStatus.mockResolvedValue({ status: 'in_progress' });
     render(EditorSplit, {
       props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
     });
@@ -758,7 +758,7 @@ describe('EditorSplit', () => {
     const onClose = vi.fn();
     const { api } = await import('../lib/api.js');
     api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-esc' });
-    api.taskStatus.mockResolvedValue({ status: 'running' });
+    api.taskStatus.mockResolvedValue({ status: 'in_progress' });
     render(EditorSplit, {
       props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md', onClose },
     });
@@ -811,7 +811,7 @@ describe('EditorSplit', () => {
   it('locked editor shows the diff of pending changes against the baseline while a preview runs', async () => {
     const { api } = await import('../lib/api.js');
     api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-1' });
-    api.taskStatus.mockResolvedValue({ status: 'running' });
+    api.taskStatus.mockResolvedValue({ status: 'in_progress' });
     render(EditorSplit, {
       props: {
         content: '# Persona\nHandle all errors with Result<T, E>.\nBe terse.',
@@ -839,7 +839,7 @@ describe('EditorSplit', () => {
   it('locked editor marks removed baseline lines with "-"', async () => {
     const { api } = await import('../lib/api.js');
     api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-2' });
-    api.taskStatus.mockResolvedValue({ status: 'running' });
+    api.taskStatus.mockResolvedValue({ status: 'in_progress' });
     render(EditorSplit, {
       props: {
         content: 'New body.',
@@ -860,7 +860,7 @@ describe('EditorSplit', () => {
   it('locked editor falls back to the verbatim draft when no baseline is provided', async () => {
     const { api } = await import('../lib/api.js');
     api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-3' });
-    api.taskStatus.mockResolvedValue({ status: 'running' });
+    api.taskStatus.mockResolvedValue({ status: 'in_progress' });
     render(EditorSplit, {
       props: { content: 'Just a draft.', repoId: 'repo-1', specPath: 'specs/auth.md' },
     });
@@ -874,7 +874,7 @@ describe('EditorSplit', () => {
   it('locked editor shows no diff when the draft equals the baseline', async () => {
     const { api } = await import('../lib/api.js');
     api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-4' });
-    api.taskStatus.mockResolvedValue({ status: 'running' });
+    api.taskStatus.mockResolvedValue({ status: 'in_progress' });
     render(EditorSplit, {
       props: {
         content: 'Unchanged draft.',
@@ -1260,8 +1260,8 @@ describe('EditorSplit — system-explorer.md §3 progressive preview', () => {
       });
       api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-pulse', agent_id: 'agent-1' });
       api.taskStatus
-        .mockResolvedValueOnce({ status: 'running' })
-        .mockResolvedValueOnce({ status: 'completed' });
+        .mockResolvedValueOnce({ status: 'in_progress' })
+        .mockResolvedValueOnce({ status: 'done' });
       render(EditorSplit, {
         props: { content: 'draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
       });
@@ -1296,7 +1296,7 @@ describe('EditorSplit — system-explorer.md §3 progressive preview', () => {
     try {
       const { api } = await import('../lib/api.js');
       api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-mr', agent_id: 'agent-7' });
-      api.taskStatus.mockResolvedValueOnce({ status: 'completed' });
+      api.taskStatus.mockResolvedValueOnce({ status: 'review' });
       api.mergeRequests.mockResolvedValueOnce([
         { id: 'mr-old', task_id: 'other-task', author_agent_id: 'someone-else', repository_id: 'repo-1' },
         { id: 'mr-1', task_id: 'task-mr', author_agent_id: 'agent-7', repository_id: 'repo-1' },
@@ -1340,4 +1340,39 @@ describe('EditorSplit — system-explorer.md §3 progressive preview', () => {
       vi.useRealTimers();
     }
   }, 20000);
+
+  // Real wire vocabulary only: GET /api/v1/tasks/{id} serializes status as
+  // backlog/in_progress/review/done/blocked/cancelled (task_status_str) —
+  // there is no 'failed' status, so the failure path is 'blocked'/'cancelled'.
+  it.each(['blocked', 'cancelled'])(
+    'thorough tier: a %s task fails the preview and returns to editing',
+    async (terminal) => {
+      vi.useFakeTimers();
+      try {
+        const { api } = await import('../lib/api.js');
+        api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-fail', agent_id: 'agent-9' });
+        api.taskStatus
+          .mockResolvedValueOnce({ status: 'in_progress' })
+          .mockResolvedValueOnce({ status: terminal });
+        render(EditorSplit, {
+          props: { content: 'draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+        });
+        await fireEvent.click(await screen.findByTestId('preview-btn'));
+        // Running state first (§9 State 2)…
+        await vi.waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+        await vi.advanceTimersByTimeAsync(10000);
+        await vi.advanceTimersByTimeAsync(10000);
+        // …then the terminal status fails the preview: error banner shown,
+        // editor unlocked, no completion artifacts.
+        await vi.waitFor(() => expect(screen.getByTestId('preview-error')).toBeTruthy());
+        expect(screen.getByTestId('preview-error').textContent).toContain(terminal);
+        await vi.waitFor(() => expect(screen.getByTestId('editor-split-textarea')).toBeTruthy());
+        expect(screen.queryByTestId('iterate-btn')).toBeNull();
+        expect(api.mergeRequests).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+    20000,
+  );
 });

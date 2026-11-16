@@ -413,11 +413,12 @@
       try {
         const status = await api.taskStatus(taskId);
         // A preview task completes when its agent finishes: the task lands
-        // in Review (agent called complete → MR created) or Done. Real
-        // task statuses are backlog/in_progress/review/done/blocked/
-        // cancelled — 'completed' is kept for wire compatibility.
+        // in Review (agent called complete → MR created) or Done. The wire
+        // vocabulary is exactly what GET /api/v1/tasks/{id} serializes via
+        // task_status_str: backlog/in_progress/review/done/blocked/
+        // cancelled — any other value keeps polling until the timeout.
         const s = status?.status;
-        if (s === 'completed' || s === 'review' || s === 'done') {
+        if (s === 'review' || s === 'done') {
           applyPreviewResult(status);
           // §3 thorough tier: the agent really implemented the spec on a
           // throwaway branch — resolve its completion MR and render the
@@ -426,7 +427,7 @@
           finishPreview();
           return;
         }
-        if (s === 'failed' || s === 'blocked' || s === 'cancelled') {
+        if (s === 'blocked' || s === 'cancelled') {
           failPreview(
             $t('editor_split.preview_failed', { values: { error: status?.error ?? s ?? 'agent execution failed' } }),
           );
