@@ -7,7 +7,7 @@ coverage_sections:
   - "supply-chain.md §AIBOM Contents"
   - "supply-chain.md §SLSA Provenance Integration"
   - "supply-chain.md §The Laptop Problem"
-commits: ["5d443e1328ac2e24764cb1c2953e1343de928557"]
+commits: ["39a0aaec029ffbfa9025bc0b2d766ca391a15fc1"]
 ---
 
 ## Spec Excerpt
@@ -52,7 +52,7 @@ Read `specs/system/supply-chain.md` §"AIBOM Contents", §"SLSA Provenance Integ
 ## Shipped
 
 All three coverage sections implemented in production code (commit
-`5d443e13`).
+`39a0aaec029ffbfa9025bc0b2d766ca391a15fc1`).
 
 ### AIBOM release artifacts (§AIBOM Contents)
 
