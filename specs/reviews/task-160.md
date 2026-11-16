@@ -57,3 +57,65 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — fresh candidate `ecad447c` against assigned base `e5df784` (verdict: complete)
+
+This round reviews the exact assigned candidate `ecad447c3774bb6c08b3ad63fa90b0546e799c46`
+(base `e5df7847ce5f3afe1eeb6b448fdc23079ecd3ae4`) after the executor's baseline-restore
+cycles. Working tree identical to the candidate tree (only unstaged difference is the
+executor's restore of the task-doc frontmatter, which is assignment contract state, not
+reviewed content). All probes re-run fresh this round — no prior-round approval carried
+forward.
+
+**Task contract re-verified with independent evidence** (full logs:
+`/tmp/stage/review-evidence/`, index in `summary.txt`):
+
+- All three scripts exist, are executable (mode 100755), and carry usage comments.
+  Clean-head runs: `check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0 with
+  118 read methods on tenant-column tables checked and 0 violations (skip list entries
+  each carry a spec-cited rationale; spot-checked against migrations — `messages` does
+  have a `tenant_id` column and `users.tenant_id` is nullable per migration 000058,
+  matching the documented rationales); `check-api-auth.sh` exit 0 including the
+  delegated `check-abac-route-registry.sh`.
+- Kill sensitivity re-probed by mutation (each edit reverted; tree restored):
+  `Task.workspace_id → Option<Id>` → check-hierarchy exit 1 naming `task.rs:60`;
+  deleting `Task.repo_id` → exit 1 "missing from the struct" (deleted-field bypass
+  closed); removing `.filter(tasks::tenant_id.eq(&tenant))` from sqlite `find_by_id`
+  → check-tenant-filter exit 1, "1 violation(s) found out of 118"; deleting the
+  `RouteResourceMapping` for `/api/v1/repos/:id/provenance` → check-api-auth exit 1
+  via the registry script ("FAIL: 1 registered /api/v1/ route(s) missing").
+- Wiring intact: all three scripts in `.pre-commit-config.yaml` and
+  `.github/workflows/ci.yml` (CI's `GYRE_CHECK_HIERARCHY=1` invocation is compatible
+  with the default-on gating — only `=0` bypasses).
+- Type checks and focused tests on the candidate tree: `cargo check -p gyre-domain`,
+  `-p gyre-adapters`, `-p gyre-server` all clean; `cargo test -p gyre-adapters
+  --test tenant_isolation` → 2 passed / 0 failed. Full `cargo test --all` is left to
+  the verifier per the build-budget split (recorded in evidence summary).
+- Commit attribution: the committed task-doc frontmatter lists the 12 product-surface
+  commits; the remaining task-160-labeled commits on the branch are doc-only chores or
+  upstream merge commits (verified by inspecting each), so no attribution gap.
+
+**Observations (non-blocking):**
+
+- *Registry-extraction quirk (pre-existing, task-095-owned):* deleting the resolver
+  entry for `/api/v1/repos` is NOT caught because the same path literal appears in
+  `abac_middleware.rs`'s own embedded test router (line 1545), and
+  `check-abac-route-registry.sh` extracts every `/api/v1/` literal from the file, test
+  code included. This only masks deletion of resolver entries whose path coincidentally
+  reappears in that file; new unregistered routes ARE caught (provenance probe). Not a
+  defect introduced or worsened by this task — task-160 correctly delegates rather than
+  forking the frozen baselines. Worth a follow-up by the registry script's owner
+  (strip `#[cfg(test)]` regions before extracting resolver paths).
+- *Lineage (controller-owned, already a durable "rebase" finding):* the assigned base
+  `e5df784` is NOT an ancestor of the candidate (merge-base is `e402e1ed`, Nov 12).
+  `git diff base..candidate` removes 115 files / ~121k lines of Nov 12–16 mainline work
+  (renumbered migration lines, web abac/moldable components, pipeline test scripts,
+  coverage docs). The rebase of this branch onto the base conflicts in 15 files. This is
+  an integration-stage defect, not a defect in the task deliverables; the verifier must
+  integrate against the assigned base before publication. Recording it here so the
+  controller's rebase finding and this review cross-reference.
+
+**Verdict: complete** — the task contract (three real, kill-sensitive, wired,
+documented enforcement scripts) is satisfied on the assigned candidate, on independent
+evidence from this round. The lineage/rebase gap is tracked as the durable finding of
+the same name and does not reflect on the deliverables themselves.
