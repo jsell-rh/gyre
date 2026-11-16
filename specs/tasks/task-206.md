@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: ["001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "1622b73cdf7e36d32299a4010462b9b1c046eab9"]
 ---
 
 ## Spec Excerpt
@@ -178,3 +178,23 @@ The prior assignment's `agent_exit: 1` was a controller-side validation failure 
 - **Working tree restored** — the checkout again showed the recovery-damage pattern (17 tracked files missing from disk as unstaged deletions, including the declared modules `api/agent_messages.rs` and `src/messages.rs`); restored from HEAD, tree clean. `web/dist` churn from a build.rs run reverted to HEAD (executor-owned).
 - **Verification on head 08c3b5e2** (evidence: `/tmp/stage/review-evidence/task-206-repair-round.md`): `cargo check -p gyre-server --lib --tests` clean (7m 21s — the preview suite compiles); `cargo fmt -p gyre-server -- --check` clean; `check-arch.sh`, `check-abac-route-registry.sh`, `check-mcp-write-tools.sh`, `check-task-commit-attribution.sh` all OK; MetaSpecs + EditorSplit vitest **149 passed, 0 failed**.
 - **Unchanged for the verifier (mandatory)**: `cargo test -p gyre-server --lib -- preview` — server test-binary builds are excluded from this sandbox by the 4 GiB build-budget rule; baseline 1232 passed (4fc19fca), type-checks on this head.
+
+### Merge round — pipeline merge 4a5925cc resolved onto base 047d6524
+
+The pipeline merged upstream main 047d6524 (PR #849 triage-decisions) into this branch as 4a5925cc but committed all 63 unresolved conflict hunks as-is across 22 files, and reverted this task file to `not-started`. This round resolved every hunk in place (upstream touched none of the conflicted files directly — its changes were in scripts/ and tools/, so the conflict sides were this branch's task-206 work vs. the older common base d81b0fe4), committed as c8f9fed9 (server/docs) and 1622b73c (web) — both recorded in `commits:`.
+
+Resolution policy per file: union for job registrations (meta_spec_preview_gc spawn + upstream's newer jobs), ABAC route mappings (preview routes + upstream's spec meta-spec-bindings routes), and the MCP preview-agent tool refusal plus upstream's validate_tool_scope; upstream's side for admin.rs (its kill_agent helper is the refactor this branch's preview paths call), merge_processor.rs and budget.rs bases (this branch's diff there was pure rustfmt plus the N-slot check_spawn_budget_for, re-applied deliberately), mem.rs (upstream's TestStateOverrides/ws_store architecture with this branch's test_state_with_preview_config ported onto it via Arc::get_mut); this branch's side for the §5 implementation in meta_specs.rs/spawn.rs/agent-runner.mjs, with upstream's newer contracts adopted: the 9-arg agent JWT mint (scope claims derived from the loaded workspace/repo rows), MetaSpecScope::Tenant visibility in the registry listing (fail-closed on unresolvable scope ids), the 7-arg MergeRequest::new, and the options field on ProcessHandle at the kubernetes/ssh spawn sites so remote kills can still reconstruct the SshTarget. Exemption files resolved to the frozen-at-zero base side (identical to 047d6524).
+
+Consequence of the merged create_task taking `AuthenticatedAgent` for the preview guard: the previously unguarded `req.workspace_id`/`req.repo_id` reads became visible to check-forged-scope-fields — fixed with the shared audit validators (derive-or-403, repo∈workspace when both supplied), and the test call sites that posted/put without a token now authenticate and seed real workspace/repo rows.
+
+Web completion (a9a474d6): the merge had left the four §9 State 2 locked-diff MetaSpecs tests and the EditorSplit iterate test mocking the removed hollow `previewPersona` endpoint. Migrated to the real §5 wire shapes; implemented what they pin: MetaSpecs' locked editor shows the LCS pending-changes diff vs the published prompt (verbatim fallback, no-diff-when-unchanged, post-publish baseline refresh) and EditorSplit's Iterate retains the last preview results with the selector stacked above the tabs (ui-layout.md §9). The conditional guard around the accept-suggestion interaction was replaced with a loud existence assertion.
+
+Verification this round (heads c8f9fed9/1622b73c):
+
+- `cargo check --workspace --all-targets` clean — every crate, lib and test target type-checks, including the full preview suite and the migrated test code.
+- `cargo test -p gyre-adapters --lib` — 576 passed, 0 failed (4 ignored: pre-existing SSH-daemon integration tests; includes the compute::ssh/compute suites covering SshTarget reconstruction); `cargo test -p gyre-common -p gyre-domain -p gyre-ports` — 688 passed, 0 failed.
+- Web: full `npm test` — **121 files, 2410 passed, 41 skipped, 0 failed** (MetaSpecs + EditorSplit focused runs included).
+- rustfmt clean on every touched Rust file. Mechanical gates on this head: arch, abac-route-registry, abac-exempt-handlers, mcp-write-tools, mem-port-contracts, fabricated-scope-defaults, lossy-secret-conversion, fail-open-ref-resolution, inert-enforcement, relative-path-defaults, scope-literal-defaults, forwarded-header-trust, in-memory-state-stores, unbounded-external-http, byte-slice-truncation, migration-versions, migration-sql-portability, dead-message-kinds, forged-scope-fields, conditional-test-guards, non-atomic-creation — all OK. The remaining check-*.sh scripts that fail in this sandbox fail byte-identically on the pristine base commit 047d6524 (control run in a separate worktree: mawk lacks gawk's 3-arg match(), so those scripts abort identically on both trees — environmental, not this diff; no violation-list delta between base and this head on any of them).
+- web/dist is executor-owned (restored to the assignment base; not committed).
+
+Unchanged for the verifier (mandatory): `cargo test -p gyre-server --lib -- preview` — server test binaries exceed this sandbox's 4 GiB build budget (the cargo wrapper refuses them); the suite's green baseline is 1232 passed (4fc19fca) and the merged tree type-checks all of it via `cargo check -p gyre-server --all-targets`.
