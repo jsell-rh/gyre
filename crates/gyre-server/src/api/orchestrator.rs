@@ -2450,13 +2450,11 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(third.name, "workspace-orchestrator-ws-1");
-        let second_renamed = state
-            .agents
-            .find_by_id(&second.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(second_renamed.name, "workspace-orchestrator-ws-1-superseded-2");
+        let second_renamed = state.agents.find_by_id(&second.id).await.unwrap().unwrap();
+        assert_eq!(
+            second_renamed.name,
+            "workspace-orchestrator-ws-1-superseded-2"
+        );
     }
 
     #[tokio::test]
@@ -2654,6 +2652,101 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn orchestrator_spawn_emits_agent_spawned_analytics_event() {
+        // analytics.md §Auto-Emitted Events: the orchestrator spawn path
+        // reports its tier via the persona property.
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _token, _launch) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
+        assert_eq!(ev.properties["persona"], "workspace-orchestrator");
+        assert_eq!(ev.properties["orchestrator_type"], "workspace_orchestrator");
+        // No workspace/tenant compute target is configured in this test, so
+        // the honest resolution of the priority chain (workspace assignment
+        // -> tenant default -> local) IS "local" here. The configured-target
+        // case is pinned by
+        // orchestrator_spawn_analytics_reports_resolved_compute_target.
+        assert_eq!(ev.properties["compute_target"], "local");
+        // Orchestrators are not task-bound: task_id must be null, not the
+        // agent's own id (regression: previously fabricated from agent.id).
+        assert!(ev.properties["task_id"].is_null());
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    /// Review f3f37604 regression: the spec-required `agent.spawned`
+    /// property `compute_target` must report the target the orchestrator
+    /// process actually launched on (workspace assignment -> tenant
+    /// default -> local), not a hardcoded "local". The pre-fix defect
+    /// recorded "local" while the process launched on the configured
+    /// workspace target — silently wrong in every deployment that
+    /// configures one.
+    #[tokio::test]
+    async fn orchestrator_spawn_analytics_reports_resolved_compute_target() {
+        let state = test_state();
+        seed(&state).await;
+
+        // Configure a workspace compute target — the exact deployment
+        // shape launch_with_command / orchestrator_launch_injects_system_prompts
+        // use. Kubernetes-typed targets dispatch via LocalTarget, so
+        // /bin/true launches deterministically in the test environment.
+        let mut ct = gyre_domain::ComputeTargetEntity::new(
+            Id::new("ct-analytics-resolved"),
+            Id::new("t1"),
+            "analytics-resolved-target",
+            gyre_domain::ComputeTargetType::Kubernetes,
+            0,
+        );
+        ct.config = serde_json::json!({ "command": "/bin/true" });
+        state.compute_targets.create(&ct).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+
+        let (agent, _token, launch) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
+        assert_eq!(
+            launch.launch_status, "running",
+            "launch failed: {:?}",
+            launch.launch_detail
+        );
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
+        // The event must carry the RESOLVED target id, proving the property
+        // is looked up from the launch resolution, not hardcoded. This
+        // assertion fails against the pre-fix code (which recorded "local").
+        assert_eq!(
+            ev.properties["compute_target"], "ct-analytics-resolved",
+            "agent.spawned must report the compute target the process \
+             actually launched on"
+        );
+    }
 
     #[tokio::test]
     async fn spawn_reports_truthful_launch_outcome() {
