@@ -194,6 +194,7 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        oidc_issuer -> Nullable<Text>,
         // TASK-099 F1: tenant binding; nullable for legacy OIDC users
         // (the auth extractor fail-closes on unbound users).
         username -> Text,
@@ -202,6 +203,8 @@ diesel::table! {
         last_login_at -> Nullable<BigInt>,
         tenant_id -> Nullable<Text>,
         global_role -> Text,
+        // TASK-124: soft deactivation stamp (NULL = active).
+        deactivated_at -> Nullable<BigInt>,
     }
 }
 
@@ -230,6 +233,20 @@ diesel::table! {
         created_at -> BigInt,
         last_used_at -> Nullable<BigInt>,
         expires_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    user_sessions (id) {
+        id -> Text,
+        user_id -> Text,
+        token_hash -> Text,
+        ip_address -> Text,
+        user_agent -> Text,
+        created_at -> BigInt,
+        last_active_at -> BigInt,
+        expires_at -> BigInt,
+        revoked -> Integer,
     }
 }
 
@@ -405,6 +422,39 @@ diesel::table! {
         restricted_role -> Text,
         created_by -> Text,
         created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    tenant_invitations (id) {
+        id -> Text,
+        tenant_id -> Text,
+        email -> Text,
+        invited_by -> Text,
+        role -> Text,
+        workspace_ids -> Text,
+        workspace_roles -> Text,
+        status -> Text,
+        token_hash -> Text,
+        expires_at -> BigInt,
+        created_at -> BigInt,
+        accepted_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    workspace_invitations (id) {
+        id -> Text,
+        tenant_id -> Text,
+        workspace_id -> Text,
+        user_id -> Text,
+        invited_by -> Text,
+        role -> Text,
+        status -> Text,
+        token_hash -> Text,
+        expires_at -> BigInt,
+        created_at -> BigInt,
+        accepted_at -> Nullable<BigInt>,
     }
 }
 
@@ -791,6 +841,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_notification_preferences,
     user_channel_preferences,
     user_tokens,
+    user_sessions,
     api_keys,
     analytics_events,
     cost_entries,
@@ -803,6 +854,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     teams,
     team_memberships,
     workspace_memberships,
+    tenant_invitations,
+    workspace_invitations,
     repo_access_overrides,
     notifications,
     policies,

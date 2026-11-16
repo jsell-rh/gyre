@@ -4,7 +4,10 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{AnalyticsEvent, CostEntry};
+use gyre_domain::{
+    decisions::{format_iso8601_utc, BuiltinDecision, CustomDecisionSpec, DecisionResult},
+    evaluate_custom, AnalyticsEvent, CostEntry,
+};
 use gyre_ports::analytics::{AnalyticsGroupBy, AnalyticsQueryFilter};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -184,13 +187,29 @@ pub(crate) async fn record_search_query(
 #[derive(Deserialize)]
 pub struct CountEventsParams {
     pub event_name: String,
-    pub since: u64,
-    pub until: u64,
+    /// Start of the window (unix secs). Defaults to 0 (all time).
+    pub since: Option<u64>,
+    /// End of the window (unix secs). Defaults to now.
+    pub until: Option<u64>,
+    /// Optional property-equality filter `key:value` — counts only
+    /// events whose `properties[key]` equals `value` (string equality).
+    /// Used by the Analytics Dashboard funnel view (analytics.md
+    /// §Analytics Dashboard): a funnel step like
+    /// `task.status_changed(InProgress)` counts status-change events
+    /// whose `new_status` property is `InProgress`.
+    pub property: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct DailyParams {
-    pub event_name: String,
+    /// Exact event-name filter. Optional: absent or empty (`?event_name=`)
+    /// aggregates across ALL event names — the total daily event volume
+    /// the Analytics Dashboard bar chart renders (analytics.md
+    /// §Analytics Dashboard: "daily event volume for the last 30 days").
+    /// The bare `?days=30` form (what the dashboard's chart sends) MUST
+    /// work — it is not an error to omit the filter.
+    #[serde(default)]
+    pub event_name: Option<String>,
     /// ISO8601 timestamp or unix seconds. Optional when `days` is given.
     pub since: Option<String>,
     /// ISO8601 timestamp or unix seconds. Defaults to now (analytics.md
@@ -545,10 +564,43 @@ pub async fn count_events(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CountEventsParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let count = state
-        .analytics
-        .count(&params.event_name, params.since, params.until)
-        .await?;
+    let until = params.until.unwrap_or_else(now_secs);
+    let since = params.since.unwrap_or(0);
+    if since > until {
+        return Err(ApiError::InvalidInput(
+            "since must not be after until".to_string(),
+        ));
+    }
+    let count = match params.property.as_deref() {
+        None => {
+            state
+                .analytics
+                .count(&params.event_name, since, until)
+                .await?
+        }
+        Some(filter) => {
+            // Property filters are evaluated in Rust over the filtered
+            // event set (the storage layer has no properties index) —
+            // same fetch cap as the /top ranking.
+            let (key, value) = filter.split_once(':').ok_or_else(|| {
+                ApiError::InvalidInput(
+                    "property filter must be 'key:value' (e.g. new_status:InProgress)".to_string(),
+                )
+            })?;
+            let filter = AnalyticsQueryFilter {
+                event_name: Some(params.event_name.clone()),
+                since: Some(since),
+                until: Some(until),
+                limit: 100_000,
+                ..Default::default()
+            };
+            let events = state.analytics.query_filtered(&filter).await?;
+            events
+                .iter()
+                .filter(|e| e.properties.get(key).and_then(|v| v.as_str()) == Some(value))
+                .count() as u64
+        }
+    };
     Ok(Json(
         serde_json::json!({ "event_name": params.event_name, "count": count }),
     ))
@@ -584,9 +636,17 @@ pub async fn daily_events(
             "since must not be after until".to_string(),
         ));
     }
+    // Empty string (`?event_name=`) is the spec's "no filter" form, same
+    // as omitting the parameter entirely — the dashboard's bar chart
+    // sends the bare `?days=30` form and must get TOTAL daily volume.
+    let event_name = params
+        .event_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
     let rows = state
         .analytics
-        .aggregate_by_day(&params.event_name, since, until)
+        .aggregate_by_day(event_name, since, until)
         .await?;
     Ok(Json(
         rows.into_iter()
@@ -733,13 +793,26 @@ pub async fn compare(
     }))
 }
 
-/// `GET /api/v1/analytics/top` — top N event names by count since a timestamp.
+/// `GET /api/v1/analytics/top` — top N event names by count since a
+/// timestamp (default), or — with `?dimension=agent` — the top-agents
+/// ranking the Analytics Dashboard renders (analytics.md §Analytics
+/// Dashboard "Top agents"): agents ranked by events generated, with task
+/// completion rate and average completion duration.
 #[derive(Deserialize)]
 pub struct TopParams {
     /// Max number of results. Defaults to 10, max 100.
     pub limit: Option<usize>,
-    /// Start of the window (unix secs). Defaults to 24h ago.
+    /// Start of the window (unix secs). Defaults to 24h ago (event
+    /// dimension) or 30d ago (agent dimension, matching the dashboard's
+    /// "Top agents — since 30d-ago" fetch).
     pub since: Option<u64>,
+    /// Ranking dimension: `event_name` (default) or `agent`.
+    pub dimension: Option<String>,
+    /// Agent dimension only: restrict the ranking to one workspace.
+    /// Validated against the caller's tenant — the same anti-forgery
+    /// rule as `decide` (a forged id would leak another tenant's
+    /// aggregated agent stats).
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -748,33 +821,337 @@ pub struct TopEntry {
     pub count: u64,
 }
 
+/// One ranked agent (`?dimension=agent`). Completion rate is
+/// `agent.completed / (agent.completed + agent.failed)` — `None` when
+/// the agent neither completed nor failed a task in the window (nothing
+/// to divide). Average duration is the mean `duration_secs` property
+/// over the agent's `agent.completed` events.
+#[derive(Serialize)]
+pub struct TopAgentEntry {
+    pub agent_id: String,
+    pub event_count: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub completion_rate: Option<f64>,
+    pub avg_duration_secs: Option<f64>,
+}
+
+#[derive(Default)]
+struct AgentAgg {
+    event_count: u64,
+    completed: u64,
+    failed: u64,
+    duration_secs_sum: f64,
+    duration_samples: u64,
+}
+
 pub async fn top_events(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Query(params): Query<TopParams>,
-) -> Result<Json<Vec<TopEntry>>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = params.limit.unwrap_or(10).min(100);
-    let since = params
-        .since
-        .unwrap_or_else(|| now_secs().saturating_sub(86400));
 
-    // Query all events in the window (capped to avoid memory issues).
-    let events = state.analytics.query(None, Some(since), 100_000).await?;
+    match params.dimension.as_deref() {
+        None | Some("event_name") => {
+            let since = params
+                .since
+                .unwrap_or_else(|| now_secs().saturating_sub(86400));
 
-    // Group by event_name.
-    let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for e in events {
-        *counts.entry(e.event_name).or_default() += 1;
+            // Query all events in the window (capped to avoid memory issues).
+            let events = state.analytics.query(None, Some(since), 100_000).await?;
+
+            // Group by event_name.
+            let mut counts: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for e in events {
+                *counts.entry(e.event_name).or_default() += 1;
+            }
+
+            // Sort by count descending, take limit.
+            let mut entries: Vec<TopEntry> = counts
+                .into_iter()
+                .map(|(event_name, count)| TopEntry { event_name, count })
+                .collect();
+            entries.sort_by_key(|e| std::cmp::Reverse(e.count));
+            entries.truncate(limit);
+
+            Ok(Json(serde_json::to_value(entries).unwrap_or_default()))
+        }
+        Some("agent") => {
+            let since = params
+                .since
+                .unwrap_or_else(|| now_secs().saturating_sub(30 * 86_400));
+
+            // Optional workspace scoping, validated against the caller
+            // (same rule as `decide` / `record_event`).
+            let workspace_id = match params.workspace_id.as_deref() {
+                Some(w) => {
+                    let id = Id::new(w);
+                    super::audit::validate_workspace_scope(&state, &id, &auth).await?;
+                    Some(id.to_string())
+                }
+                None => None,
+            };
+
+            let filter = AnalyticsQueryFilter {
+                workspace_id,
+                since: Some(since),
+                until: Some(now_secs()),
+                limit: 100_000,
+                ..Default::default()
+            };
+            let events = state.analytics.query_filtered(&filter).await?;
+
+            let mut agents: std::collections::HashMap<String, AgentAgg> =
+                std::collections::HashMap::new();
+            for e in events {
+                // Unattributed events cannot rank an agent.
+                let Some(agent_id) = e.agent_id else { continue };
+                let agg = agents.entry(agent_id).or_default();
+                agg.event_count += 1;
+                match e.event_name.as_str() {
+                    "agent.completed" => {
+                        agg.completed += 1;
+                        if let Some(d) = e
+                            .properties
+                            .get("duration_secs")
+                            .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                        {
+                            agg.duration_secs_sum += d;
+                            agg.duration_samples += 1;
+                        }
+                    }
+                    "agent.failed" => agg.failed += 1,
+                    _ => {}
+                }
+            }
+
+            let mut entries: Vec<TopAgentEntry> = agents
+                .into_iter()
+                .map(|(agent_id, agg)| TopAgentEntry {
+                    agent_id,
+                    event_count: agg.event_count,
+                    completed: agg.completed,
+                    failed: agg.failed,
+                    completion_rate: if agg.completed + agg.failed > 0 {
+                        Some(agg.completed as f64 / (agg.completed + agg.failed) as f64)
+                    } else {
+                        None
+                    },
+                    avg_duration_secs: if agg.duration_samples > 0 {
+                        Some(agg.duration_secs_sum / agg.duration_samples as f64)
+                    } else {
+                        None
+                    },
+                })
+                .collect();
+            entries.sort_by(|a, b| {
+                b.event_count
+                    .cmp(&a.event_count)
+                    .then_with(|| a.agent_id.cmp(&b.agent_id))
+            });
+            entries.truncate(limit);
+
+            Ok(Json(serde_json::to_value(entries).unwrap_or_default()))
+        }
+        Some(other) => Err(ApiError::InvalidInput(format!(
+            "unsupported dimension {other:?} (expected event_name or agent)"
+        ))),
+    }
+}
+
+// ─── Analytics Decision API (analytics.md §Decision API for Agents) ──────────
+
+/// `GET /api/v1/analytics/decide?decision=<name>&context=<json>` —
+/// evaluate a named built-in decision against current analytics data.
+///
+/// The evaluators are pure domain functions
+/// (`gyre_domain::decisions`); this handler fetches the events each
+/// decision consumes through the analytics port (scoped to the caller
+/// when the context names a workspace/repo — same anti-forgery rule as
+/// `record_event`, task-146 review F1) and the budget snapshot for
+/// `budget.headroom`, then delegates the evaluation.
+#[derive(Deserialize)]
+pub struct DecideParams {
+    pub decision: String,
+    /// JSON object, URL-encoded (spec example passes
+    /// `context=%7B%22flag%22%3A...%7D`). Defaults to `{}`.
+    pub context: Option<String>,
+}
+
+pub async fn decide(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Query(params): Query<DecideParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Context is a JSON object passed as a (URL-encoded) query string.
+    let context: serde_json::Value = match params.context.as_deref() {
+        None | Some("") => serde_json::json!({}),
+        Some(raw) => serde_json::from_str(raw)
+            .map_err(|e| ApiError::InvalidInput(format!("invalid context JSON: {e}")))?,
+    };
+    let result = evaluate_builtin_decision(&state, &auth, &params.decision, context).await?;
+    Ok(Json(result))
+}
+
+/// Core built-in decision evaluation, shared by the HTTP `decide` handler
+/// above and the `gyre_analytics_decide` MCP tool (analytics.md §MCP Tool:
+/// `gyre_analytics_decide`) — the MCP tool is a thin wrapper that must never
+/// grow a second evaluator. Parses nothing transport-specific: callers hand
+/// over the decision name and an already-decoded context object.
+pub(crate) async fn evaluate_builtin_decision(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    decision_name: &str,
+    context: serde_json::Value,
+) -> Result<serde_json::Value, ApiError> {
+    let builtin = BuiltinDecision::parse(decision_name).ok_or_else(|| {
+        ApiError::InvalidInput(format!(
+            "unknown decision {decision_name:?}: expected one of {}",
+            BuiltinDecision::all_names().join(", ")
+        ))
+    })?;
+
+    if !context.is_object() {
+        return Err(ApiError::InvalidInput(
+            "context must be a JSON object".to_string(),
+        ));
     }
 
-    // Sort by count descending, take limit.
-    let mut entries: Vec<TopEntry> = counts
-        .into_iter()
-        .map(|(event_name, count)| TopEntry { event_name, count })
-        .collect();
-    entries.sort_by(|a, b| b.count.cmp(&a.count));
-    entries.truncate(limit);
+    // Caller-scope validation: a context naming a workspace/repo scopes
+    // the events the decision is computed over, so a forged id would
+    // leak another scope's aggregated analytics through the decision
+    // outcome. Same validation as `record_event` (task-146 review F1).
+    let (workspace_id, repo_id) =
+        super::audit::validate_decision_scope(state, &context, auth).await?;
 
-    Ok(Json(entries))
+    let now = now_secs();
+
+    // budget.headroom reads the budget stores, not analytics events.
+    let budget = if builtin == BuiltinDecision::BudgetHeadroom {
+        let ws = workspace_id.as_ref().ok_or_else(|| {
+            ApiError::InvalidInput(
+                "budget.headroom requires a workspace_id in the context".to_string(),
+            )
+        })?;
+        let ws_key = super::budget::workspace_key(ws.as_str());
+        let config = super::budget::effective_workspace_config(state, &ws_key).await;
+        let usage = state.budget_usages.get_usage(&ws_key).await?;
+        Some((config, usage))
+    } else {
+        None
+    };
+
+    // Fetch the events this decision consumes, scoped to the caller when
+    // the context names a scope.
+    let mut events: Vec<AnalyticsEvent> = Vec::new();
+    if !builtin.event_names().is_empty() {
+        let since = builtin.fetch_since(&context, now);
+        for name in builtin.event_names() {
+            let filter = AnalyticsQueryFilter {
+                event_name: Some(name.to_string()),
+                workspace_id: workspace_id.as_ref().map(|id| id.to_string()),
+                repo_id: repo_id.as_ref().map(|id| id.to_string()),
+                since: Some(since),
+                until: Some(now),
+                limit: 10_000,
+                ..Default::default()
+            };
+            events.extend(state.analytics.query_filtered(&filter).await?);
+        }
+    }
+
+    // merge_queue.health also counts currently-blocked (non-terminal)
+    // queue entries — a real query against the merge queue port.
+    let blocked_count = if builtin == BuiltinDecision::MergeQueueHealth {
+        state.merge_queue.list_queue().await?.len() as u64
+    } else {
+        0
+    };
+
+    let outcome = builtin.evaluate(
+        &context,
+        &events,
+        budget.as_ref().map(|(c, u)| (c, u.as_ref())),
+        blocked_count,
+        now,
+    );
+    let result = DecisionResult {
+        decision: builtin.name().to_string(),
+        reason: outcome
+            .get("reason")
+            .and_then(|r| r.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        outcome,
+        evaluated_at: now,
+    };
+    Ok(result.response_json())
+}
+
+/// `POST /api/v1/analytics/decide/custom` — evaluate a custom decision
+/// defined with the rule DSL (metric, window, threshold, comparison,
+/// then). The first matching rule produces the outcome; when no rule
+/// matches, the decision's `default` is returned.
+pub async fn decide_custom(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let spec = CustomDecisionSpec::parse(&body).map_err(ApiError::InvalidInput)?;
+    let result = evaluate_custom_decision(&state, &auth, &spec).await?;
+    Ok(Json(result))
+}
+
+/// Core custom-decision evaluation, shared by the HTTP `decide_custom`
+/// handler above and the `gyre_analytics_decide` MCP tool (which accepts
+/// `custom_rules` tool arguments and assembles the spec itself). Takes an
+/// already-parsed `CustomDecisionSpec`; transport-specific parsing stays
+/// with each caller.
+pub(crate) async fn evaluate_custom_decision(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    spec: &CustomDecisionSpec,
+) -> Result<serde_json::Value, ApiError> {
+    // Caller-scope validation on the spec's context (same rule as the
+    // built-in decide handler above).
+    let (workspace_id, repo_id) =
+        super::audit::validate_decision_scope(state, &spec.context, auth).await?;
+
+    let now = now_secs();
+
+    // Fetch each distinct metric's events once, over the widest window
+    // among the rules referencing it. The pure evaluator applies each
+    // rule's own window and property filter.
+    let mut events_by_metric: std::collections::HashMap<String, Vec<AnalyticsEvent>> =
+        std::collections::HashMap::new();
+    for metric in spec.metrics() {
+        let Some(window_secs) = spec.fetch_window_for(&metric) else {
+            continue; // unreachable: parse() validates every window
+        };
+        let filter = AnalyticsQueryFilter {
+            event_name: Some(metric.clone()),
+            workspace_id: workspace_id.as_ref().map(|id| id.to_string()),
+            repo_id: repo_id.as_ref().map(|id| id.to_string()),
+            since: Some(now.saturating_sub(window_secs)),
+            until: Some(now),
+            limit: 10_000,
+            ..Default::default()
+        };
+        events_by_metric.insert(metric, state.analytics.query_filtered(&filter).await?);
+    }
+
+    let outcome = evaluate_custom(spec, &events_by_metric, now);
+    let mut response = outcome;
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("decision".into(), serde_json::json!(spec.name));
+        obj.insert(
+            "evaluated_at".into(),
+            serde_json::json!(format_iso8601_utc(now)),
+        );
+    }
+    Ok(response)
 }
 
 // ─── Cost Entries ─────────────────────────────────────────────────────────────
@@ -881,10 +1258,13 @@ pub async fn cost_summary(
 
 #[cfg(test)]
 mod tests {
-    use super::{epoch_days_to_ymd, parse_time_param, ymd_to_epoch_days};
+    use super::{epoch_days_to_ymd, new_id, now_secs, parse_time_param, ymd_to_epoch_days};
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
+    use gyre_domain::AnalyticsEvent;
     use http::{Request, StatusCode};
+    use serde_json::json;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -2099,5 +2479,997 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn daily_events_bare_days_form_returns_total_volume() {
+        // The Analytics Dashboard bar chart (analytics.md §Analytics
+        // Dashboard: "daily event volume for the last 30 days") sends the
+        // bare `GET /daily?days=30` form with NO event_name. That request
+        // must NOT 400 on a missing required parameter (task-149 review
+        // finding), and it must return TOTAL daily volume across ALL
+        // event names — not the per-event-name series — so the chart's
+        // bars are the aggregate counts. Seeded events deliberately use
+        // two DISTINCT event names on the same day: the total form must
+        // count both, the per-name form only one.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let now = crate::api::now_secs();
+        for (id, name, ts) in [
+            ("tv-1", "agent.spawned", now),
+            ("tv-2", "agent.completed", now),
+            ("tv-3", "agent.spawned", now),
+            // Out of window (40 days ago): excluded from every form.
+            ("tv-old", "agent.spawned", now.saturating_sub(40 * 86_400)),
+        ] {
+            let ev = gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(id),
+                name,
+                None,
+                serde_json::json!({}),
+                ts,
+            );
+            state.analytics.record(&ev).await.unwrap();
+        }
+
+        // Bare `?days=30` — the exact request the dashboard chart sends.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri("/api/v1/analytics/daily?days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "bare ?days=30 (no event_name) must not be rejected — \
+             the dashboard bar chart sends exactly this form"
+        );
+        let json = body_json(resp).await;
+        let total: u64 = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["count"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(
+            total, 3,
+            "no event_name = total daily volume across ALL event names \
+             (2x agent.spawned + 1x agent.completed today, old event excluded)"
+        );
+
+        // Spec-documented empty-value form `?event_name=&days=30` is the
+        // same "no filter" request.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri("/api/v1/analytics/daily?event_name=&days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let total: u64 = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["count"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(total, 3, "empty event_name aggregates all names");
+
+        // Explicit event_name still filters to that name's series.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri("/api/v1/analytics/daily?event_name=agent.spawned&days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let total: u64 = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["count"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(total, 2, "explicit event_name filters to that name only");
+    }
+
+    // ─── Decision API (analytics.md §Decision API for Agents) ─────────────────
+
+    /// Percent-encode a query-parameter value (the `context` JSON is
+    /// passed URL-encoded per the spec example).
+    fn urlencode(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
+    /// GET /analytics/decide with a JSON context, returning
+    /// (status, parsed body).
+    async fn decide(
+        app: &Router,
+        decision: &str,
+        context: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let uri = format!(
+            "/api/v1/analytics/decide?decision={}&context={}",
+            decision,
+            urlencode(&serde_json::to_string(&context).unwrap())
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// POST /analytics/decide/custom, returning (status, parsed body).
+    async fn decide_custom(
+        app: &Router,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/analytics/decide/custom")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// Seed an analytics event with a CONTROLLED timestamp straight into
+    /// the store (the HTTP record endpoint stamps `now`, which cannot
+    /// exercise historical windows).
+    async fn seed_event(state: &crate::AppState, ev: gyre_domain::AnalyticsEvent) {
+        state.analytics.record(&ev).await.unwrap();
+    }
+
+    fn make_event(
+        name: &str,
+        props: serde_json::Value,
+        timestamp: u64,
+    ) -> gyre_domain::AnalyticsEvent {
+        gyre_domain::AnalyticsEvent::new(super::new_id(), name, None, props, timestamp)
+    }
+
+    #[tokio::test]
+    async fn decide_unknown_decision_is_rejected() {
+        let app = app();
+        let (status, body) = decide(&app, "feature.explode", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("feature.promote"),
+            "error should list the built-in decisions: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn decide_all_builtins_on_empty_data_return_defaults_not_errors() {
+        // Edge case from the implementation plan: empty analytics data
+        // returns reasonable defaults, not errors.
+        let state = test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-empty"),
+                gyre_common::Id::new("default"),
+                "Empty",
+                "empty",
+                1000,
+            ))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, body) =
+            decide(&app, "feature.promote", serde_json::json!({"flag": "f"})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["promote"], serde_json::json!(false));
+        assert_eq!(body["confidence"], serde_json::json!(0.0));
+        assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
+
+        let (status, body) =
+            decide(&app, "feature.rollback", serde_json::json!({"flag": "f"})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["rollback"], serde_json::json!(false));
+        assert_eq!(body["trigger"], serde_json::json!("none"));
+
+        let (status, body) = decide(&app, "gate.effectiveness", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["effective"], serde_json::json!(false));
+        assert_eq!(body["catch_rate"], serde_json::json!(0.0));
+        assert_eq!(body["false_positive_rate"], serde_json::json!(0.0));
+
+        let (status, body) = decide(&app, "agent.performance", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["healthy"], serde_json::json!(true));
+        assert_eq!(body["failure_rate"], serde_json::json!(0.0));
+
+        let (status, body) = decide(
+            &app,
+            "budget.headroom",
+            serde_json::json!({"workspace_id": "ws-empty"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["tokens_remaining_pct"], serde_json::json!(100.0));
+        assert_eq!(body["cost_remaining_pct"], serde_json::json!(100.0));
+        assert_eq!(
+            body["projected_exhaustion_at"],
+            serde_json::json!("unknown")
+        );
+
+        let (status, body) = decide(&app, "merge_queue.health", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["healthy"], serde_json::json!(true));
+        assert_eq!(body["failure_rate"], serde_json::json!(0.0));
+        assert_eq!(body["blocked_count"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn decide_feature_promote_from_real_event_data() {
+        let state = test_state();
+        let now = super::now_secs();
+        let day = 86_400u64;
+        // Current window: 100 uses of the flag by distinct users, no
+        // errors, flat latency. Baseline window: same shape.
+        for i in 0..100 {
+            let mut cur = make_event(
+                "feature.used",
+                serde_json::json!({"flag": "new-diff-viewer", "latency_ms": 100}),
+                now - day,
+            );
+            cur.user_id = Some(format!("user-{i}"));
+            seed_event(&state, cur).await;
+            let mut prev = make_event(
+                "feature.used",
+                serde_json::json!({"flag": "new-diff-viewer", "latency_ms": 100}),
+                now - 8 * day,
+            );
+            prev.user_id = Some(format!("old-{i}"));
+            seed_event(&state, prev).await;
+        }
+        let app = crate::build_router(state);
+
+        let (status, body) = decide(
+            &app,
+            "feature.promote",
+            serde_json::json!({"flag": "new-diff-viewer", "baseline_days": 7}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["decision"], serde_json::json!("feature.promote"));
+        assert_eq!(body["promote"], serde_json::json!(true), "body: {body}");
+        assert_eq!(body["metrics"]["sample_size"], serde_json::json!(100));
+        assert_eq!(body["metrics"]["adoption_rate"], serde_json::json!(1.0));
+        assert_eq!(body["metrics"]["error_rate_delta"], serde_json::json!(0.0));
+        assert!(body["confidence"].as_f64().unwrap() >= 0.9);
+        assert!(body["reason"].as_str().unwrap().contains("Adoption"));
+    }
+
+    #[tokio::test]
+    async fn decide_feature_promote_rejects_error_spike() {
+        let state = test_state();
+        let now = super::now_secs();
+        let day = 86_400u64;
+        for i in 0..50 {
+            let mut cur = make_event(
+                "feature.used",
+                serde_json::json!({"flag": "bad-flag", "latency_ms": 100}),
+                now - day,
+            );
+            cur.user_id = Some(format!("user-{i}"));
+            seed_event(&state, cur).await;
+        }
+        for _ in 0..20 {
+            seed_event(
+                &state,
+                make_event(
+                    "feature.error",
+                    serde_json::json!({"flag": "bad-flag"}),
+                    now - day,
+                ),
+            )
+            .await;
+        }
+        let app = crate::build_router(state);
+
+        let (status, body) = decide(
+            &app,
+            "feature.promote",
+            serde_json::json!({"flag": "bad-flag"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["promote"], serde_json::json!(false), "body: {body}");
+        assert!(body["metrics"]["error_rate_delta"].as_f64().unwrap() > 0.2);
+    }
+
+    #[tokio::test]
+    async fn decide_feature_rollback_triggers_on_gate_failure_spike() {
+        let state = test_state();
+        let now = super::now_secs();
+        let w = 1_800u64;
+        // Before window: 1 failed / 50 passed (~2%).
+        for i in 0..50 {
+            seed_event(
+                &state,
+                make_event(
+                    "gate.passed",
+                    serde_json::json!({"mr_id": format!("b{i}")}),
+                    now - 2 * w,
+                ),
+            )
+            .await;
+        }
+        seed_event(
+            &state,
+            make_event(
+                "gate.failed",
+                serde_json::json!({"mr_id": "bf"}),
+                now - 2 * w,
+            ),
+        )
+        .await;
+        // Current window: 25 failed / 48 passed (~34%).
+        for i in 0..48 {
+            seed_event(
+                &state,
+                make_event(
+                    "gate.passed",
+                    serde_json::json!({"mr_id": format!("c{i}")}),
+                    now - w / 2,
+                ),
+            )
+            .await;
+        }
+        for i in 0..25 {
+            seed_event(
+                &state,
+                make_event(
+                    "gate.failed",
+                    serde_json::json!({"mr_id": format!("cf{i}")}),
+                    now - w / 2,
+                ),
+            )
+            .await;
+        }
+        let app = crate::build_router(state);
+
+        let (status, body) = decide(
+            &app,
+            "feature.rollback",
+            serde_json::json!({"flag": "optimistic-merge", "window_mins": 30}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["rollback"], serde_json::json!(true));
+        assert_eq!(
+            body["trigger"],
+            serde_json::json!("gate.failure_rate_spike")
+        );
+        assert!(body["metrics"]["before_rate"].as_f64().unwrap() < 0.05);
+        assert!(body["metrics"]["after_rate"].as_f64().unwrap() > 0.3);
+        assert_eq!(body["metrics"]["affected_mrs"], serde_json::json!(25));
+        assert!(body["reason"].as_str().unwrap().contains("increased"));
+    }
+
+    #[tokio::test]
+    async fn decide_gate_effectiveness_and_agent_performance() {
+        let state = test_state();
+        let now = super::now_secs();
+        // Gate: 90 passed, 10 failed (all real) → catch rate 0.1, fp 0.0.
+        for i in 0..90 {
+            seed_event(
+                &state,
+                make_event(
+                    "gate.passed",
+                    serde_json::json!({"gate_type": "lint", "mr_id": i}),
+                    now - 100,
+                ),
+            )
+            .await;
+        }
+        for i in 0..10 {
+            seed_event(
+                &state,
+                make_event(
+                    "gate.failed",
+                    serde_json::json!({"gate_type": "lint", "mr_id": 100 + i, "false_positive": false}),
+                    now - 100,
+                ),
+            )
+            .await;
+        }
+        // Agents: 90 completed at ~100s, 10 failed → failure rate 0.1.
+        for i in 0..90 {
+            seed_event(
+                &state,
+                make_event(
+                    "agent.completed",
+                    serde_json::json!({"duration_secs": 80 + i % 40}),
+                    now - 100,
+                ),
+            )
+            .await;
+        }
+        for _ in 0..10 {
+            seed_event(
+                &state,
+                make_event("agent.failed", serde_json::json!({}), now - 100),
+            )
+            .await;
+        }
+        let app = crate::build_router(state);
+
+        let (status, body) = decide(&app, "gate.effectiveness", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["effective"], serde_json::json!(true));
+        assert_eq!(body["catch_rate"], serde_json::json!(0.1));
+        assert_eq!(body["false_positive_rate"], serde_json::json!(0.0));
+
+        let (status, body) = decide(&app, "agent.performance", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["healthy"], serde_json::json!(true));
+        assert_eq!(body["failure_rate"], serde_json::json!(0.1));
+        let p50 = body["p50_duration_secs"].as_f64().unwrap();
+        assert!((80.0..=120.0).contains(&p50), "p50 {p50}");
+        assert!(body["p99_duration_secs"].as_f64().unwrap() >= p50);
+    }
+
+    #[tokio::test]
+    async fn decide_budget_headroom_from_real_usage() {
+        let state = test_state();
+        let ws = gyre_common::Id::new("ws-budget");
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                ws.clone(),
+                gyre_common::Id::new("default"),
+                "Budget",
+                "budget",
+                1000,
+            ))
+            .await
+            .unwrap();
+        let now = super::now_secs();
+        let ws_key = format!("workspace:{}", ws.as_str());
+        state
+            .budget_configs
+            .set_config(
+                &ws_key,
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(10_000),
+                    max_cost_per_day: Some(50.0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .budget_usages
+            .set_usage(
+                &ws_key,
+                &gyre_domain::BudgetUsage {
+                    entity_type: "workspace".into(),
+                    entity_id: ws.clone(),
+                    tokens_used_today: 2_500,
+                    cost_today: 10.0,
+                    active_agents: 1,
+                    period_start: now - 3_600,
+                    compute_minutes: 60,
+                },
+            )
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, body) = decide(
+            &app,
+            "budget.headroom",
+            serde_json::json!({"workspace_id": ws.as_str()}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["tokens_remaining_pct"], serde_json::json!(75.0));
+        assert_eq!(body["cost_remaining_pct"], serde_json::json!(80.0));
+        // Token burn 2500/h → 7500 left → 3h out.
+        assert_eq!(
+            body["projected_exhaustion_at"].as_str().unwrap(),
+            gyre_domain::decisions::format_iso8601_utc(now + 10_800)
+        );
+    }
+
+    #[tokio::test]
+    async fn decide_budget_headroom_requires_workspace() {
+        let app = app();
+        let (status, body) = decide(&app, "budget.headroom", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn decide_merge_queue_health_from_real_events_and_queue() {
+        let state = test_state();
+        let now = super::now_secs();
+        for i in 0..90 {
+            seed_event(
+                &state,
+                make_event(
+                    "merge_queue.processed",
+                    serde_json::json!({"mr_id": i, "outcome": "merged", "wait_secs": 300 + i % 60}),
+                    now - 1_000,
+                ),
+            )
+            .await;
+        }
+        for i in 0..10 {
+            seed_event(
+                &state,
+                make_event(
+                    "merge_queue.processed",
+                    serde_json::json!({"mr_id": 100 + i, "outcome": "failed", "wait_secs": 400}),
+                    now - 1_000,
+                ),
+            )
+            .await;
+        }
+        // Two non-terminal (blocked) queue entries.
+        for i in 0..2 {
+            state
+                .merge_queue
+                .enqueue(&gyre_domain::MergeQueueEntry::new(
+                    gyre_common::Id::new(format!("mq-{i}")),
+                    gyre_common::Id::new(format!("mr-{i}")),
+                    50,
+                    now - 60,
+                ))
+                .await
+                .unwrap();
+        }
+        let app = crate::build_router(state);
+
+        let (status, body) = decide(&app, "merge_queue.health", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["healthy"], serde_json::json!(true));
+        assert_eq!(body["failure_rate"], serde_json::json!(0.1));
+        assert_eq!(body["blocked_count"], serde_json::json!(2));
+        let avg = body["avg_wait_secs"].as_f64().unwrap();
+        assert!(avg > 300.0 && avg < 400.0, "avg {avg}");
+    }
+
+    #[tokio::test]
+    async fn decide_custom_rule_dsl_first_match_and_default() {
+        let state = test_state();
+        let now = super::now_secs();
+        // 2 spec approvals in the last week (threshold 3 → no match);
+        // 1 failed + 3 merged queue entries (threshold 5 → no match).
+        for i in 0..2 {
+            seed_event(
+                &state,
+                make_event(
+                    "spec.approved",
+                    serde_json::json!({"spec_path": i}),
+                    now - 100,
+                ),
+            )
+            .await;
+        }
+        for i in 0..3 {
+            seed_event(
+                &state,
+                make_event(
+                    "merge_queue.processed",
+                    serde_json::json!({"mr_id": i, "outcome": "merged", "wait_secs": 10}),
+                    now - 100,
+                ),
+            )
+            .await;
+        }
+        seed_event(
+            &state,
+            make_event(
+                "merge_queue.processed",
+                serde_json::json!({"mr_id": 9, "outcome": "failed", "wait_secs": 10}),
+                now - 100,
+            ),
+        )
+        .await;
+        let app = crate::build_router(state);
+
+        // The spec's own example decision (analytics.md §POST decide/custom).
+        let (status, body) = decide_custom(
+            &app,
+            serde_json::json!({
+                "name": "spec-approval-pace",
+                "description": "Are specs being approved fast enough to unblock the merge queue?",
+                "rules": [
+                    {"metric": "spec.approved", "window": "7d", "threshold": 3, "comparison": "gte", "then": "approve"},
+                    {"metric": "merge_queue.processed", "filter": {"outcome": "failed"}, "window": "24h", "threshold": 5, "comparison": "gte", "then": "escalate"}
+                ],
+                "default": "hold",
+                "context": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["decision"], serde_json::json!("spec-approval-pace"));
+        assert_eq!(body["outcome"], serde_json::json!("hold"));
+        assert!(body["matched_rule"].is_null());
+        let reason = body["reason"].as_str().unwrap();
+        assert!(reason.contains("count 2"), "reason: {reason}");
+        assert!(reason.contains("count 1"), "reason: {reason}");
+        assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
+
+        // Same store, lower threshold → rule 0 matches and wins.
+        let (status, body) = decide_custom(
+            &app,
+            serde_json::json!({
+                "name": "spec-approval-pace",
+                "rules": [
+                    {"metric": "spec.approved", "window": "7d", "threshold": 2, "comparison": "gte", "then": "approve"},
+                    {"metric": "spec.approved", "window": "7d", "threshold": 1, "comparison": "gte", "then": "never"}
+                ],
+                "default": "hold"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["outcome"], serde_json::json!("approve"));
+        assert_eq!(body["matched_rule"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn decide_custom_invalid_dsl_is_rejected() {
+        let app = app();
+        let (status, body) = decide_custom(
+            &app,
+            serde_json::json!({
+                "name": "bad",
+                "rules": [
+                    {"metric": "m", "window": "7d", "threshold": 1, "comparison": "approx", "then": "x"}
+                ],
+                "default": "hold"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("comparison"));
+    }
+
+    #[tokio::test]
+    async fn decide_rejects_cross_tenant_scope_in_context() {
+        // Same anti-forgery rule as record_event (task-146 review F1): a
+        // context naming another tenant's workspace must not scope the
+        // decision's event queries — Forbidden, not silently ignored.
+        let state = test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-victim"),
+                gyre_common::Id::new("tenant-other"),
+                "Victim",
+                "victim",
+                1000,
+            ))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, _) = decide(
+            &app,
+            "merge_queue.health",
+            serde_json::json!({"workspace_id": "ws-victim"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = decide_custom(
+            &app,
+            serde_json::json!({
+                "name": "d",
+                "rules": [{"metric": "m", "window": "1h", "threshold": 1, "comparison": "gte", "then": "x"}],
+                "default": "hold",
+                "context": {"workspace_id": "ws-victim"}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ─── Analytics Dashboard support (task-149, analytics.md §Analytics
+    // Dashboard: top agents, funnel counts) ────────────────────────────────
+
+    /// Seed an event directly through the analytics port. The HTTP ingest
+    /// binds agent identity to the caller, which would attribute every
+    /// seeded event to the test caller — the ranking tests need distinct
+    /// agents, so they bypass the endpoint and write through the port the
+    /// endpoint itself persists to.
+    async fn seed_agent_event(
+        state: &crate::AppState,
+        event_name: &str,
+        agent_id: Option<&str>,
+        properties: serde_json::Value,
+        workspace_id: Option<&str>,
+    ) {
+        let mut ev = AnalyticsEvent::new(
+            new_id(),
+            event_name,
+            agent_id.map(|a| a.to_string()),
+            properties,
+            now_secs(),
+        );
+        if let Some(ws) = workspace_id {
+            ev = ev.with_scope(None, None, Some(&Id::new(ws)), None);
+        }
+        state.analytics.record(&ev).await.unwrap();
+    }
+
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("Authorization", "Bearer test-token")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    #[tokio::test]
+    async fn top_agents_dimension_ranks_and_computes_rates() {
+        let state = test_state();
+        // agent-a: 4 events — spawned, 2 completions (durations 100s/200s),
+        // 1 failure → completion rate 2/3, avg duration 150s.
+        seed_agent_event(&state, "agent.spawned", Some("agent-a"), json!({}), None).await;
+        seed_agent_event(
+            &state,
+            "agent.completed",
+            Some("agent-a"),
+            json!({"duration_secs": 100}),
+            None,
+        )
+        .await;
+        seed_agent_event(
+            &state,
+            "agent.completed",
+            Some("agent-a"),
+            json!({"duration_secs": 200}),
+            None,
+        )
+        .await;
+        seed_agent_event(&state, "agent.failed", Some("agent-a"), json!({}), None).await;
+        // agent-b: 1 event, no completions or failures → null rates.
+        seed_agent_event(&state, "agent.spawned", Some("agent-b"), json!({}), None).await;
+        // Unattributed event cannot rank an agent.
+        seed_agent_event(&state, "agent.spawned", None, json!({}), None).await;
+
+        let app = crate::build_router(state);
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/top?dimension=agent&since=0&limit=10",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "unattributed event must not rank: {arr:?}");
+        assert_eq!(arr[0]["agent_id"], "agent-a");
+        assert_eq!(arr[0]["event_count"], 4);
+        assert_eq!(arr[0]["completed"], 2);
+        assert_eq!(arr[0]["failed"], 1);
+        let rate = arr[0]["completion_rate"].as_f64().unwrap();
+        assert!((rate - 2.0 / 3.0).abs() < 1e-9, "rate was {rate}");
+        assert_eq!(arr[0]["avg_duration_secs"].as_f64().unwrap(), 150.0);
+        assert_eq!(arr[1]["agent_id"], "agent-b");
+        assert_eq!(arr[1]["event_count"], 1);
+        assert!(arr[1]["completion_rate"].is_null());
+        assert!(arr[1]["avg_duration_secs"].is_null());
+    }
+
+    #[tokio::test]
+    async fn top_agents_workspace_scope_validated_against_caller_tenant() {
+        // Same anti-forgery rule as record_event/decide: the workspace
+        // filter must resolve within the caller's tenant, and the ranking
+        // must only cover events actually attributed to that workspace.
+        let state = test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-own"),
+                Id::new("default"),
+                "Own",
+                "own",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-victim"),
+                Id::new("tenant-other"),
+                "Victim",
+                "victim",
+                1000,
+            ))
+            .await
+            .unwrap();
+        seed_agent_event(
+            &state,
+            "agent.spawned",
+            Some("agent-own"),
+            json!({}),
+            Some("ws-own"),
+        )
+        .await;
+        seed_agent_event(
+            &state,
+            "agent.spawned",
+            Some("agent-victim"),
+            json!({}),
+            Some("ws-victim"),
+        )
+        .await;
+
+        let app = crate::build_router(state);
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/top?dimension=agent&since=0&workspace_id=ws-own",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "only the own-workspace agent ranks: {arr:?}");
+        assert_eq!(arr[0]["agent_id"], "agent-own");
+
+        // Cross-tenant workspace: Forbidden — no leaked ranking.
+        let (status, _) = get_json(
+            &app,
+            "/api/v1/analytics/top?dimension=agent&since=0&workspace_id=ws-victim",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Unknown workspace: NotFound, not a silent empty ranking.
+        let (status, _) = get_json(
+            &app,
+            "/api/v1/analytics/top?dimension=agent&since=0&workspace_id=ws-nope",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn top_dimension_rejects_unknown() {
+        let app = app();
+        let (status, body) = get_json(&app, "/api/v1/analytics/top?dimension=bogus").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn count_property_filter_matches_property_equality() {
+        // Funnel support: a `task.status_changed(InProgress)` step counts
+        // only the events whose `new_status` property is `InProgress`.
+        let state = test_state();
+        seed_agent_event(
+            &state,
+            "task.status_changed",
+            Some("agent-a"),
+            json!({"new_status": "InProgress"}),
+            None,
+        )
+        .await;
+        seed_agent_event(
+            &state,
+            "task.status_changed",
+            Some("agent-a"),
+            json!({"new_status": "InProgress"}),
+            None,
+        )
+        .await;
+        seed_agent_event(
+            &state,
+            "task.status_changed",
+            Some("agent-a"),
+            json!({"new_status": "Blocked"}),
+            None,
+        )
+        .await;
+
+        let app = crate::build_router(state);
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/count?event_name=task.status_changed&since=0&property=new_status:InProgress",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 2, "body: {json}");
+
+        // Without the property filter the count is the raw total.
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/count?event_name=task.status_changed&since=0",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 3);
+
+        // since/until are now optional (default 0..now) — the dashboard
+        // funnel fetches rely on the default window.
+        let (status, json) = get_json(
+            &app,
+            "/api/v1/analytics/count?event_name=task.status_changed",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["count"], 3);
+
+        // Malformed property filter: 400, not a silent zero count.
+        let (status, _) = get_json(
+            &app,
+            "/api/v1/analytics/count?event_name=task.status_changed&property=new_status",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

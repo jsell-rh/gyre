@@ -2193,6 +2193,7 @@ mod tests {
                         enabled: true,
                         digest: gyre_domain::DigestFrequency::Immediate,
                         min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
                     },
                     webhook: None,
                     slack: None,
@@ -2219,6 +2220,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 10,
                 0,
             )
@@ -3322,7 +3324,17 @@ mod tests {
         // Priority-1 notification for the workspace admin.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-user"), None, None, None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("admin-user"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(

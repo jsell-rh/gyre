@@ -2,10 +2,10 @@
 title: "Finish HSI §12 profile: notification filtering, judgment ledger, auth provider info"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: []
+commits: ["2fe2c20d35bc9ab7d13acb30283379bcbef9ff74", "11f52013cce3973a9e3ad0446ba2c85b95138f46", "9843f5c1470952ccbe14e9ff1dc0c3cddb9a7e7d", "9a1ab6010c79b2d9c6470aa0c53127fb5b30cc3e", "d1e30d9cfde4d02a432e84adf31c4656b21d877e", "9293115418c199d2d0ee0d75f207b3b37cfcd721", "e743177f5edecc31d937f136291c548146ef3d81", "07bb5685fe8d5e220c3b62259a102967104f411b", "a69b9ed8d8f1071a2198346da7e4392df921bb93", "d07a957fcf768d4d116f3e527788da7a2acb6076", "bc1d0c0cc30b775dc20f68cf5c2789e01a1ad5ce", "17bfb44719748cdaeb4e36a168acc996b778cb27", "22c4f6b5c604bbb55c7530fd2bed7733b743f492", "4d1d81b3e5d7ffdb22b7c6cb83fb4199457824e9", "eaca83fb8c0bf871c51a7ff7dc9adaea4b9f83ad", "062f925e2d5abdf4196291df05fac6cf9e9fbd06", "b60bead2274809356867313a2ff5bbd1d0acab86", "4a9517e1cfc30c41f37915b0dc6909dc7ac1edd2", "0ad88f037e732ed636e0d7b0036041a8c18c5fdd", "add632b1d391c2514056b3405d4b3b9c96e8f4c8", "40ea885b95788872db6560e23b11de6107cfb9c2", "8e295c2edc5bcd368da31b3015c0275944a42a11", "28b9ac50a758c443c5895f81b1de5ea571167aa0", "6add26e2979d8e917057435aa9ff119a466d738b", "2cbd48f3c8931c9addd6f895a527a64a72cc0066", "6061e726e957e84dd6a66681c2fe1eae2999cae2", "af8bc7f178f3e50790dd95a7d13bc0407c37f1ed", "a640c67f3a0cca0ac8f4d231b05689cf99328381", "2e15aff8db42ccb204636a307a4f6550dd03a030", "5065605d3fc9ba04e97c9e05d63a6a359942a878", "724b38458fd9ad1ea8026931ebae1e3daca1cfcf", "750b0acec8cf4472304b8fbedf5c432cb82e60dc", "5418531440a276986e07fb29afb6dfa4e42cacc5", "9c00e3f78ce8ed031a2663830d4c73cc3e909d48", "21dac7117d4ca855b6ad87103d66b604225cc5e3", "5564c00b8331c12535117408d6f8006ed3349e45", "1639c53172a74c6fc8bb2b0b8abdbb2c4366735f", "c7fd768b2f47f3761da6949bc71685a2ef58d131", "fa67c4cea58df20494badc51ef4b7ee63c8adcd0", "daf5eec53b71b2e9f4d24cb9cc43a34125dab5ed", "7aff9744e349e9cf75719c0b552e8abefa0ec3eb", "94af4aef33b08e09043f4eb0e0dd8542aea34e9d", "ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "b031a8cef3180b8ff6aaa770a8374b11c0194401"]
 ---
 
 ## Spec Excerpt
@@ -118,3 +118,73 @@ Check `scripts/check-tenant-filter.sh` and `scripts/check-arch.sh` run clean (au
 Key files: `crates/gyre-server/src/api/users.rs` (get_me, get_my_notifications, get_judgments), `crates/gyre-adapters/src/sqlite/user_profile.rs`, `crates/gyre-domain/src/user_profile.rs` (JudgmentType), `crates/gyre-server/src/api/workspaces.rs:223-255` (trust transitions), `crates/gyre-adapters/src/schema.rs:236-246` (audit_events), `:846-875` (meta_specs/meta_spec_versions).
 
 Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different files).
+
+## Shipped
+
+HSI §12 profile work is complete on this branch (44 attributed commits,
+independently approved earlier). This round repaired the publish blocker:
+the published PR head 2eb8bcc3 conflicted with current main b8d63b0d
+(task-113 in-app notification UI & email templates); merge aab5f74c
+resolves it, preserving the retained task-209 implementation and
+integrating task-113 verbatim.
+
+### What the merge preserves and integrates
+
+- Task-209 (unchanged in substance): inbox notification-preference
+  filtering (`exclude_types` threaded through
+  `NotificationRepository::list_for_user`/`count_unresolved`, sqlite/pg/mem
+  parity; `user_notification_prefs` store; inbox + badge + MCP tool read
+  it), the judgment ledger (`GET /users/me/judgments` aggregating
+  `spec_approvals` LEFT JOIN `spec_ledger_entries` plus `audit_events` rows
+  `gate_override`/`trust_change`/`meta_spec_publish`, SQL-level
+  `?workspace_id=` filtering, reverse-chron union sort, limit/offset after
+  the merge, `JudgmentType::GateOverride` = `gate`), its write paths
+  (trust transitions via PUT /workspaces/:id, human MR approvals past
+  failed gates, meta-spec publishes), and read-only `oidc_issuer` /
+  `last_login_at` on GET /users/me.
+- Task-113 (integrated from main): NotificationBell/Drawer/Settings web
+  components, realtime bell pushes, delivery channels, email templates.
+  The two features meet in `api/users.rs`: task-113's
+  PUT /notifications/preferences now persists per-type toggles through
+  task-209's `user_notification_prefs` store, and the inbox/badge reads
+  filter disabled types — one preference store, no split-brain.
+- `web/dist` resolved to main's (assignment-base) assets untouched; final
+  integration rebuilds and publishes them remotely.
+
+### Test evidence (merge head aab5f74c, in-sandbox)
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-domain -p gyre-ports` (clean),
+  `-p gyre-adapters` (clean), `-p gyre-server` (clean), and
+  `--all-targets` for gyre-server and gyre-adapters (clean — every
+  `list_for_user` call site, including task-113's new ones and all test
+  code, type-checks against the 9-arg signature).
+- `cargo fmt --check -p gyre-server -p gyre-adapters -p gyre-domain
+  -p gyre-ports`: clean.
+- `cargo test -p gyre-adapters user_profile`: 27 passed (judgment ledger
+  merge/filter/pagination, notification exclusion, prefs, tokens,
+  sessions, record_login). `cargo test -p gyre-adapters notification`:
+  11 passed (exclude_types list+count behavior).
+- `cargo test -p gyre-domain`: 548 passed.
+- `cd web && npm ci && npm test`: 120 files, 2391 passed / 41 skipped —
+  both task-209 (UserProfile) and task-113 (NotificationBell/Drawer/
+  Settings, notifications-store) suites green on the merged tree.
+- Mechanical checks (logs in /tmp/stage/review-evidence/): arch, ABAC
+  registry, MCP write tools, migration versions/portability, dead message
+  kinds, byte-slice, relative-path, fail-open refs, mem port contracts,
+  scope defaults, lossy secrets, forwarded headers, in-memory stores,
+  unbounded HTTP, inert enforcement, forged scope fields, task-commit
+  attribution — all exit 0. `check-tenant-filter.sh` cannot execute in
+  this mawk-only sandbox (gawk dialect; fails at its embedded awk program
+  before scanning) — verifier must run it under gawk.
+
+### Verifier must run (not executable in this sandbox)
+
+- `cargo test --all` on the merge head.
+- Server-side task-209 tests in particular:
+  `api::merge_requests::tests::human_approval_on_failed_gate_writes_gate_override_event`,
+  the trust_change audit-event test in `api::workspaces::tests`, the
+  meta_spec_publish and judgments-endpoint tests in `api/users.rs` /
+  `api::meta_specs.rs` tests, and the disabled-preference inbox tests.
+- `scripts/check-tenant-filter.sh` under gawk.
+- Exact-head GitHub checks on the published PR head after remote rebuild
+  of web/dist.

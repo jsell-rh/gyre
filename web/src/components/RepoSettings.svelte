@@ -11,6 +11,7 @@
   import { toastError } from '../lib/toast.svelte.js';
   import { shortId, entityName } from '../lib/entityNames.svelte.js';
   import SecretsPanel from './SecretsPanel.svelte';
+  import PolicyManager from './abac/PolicyManager.svelte';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
@@ -1092,6 +1093,18 @@
             </button>
           </div>
         {/if}
+
+        <!-- ABAC policies (abac-policy-engine.md §UI, task-132): full
+             management surface on the GLOBAL /api/v1/policies endpoints,
+             repo-scoped via ?scope=Repo&scope_id=<repo id> query
+             parameters — a filter on the global CRUD, not a repo-prefixed
+             resource hierarchy. -->
+        <PolicyManager
+          heading="Repo ABAC Policies"
+          initialScope="repo"
+          initialScopeId={repo?.id ?? null}
+          lockScope={true}
+        />
       </div>
 
 

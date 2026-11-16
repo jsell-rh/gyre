@@ -1,5 +1,6 @@
 use gyre_common::{Id, NotificationType};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserRole {
@@ -35,6 +36,15 @@ impl UserRole {
 pub enum GlobalRole {
     TenantAdmin,
     Member,
+}
+
+impl GlobalRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GlobalRole::TenantAdmin => "TenantAdmin",
+            GlobalRole::Member => "Member",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -185,6 +195,8 @@ impl<'de> Deserialize<'de> for NotificationChannels {
                 enabled: raw.email_enabled.unwrap_or(false),
                 digest: raw.email_digest.unwrap_or(DigestFrequency::Off),
                 min_priority: NotificationPriority::Medium,
+                // The flat shape predates per-type unsubscribe: no overrides.
+                type_overrides: HashMap::new(),
             },
         };
         Ok(Self {
@@ -214,6 +226,14 @@ pub struct EmailConfig {
     pub digest: DigestFrequency,
     /// Only email notifications at or above this priority.
     pub min_priority: NotificationPriority,
+    /// Per-notification-type email opt-outs (user-management.md §Email
+    /// Notifications: "Unsubscribe link per notification type"). Key: the
+    /// notification type string as stored/emitted (`as_str()`); `true` =
+    /// the user unsubscribed from email for that type — the dispatcher
+    /// must not queue it. Absent/`false` = subscribed. Absent by default
+    /// so pre-task-113 stored rows deserialize unchanged.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub type_overrides: HashMap<String, bool>,
 }
 
 impl Default for EmailConfig {
@@ -222,6 +242,7 @@ impl Default for EmailConfig {
             enabled: false,
             digest: DigestFrequency::Off,
             min_priority: NotificationPriority::Medium,
+            type_overrides: HashMap::new(),
         }
     }
 }
@@ -327,7 +348,17 @@ pub struct User {
     pub global_role: GlobalRole,
     pub preferences: UserPreferences,
     pub roles: Vec<UserRole>,
+    /// Verified `iss` claim of the OIDC provider that last authenticated this
+    /// user (HSI §12 auth provider info). Server-recorded; never client-editable.
+    pub oidc_issuer: Option<String>,
+    /// When the user last authenticated (HSI §12). Server-recorded.
     pub last_login_at: Option<u64>,
+    /// Unix seconds at which a TenantAdmin deactivated the account
+    /// (user-management.md §API > User Management: PUT /users/{id}/deactivate).
+    /// None while the account is active. A deactivated user fails
+    /// authentication (auth extractor + SSO login) and does not count as
+    /// an active workspace Owner.
+    pub deactivated_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -348,10 +379,28 @@ impl User {
             global_role: GlobalRole::Member,
             preferences: UserPreferences::default(),
             roles: vec![UserRole::ReadOnly],
+            oidc_issuer: None,
             last_login_at: None,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Whether a TenantAdmin has deactivated this account
+    /// (user-management.md §API > User Management).
+    pub fn is_deactivated(&self) -> bool {
+        self.deactivated_at.is_some()
+    }
+
+    /// Deactivate the account: stamp `deactivated_at` and `updated_at`.
+    /// Idempotent — a second call keeps the original stamp (the first
+    /// deactivation time is the audit-relevant one).
+    pub fn deactivate(&mut self, now: u64) {
+        if self.deactivated_at.is_none() {
+            self.deactivated_at = Some(now);
+        }
+        self.updated_at = now;
     }
 
     /// Create a user with distinct username and display name (SSO provisioning).
@@ -464,6 +513,29 @@ mod tests {
         let u = User::new(Id::new("u1"), "ext-1", "alice", 1000);
         assert_eq!(u.roles, vec![UserRole::ReadOnly]);
         assert!(!u.is_admin());
+    }
+
+    /// TASK-124: deactivation stamps deactivated_at and is idempotent —
+    /// the FIRST deactivation time is the audit-relevant one, so a second
+    /// call must not move it.
+    #[test]
+    fn deactivate_stamps_once_and_reports_state() {
+        let mut u = User::new(Id::new("u1"), "ext-1", "alice", 1000);
+        assert!(!u.is_deactivated());
+        assert!(u.deactivated_at.is_none());
+
+        u.deactivate(2000);
+        assert_eq!(u.deactivated_at, Some(2000));
+        assert!(u.is_deactivated());
+        assert_eq!(u.updated_at, 2000);
+
+        u.deactivate(3000);
+        assert_eq!(
+            u.deactivated_at,
+            Some(2000),
+            "re-deactivation must keep the original stamp"
+        );
+        assert_eq!(u.updated_at, 3000);
     }
 
     #[test]
@@ -653,6 +725,7 @@ mod tests {
                 enabled: true,
                 digest: DigestFrequency::Hourly,
                 min_priority: NotificationPriority::High,
+                type_overrides: std::collections::HashMap::new(),
             },
             webhook: Some(WebhookConfig {
                 url: "https://hooks.example/gyre".to_string(),

@@ -669,6 +669,7 @@ mod tests {
                         enabled: true,
                         digest: gyre_domain::DigestFrequency::Immediate,
                         min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
                     },
                     webhook: None,
                     slack: None,
@@ -704,7 +705,17 @@ mod tests {
 
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-chan"), None, None, None, None, None, 10, 0)
+            .list_for_user(
+                &Id::new("user-chan"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
             .await
             .unwrap();
         assert!(

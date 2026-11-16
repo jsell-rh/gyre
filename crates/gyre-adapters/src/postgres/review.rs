@@ -188,6 +188,21 @@ impl ReviewRepository for PgStorage {
         .await?
     }
 
+    async fn list_by_reviewer(&self, reviewer_agent_id: &str) -> Result<Vec<Review>> {
+        let pool = Arc::clone(&self.pool);
+        let reviewer = reviewer_agent_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Review>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = reviews::table
+                .filter(reviews::reviewer_agent_id.eq(reviewer))
+                .order(reviews::created_at.desc())
+                .load::<ReviewRow>(&mut *conn)
+                .context("list reviews by reviewer")?;
+            rows.into_iter().map(|r| r.into_review()).collect()
+        })
+        .await?
+    }
+
     async fn is_approved(&self, mr_id: &Id) -> Result<bool> {
         let reviews = self.list_reviews(mr_id).await?;
         if reviews.is_empty() {

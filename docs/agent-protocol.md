@@ -219,3 +219,65 @@ When an agent pushes to the **default branch** of any repo, the post-receive hoo
 | `R` (Renamed) | `Update spec references: <old> -> <new>` | `spec-housekeeping`, `auto-created` | Medium |
 
 **Auto-revocation of spec approvals:** When a watched spec file is **modified**, **deleted**, or **renamed** in a push to the default branch, all active approvals for that path are automatically revoked. `revoked_by` is set to `"system:spec-lifecycle"` and `revocation_reason` records the push branch. For renames, approvals on the old path are revoked; the new path starts with no approvals.
+
+---
+
+## Analytics Decisions in the Ralph Loop (analytics.md §Integration with the Ralph Loop)
+
+Analytics close the feedback loop for autonomous development. The loop, end to end:
+
+1. Workspace orchestrator creates delegation tasks
+2. Implementation agent ships code, opens MR
+3. MR merges → `mr.merged` event recorded
+4. Analytics tracks adoption over N days
+5. Repo orchestrator evaluates `feature.promote` (equivalent to `GET /api/v1/analytics/decide?decision=feature.promote`)
+6. Agent either promotes the flag or rolls back
+
+Steps 5–6 are agent decisions, not server-side automation: the orchestrator calls the
+`gyre_analytics_decide` MCP tool in its decision-making loop and acts on the returned
+`DecisionResult`. This is the primary way agent code invokes analytics decisions — no raw
+HTTP calls required.
+
+**Promote/rollback decision** (built-in decision over the flag's adoption data):
+
+```json
+{
+  "tool": "gyre_analytics_decide",
+  "arguments": {
+    "decision": "feature.promote",
+    "context": {
+      "flag": "new-diff-viewer",
+      "baseline_days": 7
+    }
+  }
+}
+```
+
+The response carries the `DecisionResult` shape (`decision`, `reason`, `outcome` with
+`promote`/`confidence`/`metrics`, `evaluated_at`). A repo orchestrator that receives
+`promote: true` promotes the flag; on `feature.rollback` triggers (a gate-failure spike)
+it rolls the flag back instead.
+
+**Custom decision** (rule DSL — `custom_rules` present switches to the custom evaluator;
+first matching rule wins, `default` applies otherwise):
+
+```json
+{
+  "tool": "gyre_analytics_decide",
+  "arguments": {
+    "decision": "spec-approval-pace",
+    "context": {},
+    "custom_rules": [
+      {"metric": "spec.approved", "window": "7d", "threshold": 3, "comparison": "gte", "then": "approve"},
+      {"metric": "merge_queue.processed", "filter": {"outcome": "failed"}, "window": "24h", "threshold": 5, "comparison": "gte", "then": "escalate"}
+    ],
+    "default": "hold"
+  }
+}
+```
+
+Other built-in decisions for loop control: `feature.rollback`, `gate.effectiveness`,
+`agent.performance`, `budget.headroom`, `merge_queue.health`. The `context` may scope the
+decision with `workspace_id`/`repo_id` (validated against the caller's tenant and token
+scope). See `specs/system/analytics.md` §Decision API for Agents for the full decision
+catalog and response shapes.

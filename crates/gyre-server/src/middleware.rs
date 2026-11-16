@@ -25,6 +25,46 @@ use tracing::Instrument;
 
 use crate::AppState;
 
+/// Path prefixes whose next path segment is a single-use invitation
+/// magic-link token — the sole auth factor for the invitee routes
+/// registered in lib.rs (`/api/v1/invite/:token/accept`,
+/// `/api/v1/workspaces/invitations/:token/accept`, and their decline
+/// siblings). The invitee holds no credentials yet, so the token in the
+/// URL is a bearer credential and must never reach observability output.
+const TOKEN_PATH_PREFIXES: &[&str] = &["/api/v1/invite/", "/api/v1/workspaces/invitations/"];
+
+/// Redact credential-bearing path segments before the path is used as a
+/// tracing span field or a Prometheus label value.
+///
+/// `request_tracing` exports the request path both to the `http_request`
+/// info span (default `RUST_LOG=info`, so logs/OTLP on every deployment)
+/// and as Prometheus label values
+/// (`gyre_http_requests_total{method,path,status}`), and `GET /metrics`
+/// is unauthenticated in the default deployment — an unredacted invite
+/// path would publish the magic-link token to anyone who can read
+/// /metrics for as long as the invitation is Pending (default 7 days),
+/// letting them accept it first. Redacting to a fixed template also
+/// keeps the label cardinality bounded (one label set per route, not
+/// per token), preserving the "normalise path to avoid high
+/// cardinality" intent below. Same hazard class as the ws-ticket
+/// comment in lib.rs ("Prevents leaking real auth tokens in WebSocket
+/// URL query parameters").
+fn redact_token_paths(path: &str) -> String {
+    for prefix in TOKEN_PATH_PREFIXES {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            // The token is the first segment after the prefix; keep the
+            // remainder (the action segment and anything after it)
+            // verbatim. The split index is the length of a
+            // '/'-terminated (or final) segment, so the tail slice is
+            // always on a UTF-8 char boundary.
+            let token_len = rest.split('/').next().map(str::len).unwrap_or(0);
+            let tail = &rest[token_len..];
+            return format!("{prefix}{{token}}{tail}");
+        }
+    }
+    path.to_string()
+}
+
 pub async fn request_tracing(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
@@ -32,8 +72,10 @@ pub async fn request_tracing(
 ) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().to_string();
-    // Normalise path to avoid high cardinality in metrics (strip query string).
-    let path = req.uri().path().to_string();
+    // Normalise path to avoid high cardinality in metrics (strip query
+    // string) and redact credential-bearing token segments (invitation
+    // magic links) before the path reaches logs or metrics labels.
+    let path = redact_token_paths(req.uri().path());
 
     let span = tracing::info_span!(
         "http_request",
@@ -246,6 +288,7 @@ mod tests {
             message_broadcast_tx: base.message_broadcast_tx.clone(),
             kv_store: base.kv_store.clone(),
             agent_signing_key: base.agent_signing_key.clone(),
+            attestation_verifier: base.attestation_verifier.clone(),
             agent_jwt_ttl_secs: base.agent_jwt_ttl_secs,
             users: base.users.clone(),
             api_keys: base.api_keys.clone(),
@@ -307,10 +350,13 @@ mod tests {
             workspaces: base.workspaces.clone(),
             personas: base.personas.clone(),
             policies: base.policies.clone(),
+            policy_cache: base.policy_cache.clone(),
             workspace_memberships: base.workspace_memberships.clone(),
             repo_access_overrides: base.repo_access_overrides.clone(),
             teams: base.teams.clone(),
             notifications: base.notifications.clone(),
+            tenant_invitations: base.tenant_invitations.clone(),
+            workspace_invitations: base.workspace_invitations.clone(),
             graph_store: base.graph_store.clone(),
             saved_views: base.saved_views.clone(),
             wg_config: base.wg_config.clone(),
@@ -339,12 +385,15 @@ mod tests {
             user_notification_prefs: base.user_notification_prefs.clone(),
             user_channel_prefs: base.user_channel_prefs.clone(),
             user_tokens: base.user_tokens.clone(),
+            sessions: base.sessions.clone(),
             secrets: base.secrets.clone(),
             judgment_ledger: base.judgment_ledger.clone(),
             orchestrator_registry: base.orchestrator_registry.clone(),
             ws_tickets: base.ws_tickets.clone(),
             meta_specs: base.meta_specs.clone(),
             meta_spec_bindings: base.meta_spec_bindings.clone(),
+            attestation_storage: base.attestation_storage.clone(),
+            rekor: base.rekor.clone(),
         });
         crate::build_router(state)
     }
@@ -595,6 +644,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn redact_token_paths_replaces_invite_token_segment() {
+        use super::redact_token_paths;
+        // Tenant invitation magic links (lib.rs invitee routes).
+        assert_eq!(
+            redact_token_paths("/api/v1/invite/abc123secret/accept"),
+            "/api/v1/invite/{token}/accept"
+        );
+        assert_eq!(
+            redact_token_paths("/api/v1/invite/abc123secret/decline"),
+            "/api/v1/invite/{token}/decline"
+        );
+        // Workspace invitation magic links.
+        assert_eq!(
+            redact_token_paths("/api/v1/workspaces/invitations/tok-xyz/accept"),
+            "/api/v1/workspaces/invitations/{token}/accept"
+        );
+        // The token template itself must be a fixed point (idempotent).
+        assert_eq!(
+            redact_token_paths("/api/v1/invite/{token}/accept"),
+            "/api/v1/invite/{token}/accept"
+        );
+    }
+
+    #[test]
+    fn redact_token_paths_leaves_ordinary_paths_alone() {
+        use super::redact_token_paths;
+        // Admin invitation management routes carry IDs, not credentials.
+        assert_eq!(
+            redact_token_paths("/api/v1/tenant/invitations"),
+            "/api/v1/tenant/invitations"
+        );
+        assert_eq!(
+            redact_token_paths("/api/v1/workspaces/ws-1/members"),
+            "/api/v1/workspaces/ws-1/members"
+        );
+        assert_eq!(redact_token_paths("/health"), "/health");
+        assert_eq!(redact_token_paths("/api/v1/version"), "/api/v1/version");
+    }
+
+    /// Review 2cff1e20 (finding 1): the invitation magic-link token is
+    /// the sole auth factor for the invitee routes, and GET /metrics is
+    /// unauthenticated in the default deployment — the token must never
+    /// appear as a Prometheus label value, only the redacted template.
+    #[tokio::test]
+    async fn invite_token_redacted_from_metrics_labels() {
+        let state = Arc::new(test_state());
+        let app = crate::build_router(Arc::clone(&state));
+        let token = "super-secret-magic-link-token";
+        // Any request through the route exercises request_tracing, even
+        // one that fails handler validation (unknown token → 404) — the
+        // invitee's browser GET on the magic link behaves the same way.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/invite/{token}/accept"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let rendered = state.metrics.render();
+        assert!(
+            !rendered.contains(token),
+            "invitation token must not appear in metrics output:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("path=\"/api/v1/invite/{token}/accept\""),
+            "the redacted path template must be the metrics label:\n{rendered}"
+        );
     }
 
     #[tokio::test]

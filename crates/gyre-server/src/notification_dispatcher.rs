@@ -126,10 +126,16 @@ pub async fn dispatch_with<S: HttpSender>(
     // priority — see NotificationPriority::for_notification_type.
     let priority = NotificationPriority::for_notification_type(&notif.notification_type);
 
-    // Email channel.
+    // Email channel. A per-type unsubscribe (§Email Notifications) drops
+    // the email even when the global channel config would deliver it.
     if channels.email.enabled
         && channels.email.digest != gyre_domain::DigestFrequency::Off
         && priority >= channels.email.min_priority
+        && channels
+            .email
+            .type_overrides
+            .get(notif.notification_type.as_str())
+            != Some(&true)
     {
         queue_email(state, notif).await;
     }
@@ -192,8 +198,10 @@ pub async fn dispatch_with<S: HttpSender>(
 }
 
 /// Queue an email for the digest sender (§Email Notifications). The outbox is
-/// durable (kv_store); a background digest job or operator drains it. SMTP
-/// transport is the deployment's concern — the interface contract is the queue.
+/// durable (kv_store); the `email_digest` background job (email.rs) drains it
+/// at the user's configured frequency, rendering templates per notification
+/// type. SMTP transport is the deployment's concern — the interface contract
+/// is the queue.
 async fn queue_email(state: &AppState, notif: &Notification) {
     let entry = serde_json::json!({
         "notification_id": notif.id.to_string(),
@@ -206,6 +214,10 @@ async fn queue_email(state: &AppState, notif: &Notification) {
         "entity_id": notif.source.entity_id,
         "action_url": notif.action_url,
         "queued_at": notif.created_at,
+        // Full embedded notification: the digest renderer templates from the
+        // complete record (type, title, body, deep link, timestamps) rather
+        // than the flattened summary above.
+        "notification": notif,
     });
     let key = format!("{}:{}", notif.user_id.as_str(), notif.id.as_str());
     if let Err(e) = state
@@ -1072,6 +1084,7 @@ mod tests {
                 enabled: true,
                 digest: gyre_domain::DigestFrequency::Immediate,
                 min_priority: NotificationPriority::Medium,
+                type_overrides: Default::default(),
             },
             webhook: None,
             slack: None,
@@ -1102,6 +1115,7 @@ mod tests {
                 enabled: false,
                 digest: gyre_domain::DigestFrequency::Immediate,
                 min_priority: NotificationPriority::Low,
+                type_overrides: Default::default(),
             },
             ..channels
         };
@@ -1112,6 +1126,54 @@ mod tests {
             outbox.len(),
             1,
             "disabled email channel must not queue anything"
+        );
+    }
+
+    /// Per-type unsubscribe (user-management.md §Email Notifications): a
+    /// `type_overrides` entry for the notification's type suppresses the
+    /// email queue entry even when the global channel config would deliver
+    /// it — and the queued entry embeds the full notification for the
+    /// digest renderer.
+    #[tokio::test]
+    async fn email_queue_respects_per_type_unsubscribe() {
+        let state = test_state();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("GateFailure".to_string(), true);
+        let channels = NotificationChannels {
+            in_app: true,
+            email: EmailConfig {
+                enabled: true,
+                digest: gyre_domain::DigestFrequency::Daily,
+                min_priority: NotificationPriority::Low,
+                type_overrides: overrides,
+            },
+            webhook: None,
+            slack: None,
+        };
+        let sender = Arc::new(CapturingSender {
+            calls: Mutex::new(Vec::new()),
+        });
+
+        // Unsubscribed type (would pass every global gate: High band, Low
+        // threshold, enabled) → NOT queued.
+        let notif = sample_notif("user-1", NotificationType::GateFailure);
+        dispatch_with(&state, &notif, &channels, sender.as_ref()).await;
+        let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
+        assert!(
+            outbox.is_empty(),
+            "per-type unsubscribe must suppress the queue entry"
+        );
+
+        // A different, subscribed type → queued, with the embedded
+        // notification the digest renderer templates from.
+        let notif2 = sample_notif("user-1", NotificationType::MergeQueuePaused);
+        dispatch_with(&state, &notif2, &channels, sender.as_ref()).await;
+        let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
+        assert_eq!(outbox.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(&outbox[0].1).unwrap();
+        assert_eq!(
+            parsed["notification"]["notification_type"], "MergeQueuePaused",
+            "queued entry embeds the full notification"
         );
     }
 
@@ -1132,6 +1194,7 @@ mod tests {
                 enabled: true,
                 digest: gyre_domain::DigestFrequency::Immediate,
                 min_priority: NotificationPriority::Low,
+                type_overrides: Default::default(),
             },
             webhook: None,
             slack: None,
@@ -1278,17 +1341,47 @@ mod tests {
 
         let owner_notifs = state
             .notifications
-            .list_for_user(&Id::new("owner-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("owner-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         let spawner_notifs = state
             .notifications
-            .list_for_user(&Id::new("spawner-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("spawner-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("admin-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1327,12 +1420,32 @@ mod tests {
 
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("admin-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         let spawner_notifs = state
             .notifications
-            .list_for_user(&Id::new("spawner-1"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("spawner-1"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(admin_notifs.len(), 1);
@@ -1379,6 +1492,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1405,6 +1519,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1433,7 +1548,17 @@ mod tests {
         notify_persona_approval_requested(&state, &persona).await;
         let all = state
             .notifications
-            .list_for_user(&Id::new("reviewer"), None, None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("reviewer"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -1467,7 +1592,17 @@ mod tests {
         for user in ["admin-1", "admin-2", "owner-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1487,7 +1622,17 @@ mod tests {
         for user in ["dev-1", "viewer-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert!(
@@ -1527,7 +1672,17 @@ mod tests {
         for user in ["spawner-1", "admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1549,6 +1704,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1601,6 +1757,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1620,6 +1777,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1640,6 +1798,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1672,7 +1831,17 @@ mod tests {
         for user in ["spawner-1", "admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1703,7 +1872,17 @@ mod tests {
         for user in ["spawner-1", "owner-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1725,6 +1904,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
                 50,
                 0,
             )
@@ -1769,7 +1949,17 @@ mod tests {
         for user in ["owner-1", "tenant-admin-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -1792,7 +1982,17 @@ mod tests {
         for user in ["admin-1", "dev-1"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&ws), None, None, None, None, 50, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&ws),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    50,
+                    0,
+                )
                 .await
                 .unwrap();
             assert!(

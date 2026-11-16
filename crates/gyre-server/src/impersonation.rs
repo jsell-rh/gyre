@@ -31,7 +31,7 @@
 //! - Max one active impersonation session per admin at a time.
 //! - TTL defaults to 15 minutes, configurable via `GYRE_IMPERSONATION_TTL`.
 
-use gyre_common::{Id, Notification, NotificationType, WsMessage};
+use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome, User, UserRole};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -503,6 +503,36 @@ pub async fn find_session_by_request(
         .find(|s| s.request_id == request_id))
 }
 
+/// End every active impersonation session the given user participates in
+/// (as impersonator OR target). Part of the deactivation cascade
+/// (user-management.md §API > User Management): a deactivated account
+/// fails authentication on every path, and an unexpired impersonation JWT
+/// is no exception — ending the session revokes the token before `exp`
+/// and closes the audit trail with an `ImpersonationEnded` event.
+/// `resolve_impersonation_auth` additionally re-checks both accounts'
+/// deactivation state on every call, so this is belt-and-suspenders with
+/// the resolver, not the sole gate. Returns the number of sessions ended.
+pub async fn end_active_sessions_for_user(state: &AppState, user_id: &str, reason: &str) -> u64 {
+    let mut ended = 0u64;
+    for session in list_sessions(state).await.unwrap_or_default() {
+        if session.ended {
+            continue;
+        }
+        if session.impersonator_id == user_id || session.target_user_id == user_id {
+            match end_session(state, &session.session_id, reason).await {
+                Ok(_) => ended += 1,
+                Err(e) => tracing::warn!(
+                    session_id = %session.session_id,
+                    user_id = user_id,
+                    error = %e,
+                    "deactivation cascade: failed to end impersonation session"
+                ),
+            }
+        }
+    }
+    ended
+}
+
 /// TTL-expiry sweep (background job `impersonation_expiry`).
 ///
 /// Ends every active session past its `expires_at` (emitting
@@ -686,6 +716,28 @@ pub async fn resolve_impersonation_auth(
         return None;
     }
 
+    // Deactivation cascade (user-management.md §API > User Management:
+    // the deactivated account "fails authentication on every path").
+    // This is the impersonation path: a deactivated target loses the
+    // mandate outright, and a deactivated impersonator loses it too — a
+    // rogue TenantAdmin's unexpired impersonation JWT must not keep full
+    // API access as the target user until `exp`. The impersonator's
+    // account record must also still exist: a deleted account is in no
+    // position to hold a mandate. `deactivate_user` ends the affected
+    // sessions inline, but this check is the enforcement that stands even
+    // if the session record outlives the account state change.
+    if target.is_deactivated() {
+        return None;
+    }
+    let impersonator = state
+        .users
+        .find_by_id(&Id::new(session.impersonator_id.clone()))
+        .await
+        .ok()??;
+    if impersonator.is_deactivated() {
+        return None;
+    }
+
     Some(AuthenticatedAgent {
         agent_id: target.display_name.clone(),
         user_id: Some(target.id.clone()),
@@ -809,10 +861,11 @@ async fn deliver_approval_code(
     if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation request notification");
     } else {
-        // Channel fan-out per user-management.md §Delivery Channels.
+        // Channel fan-out per user-management.md §Delivery Channels. The WS
+        // push to the target's live connections is part of the centralized
+        // create fan-out (BroadcastingNotificationRepo).
         crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
     }
-    push_notification_to_user(state, &target.id, &notif).await;
 }
 
 /// Notify the target user that impersonation has begun.
@@ -861,41 +914,10 @@ async fn notify_impersonation_alert(
     if let Err(e) = state.create_notification(&notif).await {
         tracing::warn!(error = %e, "failed to persist impersonation alert notification");
     } else {
-        // Channel fan-out per user-management.md §Delivery Channels.
+        // Channel fan-out per user-management.md §Delivery Channels. The WS
+        // push to the target's live connections is part of the centralized
+        // create fan-out (BroadcastingNotificationRepo).
         crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
-    }
-    push_notification_to_user(state, &target_id, &notif).await;
-}
-
-/// Push a notification to every live WebSocket connection authenticated as
-/// `user_id` (identity-security.md §Impersonation: notify the impersonated
-/// user when online). Connections are matched by the server-verified user
-/// identity recorded at connection time, never by client-supplied ids.
-pub async fn push_notification_to_user(state: &AppState, user_id: &Id, notif: &Notification) {
-    let payload = match serde_json::to_string(&WsMessage::NotificationPush {
-        notification: notif.clone(),
-    }) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
-    let conns = state.ws_connections.read().await;
-    let users = state.ws_connection_users.read().await;
-    let mut sent = 0usize;
-    for (conn_id, tx) in conns.iter() {
-        let matches = users
-            .get(conn_id)
-            .map(|uid| uid == user_id.as_str())
-            .unwrap_or(false);
-        if matches && tx.try_send(payload.clone()).is_ok() {
-            sent += 1;
-        }
-    }
-    if sent == 0 {
-        tracing::debug!(
-            user_id = %user_id,
-            "notification WS push: user not online, Inbox notification only"
-        );
     }
 }
 
@@ -972,6 +994,7 @@ mod tests {
                         enabled: true,
                         digest: gyre_domain::DigestFrequency::Immediate,
                         min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
                     },
                     webhook: None,
                     slack: None,
@@ -1012,7 +1035,7 @@ mod tests {
         // In-app records exist for both events …
         let notifs = state
             .notifications
-            .list_for_user(&target.id, None, None, None, None, None, 10, 0)
+            .list_for_user(&target.id, None, None, None, None, None, &[], 10, 0)
             .await
             .unwrap();
         assert_eq!(notifs.len(), 2, "approval code + start alert");

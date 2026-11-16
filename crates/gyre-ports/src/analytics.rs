@@ -79,9 +79,14 @@ pub trait AnalyticsRepository: Send + Sync {
         group_by: AnalyticsGroupBy,
     ) -> Result<Vec<(String, u64)>>;
     /// Returns (date_str, count) pairs grouped by calendar day (UTC).
+    /// `event_name` is an exact-match filter; `None` aggregates across
+    /// ALL event names — the total daily event volume the Analytics
+    /// Dashboard bar chart renders (analytics.md §Analytics Dashboard:
+    /// "daily event volume for the last 30 days"). The spec query form
+    /// `GET /daily?event_name=&days=30` (empty value) is `None`.
     async fn aggregate_by_day(
         &self,
-        event_name: &str,
+        event_name: Option<&str>,
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>>;

@@ -877,6 +877,19 @@ impl AgentRepository for MemAgentRepository {
             .collect())
     }
 
+    async fn list_by_spawner(&self, spawned_by: &str) -> Result<Vec<Agent>> {
+        let mut out: Vec<Agent> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.spawned_by.as_deref() == Some(spawned_by))
+            .cloned()
+            .collect();
+        out.sort_by_key(|a| std::cmp::Reverse(a.spawned_at));
+        Ok(out)
+    }
+
     async fn update_status(&self, agent_id: &Id, status: AgentStatus) -> Result<()> {
         let mut store = self.store.lock().await;
         if let Some(agent) = store.get_mut(agent_id.as_str()) {
@@ -1130,6 +1143,19 @@ impl ReviewRepository for MemReviewRepository {
         Ok(reviews)
     }
 
+    async fn list_by_reviewer(&self, reviewer_agent_id: &str) -> Result<Vec<Review>> {
+        let mut reviews: Vec<Review> = self
+            .reviews
+            .lock()
+            .await
+            .values()
+            .filter(|r| r.reviewer_agent_id == reviewer_agent_id)
+            .cloned()
+            .collect();
+        reviews.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+        Ok(reviews)
+    }
+
     async fn is_approved(&self, mr_id: &Id) -> Result<bool> {
         let reviews = self.list_reviews(mr_id).await?;
         if reviews.is_empty() {
@@ -1267,6 +1293,24 @@ impl UserRepository for MemUserRepository {
             .cloned())
     }
 
+    async fn find_by_email(&self, email: &str) -> Result<Vec<User>> {
+        // Case-insensitive: invitation emails are normalized to lowercase,
+        // but SSO-provisioned accounts store the IdP's raw casing. Email
+        // is not unique (same person, multiple tenants), so every match is
+        // returned; callers scope by tenant. Ordered by creation for a
+        // deterministic pick.
+        let email = email.to_lowercase();
+        let store = self.store.lock().await;
+        let mut matches: Vec<User> = store
+            .values()
+            .filter(|u| u.email.as_ref().is_some_and(|e| e.to_lowercase() == email))
+            .cloned()
+            .collect();
+        drop(store);
+        matches.sort_by_key(|u| u.created_at);
+        Ok(matches)
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
@@ -1296,8 +1340,52 @@ impl UserRepository for MemUserRepository {
         Ok(())
     }
 
+    async fn claim_external_id(&self, user_id: &Id, new_external_id: &str) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if another user already owns the new
+        // external_id, or the target user does not exist.
+        if let Some(owner) = store
+            .values()
+            .find(|u| u.external_id == new_external_id && u.id != *user_id)
+        {
+            anyhow::bail!("external_id already owned by user {}", owner.id);
+        }
+        let user = store.get_mut(user_id.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("cannot claim external_id for user {user_id}: not found")
+        })?;
+        user.external_id = new_external_id.to_string();
+        Ok(())
+    }
+
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+
+    async fn record_login(
+        &self,
+        user_id: &Id,
+        oidc_issuer: &str,
+        at: u64,
+        min_interval_secs: u64,
+    ) -> Result<()> {
+        // Same debounce contract as the SQL adapters: write only when the
+        // verified issuer differs from the stored one, or the stored
+        // last_login_at is unset or at/older than the threshold (the
+        // provisioning path re-stamps last_login_at on every auth, so the
+        // issuer carve-out is what keeps provenance correct).
+        let mut store = self.store.lock().await;
+        if let Some(u) = store.get_mut(user_id.as_str()) {
+            let issuer_changed = u.oidc_issuer.as_deref() != Some(oidc_issuer);
+            let stale = match u.last_login_at {
+                None => true,
+                Some(prev) => prev <= at.saturating_sub(min_interval_secs),
+            };
+            if issuer_changed || stale {
+                u.oidc_issuer = Some(oidc_issuer.to_string());
+                u.last_login_at = Some(at);
+            }
+        }
         Ok(())
     }
 }
@@ -1450,7 +1538,7 @@ impl AnalyticsRepository for MemAnalyticsRepository {
 
     async fn aggregate_by_day(
         &self,
-        event_name: &str,
+        event_name: Option<&str>,
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>> {
@@ -1458,7 +1546,14 @@ impl AnalyticsRepository for MemAnalyticsRepository {
         let store = self.store.lock().await;
         let mut by_day: BTreeMap<String, u64> = BTreeMap::new();
         for e in store.iter() {
-            if e.event_name == event_name && e.timestamp >= since && e.timestamp <= until {
+            let name_match = match event_name {
+                Some(name) => e.event_name == name,
+                // None = total volume across ALL event names (the
+                // dashboard bar-chart form, analytics.md §Analytics
+                // Dashboard).
+                None => true,
+            };
+            if name_match && e.timestamp >= since && e.timestamp <= until {
                 // Simple day bucketing: seconds / 86400 -> day number, format as YYYY-MM-DD
                 let secs = e.timestamp as i64;
                 let days_since_epoch = secs / 86400;
@@ -1828,7 +1923,7 @@ impl CostRepository for MemCostRepository {
 /// raw JSON lives only in `detail_zstd` and `event.detail` is `Null` —
 /// mirroring the SQLite/Postgres adapters, where compression blanks the
 /// `detail` column and stores the zstd payload in `detail_zstd`.
-struct MemAuditEntry {
+pub(crate) struct MemAuditEntry {
     event: AuditEvent,
     detail_zstd: Option<Vec<u8>>,
 }
@@ -1852,6 +1947,15 @@ impl MemAuditEntry {
 #[derive(Default)]
 pub struct MemAuditRepository {
     store: Arc<Mutex<Vec<MemAuditEntry>>>,
+}
+
+impl MemAuditRepository {
+    /// Shared handle so the in-memory judgment ledger aggregates the SAME
+    /// audit store this repo writes to (HSI §12). Entries stay wrapped in
+    /// MemAuditEntry (compression-aware); consumers materialize them.
+    pub fn shared(&self) -> Arc<Mutex<Vec<MemAuditEntry>>> {
+        Arc::clone(&self.store)
+    }
 }
 
 #[async_trait]
@@ -3008,6 +3112,7 @@ impl NotificationRepository for MemNotificationRepository {
         max_priority: Option<u8>,
         notification_types: Option<&[&str]>,
         repo_id: Option<&Id>,
+        exclude_types: &[&str],
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
@@ -3024,6 +3129,7 @@ impl NotificationRepository for MemNotificationRepository {
                     // item — never a no-op.
                     && notification_types.is_none_or(|ts| ts.contains(&n.notification_type.as_str()))
                     && repo_id.is_none_or(|r| n.source.repo_id.as_ref() == Some(r))
+                    && !exclude_types.contains(&n.notification_type.as_str())
             })
             .cloned()
             .collect();
@@ -3105,7 +3211,12 @@ impl NotificationRepository for MemNotificationRepository {
         Ok(())
     }
 
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> Result<u64> {
         Ok(self
             .store
             .lock()
@@ -3113,9 +3224,10 @@ impl NotificationRepository for MemNotificationRepository {
             .iter()
             .filter(|n| {
                 n.user_id == *user_id
-                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
                     && n.resolved_at.is_none()
                     && n.dismissed_at.is_none()
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && !exclude_types.contains(&n.notification_type.as_str())
             })
             .count() as u64)
     }
@@ -3593,6 +3705,13 @@ impl gyre_ports::GateResultRepository for MemGateResultRepository {
             .cloned()
             .collect())
     }
+    async fn delete_by_mr_id_and_gate_id(&self, mr_id: &str, gate_id: &str) -> Result<()> {
+        self.results
+            .lock()
+            .await
+            .retain(|_, r| !(r.mr_id.to_string() == mr_id && r.gate_id.to_string() == gate_id));
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -3647,7 +3766,13 @@ impl gyre_ports::SpecLifecycleRepository for MemSpecLifecycleRepository {
 pub struct MemSpecApprovalRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
 }
+
 impl MemSpecApprovalRepository {
+    /// Shared handle for the in-memory judgment ledger (HSI §12).
+    pub fn shared(&self) -> Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>> {
+        Arc::clone(&self.store)
+    }
+
     /// Apply a domain transition (approve/revoke/reject) to a stored entry:
     /// load, validate via the domain's transition rules, persist the full
     /// record so mutual exclusivity is guaranteed. Returns Ok(None) when the
@@ -3665,6 +3790,7 @@ impl MemSpecApprovalRepository {
         Ok(Some(()))
     }
 }
+
 #[async_trait]
 impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
     async fn create(&self, approval: &gyre_domain::SpecApproval) -> Result<()> {
@@ -3687,7 +3813,7 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path)
             .cloned()
             .collect();
-        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn find_by_spec_sha(
@@ -3703,7 +3829,7 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path && a.spec_sha == spec_sha)
             .cloned()
             .collect();
-        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
@@ -3715,11 +3841,27 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
             .filter(|a| a.spec_path == spec_path && a.is_active())
             .cloned()
             .collect();
-        out.reverse();
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str())); // SQL id-desc
         Ok(out)
     }
     async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.values().cloned().collect())
+    }
+
+    async fn list_by_approver(&self, approver_id: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
+        let mut out: Vec<_> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.approver_id == approver_id)
+            .cloned()
+            .collect();
+        // The store is a HashMap (arbitrary iteration order), so ordering
+        // must be derived from the rows, not insertion: sort by id string
+        // descending, mirroring the SQL adapters' ORDER BY id DESC.
+        out.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str()));
+        Ok(out)
     }
 
     async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
@@ -3888,6 +4030,14 @@ impl gyre_ports::ContainerAuditRepository for MemContainerAuditRepository {
 #[derive(Default)]
 pub struct MemSpecLedgerRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>>,
+}
+
+impl MemSpecLedgerRepository {
+    /// Shared handle for the in-memory judgment ledger (HSI §12 workspace
+    /// attribution of spec approvals).
+    pub fn shared(&self) -> Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>> {
+        Arc::clone(&self.store)
+    }
 }
 
 #[async_trait]
@@ -4685,7 +4835,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair_seeded();
     test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
@@ -4890,6 +5040,42 @@ fn shared_workspace_policy_pair(fail_trust: bool) -> SharedWorkspacePolicyPair {
     (Arc::new(workspaces), policies, ws_store)
 }
 
+/// Production-parity variant of [`shared_workspace_policy_pair`]: the
+/// shared policy store comes pre-populated with the full built-in ABAC
+/// policy set — `abac_middleware::m34_builtin_policies()` chained with
+/// `abac_middleware::domain_builtin_policies()`, the exact set
+/// [`abac_middleware::seed_builtin_policies`] persists at startup
+/// (main.rs), keyed by policy id exactly as `MemPolicyRepository::create`
+/// writes them. Constructing the map synchronously (before it is wrapped
+/// in the store mutex) keeps every `test_state*` builder callable from
+/// sync and current-thread-runtime contexts alike.
+///
+/// task-129 removed the middleware's system-token bypass: the global
+/// GYRE_AUTH_TOKEN is allowed BY the `system-full-access` policy
+/// (priority 1000), so a test state whose policy store is empty
+/// default-denies every ABAC-evaluated route — the seeded builtin set is
+/// part of production wiring (`main.rs` seeds it before serving), not an
+/// optional extra. Test states that specifically exercise empty- or
+/// failing-policy behavior (`test_state_failing_policy_creates`,
+/// `test_state_failing_policy_lists`) build their own stores and stay
+/// unseeded.
+#[cfg(test)]
+fn shared_workspace_policy_pair_seeded() -> SharedWorkspacePolicyPair {
+    let mut seeded = std::collections::HashMap::new();
+    for policy in crate::abac_middleware::m34_builtin_policies()
+        .into_iter()
+        .chain(crate::abac_middleware::domain_builtin_policies())
+    {
+        seeded.insert(policy.id.to_string(), policy);
+    }
+    let pol_store = Arc::new(tokio::sync::Mutex::new(seeded));
+    let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store)
+        .with_workspace_store(Arc::clone(&ws_store));
+    (Arc::new(workspaces), policies, ws_store)
+}
+
 /// Build an AppState with a custom GitOpsPort for tests that need to control
 /// git operation behavior (e.g., configurable `can_merge` results).
 #[cfg(test)]
@@ -4933,6 +5119,11 @@ fn test_state_inner(
     crate::load_spec_links_into_store(&spec_link_repo, &spec_links_store);
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+    // In-memory judgment ledger aggregates the SAME audit / spec-approval /
+    // spec-ledger stores these repos write through (HSI §12).
+    let mem_audit = Arc::new(MemAuditRepository::default());
+    let mem_spec_approvals = Arc::new(MemSpecApprovalRepository::default());
+    let mem_spec_ledger = Arc::new(MemSpecLedgerRepository::default());
 
     let TestStateOverrides {
         storage,
@@ -4940,10 +5131,15 @@ fn test_state_inner(
         secrets,
         kv,
     } = overrides;
-
     // Shared binding store: the meta-spec delete guard must see bindings
     // written through `meta_spec_bindings` (same wiring as lib.rs).
     let meta_spec_binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    // §Performance: wrap the policy repo in the read-through cache, same as
+    // build_state, so middleware/engine tests exercise the cached path.
+    let policy_cache = Arc::new(crate::policy_cache::PolicyCache::default());
+    let cached_policies: Arc<dyn gyre_ports::PolicyRepository> = Arc::new(
+        crate::policy_cache::CachedPolicyRepository::new(policies, Arc::clone(&policy_cache)),
+    );
 
     // Mirror production wiring (lib.rs): entity repositories are wrapped in
     // search-sync decorators so tests exercise the same index-on-write
@@ -4976,10 +5172,23 @@ fn test_state_inner(
         Arc::new(MemAnalyticsRepository::default()),
         Arc::clone(&search),
     );
+    // The audit repo keeps both concerns: search-sync indexing (task-202,
+    // mirroring production lib.rs wiring) AND store sharing with the
+    // judgment ledger (task-209, HSI §12) — the decorator wraps the shared
+    // mem store instead of constructing its own.
     let audit = crate::search_sync::wrap_audit(
-        Arc::new(MemAuditRepository::default()),
+        Arc::clone(&mem_audit) as Arc<dyn AuditRepository>,
         Arc::clone(&search),
     );
+    // Mirror production wiring (lib.rs): attestation bundles are stored
+    // through the AttestationStorage port over the same audit repository,
+    // and Rekor is the no-op client.
+    let attestation_storage: Arc<dyn gyre_ports::AttestationStorage> = Arc::new(
+        gyre_adapters::MergeAttestationStorage::new(Arc::clone(&audit)),
+    );
+    let rekor: Arc<dyn gyre_ports::RekorClient> = Arc::new(gyre_adapters::NoopRekorClient);
+
+    let forge_key = Arc::new(crate::auth::AgentSigningKey::generate());
 
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
@@ -4997,7 +5206,10 @@ fn test_state_inner(
         telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
         message_broadcast_tx: broadcast::channel(16).0,
         kv_store: kv.unwrap_or_else(|| Arc::new(MemKvStore::default())),
-        agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
+        agent_signing_key: forge_key.clone(),
+        attestation_verifier: Arc::new(crate::merge_attestation::ForgeAttestationVerifier::new(
+            forge_key.clone(),
+        )),
         agent_jwt_ttl_secs: 3600,
         users: Arc::new(MemUserRepository::default()),
         api_keys: Arc::new(MemApiKeyRepository::default()),
@@ -5018,6 +5230,8 @@ fn test_state_inner(
         analytics,
         costs: Arc::new(MemCostRepository::default()),
         audit,
+        attestation_storage,
+        rekor,
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
         notification_broadcast_tx: broadcast::channel(64).0,
@@ -5039,7 +5253,8 @@ fn test_state_inner(
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
         db_storage: None,
         storage,
-        spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
+        spec_approvals: Arc::clone(&mem_spec_approvals)
+            as Arc<dyn gyre_ports::SpecApprovalRepository>,
         spec_policies: Arc::new(MemSpecPolicyRepository::default()),
         attestation_store: Arc::new(MemAttestationRepository::default()),
         chain_attestations: Arc::new(MemChainAttestationRepository::default()),
@@ -5051,7 +5266,7 @@ fn test_state_inner(
         trusted_proxies: crate::trusted_proxy::TrustedProxies::default(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: Arc::new(MemContainerAuditRepository::default()),
-        spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
+        spec_ledger: Arc::clone(&mem_spec_ledger) as Arc<dyn gyre_ports::SpecLedgerRepository>,
         spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
         spec_link_repo: spec_link_repo.clone(),
         spec_assertion_results: Arc::new(MemSpecAssertionResultRepository::default()),
@@ -5064,11 +5279,14 @@ fn test_state_inner(
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
         personas,
-        policies,
+        policies: cached_policies,
+        policy_cache,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
         repo_access_overrides: Arc::new(MemRepoAccessOverrideRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
+        tenant_invitations: Arc::new(MemTenantInvitationRepository::default()),
+        workspace_invitations: Arc::new(MemWorkspaceInvitationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
@@ -5116,7 +5334,12 @@ fn test_state_inner(
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_channel_prefs: Arc::new(MemUserChannelPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
-        judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
+        sessions: Arc::new(MemSessionRepository::default()),
+        judgment_ledger: Arc::new(MemJudgmentLedgerRepository::with_sources(
+            &mem_audit,
+            &mem_spec_approvals,
+            &mem_spec_ledger,
+        )),
         secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
         orchestrator_registry: crate::signal_chain::OrchestratorRegistry::new(),
         ws_tickets: crate::auth::WsTicketStore::new(),
@@ -6097,23 +6320,326 @@ impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
     }
 }
 
-// ─── MemJudgmentLedgerRepository ─────────────────────────────────────────────
+// ─── MemSessionRepository ────────────────────────────────────────────────────
 
 #[derive(Default)]
-pub struct MemJudgmentLedgerRepository;
+pub struct MemSessionRepository {
+    sessions: Arc<tokio::sync::RwLock<Vec<gyre_domain::UserSession>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SessionRepository for MemSessionRepository {
+    async fn create(&self, session: &gyre_domain::UserSession) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if guard.iter().any(|s| s.id == session.id) {
+            anyhow::bail!("session {} already exists", session.id);
+        }
+        guard.push(session.clone());
+        Ok(())
+    }
+
+    async fn list_for_user(&self, user_id: &Id) -> Result<Vec<gyre_domain::UserSession>> {
+        let guard = self.sessions.read().await;
+        Ok(guard
+            .iter()
+            .filter(|s| &s.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .find(|s| &s.id == id)
+            .cloned())
+    }
+
+    async fn find_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| s.token_hash == token_hash)
+            .max_by_key(|s| (s.created_at, s.id.to_string()))
+            .cloned())
+    }
+
+    async fn find_by_credential_and_device(
+        &self,
+        user_id: &Id,
+        credential_hash: &str,
+        ip_address: &str,
+        user_agent: &str,
+    ) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| {
+                &s.user_id == user_id
+                    && s.token_hash == credential_hash
+                    && s.ip_address == ip_address
+                    && s.user_agent == user_agent
+            })
+            // Newest match first: after a re-mint both the stale expired
+            // row and the fresh row match; the fresh one must be found.
+            .max_by_key(|s| (s.created_at, s.id.to_string()))
+            .cloned())
+    }
+
+    async fn touch(&self, id: &Id, last_active_at: u64, expires_at: u64) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if let Some(s) = guard.iter_mut().find(|s| &s.id == id) {
+            s.last_active_at = last_active_at;
+            s.expires_at = expires_at;
+        }
+        Ok(())
+    }
+
+    async fn revoke(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if let Some(s) = guard
+            .iter_mut()
+            .find(|s| s.id == *id && s.user_id == *user_id)
+        {
+            s.revoked = true;
+        }
+        Ok(())
+    }
+
+    async fn revoke_all_for_user(&self, user_id: &Id) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        for s in guard.iter_mut().filter(|s| &s.user_id == user_id) {
+            s.revoked = true;
+        }
+        Ok(())
+    }
+
+    async fn delete_expired_before(&self, cutoff: u64) -> Result<u64> {
+        let mut guard = self.sessions.write().await;
+        let before = guard.len();
+        // Port contract: revoked rows are never deleted — they are the
+        // durable record that keeps a signed-out credential rejected.
+        guard.retain(|s| s.revoked || s.expires_at >= cutoff);
+        Ok((before - guard.len()) as u64)
+    }
+}
+
+// ─── MemJudgmentLedgerRepository ─────────────────────────────────────────────
+
+/// Aggregates the judgment ledger (HSI §12) from the SAME in-memory stores
+/// the audit / spec-approval / spec-ledger repos use — construct via
+/// [`MemJudgmentLedgerRepository::with_sources`] so the sources are shared.
+#[derive(Default)]
+pub struct MemJudgmentLedgerRepository {
+    audits: Arc<Mutex<Vec<MemAuditEntry>>>,
+    approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
+    spec_ledger: Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>>,
+}
+
+impl MemJudgmentLedgerRepository {
+    pub fn with_sources(
+        audit: &MemAuditRepository,
+        approvals: &MemSpecApprovalRepository,
+        spec_ledger: &MemSpecLedgerRepository,
+    ) -> Self {
+        Self {
+            audits: audit.shared(),
+            approvals: approvals.shared(),
+            spec_ledger: spec_ledger.shared(),
+        }
+    }
+}
 
 #[async_trait]
 impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
     async fn list_for_user(
         &self,
-        _user_id: &str,
-        _workspace_id: Option<&Id>,
-        _judgment_type: Option<gyre_domain::JudgmentType>,
-        _since: Option<u64>,
-        _limit: u32,
-        _offset: u32,
+        approver_id: &str,
+        workspace_id: Option<&Id>,
+        judgment_type: Option<gyre_domain::JudgmentType>,
+        since: Option<u64>,
+        limit: u32,
+        offset: u32,
     ) -> Result<Vec<gyre_domain::JudgmentEntry>> {
-        Ok(vec![])
+        use gyre_domain::{AuditEventType, JudgmentEntry, JudgmentType};
+        let jt = judgment_type;
+        let mut entries: Vec<JudgmentEntry> = Vec::new();
+
+        // ── Source 1: spec approvals & rejections ────────────────────────────
+        let want_approvals = jt
+            .is_none_or(|t| matches!(t, JudgmentType::SpecApproval | JudgmentType::SpecRejection));
+        if want_approvals {
+            let approvals = self.approvals.lock().await;
+            let wid_for_path: Vec<(String, Option<Id>)> = {
+                let ledger = self.spec_ledger.lock().await;
+                ledger
+                    .values()
+                    .map(|e| (e.path.clone(), e.workspace_id.as_ref().map(Id::new)))
+                    .collect()
+            };
+            // Attribution (HSI §12): an approval is the approver's judgment
+            // (`approver_id` = canonical user Id, written by the approve
+            // endpoint); a rejection/revocation is the declining human's
+            // judgment (`rejected_by`/`revoked_by` = canonical user Id).
+            // Mirrors the SQL adapters: the WHERE matches any of the three
+            // keys and the row loop re-checks the right one per status.
+            for a in approvals.values().filter(|a| {
+                a.approver_id == approver_id
+                    || a.rejected_by.as_deref() == Some(approver_id)
+                    || a.revoked_by.as_deref() == Some(approver_id)
+            }) {
+                let wid = wid_for_path
+                    .iter()
+                    .find(|(p, _)| p == &a.spec_path)
+                    .and_then(|(_, w)| w.clone());
+                // Workspace filter: unknown-workspace entries are excluded.
+                if workspace_id.is_some() && wid.as_ref() != workspace_id {
+                    continue;
+                }
+                // The spec approval ledger derives status from which
+                // timestamp column is non-null (mutually exclusive); the
+                // judgment timestamp is whichever fired. Pending entries
+                // (all None) carry no judgment yet and are excluded.
+                let judgment_ts = a.approved_at.or(a.rejected_at).or(a.revoked_at);
+                let Some(judgment_ts) = judgment_ts else {
+                    continue;
+                };
+                if judgment_ts < since.unwrap_or(0) {
+                    continue;
+                }
+                let rejected = a.revoked_at.is_some() || a.rejected_at.is_some();
+                if rejected
+                    && a.revoked_by.as_deref() != Some(approver_id)
+                    && a.rejected_by.as_deref() != Some(approver_id)
+                {
+                    // The rejection belongs to the human who declined or
+                    // withdrew it — not to the original approver.
+                    continue;
+                }
+                let jtype = if rejected {
+                    JudgmentType::SpecRejection
+                } else {
+                    JudgmentType::SpecApproval
+                };
+                if jt.is_some_and(|f| f != jtype) {
+                    continue;
+                }
+                let detail = if rejected {
+                    a.revocation_reason
+                        .clone()
+                        .or_else(|| a.rejected_reason.clone())
+                } else {
+                    None
+                };
+                entries.push(JudgmentEntry::new(
+                    jtype,
+                    a.spec_path.clone(),
+                    wid,
+                    judgment_ts,
+                    detail,
+                ));
+            }
+        }
+
+        // ── Source 2: audit-carried judgments (gate / trust / meta-spec) ─────
+        let want_audit = jt.is_none_or(|t| {
+            matches!(
+                t,
+                JudgmentType::GateOverride | JudgmentType::TrustGrant | JudgmentType::MetaSpec
+            )
+        });
+        if want_audit {
+            let audits = self.audits.lock().await;
+            for stored in audits.iter() {
+                // Materialize decompresses detail for compression-processed
+                // entries; the ledger reads `detail` fields (mr_id, from/to).
+                let ev = stored.materialize()?;
+                if ev.user_id.as_ref().map(|u| u.as_str()) != Some(approver_id) {
+                    continue;
+                }
+                let jtype = match ev.event_type {
+                    AuditEventType::GateOverride => JudgmentType::GateOverride,
+                    AuditEventType::TrustChange => JudgmentType::TrustGrant,
+                    AuditEventType::MetaSpecPublish => JudgmentType::MetaSpec,
+                    _ => continue,
+                };
+                if jt.is_some_and(|f| f != jtype) {
+                    continue;
+                }
+                if workspace_id.is_some() && ev.workspace_id.as_ref() != workspace_id {
+                    continue;
+                }
+                if ev.timestamp < since.unwrap_or(0) {
+                    continue;
+                }
+                let str_field = |k: &str| -> Option<String> {
+                    ev.detail
+                        .get(k)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                };
+                let rid = ev.resource_id.clone();
+                let (entity_ref, entry_detail) = match jtype {
+                    JudgmentType::GateOverride => (
+                        str_field("mr_id").or(rid).unwrap_or_default(),
+                        format!(
+                            "gate {} overridden: {} -> {}",
+                            str_field("gate_type").unwrap_or_else(|| "unknown".into()),
+                            str_field("from_status").unwrap_or_else(|| "failed".into()),
+                            str_field("to_status").unwrap_or_else(|| "overridden".into()),
+                        ),
+                    ),
+                    JudgmentType::TrustGrant => (
+                        str_field("workspace_id")
+                            .or_else(|| ev.workspace_id.as_ref().map(|w| w.as_str().to_string()))
+                            .unwrap_or_default(),
+                        format!(
+                            "trust {} -> {}",
+                            str_field("from").unwrap_or_default(),
+                            str_field("to").unwrap_or_default(),
+                        ),
+                    ),
+                    _ => (
+                        str_field("name").or(rid).unwrap_or_default(),
+                        format!(
+                            "{} v{}",
+                            str_field("kind").unwrap_or_default(),
+                            ev.detail
+                                .get("version")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                        ),
+                    ),
+                };
+                entries.push(JudgmentEntry::new(
+                    jtype,
+                    entity_ref,
+                    ev.workspace_id.clone(),
+                    ev.timestamp,
+                    Some(entry_detail),
+                ));
+            }
+        }
+
+        entries.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| b.entity_ref.cmp(&a.entity_ref))
+        });
+        Ok(entries
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect())
     }
 }
 
@@ -6457,6 +6983,213 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
             .lock()
             .await
             .retain(|(tid, a)| !(tid == tenant_id && a.id == anchor_id));
+        Ok(())
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Invitations (user-management.md §Tenant-Level User Onboarding, §Workspace
+// Invitation Flow, §Invitation Expiry — task-110)
+// ──────────────────────────────────────────────────────────────────────────────
+
+use gyre_domain::{InvitationStatus, TenantInvitation, WorkspaceInvitation};
+use gyre_ports::{TenantInvitationRepository, WorkspaceInvitationRepository};
+
+#[derive(Default)]
+pub struct MemTenantInvitationRepository {
+    store: Arc<Mutex<HashMap<String, TenantInvitation>>>,
+}
+
+#[async_trait]
+impl TenantInvitationRepository for MemTenantInvitationRepository {
+    async fn create(&self, inv: &TenantInvitation) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if a pending invitation for the same
+        // (tenant, email) already exists.
+        if store.values().any(|i| {
+            i.tenant_id == inv.tenant_id
+                && i.email == inv.email
+                && i.status == InvitationStatus::Pending
+        }) {
+            anyhow::bail!(
+                "a pending invitation for {} in tenant {} already exists",
+                inv.email,
+                inv.tenant_id
+            );
+        }
+        store.insert(inv.id.to_string(), inv.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<TenantInvitation>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<TenantInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|i| i.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn list_by_tenant(&self, tenant_id: &Id) -> Result<Vec<TenantInvitation>> {
+        let mut items: Vec<TenantInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.tenant_id == *tenant_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_status(&self, status: InvitationStatus) -> Result<Vec<TenantInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.status == status)
+            .cloned()
+            .collect())
+    }
+
+    async fn transition_status(
+        &self,
+        id: &Id,
+        from: InvitationStatus,
+        to: InvitationStatus,
+        accepted_at: Option<u64>,
+    ) -> Result<bool> {
+        // Check-and-set under the store lock: the mem adapter has no
+        // schema, so the `from` precondition is guarded in code — the
+        // guard and the write happen inside one critical section, which
+        // is the single-use acceptance contract (same as the adapters'
+        // conditional UPDATE).
+        let mut store = self.store.lock().await;
+        match store.get_mut(id.as_str()) {
+            Some(inv) if inv.status == from => {
+                inv.status = to;
+                inv.accepted_at = accepted_at;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct MemWorkspaceInvitationRepository {
+    store: Arc<Mutex<HashMap<String, WorkspaceInvitation>>>,
+}
+
+#[async_trait]
+impl WorkspaceInvitationRepository for MemWorkspaceInvitationRepository {
+    async fn create(&self, inv: &WorkspaceInvitation) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Port contract: fail if a pending invitation for the same
+        // (workspace, user) already exists.
+        if store.values().any(|i| {
+            i.workspace_id == inv.workspace_id
+                && i.user_id == inv.user_id
+                && i.status == InvitationStatus::Pending
+        }) {
+            anyhow::bail!(
+                "a pending invitation for user {} in workspace {} already exists",
+                inv.user_id,
+                inv.workspace_id
+            );
+        }
+        store.insert(inv.id.to_string(), inv.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<WorkspaceInvitation>> {
+        Ok(self.store.lock().await.get(id.as_str()).cloned())
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<WorkspaceInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|i| i.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<WorkspaceInvitation>> {
+        let mut items: Vec<WorkspaceInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.workspace_id == *workspace_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_user(&self, user_id: &Id) -> Result<Vec<WorkspaceInvitation>> {
+        let mut items: Vec<WorkspaceInvitation> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.user_id == *user_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        Ok(items)
+    }
+
+    async fn list_by_status(&self, status: InvitationStatus) -> Result<Vec<WorkspaceInvitation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|i| i.status == status)
+            .cloned()
+            .collect())
+    }
+
+    async fn transition_status(
+        &self,
+        id: &Id,
+        from: InvitationStatus,
+        to: InvitationStatus,
+        accepted_at: Option<u64>,
+    ) -> Result<bool> {
+        // Check-and-set under the store lock: the mem adapter has no
+        // schema, so the `from` precondition is guarded in code — the
+        // guard and the write happen inside one critical section, which
+        // is the single-use acceptance contract (same as the adapters'
+        // conditional UPDATE).
+        let mut store = self.store.lock().await;
+        match store.get_mut(id.as_str()) {
+            Some(inv) if inv.status == from => {
+                inv.status = to;
+                inv.accepted_at = accepted_at;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn delete(&self, id: &Id) -> Result<()> {
+        self.store.lock().await.remove(id.as_str());
         Ok(())
     }
 }

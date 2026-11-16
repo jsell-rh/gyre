@@ -155,6 +155,10 @@ impl AnalyticsRepository for PgStorage {
     async fn record(&self, event: &AnalyticsEvent) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let e = event.clone();
+        // File the row under the handle's resolved tenant scope (not a
+        // fabricated literal) — same form as the merge_request/repository
+        // create() rows (task-111 verification repair).
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let props = serde_json::to_string(&e.properties)?;
@@ -168,7 +172,7 @@ impl AnalyticsRepository for PgStorage {
                 repo_id: e.repo_id.as_deref(),
                 properties: props,
                 timestamp: e.timestamp as i64,
-                tenant_id: "default",
+                tenant_id: &tenant,
             };
             diesel::insert_into(analytics_events::table)
                 .values(&record)
@@ -384,28 +388,43 @@ impl AnalyticsRepository for PgStorage {
 
     async fn aggregate_by_day(
         &self,
-        event_name: &str,
+        event_name: Option<&str>,
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
-        let event_name = event_name.to_string();
+        let event_name = event_name.map(str::to_string);
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
             let mut conn = pool.get().context("get db connection")?;
-            let rows = diesel::sql_query(
-                // UTC calendar day (task-146 review R4): pin the rendering
-                // to UTC, not the server session TimeZone — same key as
-                // the SQLite/mem adapters and the port contract doc.
-                "SELECT to_char(to_timestamp(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as day, COUNT(*) as cnt \
-                 FROM analytics_events \
-                 WHERE event_name = $1 AND timestamp >= $2 AND timestamp <= $3 \
-                 GROUP BY day ORDER BY day",
-            )
-            .bind::<Text, _>(event_name)
-            .bind::<BigInt, _>(since as i64)
-            .bind::<BigInt, _>(until as i64)
-            .load::<DayCount>(&mut *conn)
-            .context("aggregate analytics_events by day")?;
+            // `None` event_name aggregates across ALL event names — the
+            // total daily event volume form (analytics.md §Analytics
+            // Dashboard).
+            let rows = match event_name {
+                Some(name) => diesel::sql_query(
+                    // UTC calendar day (task-146 review R4): pin the rendering
+                    // to UTC, not the server session TimeZone — same key as
+                    // the SQLite/mem adapters and the port contract doc.
+                    "SELECT to_char(to_timestamp(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as day, COUNT(*) as cnt \
+                     FROM analytics_events \
+                     WHERE event_name = $1 AND timestamp >= $2 AND timestamp <= $3 \
+                     GROUP BY day ORDER BY day",
+                )
+                .bind::<Text, _>(name)
+                .bind::<BigInt, _>(since as i64)
+                .bind::<BigInt, _>(until as i64)
+                .load::<DayCount>(&mut *conn)
+                .context("aggregate analytics_events by day")?,
+                None => diesel::sql_query(
+                    "SELECT to_char(to_timestamp(timestamp) AT TIME ZONE 'UTC', 'YYYY-MM-DD') as day, COUNT(*) as cnt \
+                     FROM analytics_events \
+                     WHERE timestamp >= $1 AND timestamp <= $2 \
+                     GROUP BY day ORDER BY day",
+                )
+                .bind::<BigInt, _>(since as i64)
+                .bind::<BigInt, _>(until as i64)
+                .load::<DayCount>(&mut *conn)
+                .context("aggregate analytics_events by day")?,
+            };
             Ok(rows.into_iter().map(|r| (r.day, r.cnt as u64)).collect())
         })
         .await?
@@ -430,6 +449,8 @@ impl CostRepository for PgStorage {
     async fn record(&self, entry: &CostEntry) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let e = entry.clone();
+        // Handle's resolved tenant scope — see AnalyticsRepository::record above.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let record = CostEntryRecord {
@@ -440,7 +461,7 @@ impl CostRepository for PgStorage {
                 amount: e.amount,
                 currency: &e.currency,
                 timestamp: e.timestamp as i64,
-                tenant_id: "default",
+                tenant_id: &tenant,
             };
             diesel::insert_into(cost_entries::table)
                 .values(&record)

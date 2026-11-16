@@ -17,15 +17,15 @@ use axum::{
 use futures_util::stream;
 use gyre_common::Id;
 use gyre_domain::{
-    CostEntry, DependencySource, MergeRequest, MergeRequestDependency, Task, TaskPriority,
-    TaskStatus,
+    CostEntry, DependencySource, MergeRequest, MergeRequestDependency, PolicyEffect, Task,
+    TaskPriority, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::{auth::AuthenticatedAgent, AppState};
+use crate::{auth::AuthenticatedAgent, policy_engine, policy_engine::AttributeContext, AppState};
 
 use gyre_domain::UserRole;
 
@@ -306,6 +306,28 @@ fn tool_definitions() -> Value {
                         }
                     },
                     "required": ["query_type", "params"]
+                }
+            },
+            {
+                "name": "gyre_analytics_decide",
+                "description": "Evaluate a named analytics decision (feature.promote, feature.rollback, gate.effectiveness, agent.performance, budget.headroom, merge_queue.health) or a custom rule DSL",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "decision": {
+                            "type": "string",
+                            "description": "Named decision to evaluate (feature.promote, feature.rollback, gate.effectiveness, agent.performance, budget.headroom, merge_queue.health). With custom_rules present, this is the custom decision's name instead."
+                        },
+                        "context": {
+                            "type": "object",
+                            "description": "Decision context, e.g. {\"flag\": \"new-diff-viewer\", \"baseline_days\": 7}. May scope the decision with workspace_id/repo_id."
+                        },
+                        "custom_rules": {
+                            "type": "array",
+                            "description": "Custom rule DSL rules ({metric, window, threshold, comparison, then, filter?}). First match wins; the decision's default applies otherwise. Omit to evaluate the named built-in decision."
+                        }
+                    },
+                    "required": ["decision"]
                 }
             },
             {
@@ -909,13 +931,52 @@ async fn validate_tool_scope(
             }
             check_repo_read_target(state, auth, repo, tool_name).await
         }
-        // Remaining read-only platform tools (analytics, messaging,
+        // gyre_analytics_decide addresses scope through its `context`
+        // object (context.workspace_id / context.repo_id name the events
+        // the decision is computed over) — the same scope-addressable
+        // surface as gyre_search's workspace_id arg. A scoped caller may
+        // only compute decisions over its own tier's scope; the shared
+        // core evaluator additionally validates the named scope against
+        // the caller's tenant (validate_decision_scope).
+        "gyre_analytics_decide" => {
+            let ctx = args.get("context").cloned().unwrap_or(json!({}));
+            let ws = ctx
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !ws.is_empty() {
+                let own = match &auth.workspace_id {
+                    Some(w) => w.clone(),
+                    None => {
+                        return Err(format!(
+                            "PERMISSION_DENIED: agent token carries no workspace claim; refusing {tool_name}"
+                        ))
+                    }
+                };
+                if ws != own {
+                    if has_workspace_scopes(auth) {
+                        check_workspace_scope(auth, Some(ws), false, tool_name)?;
+                    } else {
+                        return Err(format!(
+                            "PERMISSION_DENIED: token scope {:?} does not permit deciding over workspace {ws}",
+                            auth.scope
+                        ));
+                    }
+                }
+            }
+            let repo = ctx.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+            if !repo.is_empty() {
+                check_repo_read_target(state, auth, repo, tool_name).await?;
+            }
+            Ok(())
+        }
+        // Remaining read-only platform tools (analytics query, messaging,
         // conversation upload): scoped callers may read within their tier —
-        // analytics returns aggregate counters with no scope-addressable
-        // args, messaging is agent-identity routed and validated per tool,
-        // conversation upload is caller-bound (see the platform-model.md
-        // §Token Scoping coverage row for the per-tool read-surface
-        // justification).
+        // analytics query returns aggregate counters with no
+        // scope-addressable args, messaging is agent-identity routed and
+        // validated per tool, conversation upload is caller-bound (see the
+        // platform-model.md §Token Scoping coverage row for the per-tool
+        // read-surface justification).
         _ => Ok(()),
     }
 }
@@ -1833,9 +1894,23 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
 
     let now = now_secs();
     let rid = Id::new(&repo_id);
+    // The MR's workspace scope comes from its repository (M34 hierarchy
+    // enforcement, mirroring REST create_mr). Refuse to create an MR whose
+    // scope cannot be resolved instead of fabricating a "default"
+    // workspace identity.
+    let repo = match state.repos.find_by_id(&rid).await {
+        Ok(Some(repo)) => repo,
+        Ok(None) => {
+            return tool_error(format!("repository {rid} not found"));
+        }
+        Err(e) => {
+            return tool_error(format!("failed to look up repository {rid}: {e}"));
+        }
+    };
     let mut mr = MergeRequest::new(
         new_id(),
         rid.clone(),
+        repo.workspace_id.clone(),
         title.clone(),
         source.clone(),
         target.clone(),
@@ -1843,20 +1918,17 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     );
     mr.author_agent_id = get_str(args, "author_agent_id").map(Id::new);
 
-    // Auto-detect branch lineage dependencies and set workspace_id (mirrors REST create_mr).
-    if let Ok(Some(repo)) = state.repos.find_by_id(&rid).await {
-        mr.workspace_id = repo.workspace_id.clone();
-        let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
-            state,
-            &rid,
-            &repo.path,
-            &source,
-            &repo.default_branch,
-        )
-        .await;
-        if !lineage_deps.is_empty() {
-            mr.depends_on = lineage_deps;
-        }
+    // Auto-detect branch lineage dependencies (mirrors REST create_mr).
+    let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
+        state,
+        &rid,
+        &repo.path,
+        &source,
+        &repo.default_branch,
+    )
+    .await;
+    if !lineage_deps.is_empty() {
+        mr.depends_on = lineage_deps;
     }
 
     // Merge explicit deps with lineage deps: explicit takes precedence,
@@ -2637,6 +2709,61 @@ async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
         other => tool_error(format!(
             "unknown query_type: {other}. Use 'usage', 'compare', or 'top'"
         )),
+    }
+}
+
+/// `gyre_analytics_decide` (analytics.md §MCP Tool: `gyre_analytics_decide`)
+/// — the primary way agent code invokes analytics decisions without raw
+/// HTTP calls. A thin wrapper around the decision API's shared core
+/// evaluators (same functions the HTTP handlers call): with `custom_rules`
+/// present it assembles a `CustomDecisionSpec` and evaluates the rule DSL;
+/// otherwise it evaluates the named built-in decision. No decision logic
+/// lives here — scope validation, event fetching, and evaluation are all
+/// in `api::analytics::evaluate_builtin_decision` /
+/// `evaluate_custom_decision`.
+async fn handle_analytics_decide(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    let decision = match get_str(args, "decision") {
+        Some(d) => d.to_string(),
+        None => return tool_error("missing required field: decision"),
+    };
+    let context = args.get("context").cloned().unwrap_or(json!({}));
+    if !context.is_object() {
+        return tool_error("context must be a JSON object");
+    }
+
+    let result = if let Some(custom_rules) = args.get("custom_rules") {
+        if !custom_rules.is_array() {
+            return tool_error("custom_rules must be an array of rule DSL objects");
+        }
+        // Assemble the custom decision spec from the tool arguments: the
+        // `decision` arg names it, `context` scopes it, `custom_rules` are
+        // the DSL rules, and an optional `default` outcome fills the
+        // spec's default ("default" otherwise, matching the HTTP body
+        // shape of POST /api/v1/analytics/decide/custom).
+        let mut body = json!({
+            "name": decision,
+            "rules": custom_rules,
+            "context": context,
+        });
+        if let Some(default) = args.get("default") {
+            body["default"] = default.clone();
+        }
+        let spec = match gyre_domain::decisions::CustomDecisionSpec::parse(&body) {
+            Ok(spec) => spec,
+            Err(e) => return tool_error(format!("invalid custom decision: {e}")),
+        };
+        crate::api::analytics::evaluate_custom_decision(state, auth, &spec).await
+    } else {
+        crate::api::analytics::evaluate_builtin_decision(state, auth, &decision, context).await
+    };
+
+    match result {
+        Ok(response) => tool_result(serde_json::to_string_pretty(&response).unwrap_or_default()),
+        Err(e) => tool_error(format!("analytics decide failed: {e}")),
     }
 }
 
@@ -3773,6 +3900,181 @@ async fn collect_secret_metadata(
     Ok(secrets)
 }
 
+// ── permissions:// resources (abac-policy-engine.md §MCP Integration) ─────────
+
+/// The ABAC action vocabulary probed by `permissions://me` — the spec's
+/// action-attribute examples (§Attributes: read, write, delete, approve,
+/// spawn, push, merge, escalate, generate).
+const PERMISSION_ACTIONS: &[&str] = &[
+    "read", "write", "delete", "approve", "spawn", "push", "merge", "escalate", "generate",
+];
+
+/// Build the CALLING agent's ABAC attribute context for the `permissions://`
+/// resources (abac-policy-engine.md §MCP Integration).
+///
+/// Subject attributes are extracted from the `AuthenticatedAgent` — the
+/// same sources the ABAC middleware uses on live requests (auth context,
+/// allowlisted agent-JWT claims, membership/team stores) — so the answer
+/// the pre-flight check gives is the answer the middleware would give.
+/// There is deliberately NO subject parameter: an agent can only ever
+/// query its own permissions, never another agent's.
+///
+/// Resource scope attributes come from the caller's own resolved scope
+/// (JWT claims → agent record → task, tenant from the governing
+/// workspace — `agent_secret_scope`), and `env.budget_remaining` from the
+/// real budget stores. `action`, `resource.type`, and `env.time` are
+/// injected by the evaluation engine itself.
+async fn agent_permission_context(state: &AppState, auth: &AuthenticatedAgent) -> AttributeContext {
+    let mut ctx = AttributeContext::default();
+
+    let subject_type = if auth.roles.contains(&UserRole::Agent) {
+        "agent"
+    } else {
+        "user"
+    };
+    ctx.set("subject.type", subject_type);
+    ctx.set("subject.id", &auth.agent_id);
+    ctx.set("subject.tenant_id", &auth.tenant_id);
+    // The genuine system principal carries the reserved, non-spoofable
+    // ABAC identity (same discipline as the middleware; see its comment
+    // on SYSTEM_ABAC_IDENTITY for why the audit id differs).
+    if auth.is_system_principal() {
+        ctx.set("subject.id", gyre_domain::SYSTEM_ABAC_IDENTITY);
+    }
+    // Role SET semantics, matching the middleware: empty roles leave the
+    // attribute unset (fail closed); multi-role callers get a list the
+    // engine evaluates with membership semantics.
+    match auth.roles.as_slice() {
+        [] => {}
+        [only] => ctx.set("subject.global_role", only.as_str()),
+        many => ctx.set_list(
+            "subject.global_role",
+            many.iter().map(|r| r.as_str().to_string()).collect(),
+        ),
+    }
+
+    // Allowlisted agent-JWT claim attributes (persona, stack_hash,
+    // attestation_level, repo_scope — §Attributes, source "Agent OIDC
+    // claim"), agent subjects only, with the spec-named normalization
+    // (wl_stack_hash → stack_hash). Same gate + allowlist as the
+    // middleware; a raw claim must never define a membership-sourced or
+    // extractor-sourced attribute.
+    if subject_type == "agent" {
+        if let Some(claims) = &auth.jwt_claims {
+            ctx.merge_agent_jwt_claims(claims);
+            crate::abac_middleware::normalize_agent_jwt_attributes(&mut ctx, claims);
+        }
+    }
+
+    // Membership-sourced subject attributes (workspace_ids, team_ids) for
+    // callers with a user identity — same stores the middleware consults.
+    // A failed lookup leaves the attributes unset (conditions on them
+    // fail closed), matching the middleware's read of these stores.
+    if let Some(user_id) = &auth.user_id {
+        if let Ok(memberships) = state.workspace_memberships.list_by_user(user_id).await {
+            let workspace_ids: Vec<String> = memberships
+                .iter()
+                .map(|m| m.workspace_id.to_string())
+                .collect();
+            if !workspace_ids.is_empty() {
+                ctx.set_list("subject.workspace_ids", workspace_ids);
+            }
+            let mut team_ids: Vec<String> = Vec::new();
+            for m in &memberships {
+                if let Ok(teams) = state.teams.list_for_user(&m.workspace_id, user_id).await {
+                    for team in teams {
+                        team_ids.push(team.id.to_string());
+                    }
+                }
+            }
+            if !team_ids.is_empty() {
+                ctx.set_list("subject.team_ids", team_ids);
+            }
+        }
+    }
+
+    // Resource scope chain from the caller's own agent scope (JWT claims →
+    // agent record → task; tenant from the governing workspace record —
+    // never fabricated). This is what makes "in my scope" real: scoped
+    // policies apply via the engine's canonical scope filter only when
+    // the context names the caller's actual scope. A caller with no
+    // resolvable agent scope (e.g. a user token) queries an unscoped
+    // resource — scoped policies conservatively do not apply, same as the
+    // REST effective-permissions endpoint's no-scope path.
+    if let Some(scope) = agent_secret_scope(state, auth).await {
+        ctx.set("resource.tenant_id", &scope.tenant_id);
+        ctx.set("resource.workspace_id", &scope.workspace_id);
+        if !scope.repo_id.is_empty() {
+            ctx.set("resource.repo_id", &scope.repo_id);
+        }
+        // env.budget_remaining (§Attributes): tokens remaining in the
+        // governing workspace's daily budget, from the real budget stores;
+        // absent when no cap is configured (conditions fail closed).
+        let key = format!("workspace:{}", scope.workspace_id);
+        let config = state.budget_configs.get_config(&key).await.ok().flatten();
+        let usage = state.budget_usages.get_usage(&key).await.ok().flatten();
+        if let Some(remaining) =
+            crate::abac_middleware::budget_tokens_remaining(config.as_ref(), usage.as_ref())
+        {
+            ctx.set_number("env.budget_remaining", remaining);
+        }
+    }
+
+    ctx
+}
+
+/// `permissions://me` — the caller's effective permissions: a JSON array of
+/// `{resource_type, allowed_actions: []}`, one entry per canonical resource
+/// type (the route registry's vocabulary), each listing the spec's action
+/// vocabulary entries the current policy set would ALLOW for this caller
+/// in its own scope (abac-policy-engine.md §MCP Integration).
+async fn resource_permissions_me(state: &AppState, auth: &AuthenticatedAgent) -> Value {
+    let ctx = agent_permission_context(state, auth).await;
+    let policies = match state.policies.list().await {
+        Ok(p) => p,
+        Err(e) => return json!({"error": format!("failed to load policies: {e}")}),
+    };
+    let resource_types = crate::abac_middleware::all_resource_types();
+    let mut results = Vec::with_capacity(resource_types.len());
+    for resource_type in resource_types {
+        let mut allowed_actions = Vec::new();
+        for action in PERMISSION_ACTIONS {
+            let result = policy_engine::evaluate(policies.clone(), &ctx, action, resource_type);
+            if result.effect == PolicyEffect::Allow {
+                allowed_actions.push(*action);
+            }
+        }
+        results.push(json!({
+            "resource_type": resource_type,
+            "allowed_actions": allowed_actions,
+        }));
+    }
+    Value::Array(results)
+}
+
+/// `permissions://check?action={action}&resource={type}` — single pre-flight
+/// policy check: can this caller perform `action` on `resource_type` in its
+/// own scope? Returns `{allowed, matched_policy}` (abac-policy-engine.md
+/// §MCP Integration). The subject is always the caller — there is no way to
+/// ask about another agent.
+async fn resource_permissions_check(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    action: &str,
+    resource_type: &str,
+) -> Value {
+    let ctx = agent_permission_context(state, auth).await;
+    let policies = match state.policies.list().await {
+        Ok(p) => p,
+        Err(e) => return json!({"error": format!("failed to load policies: {e}")}),
+    };
+    let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
+    json!({
+        "allowed": result.effect == PolicyEffect::Allow,
+        "matched_policy": result.matched_policy,
+    })
+}
+
 fn resource_definitions() -> Value {
     json!({
         "resources": [
@@ -3835,6 +4137,19 @@ fn resource_definitions() -> Value {
                 "name": "Secret Expiry Status",
                 "description": "Expiry status of the secrets available to this agent: [{name, scope, expires_at, last_rotated_at, status: active|expiring|expired}] (platform-model.md §7).",
                 "mimeType": "application/json"
+            },
+            {
+                "uri": "permissions://me",
+                "name": "My Permissions",
+                "description": "Effective ABAC permissions of the calling agent in its own scope: [{resource_type, allowed_actions: []}] (abac-policy-engine.md §MCP Integration). Only the caller's own permissions — never another agent's.",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "permissions://check",
+                "name": "Permission Pre-Flight Check",
+                "description": "Can the calling agent perform a specific action? URI: permissions://check?action={action}&resource={type} (abac-policy-engine.md §MCP Integration). Returns {allowed, matched_policy}.",
+                "mimeType": "application/json",
+                "uriTemplate": "permissions://check?action={action}&resource={type}"
             }
         ]
     })
@@ -4286,9 +4601,33 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             .clone()
             .unwrap_or_else(|| Id::new(auth.agent_id.clone()));
         let ws_id = Id::new(workspace_id);
+        // HSI §12 parity with REST: types the user disabled in preferences are
+        // excluded from the MCP inbox too.
+        let disabled: Vec<String> =
+            match state.user_notification_prefs.list_for_user(&user_id).await {
+                Ok(prefs) => prefs
+                    .into_iter()
+                    .filter(|p| !p.enabled)
+                    .map(|p| p.notification_type)
+                    .collect(),
+                Err(e) => {
+                    return json!({"error": format!("failed to load notification preferences: {e}")})
+                }
+            };
+        let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
         match state
             .notifications
-            .list_for_user(&user_id, Some(&ws_id), min_pri, max_pri, None, None, 50, 0)
+            .list_for_user(
+                &user_id,
+                Some(&ws_id),
+                min_pri,
+                max_pri,
+                None,
+                None,
+                &disabled,
+                50,
+                0,
+            )
             .await
         {
             Ok(notifications) => {
@@ -4403,6 +4742,56 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             None => {
                 json!({"error": "secrets:// resources resolve scope from the caller's agent identity — no agent record or scope claims found"})
             }
+        }
+    } else if let Some(rest) = uri.strip_prefix("permissions://") {
+        // permissions://me | permissions://check?action={action}&resource={type}
+        // (abac-policy-engine.md §MCP Integration). The subject is always
+        // the caller: neither resource accepts a subject parameter, so an
+        // agent can only ever query its own permissions.
+        let (name, query) = match rest.split_once('?') {
+            Some((n, q)) => (n, q),
+            None => (rest, ""),
+        };
+        match name {
+            "me" => {
+                let result = resource_permissions_me(state, auth).await;
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            "check" => {
+                // Parse action= and resource= query params (plain tokens —
+                // same non-decoding parse the other parameterized
+                // resources use for their query strings).
+                let action = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("action="))
+                    .unwrap_or("");
+                let resource_type = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("resource="))
+                    .unwrap_or("");
+                if action.is_empty() || resource_type.is_empty() {
+                    return json!({"error": "permissions://check requires both query params: action={action}&resource={type}"});
+                }
+                let result = resource_permissions_check(state, auth, action, resource_type).await;
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            other => json!({
+                "error": format!(
+                    "unknown permissions:// resource '{other}' — expected permissions://me or permissions://check?action={{action}}&resource={{type}}"
+                )
+            }),
         }
     } else {
         json!({"error": format!("unknown resource URI scheme: {uri}")})
@@ -4572,6 +4961,7 @@ pub async fn mcp_handler(
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
+                "gyre_analytics_decide" => handle_analytics_decide(&state, &args, &auth).await,
                 "gyre_search" => handle_search(&state, &args, &auth).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
                 "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
@@ -5520,6 +5910,283 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_tools_list_includes_analytics_decide() {
+        // analytics.md §MCP Tool: gyre_analytics_decide must be in the
+        // tools/list response — the primary agent entry point for decisions.
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 33,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let decide = tools
+            .iter()
+            .find(|t| t["name"] == "gyre_analytics_decide")
+            .expect("gyre_analytics_decide in tools/list");
+        assert!(decide["description"]
+            .as_str()
+            .unwrap()
+            .contains("feature.promote"));
+        assert!(decide["inputSchema"]["properties"]["context"].is_object());
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_builtin_via_protocol() {
+        // analytics.md §MCP Tool spec example: feature.promote over a flag
+        // with real adoption events, invoked via the MCP protocol — no raw
+        // HTTP. The response must carry the DecisionResult shape.
+        let state = test_state();
+        let now = now_secs();
+        let day = 86_400u64;
+        for i in 0..100 {
+            let mut cur = gyre_domain::AnalyticsEvent::new(
+                Id::new(format!("ev-cur-{i}")),
+                "feature.used",
+                None,
+                json!({"flag": "new-diff-viewer", "latency_ms": 100}),
+                now - day,
+            );
+            cur.user_id = Some(format!("user-{i}"));
+            state.analytics.record(&cur).await.unwrap();
+            let mut prev = gyre_domain::AnalyticsEvent::new(
+                Id::new(format!("ev-prev-{i}")),
+                "feature.used",
+                None,
+                json!({"flag": "new-diff-viewer", "latency_ms": 100}),
+                now - 8 * day,
+            );
+            prev.user_id = Some(format!("old-{i}"));
+            state.analytics.record(&prev).await.unwrap();
+        }
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 34,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "feature.promote",
+                        "context": {"flag": "new-diff-viewer", "baseline_days": 7}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let body: serde_json::Value = serde_json::from_str(text).expect("DecisionResult JSON");
+        // DecisionResult shape (same as GET /api/v1/analytics/decide).
+        assert_eq!(body["decision"], json!("feature.promote"));
+        assert_eq!(body["promote"], json!(true), "body: {body}");
+        assert_eq!(body["metrics"]["sample_size"], json!(100));
+        assert_eq!(body["metrics"]["adoption_rate"], json!(1.0));
+        assert!(body["confidence"].as_f64().unwrap() >= 0.9);
+        assert!(body["reason"].as_str().unwrap().contains("Adoption"));
+        assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_unknown_decision_is_tool_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 35,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {"decision": "feature.explode", "context": {}}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        // The built-in evaluator's rejection (not a generic failure):
+        // unknown names list the six built-in decisions.
+        assert!(text.contains("unknown decision"), "text: {text}");
+        assert!(text.contains("feature.promote"), "text: {text}");
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_custom_rules_via_protocol() {
+        // custom_rules present → the custom rule DSL evaluator runs (same
+        // core as POST /api/v1/analytics/decide/custom): first matching
+        // rule wins, default otherwise.
+        let state = test_state();
+        let now = now_secs();
+        for i in 0..2 {
+            state
+                .analytics
+                .record(&gyre_domain::AnalyticsEvent::new(
+                    Id::new(format!("ev-spec-{i}")),
+                    "spec.approved",
+                    None,
+                    json!({"spec_path": i}),
+                    now - 100,
+                ))
+                .await
+                .unwrap();
+        }
+        let app = crate::build_router(state);
+
+        let call = |rules: serde_json::Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 36,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "spec-approval-pace",
+                        "context": {},
+                        "custom_rules": rules,
+                        "default": "hold"
+                    }
+                }
+            })
+        };
+
+        // Threshold 3 > count 2 → no rule matches, default applies.
+        let (status, json) = mcp_post(
+            app.clone(),
+            call(json!([
+                {"metric": "spec.approved", "window": "7d", "threshold": 3, "comparison": "gte", "then": "approve"}
+            ])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(json["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["decision"], json!("spec-approval-pace"));
+        assert_eq!(body["outcome"], json!("hold"));
+        assert!(body["matched_rule"].is_null());
+        assert!(body["reason"].as_str().unwrap().contains("count 2"));
+        assert!(body["evaluated_at"].as_str().unwrap().ends_with('Z'));
+
+        // Same store, threshold 2 → rule 0 matches and wins.
+        let (status, json) = mcp_post(
+            app,
+            call(json!([
+                {"metric": "spec.approved", "window": "7d", "threshold": 2, "comparison": "gte", "then": "approve"},
+                {"metric": "spec.approved", "window": "7d", "threshold": 1, "comparison": "gte", "then": "never"}
+            ])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "json: {json}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(json["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["outcome"], json!("approve"));
+        assert_eq!(body["matched_rule"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn mcp_analytics_decide_invalid_custom_rule_is_tool_error() {
+        // Invalid DSL is rejected by the shared spec parser, naming the field.
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 37,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_analytics_decide",
+                    "arguments": {
+                        "decision": "bad",
+                        "context": {},
+                        "custom_rules": [
+                            {"metric": "m", "window": "7d", "threshold": 1, "comparison": "approx", "then": "x"}
+                        ]
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("comparison"), "text: {text}");
+    }
+
+    #[tokio::test]
+    async fn handle_analytics_decide_delegates_by_custom_rules_presence() {
+        // Unit test of the delegation contract: without custom_rules the
+        // built-in evaluator runs (unknown built-in name → its rejection,
+        // listing the built-ins); with custom_rules the custom evaluator
+        // runs (the same name is a valid custom decision name and the
+        // rule's outcome is returned).
+        let state = test_state();
+        let now = now_secs();
+        state
+            .analytics
+            .record(&gyre_domain::AnalyticsEvent::new(
+                Id::new("ev-del-1"),
+                "spec.approved",
+                None,
+                json!({"spec_path": 1}),
+                now - 100,
+            ))
+            .await
+            .unwrap();
+        let auth = agent_auth("agent-decide", "ws-decide", None);
+
+        // No custom_rules → built-in path.
+        let result = handle_analytics_decide(
+            &state,
+            &json!({"decision": "feature.explode", "context": {}}),
+            &auth,
+        )
+        .await;
+        assert!(result["isError"].as_bool().unwrap(), "result: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown decision"), "text: {text}");
+        assert!(text.contains("feature.promote"), "text: {text}");
+
+        // custom_rules present → custom path: the same decision name is
+        // legal, and the matching rule's outcome is returned.
+        let result = handle_analytics_decide(
+            &state,
+            &json!({
+                "decision": "feature.explode",
+                "context": {},
+                "custom_rules": [
+                    {"metric": "spec.approved", "window": "7d", "threshold": 1, "comparison": "gte", "then": "custom-outcome"}
+                ]
+            }),
+            &auth,
+        )
+        .await;
+        assert!(!result["isError"].as_bool().unwrap(), "result: {result}");
+        let body: serde_json::Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["decision"], json!("feature.explode"));
+        assert_eq!(body["outcome"], json!("custom-outcome"));
+        assert_eq!(body["matched_rule"], json!(0));
+    }
+
+    #[tokio::test]
     async fn mcp_write_tool_requires_agent_role() {
         // ReadOnly tokens must be rejected for write tools.
         // The test-state global token is Admin, so we need to use a non-admin token
@@ -5674,6 +6341,290 @@ mod tests {
         assert!(names.contains(&"Spec Files"));
         assert!(names.contains(&"Workspace Agents"));
         assert!(names.contains(&"Merge Queue"));
+    }
+
+    // ── TASK-133: permissions:// resources (abac-policy-engine.md §MCP Integration) ──
+
+    #[tokio::test]
+    async fn mcp_resources_list_includes_permission_resources() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 60,
+                "method": "resources/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resources = json["result"]["resources"].as_array().unwrap();
+        let me = resources
+            .iter()
+            .find(|r| r["uri"] == "permissions://me")
+            .expect("permissions://me must be listed in resources/list");
+        assert_eq!(me["mimeType"], "application/json");
+        let check = resources
+            .iter()
+            .find(|r| r["uri"] == "permissions://check")
+            .expect("permissions://check must be listed in resources/list");
+        assert_eq!(
+            check["uriTemplate"],
+            "permissions://check?action={action}&resource={type}"
+        );
+    }
+
+    /// `permissions://me` and `permissions://check` must answer from the
+    /// REAL policy set for the CALLER's own attributes. A Gyre-minted
+    /// worker JWT (roles=[Agent]) is allowed read/write/approve on most
+    /// types by `builtin-agent-scoped-access`, and denied `approve` on
+    /// `spec` by the immutable `builtin:require-human-spec-approval` —
+    /// the immutable Deny wins over the role Allow, so both assertions
+    /// can only pass through the real evaluation engine with the caller's
+    /// real subject attributes.
+    #[tokio::test]
+    async fn permissions_resources_evaluate_real_policies_for_agent_jwt() {
+        let state = orch_state().await;
+        let (_id, token) = register_worker(&state, "permw", "r-1").await;
+        let app = crate::build_router(state);
+
+        // Pre-flight check, allowed case.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 61,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=read&resource=repo" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("permissions://check must return a text content");
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], true, "got: {result}");
+        assert_eq!(
+            result["matched_policy"], "builtin-agent-scoped-access",
+            "got: {result}"
+        );
+
+        // Pre-flight check, denied case: the immutable human-only spec
+        // approval Deny beats the agent role Allow.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 62,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=approve&resource=spec" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], false, "got: {result}");
+        assert_eq!(
+            result["matched_policy"], "builtin-require-human-spec-approval",
+            "got: {result}"
+        );
+
+        // permissions://me: per-resource-type allowed action lists, from
+        // the same evaluation. The worker's repo entry must carry the
+        // agent-role actions but NOT push/merge/spawn/delete; the spec and
+        // persona entries must NOT carry approve (human-only Denies).
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 63,
+                "method": "resources/read",
+                "params": { "uri": "permissions://me" }
+            }),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let me: Value = serde_json::from_str(text).unwrap();
+        let entries = me
+            .as_array()
+            .expect("permissions://me returns a JSON array");
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.get("resource_type").is_some() && e["allowed_actions"].is_array()),
+            "every entry must be {{resource_type, allowed_actions: []}}"
+        );
+        let repo = entries
+            .iter()
+            .find(|e| e["resource_type"] == "repo")
+            .expect("canonical resource-type vocabulary includes repo");
+        let repo_actions: Vec<&str> = repo["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        for allowed in ["read", "write", "approve"] {
+            assert!(
+                repo_actions.contains(&allowed),
+                "repo must allow {allowed}: {repo_actions:?}"
+            );
+        }
+        for denied in ["push", "merge", "spawn", "delete", "escalate", "generate"] {
+            assert!(
+                !repo_actions.contains(&denied),
+                "repo must not allow {denied}: {repo_actions:?}"
+            );
+        }
+        for human_only in ["spec", "persona"] {
+            let entry = entries
+                .iter()
+                .find(|e| e["resource_type"] == human_only)
+                .unwrap_or_else(|| panic!("{human_only} must appear in permissions://me"));
+            let actions: Vec<&str> = entry["allowed_actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            assert!(
+                !actions.contains(&"approve"),
+                "{human_only} approve must be denied to agents: {actions:?}"
+            );
+        }
+    }
+
+    /// The permissions:// resources answer ONLY for the caller. Two JWT
+    /// callers with different identities get different answers for the
+    /// same action: user A is allowed `push` on `repo` by a custom Allow
+    /// keyed on A's subject.id, user B (no such policy) is denied. If the
+    /// resource ignored the caller's identity (fixed subject, or a
+    /// query-param subject), both callers would get the same answer.
+    #[tokio::test]
+    async fn permissions_check_is_caller_scoped() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
+        };
+
+        let state = make_test_state_with_jwt();
+        // Allow push on repo for exactly one subject id, at priority 2000
+        // (above every seeded builtin, so the matched policy is pinned).
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("perm-me-push-a"),
+                name: "perm-me-push-a".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 2000,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("perm-user-a".to_string()),
+                }],
+                actions: vec!["push".to_string()],
+                resource_types: vec!["repo".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        let token_a = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "perm-sub-a",
+                "preferred_username": "perm-user-a",
+                "realm_access": {"roles": []}
+            }),
+            3600,
+        );
+        let token_b = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "perm-sub-b",
+                "preferred_username": "perm-user-b",
+                "realm_access": {"roles": []}
+            }),
+            3600,
+        );
+        let app = crate::build_router(state);
+
+        let read_check = json!({
+            "jsonrpc": "2.0",
+            "id": 64,
+            "method": "resources/read",
+            "params": { "uri": "permissions://check?action=push&resource=repo" }
+        });
+        let (status, json) = mcp_post_with_token(app.clone(), read_check.clone(), &token_a).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], true, "user A: {result}");
+        assert_eq!(result["matched_policy"], "perm-me-push-a");
+
+        let (status, json) = mcp_post_with_token(app, read_check, &token_b).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["contents"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["allowed"], false, "user B: {result}");
+        // The denial is decided by the seeded default-deny catchall
+        // (priority 1, no conditions) — B matches no role Allow and not
+        // A's subject-keyed Allow. Same attribution convention as the
+        // REST policies/evaluate endpoint (api/policies.rs) and the
+        // decision audit trail: a default deny names the catchall, it is
+        // never unattributed and never attributed to another subject's
+        // policy.
+        assert_eq!(result["matched_policy"], "builtin-default-deny");
+    }
+
+    /// Missing query params are a usage error, not a silent deny — an
+    /// agent must not mistake a malformed pre-flight for a policy denial.
+    #[tokio::test]
+    async fn permissions_check_requires_both_params() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 65,
+                "method": "resources/read",
+                "params": { "uri": "permissions://check?action=push" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("action={action}&resource={type}"),
+            "got: {err}"
+        );
+
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 66,
+                "method": "resources/read",
+                "params": { "uri": "permissions://other" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let err = json["result"]["error"].as_str().unwrap();
+        assert!(
+            err.contains("unknown permissions:// resource"),
+            "got: {err}"
+        );
     }
 
     // ── resources/read — unknown scheme ──────────────────────────────────────
@@ -7403,6 +8354,7 @@ mod tests {
         let mr = MergeRequest::new(
             Id::new("mr-trace-test"),
             Id::new("repo-1"),
+            Id::new("default"),
             "Test MR",
             "feat/test",
             "main",
@@ -9527,16 +10479,15 @@ concepts:
         // caller's own repo.
         let state = orch_state().await;
         let seed_mr = |id: &str, repo: &str, ws: &str, title: &str| {
-            let mut mr = gyre_domain::MergeRequest::new(
+            gyre_domain::MergeRequest::new(
                 gyre_common::Id::new(id),
                 gyre_common::Id::new(repo),
+                gyre_common::Id::new(ws),
                 title,
                 "feat/a",
                 "main",
                 0,
-            );
-            mr.workspace_id = gyre_common::Id::new(ws);
-            mr
+            )
         };
         state
             .merge_requests

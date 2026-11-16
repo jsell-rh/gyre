@@ -299,8 +299,13 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
     }
 
     // 2. Gate failure details → the agent's inbox, as messages the next
-    //    session reads on startup (gyre_message_poll). One message per
-    //    failed gate, carrying the gate's real recorded output.
+    //    session reads on startup (gyre_message_poll). One GateResult per
+    //    failed gate, carrying the gate's real recorded output. The gate
+    //    executor already delivers GateResult at failure time
+    //    (§Gate Failure Feedback: "Speed matters"); this loop path is the
+    //    fallback for failures it did not cover (optional gates, results
+    //    from paths that bypass the executor) — the delivery marker keeps
+    //    the author's next session from reading the same failure twice.
     let failed = state
         .gate_results
         .list_by_mr_id(mr_id.as_str())
@@ -310,30 +315,49 @@ async fn on_gates_failed(state: &Arc<AppState>, mr_id: &Id, agent_id: &Id) {
         .filter(|r| r.status == GateStatus::Failed)
         .collect::<Vec<_>>();
     for r in &failed {
-        let gate_name = state
+        let gate = state
             .quality_gates
             .find_by_id(r.gate_id.as_str())
             .await
             .ok()
-            .flatten()
-            .map(|g| g.name)
+            .flatten();
+        let gate_name = gate
+            .as_ref()
+            .map(|g| g.name.clone())
             .unwrap_or_else(|| r.gate_id.to_string());
+        let gate_type_str = gate
+            .as_ref()
+            .map(|g| format!("{:?}", g.gate_type))
+            .unwrap_or_else(|| "Unknown".to_string());
+        let attempt = crate::gate_executor::gate_attempt_count(state, &mr.id, &r.gate_id).await;
+        if crate::gate_executor::gate_result_already_delivered(
+            state, &mr.id, &r.gate_id, &agent.id, attempt,
+        )
+        .await
+        {
+            continue;
+        }
         state
             .emit_event(
                 Some(agent.workspace_id.clone()),
                 Destination::Agent(agent.id.clone()),
-                MessageKind::GateFailure,
+                MessageKind::GateResult,
                 Some(serde_json::json!({
                     "mr_id": mr.id.to_string(),
                     "gate_name": gate_name,
-                    "gate_type": "gate_failure",
+                    "gate_type": gate_type_str,
                     "status": "Failed",
                     "output": r.output.clone().unwrap_or_default(),
                     "spec_ref": mr.spec_ref.clone(),
-                    "iteration": agent.iteration,
+                    "attempt": attempt,
+                    "gate_agent_id": format!("gate-agent:{}", r.gate_id.as_str()),
                 })),
             )
             .await;
+        crate::gate_executor::mark_gate_result_delivered(
+            state, &mr.id, &r.gate_id, &agent.id, attempt,
+        )
+        .await;
     }
 
     // 3. Close the failed MR so the next completion creates a fresh one
@@ -661,8 +685,9 @@ pub(crate) async fn relaunch_agent_session(
     let branch = wt.branch.clone();
     let work_dir = wt.path.clone();
 
-    // Fresh JWT (the completion path revoked the previous one) — minted
-    // with the same workload claims as the first spawn.
+    // Resolve the workspace compute target (same as the first spawn) —
+    // used both for the JWT's workload/attestation claims and the launch
+    // context below.
     let resolved_ct_entity = match workspace.as_ref() {
         Some(ws) => resolve_workspace_target(state, ws).await?,
         None => None,
@@ -718,12 +743,19 @@ pub(crate) async fn relaunch_agent_session(
         None => None,
     };
 
-    // Fresh JWT (§1 Token Scoping): minted with the same hierarchy context
-    // as the first spawn — tenant from the repo's workspace (fail-closed: an
-    // unresolvable workspace means the tenant scope cannot be determined,
-    // never a fabricated identity), the fine-grained `repo:{name}:write`
-    // scope list, the persona slug bound to the agent row, and the
-    // identity-security.md attestation level implied by the compute target.
+    // Fresh JWT (§1 Token Scoping + task-129 review round 6): minted with
+    // the SAME worker scope claims as the first spawn
+    // (`mint_worker_scoped`: tenant, `workspace_id`, `repo_id`, and the
+    // fine-grained `repo:{name}:write` scope list) so the ABAC subject
+    // attribute `subject.repo_scope` (§Attributes, source "Agent OIDC
+    // claim") is real on every request the re-spawned session makes —
+    // without it the `builtin-agent-repo-scope` containment Deny fails
+    // its condition and the agent gains tenant-wide access. Tenant comes
+    // from the repo's workspace, resolved fail-closed: an unresolvable
+    // workspace means the tenant scope cannot be determined, never a
+    // fabricated identity. The persona slug bound to the agent row and
+    // the identity-security.md attestation level implied by the compute
+    // target mirror the first-spawn mint.
     let ws_tenant = match &workspace {
         Some(ws) => ws.tenant_id.to_string(),
         None => anyhow::bail!(
@@ -735,7 +767,7 @@ pub(crate) async fn relaunch_agent_session(
     };
     let token = state
         .agent_signing_key
-        .mint_with_workload(
+        .mint_worker_scoped(
             agent.id.as_str(),
             task.id.as_str(),
             agent.spawned_by.as_deref().unwrap_or("system"),
@@ -752,17 +784,12 @@ pub(crate) async fn relaunch_agent_session(
             Some(
                 resolved_ct_entity
                     .as_ref()
-                    .map_or(1u32, |ct| match ct.target_type {
+                    .map_or(1u8, |ct| match ct.target_type {
                         gyre_domain::ComputeTargetType::Container => 3,
                         gyre_domain::ComputeTargetType::Ssh => 2,
                         gyre_domain::ComputeTargetType::Kubernetes => 1,
                     }),
             ),
-            None,
-            None,
-            None,
-            None,
-            None,
             wl_image_hash,
         )
         .map_err(|e| anyhow::anyhow!("re-spawn JWT mint: {e}"))?;
@@ -978,6 +1005,7 @@ mod tests {
         let mut mr = MergeRequest::new(
             Id::new("mr-1"),
             Id::new("r-1"),
+            Id::new("ws-1"),
             "Agent 'worker-1': Implement auth retry",
             "task/abc",
             "main",
@@ -1096,7 +1124,7 @@ mod tests {
             .unwrap();
         let failure = inbox
             .iter()
-            .find(|m| m.kind == MessageKind::GateFailure)
+            .find(|m| m.kind == MessageKind::GateResult)
             .expect("gate failure message in agent inbox");
         assert_eq!(
             failure
@@ -1110,6 +1138,26 @@ mod tests {
             Some("test auth_retry failed: expected 3 attempts"),
             "the agent receives the gate's REAL recorded output"
         );
+        // §Gate Failure Feedback: the fallback delivery carries the full
+        // GateResult field set — the real gate type (not a placeholder) and
+        // the per-(MR, gate) attempt number.
+        assert_eq!(
+            failure
+                .payload
+                .as_ref()
+                .and_then(|p| p["gate_type"].as_str()),
+            Some("TestCommand")
+        );
+        assert_eq!(
+            failure.payload.as_ref().and_then(|p| p["status"].as_str()),
+            Some("Failed")
+        );
+        let attempt = failure
+            .payload
+            .as_ref()
+            .and_then(|p| p["attempt"].as_u64())
+            .expect("attempt number present");
+        assert!(attempt >= 1, "attempt is 1-based, got {attempt}");
 
         // Fresh JWT: the completion path revoked the old token; the
         // re-spawn mints and stores a new one.
@@ -1180,6 +1228,61 @@ mod tests {
         assert_eq!(ev.properties["old_status"], "Review");
         assert_eq!(ev.properties["new_status"], "InProgress");
         assert_eq!(ev.properties["assigned_to"], "agent-1");
+    }
+
+    /// Review round 6 (task-129, §Built-In Policies agent-repo-scope): the
+    /// re-spawn JWT must carry the SAME worker scope claims as the first
+    /// spawn (`mint_worker_scoped`: workspace_id + repo_id). The previous
+    /// mint (`mint_with_workload`) hardcoded `repo_id: None`, so a
+    /// re-spawned agent's requests had NO `subject.repo_scope` — the
+    /// builtin-agent-repo-scope containment Deny (750) failed its
+    /// condition and builtin-agent-scoped-access (700) granted
+    /// tenant-wide access. Killing direction: with the claim-less mint,
+    /// both assertions below fail (claims are None).
+    #[tokio::test]
+    async fn respawn_jwt_carries_worker_scope_claims() {
+        struct EnvVarRemove(&'static str);
+        impl Drop for EnvVarRemove {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _env_guard = EnvVarRemove("GYRE_AGENT_COMMAND");
+        std::env::set_var("GYRE_AGENT_COMMAND", "/bin/true");
+        let state = loop_state(None).await; // default ceiling: 10
+
+        on_gates_failed(&state, &Id::new("mr-1"), &Id::new("agent-1")).await;
+
+        let agent = state
+            .agents
+            .find_by_id(&Id::new("agent-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.status, AgentStatus::Active, "agent re-spawned");
+
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", "agent-1")
+            .await
+            .unwrap()
+            .expect("re-spawned agent has a fresh token");
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("re-spawn JWT must validate against the signing key");
+        assert_eq!(
+            claims.repo_id.as_deref(),
+            Some("r-1"),
+            "the re-spawn JWT must carry the task's repo scope — without it, \
+             agent-repo-scope containment is not enforced for re-spawned sessions"
+        );
+        assert_eq!(
+            claims.workspace_id.as_deref(),
+            Some("ws-1"),
+            "the re-spawn JWT must carry the repo's workspace scope, like the \
+             first-spawn JWT"
+        );
     }
 
     /// Phase 7 spawn-failure policy on the RE-SPAWN path (review F1,
@@ -1284,7 +1387,17 @@ mod tests {
         // Priority-1 notification for the workspace admin.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-user"), None, None, None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("admin-user"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(

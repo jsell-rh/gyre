@@ -89,10 +89,12 @@ test.describe('Auth flow', () => {
     const userBtn = page.getByRole('button', { name: /user menu/i });
     await userBtn.click();
 
-    // Dropdown menu should appear with at least Profile and API Token
+    // Dropdown menu should appear with at least Profile and API Token.
+    // Exact-text match: the menu also offers "Public profile"
+    // (/@{username}, task-114), which substring-matches "Profile".
     const dropdown = page.locator('[role="menu"]');
     await expect(dropdown).toBeVisible({ timeout: 3000 });
-    await expect(page.locator('[role="menuitem"]', { hasText: 'Profile' })).toBeVisible();
+    await expect(page.locator('[role="menuitem"]', { hasText: /^Profile$/ })).toBeVisible();
     await expect(page.locator('[role="menuitem"]', { hasText: 'API Token' })).toBeVisible();
   });
 
@@ -130,7 +132,7 @@ test.describe('Auth flow', () => {
     await page.waitForLoadState('networkidle');
 
     await page.getByRole('button', { name: /user menu/i }).click();
-    await page.locator('[role="menuitem"]', { hasText: 'Profile' }).click();
+    await page.locator('[role="menuitem"]', { hasText: /^Profile$/ }).click();
 
     await page.waitForLoadState('networkidle');
     // URL should contain /profile
