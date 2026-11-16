@@ -82,3 +82,25 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Revision review — task-093 (round 6)
+
+Candidate: `8c3d2bdc1887eaa89c03d1d411e7bde058643d8f` (base `047d652495dde3b1ae6ddbea4f8cf1b077a3c18f`). Verdict: **complete**.
+
+Scope: the two round-5 findings against the merge of main into the branch, plus an independent pass over the full base→candidate diff (orchestrator.rs, spawn.rs, stale_agents.rs, mcp.rs, abac_middleware.rs, main.rs, exemption files, specs).
+
+Round-5 findings, independently verified fixed:
+
+- **Dropped analytics kill-tests — fixed.** Both `orchestrator_spawn_emits_agent_spawned_analytics_event` and `orchestrator_spawn_analytics_reports_resolved_compute_target` are present in the candidate (orchestrator.rs:2656/2697) and byte-identical to the base versions (extracted from `git show 047d652:...` and diffed — empty diff). Base already carried the 5-arg `spawn_workspace_orchestrator_core` signature, so the restored tests call the candidate's exact signature; they use the candidate `seed` fixture, which seeds the persona meta-specs that `validate_persona` now requires. `cargo check -p gyre-server --tests` confirms the whole test module (restored tests included) type-checks against the current tree.
+- **rustfmt changed-lines gate — fixed.** `python3 scripts/check-rustfmt-diff.py 047d6524...` exits 0 ("changed lines clean, 6 Rust files checked").
+
+Independent checks this round:
+
+- Mechanical invariant suite on the candidate: arch, abac-route-registry (both spawn routes resolver-registered; exemption file honestly shrunk by 2), abac-exempt-handlers, mcp-write-tools (gyre_message_send gated; exemption file emptied), inert-enforcement, forged-scope-fields, fabricated-scope-defaults, scope-literal-defaults, unbounded-external-http, mem-port-contracts, forwarded-header-trust, in-memory-state-stores, lossy-secret-conversion, fail-open-ref-resolution, relative-path-defaults, byte-slice-truncation, dead-message-kinds and more — all PASS (logs in /tmp/stage/review-evidence).
+- Non-passing scripts triaged against a base worktree: three fail with identical violation sets on base (pre-existing, untouched files); seven exit 2 because this sandbox's mawk lacks gawk extensions used by unchanged scripts; `check-task-commit-attribution` PASSES on the committed candidate (its working-tree failure was caused by the controller's unstaged contract restore of specs/tasks/task-093.md, not by the candidate).
+- `cargo check -p gyre-server` and `cargo check -p gyre-server --tests` pass (cold 7m33s / warm, via the build wrapper).
+- Full diff read: persona enforcement is two-layer fail-closed (meta-spec ledger + entity resolution) and enforcement precedes persistence (kill-tested with no-agent-created assertions); tenant containment holds on both tiers with no system-principal bypass on the workspace tier; one-live-per-scope is enforced in spawn cores and re-enforced in `restart_orchestrator`; budget symmetry (decrement on terminal, `check_spawn_budget` + increment on replacement, no restart under exhaustion); fail/stop handlers are terminal-state idempotent so double terminal calls cannot mint a second live orchestrator; escalation names the replacement and is flagged informational.
+
+Deferred to the independent verifier (gyre-server test-binary compilation exceeds the model-session 4 GiB budget, per the build-wrapper contract): `cargo test -p gyre-server --lib api::orchestrator` (includes the two restored kill-tests), `--lib stale_agents`, `--lib mcp`, `--lib api::spawn`, and the full `cargo test --all`. Prior rounds ran the focused suites (16/16, 9/9, 6/6) on product code tree-identical to this candidate's; the only subsequent product-code change is the reviewed merge plus the two repairs verified above.
+
+— Reviewer, 2026-10-12

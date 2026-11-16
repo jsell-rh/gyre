@@ -2,12 +2,12 @@
 title: "Platform Model Orchestrator Lifecycle Protocol"
 spec_ref: "platform-model.md §3 Two-Level Orchestration"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
   - "platform-model.md §3 Repo Orchestrator"
-commits: ["d54224113232c496a3072f1152b5a2a6034099a5", "34baa7370f43cca5bf5aeacfa2e66bca53711aa0", "decfec1b65384fd70cf6a5bbc10716e0afac302e", "0346b089db211c060ff44f08b80d782b94efc405", "6f9af6286c3188657a6746e277777ab818584d14", "b277fff9697fac6b1284131169a99f970c46d055", "45d6d869ac7408a8557975bcb195478c4edb716e", "c9743839d1b784fb7ce4c46f9d536fdd72e1d197", "d7e588d9ffc25b8a5755dc411e4dba650caa599b", "098fe57564253fa29f4d738b16ae5b8ee32f8eae", "73b1c92efc920a9725e0531219b030c3f3ecc22d", "c158eb6853538d989766f84b3f4b236f7fb73ad7", "c83dc841a282381a36a130853c846de4c13e1195", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "2ae69e973fce1e3a316205af1f238c3a457bd458"]
+commits: ["2ae69e973fce1e3a316205af1f238c3a457bd458", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5"]
 review: specs/reviews/task-093.md
 ---
 
@@ -84,46 +84,3 @@ One per repo. Manages the Ralph loop for its repo. Uses the `repo-orchestrator` 
 ## Agent Instructions
 
 Read `specs/system/platform-model.md` §3 "Two-Level Orchestration" for the full spec. The agent spawn flow is in `gyre-server/src/api/spawn.rs`. The existing `agent_type` field handles "interrogation" — extend it. The `workspace-orchestrator` and `repo-orchestrator` personas should be registered as built-in personas (see `gyre-domain/src/policy.rs` builtin_policies pattern). JWT minting is in the spawn flow — workspace-scoped JWTs need workspace_id in claims without repo restriction.
-
-## Shipped
-
-Product behavior for this task (OrchestratorType domain enum, one-live-per-scope
-spawn endpoints with tenant containment, scoped JWTs per tier, stale-detector
-auto-restart with budget symmetry and death escalation, MCP orchestrator tool
-suite with tier gates) was implemented and review-verified in earlier rounds
-(round-2 verdict: complete — see `specs/reviews/task-093.md`). This round
-repaired the two round-4 review findings against the merge of main
-(`047d6524`) into the branch:
-
-### Restored dropped analytics kill-tests (commit `d5422411`)
-
-Merge resolution `34baa737` silently dropped two of main's tests from
-`crates/gyre-server/src/api/orchestrator.rs`:
-`orchestrator_spawn_emits_agent_spawned_analytics_event` and
-`orchestrator_spawn_analytics_reports_resolved_compute_target`. They pin the
-f3f37604 regression (`agent.spawned` `compute_target` must report the
-resolved launch target, not hardcoded `"local"`) plus the null `task_id` /
-persona properties. Both restored verbatim from base `047d652`
-(byte-identity verified by diff against the extracted base region); they
-call the current 5-arg `spawn_workspace_orchestrator_core` signature and the
-existing `test_state`/`seed` fixtures unchanged.
-
-### rustfmt changed-lines gate
-
-The three flagged regions (unformatted let-chain in a test, double blank
-line, missing EOF newline) were formatted — zero semantic change. Probe:
-`python3 scripts/check-rustfmt-diff.py 047d652495dde3b1ae6ddbea4f8cf1b077a3c18f`
-exits 0 ("changed lines clean, 6 Rust files checked").
-
-### Verification evidence
-
-- `cargo check -p gyre-server --tests` (via the build wrapper): passes,
-  9m20s — the restored tests type-check against the current tree.
-- Tests the independent verifier must execute:
-  `cargo test -p gyre-server orchestrator_spawn_emits_agent_spawned_analytics_event`
-  and
-  `cargo test -p gyre-server orchestrator_spawn_analytics_reports_resolved_compute_target`
-  (server test builds exceed this sandbox's 4 GiB model budget; deferred
-  per the build-wrapper contract). Evidence recorded under
-  `/tmp/stage/review-evidence`.
-- `python3 scripts/check-rustfmt-diff.py 047d652495dde3b1ae6ddbea4f8cf1b077a3c18f`: exit 0.
