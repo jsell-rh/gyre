@@ -2,6 +2,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
 import NotificationDrawer from '../components/NotificationDrawer.svelte';
 
+// NotificationDrawer (user-management.md §UI Pages > Notification Drawer and
+// §In-App Notification UI). Covers the merged feature set:
+//   - active-only listing (`?active=true` — resolved/dismissed rows are
+//     excluded server-side, pinned by the adapter test
+//     list_active_for_user_excludes_resolved_and_dismissed)
+//   - grouping by priority band (Urgent/High/Medium/Low), Urgent first
+//   - unread pill shows the unread count
+//   - per-item mark read/unread and bulk mark-all-read (task-125 endpoints)
+//   - deep links replay the app's popstate routing against action_url
+//   - InvitationReceived deep-links to /invite/{workspace_id}
+//   - items without a deep link are disabled (no fabricated targets)
+//   - filter params pass through (type/priority/workspace/repo)
+
 // Fixtures across priority bands and read states. `priority_level` is the
 // four-level band the drawer groups by; `priority` is the HSI rank.
 const makeNotification = (overrides = {}) => ({
@@ -60,6 +73,18 @@ describe('NotificationDrawer', () => {
     apiMocks.workspaceRepos.mockResolvedValue([{ id: 'repo-1', name: 'payment-api' }]);
   });
 
+  it('loads the active-only listing when opened (resolved/dismissed excluded server-side)', async () => {
+    // The drawer must ask for ?active=true: the server excludes rows the
+    // user resolved or dismissed in the Inbox, so a dismissed card never
+    // reappears in the drawer. (The exclusion itself is enforced by the
+    // SQLite adapter test of the same name — this pins the request shape.)
+    const { container } = render(NotificationDrawer, { open: true, workspaces: [] });
+    await waitFor(() => {
+      expect(apiMocks.notifications).toHaveBeenCalledWith({ limit: 50, active: true });
+    });
+    expect(container.querySelector('[data-testid="notification-drawer"]')).toBeTruthy();
+  });
+
   it('groups notifications by priority, Urgent first', async () => {
     const { container } = render(NotificationDrawer, { open: true, workspaces: [] });
     await waitFor(() => {
@@ -72,6 +97,16 @@ describe('NotificationDrawer', () => {
     const urgent = container.querySelector('.priority-group[data-priority="Urgent"]');
     expect(urgent.textContent).toContain('Queue escalation');
     expect(urgent.textContent).not.toContain('Suggested link');
+  });
+
+  it('shows the unread count in the header pill', async () => {
+    const { container } = render(NotificationDrawer, { open: true, workspaces: [] });
+    await waitFor(() => {
+      const pill = container.querySelector('[data-testid="drawer-unread-count"]');
+      expect(pill).toBeTruthy();
+      // 3 unread fixtures (urgent, high, medium); en.json: "{n} unread".
+      expect(pill.textContent).toContain('3');
+    });
   });
 
   it('marks a notification read via the read endpoint and updates the item', async () => {
@@ -127,6 +162,45 @@ describe('NotificationDrawer', () => {
 
     window.removeEventListener('popstate', onPop);
     pushSpy.mockRestore();
+  });
+
+  it('deep-links InvitationReceived to the invitation accept page (/invite/{workspace})', async () => {
+    // task-124 models a pending invitation as a membership row keyed by
+    // workspace — the drawer routes InvitationReceived (no action_url) to
+    // /invite/{workspace_id} rather than fabricating another target.
+    const pushSpy = vi.spyOn(window.history, 'pushState').mockImplementation(() => {});
+    apiMocks.notifications.mockResolvedValue({
+      notifications: [
+        makeNotification({
+          id: 'n-invite',
+          notification_type: 'InvitationReceived',
+          title: 'You have been invited to workspace ws-9',
+          action_url: null,
+          workspace_id: 'ws-9',
+          priority_level: 'Low',
+          priority: 9,
+        }),
+      ],
+    });
+    const { container } = render(NotificationDrawer, { open: true, workspaces: [] });
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="notification-item"]').length).toBe(1));
+
+    await fireEvent.click(container.querySelector('[data-testid="notification-open-n-invite"]'));
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledWith({}, '', '/invite/ws-9'));
+    pushSpy.mockRestore();
+  });
+
+  it('disables items without a deep link — no fabricated navigation target', async () => {
+    apiMocks.notifications.mockResolvedValue({
+      notifications: [
+        makeNotification({ id: 'n-nolink', action_url: null, notification_type: 'GatePassed', title: 'Gate passed' }),
+      ],
+    });
+    const { container } = render(NotificationDrawer, { open: true, workspaces: [] });
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="notification-item"]').length).toBe(1));
+
+    const main = container.querySelector('[data-testid="notification-open-n-nolink"]');
+    expect(main.disabled).toBe(true);
   });
 
   it('applies the priority filter to the API query', async () => {

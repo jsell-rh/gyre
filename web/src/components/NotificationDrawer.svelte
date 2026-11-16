@@ -8,15 +8,26 @@
   import EmptyState from '../lib/EmptyState.svelte';
   import { toastError } from '../lib/toast.svelte.js';
 
-  // NotificationDrawer (user-management.md §In-App Notification UI):
-  // slide-out panel from the bell — recent notifications grouped by priority
-  // (Urgent first), deep links to the source entity, per-item and bulk
-  // mark read/unread, filters by type / priority / workspace / repo, and a
-  // link to the notification preferences page.
+  // NotificationDrawer (user-management.md §UI Pages > Notification Drawer
+  // and §In-App Notification UI): slide-out panel from the bell — recent
+  // ACTIVE notifications grouped by priority (Urgent first), deep links to
+  // the source entity, per-item and bulk mark read/unread, filters by
+  // type / priority / workspace / repo, and a link to the notification
+  // preferences page.
+  //
+  // Active-only listing (`?active=true`, task-127): rows the user resolved
+  // or dismissed in the Inbox/Decisions surface are excluded by the query
+  // (enforced server-side by `list_active_for_user`); the default listing
+  // keeps the full row set the Inbox's show-dismissed toggle depends on.
 
   let { open = $bindable(false), workspaces = [], currentWorkspaceId = null } = $props();
 
   const openPreferences = getContext('goToNotificationSettings');
+  // When rendered inside the app, deep links route through the app's own
+  // navigateToPath (same transitions as popstate routing, incl. workspace
+  // switching); standalone (tests) the drawer falls back to pushing the
+  // path and replaying the app's popstate routing.
+  const navigateViaApp = getContext('navigateToPath');
 
   let notifications = $state([]);
   let loading = $state(false);
@@ -35,11 +46,32 @@
   const PRIORITIES = ['Urgent', 'High', 'Medium', 'Low'];
 
   // Deep links: the server emits SPA paths (/workspaces/:slug/r/:repo/...).
-  // Navigating pushes the path and replays the app's popstate routing.
+  // Standalone fallback: push the path and replay the app's popstate
+  // routing. Inside the app the navigateToPath context is preferred.
   function navigateTo(path) {
     if (!path) return;
+    if (navigateViaApp) {
+      navigateViaApp(path);
+      return;
+    }
     window.history.pushState({}, '', path);
     window.dispatchEvent(new PopStateEvent('popstate'));
+  }
+
+  /** Resolve the deep-link target for a notification. No fabricated
+   *  targets: a notification without an action_url and without an
+   *  invitation workspace is informational only. */
+  function targetFor(n) {
+    if (n.action_url) return n.action_url;
+    // Workspace invitations deep-link to the accept page — the invitation
+    // identifier the invitee holds is the workspace (task-124 models a
+    // pending invitation as a membership row keyed by workspace, not a
+    // token; the token form belongs to the tenant-invitation flow,
+    // task-110).
+    if (n.notification_type === 'InvitationReceived' && n.workspace_id) {
+      return `/invite/${n.workspace_id}`;
+    }
+    return null;
   }
 
   async function loadRepos(wsId) {
@@ -54,7 +86,7 @@
     const gen = ++loadGen;
     loading = true;
     error = null;
-    const params = { limit: 50 };
+    const params = { limit: 50, active: true };
     if (filterType) params.type = filterType;
     if (filterPriority) params.priority = filterPriority;
     if (filterWorkspace) params.workspace_id = filterWorkspace;
@@ -139,10 +171,12 @@
   }
 
   async function openNotification(n) {
+    const target = targetFor(n);
+    if (!target) return; // informational only — no fabricated target
     // Mark read, then deep-link to the entity (§Deep links).
     if (!n.read) void toggleRead(n);
     open = false;
-    navigateTo(n.action_url || '/settings/notifications');
+    navigateTo(target);
   }
 
   async function markAllRead() {
@@ -208,6 +242,11 @@
   >
     <header class="notif-header">
       <h2>{$t('notifications.drawer.title')}</h2>
+      {#if unreadCount > 0}
+        <span class="unread-pill" data-testid="drawer-unread-count">
+          {$t('notifications.drawer.unread_count', { values: { n: unreadCount } })}
+        </span>
+      {/if}
       {#if notificationState.streamStatus === 'open'}
         <span class="live-dot" title={$t('notifications.drawer.live')} aria-label={$t('notifications.drawer.live')}></span>
       {/if}
@@ -277,7 +316,13 @@
             </div>
             {#each group.items as n (n.id)}
               <div class="notif-item" class:unread={!n.read} data-testid="notification-item" data-id={n.id}>
-                <button class="notif-main" onclick={() => openNotification(n)} data-testid={`notification-open-${n.id}`}>
+                <button
+                  class="notif-main"
+                  onclick={() => openNotification(n)}
+                  disabled={!targetFor(n)}
+                  title={targetFor(n) ?? $t('notifications.drawer.no_link')}
+                  data-testid={`notification-open-${n.id}`}
+                >
                   <span class="notif-title">{n.title}</span>
                   <span class="notif-meta">
                     <span class="notif-type">{typeLabel(n.notification_type)}</span>
@@ -329,6 +374,10 @@
     border-bottom: 1px solid var(--color-border, #e2e4e9);
   }
   .notif-header h2 { margin: 0; font-size: 16px; }
+  .unread-pill {
+    background: var(--color-primary, #4a6cf7); color: #fff;
+    border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600;
+  }
   .spacer { flex: 1; }
   .live-dot {
     width: 8px; height: 8px; border-radius: 50%; background: #22c55e;
@@ -372,7 +421,8 @@
     flex: 1; display: flex; flex-direction: column; gap: 2px; text-align: left;
     padding: 8px 8px 8px 16px; background: none; border: none; cursor: pointer;
   }
-  .notif-main:hover { background: var(--color-bg-hover, #f4f5f7); }
+  .notif-main:disabled { cursor: default; }
+  .notif-main:not(:disabled):hover { background: var(--color-bg-hover, #f4f5f7); }
   .notif-title { font-size: 13px; font-weight: 500; color: var(--color-text, #111827); }
   .notif-item.unread .notif-title { font-weight: 600; }
   .notif-meta { display: flex; flex-direction: column; gap: 1px; }
