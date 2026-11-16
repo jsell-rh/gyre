@@ -64,6 +64,8 @@ pub(crate) fn is_live(a: &gyre_domain::Agent) -> bool {
 /// approved persona behind it. Store read failures propagate rather than
 /// fail-open.
 async fn validate_persona(state: &AppState, name: &str) -> Result<(), ApiError> {
+    use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecKind};
+    use gyre_ports::MetaSpecFilter;
     let filter = MetaSpecFilter {
         kind: Some(MetaSpecKind::Persona),
         ..Default::default()
@@ -87,28 +89,6 @@ async fn validate_persona(state: &AppState, name: &str) -> Result<(), ApiError> 
         )));
     }
     Ok(())
-}
-
-/// Derive an unused agent name from the per-scope default (§3.2
-/// exactly-one-live). Dead orchestrators keep their rows, so the plain
-/// default can be taken by a tombstone; suffix `-2`, `-3`, ... until free.
-/// Deterministic and readable, mirroring the `-restart-N` convention in
-/// stale_agents.rs. A store read failure is a spawn failure (Internal) —
-/// guessing "free" on a failed read could mint a duplicate name.
-async fn unique_default_name(state: &AppState, base: &str) -> Result<String, ApiError> {
-    for n in 1.. {
-        let candidate = if n == 1 {
-            base.to_string()
-        } else {
-            format!("{base}-{n}")
-        };
-        match state.agents.find_by_name(&candidate).await {
-            Ok(None) => return Ok(candidate),
-            Ok(Some(_)) => continue,
-            Err(e) => return Err(ApiError::Internal(e)),
-        }
-    }
-    unreachable!("agent name suffix space exhausted")
 }
 
 /// Resolve the persona an orchestrator spawn must attach (platform-model.md
@@ -1098,7 +1078,6 @@ pub async fn spawn_repo_orchestrator(
         .await;
         return Err(ApiError::Forbidden(reason));
     }
-    }
 
     // Tenant containment (task-093 F3): load the repo, resolve its
     // workspace, compare the workspace's tenant against the caller's. The
@@ -1159,6 +1138,7 @@ async fn record_and_index_activity(state: &AppState, ev: &AnalyticsEvent) {
 mod tests {
     use super::*;
     use crate::mem::test_state;
+    use gyre_domain::meta_spec::{MetaSpecApprovalStatus, MetaSpecKind};
 
     fn req(name: Option<&str>) -> SpawnOrchestratorRequest {
         SpawnOrchestratorRequest {
@@ -1289,7 +1269,7 @@ mod tests {
         let state = test_state();
         seed_scope(&state).await; // scope entities only, no persona meta-specs
 
-        let err = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+        let err = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
             .await
             .unwrap_err();
         assert!(
@@ -1335,7 +1315,7 @@ mod tests {
         };
         state.meta_specs.create(&ms).await.unwrap();
 
-        let err = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+        let err = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
             .await
             .unwrap_err();
         assert!(
@@ -1910,61 +1890,6 @@ mod tests {
         );
     }
 
-<<<<<<< HEAD
-    /// Build a hand-rolled AuthenticatedAgent for direct wrapper calls
-    /// (task-093 F10): the auth extractor is not in play in unit tests.
-    fn auth_in_tenant(tenant: &str) -> crate::auth::AuthenticatedAgent {
-        crate::auth::AuthenticatedAgent {
-            agent_id: "caller-1".to_string(),
-            user_id: None,
-            roles: vec![gyre_domain::UserRole::Admin],
-            tenant_id: tenant.to_string(),
-            jwt_claims: None,
-            deprecated_token_auth: false,
-        }
-    }
-
-    #[tokio::test]
-    async fn workspace_spawn_wrapper_allows_same_tenant() {
-        let state = test_state();
-        seed(&state).await;
-
-        let (code, body) = spawn_workspace_orchestrator(
-            State(state.clone()),
-            auth_in_tenant("t1"),
-            Path("ws-1".to_string()),
-            Json(req(Some("ws-orch-wrap"))),
-        )
-        .await
-        .unwrap();
-        assert_eq!(code, StatusCode::CREATED);
-        assert_eq!(
-            body.agent.orchestrator_type,
-            "workspace_orchestrator".to_string()
-        );
-    }
-
-    #[tokio::test]
-    async fn workspace_spawn_wrapper_forbids_cross_tenant() {
-        let state = test_state();
-        seed(&state).await;
-
-        match spawn_workspace_orchestrator(
-            State(state.clone()),
-            auth_in_tenant("t2"),
-            Path("ws-1".to_string()),
-            Json(req(Some("ws-orch-evil"))),
-        )
-        .await
-        {
-            Err(e @ ApiError::Forbidden(_)) => assert!(e.to_string().contains("tenant")),
-            Err(other) => panic!("expected Forbidden, got: {other}"),
-            Ok(_) => panic!("cross-tenant spawn must be Forbidden"),
-        }
-
-        // Nothing was spawned.
-        let agents = state
-=======
     /// Review finding F3 regression (task-115): server-driven
     /// orchestrators (spawned_by="system", created by the signal chain)
     /// have no external process to heartbeat. The stale-agent detector
@@ -2011,12 +1936,116 @@ mod tests {
         );
 
         let peers = state
->>>>>>> c3c7a522
             .agents
             .list_by_workspace(&Id::new("ws-1"))
             .await
             .unwrap();
-<<<<<<< HEAD
+        assert!(
+            !peers
+                .iter()
+                .any(|a| a.name.starts_with("system-ws-orch-restart")),
+            "no restart replacement spawned for a system orchestrator"
+        );
+        assert_eq!(
+            peers
+                .iter()
+                .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
+                .count(),
+            1,
+            "exactly one live workspace orchestrator (no churn)"
+        );
+
+        // A second cycle must keep refreshing the same agent — the churn
+        // loop the finding describes is spawn→kill→restart→…, so prove
+        // two consecutive detector cycles never grow the orchestrator set.
+        crate::stale_agents::run_once(&state).await.unwrap();
+        let after = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
+                .count(),
+            1,
+            "still exactly one live workspace orchestrator after a second cycle"
+        );
+        assert_eq!(
+            state
+                .agents
+                .find_by_id(&agent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentStatus::Active
+        );
+    }
+
+    /// Build a hand-rolled AuthenticatedAgent for direct wrapper calls
+    /// (task-093 F10): the auth extractor is not in play in unit tests.
+    fn auth_in_tenant(tenant: &str) -> crate::auth::AuthenticatedAgent {
+        crate::auth::AuthenticatedAgent {
+            agent_id: "caller-1".to_string(),
+            user_id: None,
+            roles: vec![gyre_domain::UserRole::Admin],
+            tenant_id: tenant.to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
+            jwt_claims: None,
+            bearer_token: None,
+            deprecated_token_auth: false,
+            impersonation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_spawn_wrapper_allows_same_tenant() {
+        let state = test_state();
+        seed(&state).await;
+
+        let (code, body) = spawn_workspace_orchestrator(
+            State(state.clone()),
+            auth_in_tenant("t1"),
+            Path("ws-1".to_string()),
+            Json(req(Some("ws-orch-wrap"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!(
+            body.agent.agent.orchestrator_type,
+            "workspace_orchestrator".to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_spawn_wrapper_forbids_cross_tenant() {
+        let state = test_state();
+        seed(&state).await;
+
+        match spawn_workspace_orchestrator(
+            State(state.clone()),
+            auth_in_tenant("t2"),
+            Path("ws-1".to_string()),
+            Json(req(Some("ws-orch-evil"))),
+        )
+        .await
+        {
+            Err(e @ ApiError::Forbidden(_)) => assert!(e.to_string().contains("tenant")),
+            Err(other) => panic!("expected Forbidden, got: {other}"),
+            Ok(_) => panic!("cross-tenant spawn must be Forbidden"),
+        }
+
+        // Nothing was spawned.
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
         assert!(agents
             .iter()
             .all(|a| a.orchestrator_type != OrchestratorType::WorkspaceOrchestrator));
@@ -2037,7 +2066,7 @@ mod tests {
         .unwrap();
         assert_eq!(code, StatusCode::CREATED);
         assert_eq!(
-            body.agent.orchestrator_type,
+            body.agent.agent.orchestrator_type,
             "repo_orchestrator".to_string()
         );
     }
@@ -2075,12 +2104,12 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (ws_orch, _t1) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (ws_orch, _t1, _l1) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
-        let (repo_orch, _t2) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1")
+        let (repo_orch, _t2, _l2) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -2138,6 +2167,7 @@ mod tests {
             max_cost_per_day: None,
             max_concurrent_agents: Some(2),
             max_agent_lifetime_secs: None,
+            enforcement_action: None,
         };
         state
             .budget_configs
@@ -2145,8 +2175,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (agent, _t) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (agent, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
         let usage = state
@@ -2193,6 +2223,7 @@ mod tests {
             max_cost_per_day: None,
             max_concurrent_agents: Some(1),
             max_agent_lifetime_secs: None,
+            enforcement_action: None,
         };
         state
             .budget_configs
@@ -2200,8 +2231,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (agent, _t) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (agent, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -2246,8 +2277,8 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, _t) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (agent, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
         let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
@@ -2283,70 +2314,27 @@ mod tests {
             state
                 .agents
                 .find_by_name("ws-orch-restart-1")
-=======
-        assert!(
-            !peers
-                .iter()
-                .any(|a| a.name.starts_with("system-ws-orch-restart")),
-            "no restart replacement spawned for a system orchestrator"
-        );
-        assert_eq!(
-            peers
-                .iter()
-                .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
-                .count(),
-            1,
-            "exactly one live workspace orchestrator (no churn)"
-        );
-
-        // A second cycle must keep refreshing the same agent — the churn
-        // loop the finding describes is spawn→kill→restart→…, so prove
-        // two consecutive detector cycles never grow the orchestrator set.
-        crate::stale_agents::run_once(&state).await.unwrap();
-        let after = state
-            .agents
-            .list_by_workspace(&Id::new("ws-1"))
-            .await
-            .unwrap();
-        assert_eq!(
-            after
-                .iter()
-                .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
-                .count(),
-            1,
-            "still exactly one live workspace orchestrator after a second cycle"
-        );
-        assert_eq!(
-            state
-                .agents
-                .find_by_id(&agent.id)
->>>>>>> c3c7a522
                 .await
                 .unwrap()
                 .unwrap()
                 .status,
-<<<<<<< HEAD
             AgentStatus::Dead
-=======
-            AgentStatus::Active
->>>>>>> c3c7a522
         );
     }
 
     #[tokio::test]
-<<<<<<< HEAD
     async fn fail_agent_restarts_and_escalates_repo_orchestrator() {
         // F6: the fail handler gives an orchestrator the same death handling
         // as the stale-agent Abort path — replacement + escalation.
         let state = test_state();
         seed(&state).await;
 
-        let (ws_orch, _t1) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (ws_orch, _t1, _l1) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
-        let (repo_orch, _t2) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1")
+        let (repo_orch, _t2, _l2) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -2387,8 +2375,8 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, _t) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (agent, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -2414,22 +2402,32 @@ mod tests {
         // so spawning again with NO explicit name must succeed even though
         // the dead agent's tombstone row still holds the default name.
         // Before the fix this returned InvalidInput forever (name taken by
-        // a dead agent), leaving the workspace unorchestrated.
+        // a dead agent), leaving the workspace unorchestrated. The merged
+        // resolution releases the canonical name by renaming the dead row
+        // (-superseded-N) — the same scheme spawn_frees_name_of_stopped_
+        // predecessor pins for explicit names.
         let state = test_state();
         seed(&state).await;
 
-        let (first, _t) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
-            .await
-            .unwrap();
+        let (first, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
         assert_eq!(first.name, "workspace-orchestrator-ws-1");
 
         kill(&state, &first.name).await;
 
-        let (second, _t) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
-            .await
-            .unwrap();
-        assert_eq!(second.name, "workspace-orchestrator-ws-1-2");
+        let (second, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
+        // The respawn takes the canonical default name; the dead
+        // predecessor was renamed out of the way.
+        assert_eq!(second.name, "workspace-orchestrator-ws-1");
         assert_eq!(second.status, AgentStatus::Active);
+        let renamed = state.agents.find_by_id(&first.id).await.unwrap().unwrap();
+        assert_eq!(renamed.name, "workspace-orchestrator-ws-1-superseded-1");
+        assert_eq!(renamed.status, AgentStatus::Dead);
 
         // Exactly one live workspace orchestrator after the respawn.
         let live = state
@@ -2444,12 +2442,21 @@ mod tests {
             .count();
         assert_eq!(live, 1);
 
-        // Third cycle keeps suffixing, not colliding.
+        // A third cycle reuses the default name again; the second dead row
+        // is suffixed past the first tombstone, never colliding.
         kill(&state, &second.name).await;
-        let (third, _t) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+        let (third, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
+        assert_eq!(third.name, "workspace-orchestrator-ws-1");
+        let second_renamed = state
+            .agents
+            .find_by_id(&second.id)
             .await
+            .unwrap()
             .unwrap();
-        assert_eq!(third.name, "workspace-orchestrator-ws-1-3");
+        assert_eq!(second_renamed.name, "workspace-orchestrator-ws-1-superseded-2");
     }
 
     #[tokio::test]
@@ -2459,44 +2466,28 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (first, _t) = spawn_repo_orchestrator_core(&state, "r-1", req(None), "user-1")
-            .await
-            .unwrap();
+        let (first, _t, _l) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(None), "user-1", "t1")
+                .await
+                .unwrap();
         assert_eq!(first.name, "repo-orchestrator-r-1");
 
         kill(&state, &first.name).await;
 
-        let (second, _t) = spawn_repo_orchestrator_core(&state, "r-1", req(None), "user-1")
-            .await
-            .unwrap();
-        assert_eq!(second.name, "repo-orchestrator-r-1-2");
-
-        // A different repo's default name is unaffected.
-        let (other, _t) = spawn_repo_orchestrator_core(&state, "r-2", req(None), "user-1")
-            .await
-            .unwrap();
-        assert_eq!(other.name, "repo-orchestrator-r-2");
-    }
-
-    #[tokio::test]
-    async fn explicit_name_conflict_still_rejected_when_dead_agent_holds_it() {
-        // Explicit names stay strict: a caller-supplied name matching ANY
-        // existing agent (here: the dead tombstone) is a 400, not silently
-        // renamed. Only the per-scope default name auto-suffixes.
-        let state = test_state();
-        seed(&state).await;
-
-        let (first, _t) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("named-orch")), "user-1")
+        let (second, _t, _l) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(None), "user-1", "t1")
                 .await
                 .unwrap();
-        kill(&state, &first.name).await;
+        assert_eq!(second.name, "repo-orchestrator-r-1");
+        let renamed = state.agents.find_by_id(&first.id).await.unwrap().unwrap();
+        assert_eq!(renamed.name, "repo-orchestrator-r-1-superseded-1");
 
-        let err =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("named-orch")), "user-1")
+        // A different repo's default name is unaffected.
+        let (other, _t, _l) =
+            spawn_repo_orchestrator_core(&state, "r-2", req(None), "user-1", "t1")
                 .await
-                .unwrap_err();
-        assert!(matches!(err, ApiError::InvalidInput(_)), "got: {err}");
+                .unwrap();
+        assert_eq!(other.name, "repo-orchestrator-r-2");
     }
 
     #[tokio::test]
@@ -2509,8 +2500,8 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, _t) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (agent, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -2560,105 +2551,10 @@ mod tests {
         assert_eq!(
             usage.active_agents, 1,
             "double terminal must not double-decrement the budget"
-=======
-    async fn orchestrator_spawn_emits_agent_spawned_analytics_event() {
-        // analytics.md §Auto-Emitted Events: the orchestrator spawn path
-        // reports its tier via the persona property.
-        let state = test_state();
-        seed(&state).await;
-
-        let (agent, _token, _launch) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
-                .await
-                .unwrap();
-
-        let events = state
-            .analytics
-            .query(Some("agent.spawned"), None, 10)
-            .await
-            .unwrap();
-        assert_eq!(events.len(), 1, "one agent.spawned event expected");
-        let ev = &events[0];
-        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
-        assert_eq!(ev.properties["persona"], "workspace-orchestrator");
-        assert_eq!(ev.properties["orchestrator_type"], "workspace_orchestrator");
-        // No workspace/tenant compute target is configured in this test, so
-        // the honest resolution of the priority chain (workspace assignment
-        // -> tenant default -> local) IS "local" here. The configured-target
-        // case is pinned by
-        // orchestrator_spawn_analytics_reports_resolved_compute_target.
-        assert_eq!(ev.properties["compute_target"], "local");
-        // Orchestrators are not task-bound: task_id must be null, not the
-        // agent's own id (regression: previously fabricated from agent.id).
-        assert!(ev.properties["task_id"].is_null());
-        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
-    }
-
-    /// Review f3f37604 regression: the spec-required `agent.spawned`
-    /// property `compute_target` must report the target the orchestrator
-    /// process actually launched on (workspace assignment -> tenant
-    /// default -> local), not a hardcoded "local". The pre-fix defect
-    /// recorded "local" while the process launched on the configured
-    /// workspace target — silently wrong in every deployment that
-    /// configures one.
-    #[tokio::test]
-    async fn orchestrator_spawn_analytics_reports_resolved_compute_target() {
-        let state = test_state();
-        seed(&state).await;
-
-        // Configure a workspace compute target — the exact deployment
-        // shape launch_with_command / orchestrator_launch_injects_system_prompts
-        // use. Kubernetes-typed targets dispatch via LocalTarget, so
-        // /bin/true launches deterministically in the test environment.
-        let mut ct = gyre_domain::ComputeTargetEntity::new(
-            Id::new("ct-analytics-resolved"),
-            Id::new("t1"),
-            "analytics-resolved-target",
-            gyre_domain::ComputeTargetType::Kubernetes,
-            0,
-        );
-        ct.config = serde_json::json!({ "command": "/bin/true" });
-        state.compute_targets.create(&ct).await.unwrap();
-        let mut ws = state
-            .workspaces
-            .find_by_id(&Id::new("ws-1"))
-            .await
-            .unwrap()
-            .unwrap();
-        ws.compute_target_id = Some(ct.id.clone());
-        state.workspaces.update(&ws).await.unwrap();
-
-        let (agent, _token, launch) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1", "t1")
-                .await
-                .unwrap();
-        assert_eq!(
-            launch.launch_status, "running",
-            "launch failed: {:?}",
-            launch.launch_detail
-        );
-
-        let events = state
-            .analytics
-            .query(Some("agent.spawned"), None, 10)
-            .await
-            .unwrap();
-        assert_eq!(events.len(), 1, "one agent.spawned event expected");
-        let ev = &events[0];
-        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
-        // The event must carry the RESOLVED target id, proving the property
-        // is looked up from the launch resolution, not hardcoded. This
-        // assertion fails against the pre-fix code (which recorded "local").
-        assert_eq!(
-            ev.properties["compute_target"], "ct-analytics-resolved",
-            "agent.spawned must report the compute target the process \
-             actually launched on"
->>>>>>> c3c7a522
         );
     }
 
     #[tokio::test]
-<<<<<<< HEAD
     async fn fail_after_stale_death_does_not_spawn_second_replacement() {
         // The other re-entry route: the stale detector kills the
         // orchestrator (Dead + replacement), then a caller POSTs /fail on
@@ -2667,8 +2563,8 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, _t) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (agent, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -2727,8 +2623,8 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, _t) =
-            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+        let (agent, _t, _l) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1", "t1")
                 .await
                 .unwrap();
 
@@ -2755,7 +2651,11 @@ mod tests {
             1,
             "second death-handling entry on a corpse must not mint a second live orchestrator; live: {:?}",
             live.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
-=======
+        );
+    }
+
+
+    #[tokio::test]
     async fn spawn_reports_truthful_launch_outcome() {
         // task-099 F3: the spawn outcome must report what actually happened
         // at launch -- never a blanket "running" for a row whose process
@@ -3025,7 +2925,6 @@ mod tests {
         assert!(
             !std::path::Path::new(&dump_path).exists(),
             "no orchestrator process may be spawned with an unapproved persona"
->>>>>>> c3c7a522
         );
     }
 }

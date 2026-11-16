@@ -256,15 +256,14 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/bookmark", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
                 RouteResourceMapping::api(
-<<<<<<< HEAD
                     "/api/v1/repos/:id/orchestrator/spawn",
                     "repo",
                     Some("write"),
-=======
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/repos/:id/commits/:sha/signature/verification",
                     "repo",
                     None,
->>>>>>> c3c7a522
                 ),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependencies", "dependency", None),
                 RouteResourceMapping::api(
@@ -1868,18 +1867,6 @@ pub async fn seed_builtin_policies(state: &Arc<AppState>) -> anyhow::Result<()> 
     for policy in policies {
         match state.policies.find_by_id(&policy.id.to_string()).await {
             Ok(None) => {
-<<<<<<< HEAD
-                tracing::debug!(
-                    policy_id = %policy.id,
-                    name = %policy.name,
-                    "Seeding built-in ABAC policy"
-                );
-                state.policies.create(&policy).await.map_err(|e| {
-                    e.context(format!("failed to seed built-in ABAC policy {}", policy.id))
-                })?;
-            }
-            Ok(Some(_)) => {} // already exists → idempotent
-=======
                 state.policies.create(&policy).await.map_err(|e| {
                     anyhow::anyhow!("failed to seed built-in ABAC policy {}: {e}", policy.id)
                 })?;
@@ -1909,7 +1896,6 @@ pub async fn seed_builtin_policies(state: &Arc<AppState>) -> anyhow::Result<()> 
                     );
                 }
             }
->>>>>>> c3c7a522
             Err(e) => {
                 return Err(e.context(format!(
                     "failed to check existence of built-in ABAC policy {}",

@@ -10362,57 +10362,6 @@ concepts:
         assert!(text.contains("repo-orchestrator"), "got: {text}");
     }
 
-<<<<<<< HEAD
-    #[tokio::test]
-    async fn mcp_message_send_denies_readonly_api_key() {
-        // task-093 F7: gyre_message_send persists via state.messages.store,
-        // so it is a write tool — a ReadOnly principal must be denied at the
-        // RBAC gate with a JSON-RPC error (not an isError tool result).
-        let state = orch_state().await;
-
-        // ReadOnly user + API key (auth.rs API-key path: roles come from the
-        // user record; User::new defaults to [ReadOnly]).
-        let user = gyre_domain::User::new(gyre_common::Id::new("ro-user"), "ro-ext", "ro-user", 0);
-        state.users.create(&user).await.unwrap();
-        let raw_key = "ro-test-api-key";
-        let hashed = crate::auth::hash_api_key(raw_key);
-        state
-            .api_keys
-            .create(&hashed, &gyre_common::Id::new("ro-user"), "test")
-            .await
-            .unwrap();
-
-        let app = crate::build_router(state.clone());
-        let (status, json) = mcp_post_with_token(
-            app,
-            tool_call(
-                "gyre_message_send",
-                json!({
-                    "to": { "agent": "orch-ro-target" },
-                    "kind": "Custom",
-                    "payload": { "note": "hi" }
-                }),
-            ),
-            raw_key,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            json["error"]["code"].as_i64(),
-            Some(-32603),
-            "expected PERMISSION_DENIED jsonrpc error, got: {json}"
-        );
-
-        // Nothing was persisted.
-        let msgs = state
-            .messages
-            .list_unacked(&gyre_common::Id::new("orch-ro-target"), 100)
-            .await
-            .unwrap();
-        assert!(
-            msgs.is_empty(),
-            "no message may be stored for a denied send"
-=======
     // ── §1 Token Scoping: MCP validates scope on every tool call ─────────────
 
     /// Register a worker agent (entity + repo-scoped JWT in agent_tokens).
@@ -10502,30 +10451,10 @@ concepts:
         assert!(
             msg.contains("r-2"),
             "error must name the target repo: {msg}"
->>>>>>> c3c7a522
         );
     }
 
     #[tokio::test]
-<<<<<<< HEAD
-    async fn mcp_message_send_allows_agent_role() {
-        // Positive control: an Agent-role (or higher) caller passes the gate
-        // and reaches the handler.
-        let state = orch_state().await;
-        let (agent_id, token) =
-            register_orchestrator(&state, "sender", "ws-1", None, "workspace_orchestrator").await;
-        let app = crate::build_router(state.clone());
-
-        let (status, json) = mcp_post_with_token(
-            app,
-            tool_call(
-                "gyre_message_send",
-                json!({
-                    "to": { "agent": agent_id },
-                    "kind": "Custom",
-                    "payload": { "note": "self" }
-                }),
-=======
     async fn mcp_scope_worker_create_mr_own_repo_passes_scope_gate() {
         let state = orch_state().await;
         let (_id, token) = register_worker(&state, "w2", "r-1").await;
@@ -10785,19 +10714,10 @@ concepts:
             tool_call(
                 "gyre_list_repo_orchestrators",
                 json!({ "workspace_id": "ws-1" }),
->>>>>>> c3c7a522
             ),
             &token,
         )
         .await;
-<<<<<<< HEAD
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            json["error"].is_null(),
-            "Agent-role caller must pass the RBAC gate, got: {json}"
-        );
-    }
-=======
         assert!(
             json["error"].is_null(),
             "in-scope workspace call must pass: {json}"
@@ -10846,5 +10766,85 @@ concepts:
         .await;
         assert!(json["error"].is_null(), "got: {json}");
     }
->>>>>>> c3c7a522
+
+    #[tokio::test]
+    async fn mcp_message_send_denies_readonly_api_key() {
+        // task-093 F7: gyre_message_send persists via state.messages.store,
+        // so it is a write tool — a ReadOnly principal must be denied at the
+        // RBAC gate with a JSON-RPC error (not an isError tool result).
+        let state = orch_state().await;
+
+        // ReadOnly user + API key (auth.rs API-key path: roles come from the
+        // user record; User::new defaults to [ReadOnly]).
+        let user = gyre_domain::User::new(gyre_common::Id::new("ro-user"), "ro-ext", "ro-user", 0);
+        state.users.create(&user).await.unwrap();
+        let raw_key = "ro-test-api-key";
+        let hashed = crate::auth::hash_api_key(raw_key);
+        state
+            .api_keys
+            .create(&hashed, &gyre_common::Id::new("ro-user"), "test")
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_message_send",
+                json!({
+                    "to": { "agent": "orch-ro-target" },
+                    "kind": "Custom",
+                    "payload": { "note": "hi" }
+                }),
+            ),
+            raw_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["error"]["code"].as_i64(),
+            Some(-32603),
+            "expected PERMISSION_DENIED jsonrpc error, got: {json}"
+        );
+
+        // Nothing was persisted.
+        let msgs = state
+            .messages
+            .list_unacked(&gyre_common::Id::new("orch-ro-target"), 100)
+            .await
+            .unwrap();
+        assert!(
+            msgs.is_empty(),
+            "no message may be stored for a denied send"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_allows_agent_role() {
+        // Positive control: an Agent-role (or higher) caller passes the gate
+        // and reaches the handler.
+        let state = orch_state().await;
+        let (agent_id, token) =
+            register_orchestrator(&state, "sender", "ws-1", None, "workspace_orchestrator").await;
+        let app = crate::build_router(state.clone());
+
+        let (status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_message_send",
+                json!({
+                    "to": { "agent": agent_id },
+                    "kind": "Custom",
+                    "payload": { "note": "self" }
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["error"].is_null(),
+            "Agent-role caller must pass the RBAC gate, got: {json}"
+        );
+    }
 }

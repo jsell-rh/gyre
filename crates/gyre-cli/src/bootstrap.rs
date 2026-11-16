@@ -7,71 +7,12 @@
 use std::path::Path;
 
 // ─── Persona prompts ──────────────────────────────────────────────────────────
-<<<<<<< HEAD
-// Prompt content is embedded from the canonical `specs/personas/<slug>.md`
-// spec files (byte-identical to the CLI-private copies they replace, which
-// the assignment base deleted in favor of the specs/ single source).
-
-pub const WORKSPACE_ORCHESTRATOR_PROMPT: &str =
-    include_str!("../../../specs/personas/workspace-orchestrator.md");
-pub const REPO_ORCHESTRATOR_PROMPT: &str =
-    include_str!("../../../specs/personas/repo-orchestrator.md");
-pub const ACCOUNTABILITY_PROMPT: &str = include_str!("../../../specs/personas/accountability.md");
-pub const SECURITY_PROMPT: &str = include_str!("../../../specs/personas/security.md");
-
-/// A built-in persona to register during bootstrap (platform-model.md §2).
-pub struct BuiltinPersona {
-    pub name: &'static str,
-    pub slug: &'static str,
-    pub prompt: &'static str,
-    pub capabilities: &'static [&'static str],
-    pub protocols: &'static [&'static str],
-}
-
-/// The four built-in personas, all pre-approved at Tenant scope (spec §8 step 5).
-pub const BUILTIN_PERSONAS: &[BuiltinPersona] = &[
-    BuiltinPersona {
-        name: "Workspace Orchestrator",
-        slug: "workspace-orchestrator",
-        prompt: WORKSPACE_ORCHESTRATOR_PROMPT,
-        capabilities: &["task.create", "spec.read", "cross-repo-analysis"],
-        protocols: &["mcp", "escalation", "handoff"],
-    },
-    BuiltinPersona {
-        name: "Repo Orchestrator",
-        slug: "repo-orchestrator",
-        prompt: REPO_ORCHESTRATOR_PROMPT,
-        capabilities: &[
-            "task.create",
-            "task.decompose",
-            "agent.dispatch",
-            "merge.queue",
-        ],
-        protocols: &["mcp", "ralph-loop", "escalation", "handoff"],
-    },
-    BuiltinPersona {
-        name: "Accountability Agent",
-        slug: "accountability",
-        prompt: ACCOUNTABILITY_PROMPT,
-        capabilities: &["spec.read", "code.read", "drift.report"],
-        protocols: &["mcp", "patrol"],
-    },
-    BuiltinPersona {
-        name: "Security Agent",
-        slug: "security",
-        prompt: SECURITY_PROMPT,
-        capabilities: &["code.read", "threat.report", "dependency.audit"],
-        protocols: &["mcp", "patrol", "escalation"],
-    },
-];
-=======
 // Single source of truth: `gyre_domain::BUILTIN_PERSONA_DEFS`, the same
 // definitions the server seeds from (platform-model.md §2). task-140
 // consolidated the CLI's private copies here — two independent embeds of
 // the four personas could drift, restoring different prompts on
 // re-registration than a server restart re-seeds.
 pub use gyre_domain::BUILTIN_PERSONA_DEFS as BUILTIN_PERSONAS;
->>>>>>> c3c7a522
 
 // ─── Slug derivation ──────────────────────────────────────────────────────────
 
