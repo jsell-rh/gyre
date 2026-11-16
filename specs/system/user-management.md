@@ -365,8 +365,13 @@ pub enum NotificationPriority {
 
 > **Priority band membership (amended 2026-11, task-112 review):** The band
 > comments above classify notification types by example. The full
-> type→band mapping (implemented as `NotificationPriority::for_notification_type`
-> in `gyre-domain/src/user.rs`) is:
+> type→band mapping (canonically implemented as
+> `NotificationPriority::for_notification_type` in
+> `gyre-common/src/notification.rs` — the single table both the entity's
+> `priority` field and the domain channel-routing
+> `gyre-domain::NotificationPriority::for_notification_type` delegate to,
+> recorded 2026-11 task-123 repair so one notification carries one band on
+> every surface) is:
 >
 > | Band | Notification types |
 > |---|---|
