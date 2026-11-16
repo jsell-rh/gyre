@@ -5,7 +5,7 @@ depends_on: [task-165]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §Supply Chain (supply-chain.md)"
-commits: ["a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5"]
+commits: ["a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5", "ad473d3c0846cbdb5888f4973b3ea8e406f09586"]
 ---
 
 ## Spec Excerpt
@@ -99,8 +99,12 @@ section cannot silently under-report spec provenance; only genuine absence
 
 ### Test evidence
 
-`cargo check -p gyre-server` and `cargo check -p gyre-server --tests` pass at
-head `a4c24fc1`. The sandbox build wrapper blocks gyre-server test code
+`cargo check -p gyre-server` and `cargo check -p gyre-server --tests` passed at
+`a4c24fc1`; after the verification repair (rustfmt + removal of one useless
+`format!` — whitespace-only otherwise) `cargo fmt --check -p gyre-server` and
+`cargo clippy -p gyre-server --lib` (no new warnings, in particular no
+`useless_format` in `aibom_spec_registry.rs`) pass at head `ad473d3c`. The
+sandbox build wrapper blocks gyre-server test code
 generation ("exceeds 4 GiB") — an infrastructure limit recorded in
 `/tmp/stage/review-evidence/task-169-probes.md`, not a code defect. The
 independent verifier must run:
