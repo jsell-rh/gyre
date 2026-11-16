@@ -630,11 +630,6 @@ pub(crate) async fn increment_revert_count(
     Ok(next)
 }
 
-<<<<<<< HEAD
-/// Circuit breaker tripped: cancel the MR's queue entries permanently and
-/// escalate to a human (platform-model.md §6 Circuit Breaker).
-async fn trip_circuit_breaker(
-=======
 /// Circuit-breaker counter key for an MR (task-095 R3-F2).
 ///
 /// Keyed on `spec_ref` when the MR carries one — a resubmission of the
@@ -661,7 +656,6 @@ pub(crate) fn revert_breaker_key(mr: &MergeRequest) -> String {
 /// already over threshold — cancelling only the triggering MR's entries
 /// would let its resubmission ride the queue with a stale pre-trip entry.
 pub(crate) async fn trip_circuit_breaker(
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
     state: &AppState,
     repo_id: &str,
     mr: &MergeRequest,
@@ -3461,24 +3455,10 @@ pub(crate) async fn apply_revert_side_effects(
         // MrReverted event above already reached the agent itself).
         crate::notifications::notify_mr_reverted(
             state,
-<<<<<<< HEAD
-            updated.workspace_id.clone(),
-            user_id,
-            gyre_common::NotificationType::MrReverted,
-            format!(
-                "MR '{}' reverted on {}: post-merge validation failed",
-                updated.title, repo.name
-            ),
-            "default",
-            Some(payload.to_string()),
-            Some(updated.id.to_string()),
-            Some(repo.id.to_string()),
-=======
             author_agent_id,
             &updated.workspace_id,
             updated.id.as_str(),
             failure_reason,
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
         )
         .await;
     }
@@ -3512,11 +3492,7 @@ pub(crate) async fn apply_revert_side_effects(
     task.description = Some(format!(
         "MR '{}' ({}) was merged to {} but failed post-merge validation: {}. \
          The merge was reverted via commit {}. Re-do the work on a fresh branch \
-<<<<<<< HEAD
-         and re-open a merge request.",
-=======
          and re-open a merge request.{spec_carry}",
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
         updated.title, updated.id, repo.default_branch, failure_reason, revert_sha,
     ));
     if let Err(e) = state.tasks.create(&task).await {
@@ -3572,9 +3548,6 @@ async fn recover_atomic_group_from_post_merge_failure(
             .revert_commit(&repo.path, &repo.default_branch, sha)
             .await
         {
-<<<<<<< HEAD
-            Ok(revert_sha) => final_revert_sha = Some(revert_sha),
-=======
             Ok(gyre_domain::RevertResult::Success { revert_commit_sha }) => {
                 final_revert_sha = Some(revert_commit_sha)
             }
@@ -3592,7 +3565,6 @@ async fn recover_atomic_group_from_post_merge_failure(
                 }
                 return;
             }
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             Err(e) => {
                 error!(
                     repo_id = %repo.id,
@@ -5674,17 +5646,11 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
-<<<<<<< HEAD
-            required: true,
-            gate_phase: Default::default(),
-            timeout_secs: None,
-=======
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
             position: 0,
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
@@ -5806,17 +5772,11 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
-<<<<<<< HEAD
-            required: true,
-            gate_phase: Default::default(),
-            timeout_secs: None,
-=======
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
             position: 0,
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
@@ -6328,17 +6288,11 @@ mod tests {
             command: Some("cargo test".to_string()),
             required_approvals: None,
             persona: None,
-<<<<<<< HEAD
-            required: true,
-            gate_phase: Default::default(),
-            timeout_secs: None,
-=======
             validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
             position: 0,
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
@@ -8229,11 +8183,8 @@ mod tests {
                 None,
                 None,
                 None,
-<<<<<<< HEAD
-=======
                 None,
                 &[],
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
                 100,
                 0,
             )
@@ -8242,11 +8193,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-<<<<<<< HEAD
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
-=======
                 .any(|n| n.notification_type == NotificationType::MrMerged),
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -8358,11 +8305,8 @@ mod tests {
                 None,
                 None,
                 None,
-<<<<<<< HEAD
-=======
                 None,
                 &[],
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
                 100,
                 0,
             )
@@ -8701,11 +8645,8 @@ mod tests {
                 None,
                 None,
                 None,
-<<<<<<< HEAD
-=======
                 None,
                 &[],
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
                 100,
                 0,
             )
@@ -8714,11 +8655,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-<<<<<<< HEAD
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
-=======
                 .any(|n| n.notification_type == NotificationType::MrMerged),
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -8763,11 +8700,8 @@ mod tests {
                 None,
                 None,
                 None,
-<<<<<<< HEAD
-=======
                 None,
                 &[],
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
                 100,
                 0,
             )
@@ -8776,11 +8710,7 @@ mod tests {
         assert!(
             notifs
                 .iter()
-<<<<<<< HEAD
-                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
-=======
                 .any(|n| n.notification_type == NotificationType::MrMerged),
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             "author spawner should receive the merge notification, got {:?}",
             notifs
                 .iter()
@@ -8884,11 +8814,8 @@ mod tests {
                 None,
                 None,
                 None,
-<<<<<<< HEAD
-=======
                 None,
                 &[],
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
                 100,
                 0,
             )
@@ -9136,11 +9063,8 @@ mod tests {
                     None,
                     None,
                     None,
-<<<<<<< HEAD
-=======
                     None,
                     &[],
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
                     100,
                     0,
                 )

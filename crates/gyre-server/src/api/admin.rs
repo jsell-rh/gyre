@@ -516,51 +516,6 @@ pub async fn admin_kill_agent(
     // Auto-track agent kill (analytics.md §Auto-Emitted Events: agent.failed
     // covers "fails or is killed").
     let now = now_secs();
-<<<<<<< HEAD
-
-    let _ = agent.transition_status(AgentStatus::Dead);
-    state.agents.update(&agent).await?;
-
-    // Kill the actual process if it is running.
-    if let Some(handle) = state.process_registry.lock().await.remove(&id) {
-        if let Err(e) = super::spawn::kill_process_handle(&handle).await {
-            tracing::warn!(agent_id = %id, "kill_process failed: {e}");
-        }
-    }
-
-    // Clean up worktrees.
-    if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
-        for wt in worktrees {
-            if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
-                let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
-            }
-            let _ = state.worktrees.delete(&wt.id).await;
-        }
-    }
-
-    // Block the agent's current task.
-    if let Some(task_id) = &agent.current_task_id {
-        if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
-            if task.status == TaskStatus::InProgress {
-                let _ = task.transition_status(TaskStatus::Blocked);
-                task.updated_at = now;
-                let _ = state.tasks.update(&task).await;
-            }
-        }
-    }
-
-    let ws_id = agent.workspace_id.clone();
-    state.emit_telemetry(
-        ws_id,
-        gyre_common::message::MessageKind::AgentStatusChanged,
-        Some(serde_json::json!({
-            "event_id": uuid::Uuid::new_v4().to_string(),
-            "agent_id": agent.id.to_string(),
-            "status": "dead",
-            "description": format!("Agent {} force-killed by admin", agent.name),
-            "timestamp": now,
-        })),
-=======
     let ev = gyre_domain::AnalyticsEvent::new(
         crate::api::new_id(),
         "agent.failed",
@@ -577,7 +532,6 @@ pub async fn admin_kill_agent(
         None,
         Some(&agent.workspace_id),
         agent.repo_id.as_ref(),
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
     );
     let _ = state.analytics.record(&ev).await;
 

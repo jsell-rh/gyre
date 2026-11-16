@@ -565,22 +565,6 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
-<<<<<<< HEAD
-    // Register meta_spec_preview_gc job (§5 of meta-spec-reconciliation.md)
-    registry
-        .register(
-            JobDefinition {
-                name: "meta_spec_preview_gc".to_string(),
-                description: "Tears down meta-spec preview runs past their TTL: kills agents, \
-             removes worktrees, deletes preview branches, revokes tokens, releases \
-             budget slots"
-                    .to_string(),
-                interval_secs: crate::api::meta_specs::preview_gc_interval_secs_from_env(),
-                enabled: true,
-                run_at_utc_hour: None,
-            },
-            |state| async move { crate::api::meta_specs::run_once(&state).await },
-=======
     // Register code-search file indexing (search.md §Index Updates: file
     // content is indexed asynchronously on push; also runs on a fixed interval
     // so the index stays consistent after restarts without a manual reindex).
@@ -695,7 +679,23 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 run_at_utc_hour: None,
             },
             |state| async move { crate::email::run_digest_once(&state).await },
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
+        )
+        .await;
+
+    // Register meta_spec_preview_gc job (§5 of meta-spec-reconciliation.md)
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_preview_gc".to_string(),
+                description: "Tears down meta-spec preview runs past their TTL: kills agents, \
+             removes worktrees, deletes preview branches, revokes tokens, releases \
+             budget slots"
+                    .to_string(),
+                interval_secs: crate::api::meta_specs::preview_gc_interval_secs_from_env(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::api::meta_specs::run_once(&state).await },
         )
         .await;
 

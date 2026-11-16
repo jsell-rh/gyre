@@ -20,7 +20,7 @@ use gyre_domain::{
     Repository, UserRole, Workspace,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::{auth::AuthenticatedAgent, AppState};
@@ -809,10 +809,16 @@ struct Provisioned {
 
 /// Role gate for every preview entry point: a preview run spends real compute
 /// against real specs, so read-only and agent-role callers are excluded.
-fn require_preview_role(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
+/// Denials are recorded through the RBAC audit trail like every other gate.
+async fn require_preview_role(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    route: &str,
+) -> Result<(), ApiError> {
     if auth.roles.contains(&UserRole::Admin) || auth.roles.contains(&UserRole::Developer) {
         Ok(())
     } else {
+        crate::rbac::record_rbac_denied(state, auth, "Admin or Developer", route).await;
         Err(ApiError::Forbidden(
             "Admin or Developer role required to run meta-spec preview".to_string(),
         ))
@@ -828,26 +834,7 @@ pub async fn post_meta_spec_preview(
     auth: AuthenticatedAgent,
     Json(req): Json<PreviewMetaSpecRequest>,
 ) -> Result<(StatusCode, Json<PreviewResponse>), ApiError> {
-<<<<<<< HEAD
-    require_preview_role(&auth)?;
-=======
-    // Require Admin or Developer role: preview runs agents against real specs, so
-    // read-only and agent callers must not trigger preview runs.
-    let allowed = auth.roles.contains(&gyre_domain::UserRole::Admin)
-        || auth.roles.contains(&gyre_domain::UserRole::Developer);
-    if !allowed {
-        crate::rbac::record_rbac_denied(
-            &state,
-            &auth,
-            "Admin or Developer",
-            "POST /api/v1/workspaces/:id/meta-specs/preview",
-        )
-        .await;
-        return Err(ApiError::Forbidden(
-            "Admin or Developer role required to run meta-spec preview".to_string(),
-        ));
-    }
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
+    require_preview_role(&state, &auth, "POST /api/v1/meta-specs/preview").await?;
 
     if req.draft.kind.trim().is_empty() || req.draft.content.trim().is_empty() {
         return Err(ApiError::BadRequest(
@@ -950,7 +937,6 @@ pub async fn post_meta_spec_preview(
         }
     }
 
-<<<<<<< HEAD
     // ── Pass 3: provision. A failure rolls back everything provisioned so far.
     let preview_id = uuid::Uuid::new_v4().to_string();
     let now = now_secs();
@@ -965,69 +951,6 @@ pub async fn post_meta_spec_preview(
                     rollback_preview_agent(&state, &p.agent_ref).await;
                 }
                 return Err(e);
-=======
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Compute a blast-radius summary for a workspace's current meta-spec-set.
-///
-/// Returns the set of workspaces and repos that reference any of the meta-specs
-/// currently bound to `workspace_id`. This gives a structural impact estimate:
-/// if the draft replaces any of those specs, all of these workspaces/repos are
-/// affected.
-async fn compute_preview_blast_radius(
-    state: &Arc<AppState>,
-    workspace_id: &str,
-) -> PreviewBlastRadius {
-    // caller-scope:ok — correctly uses ws_id (each workspace's own ID) inside the loop, not the parameter
-    // Collect the spec paths currently bound in this workspace's EFFECTIVE
-    // meta-spec-set (own bindings plus inherited tenant defaults, §8).
-    let mut bound_paths: Vec<String> = Vec::new();
-    if let Ok(Some(ws)) = state.workspaces.find_by_id(&Id::new(workspace_id)).await {
-        if let Ok(set) = crate::reconciliation::resolve_effective_meta_spec_set(state, &ws).await {
-            bound_paths.extend(set.personas.values().map(|e| e.path.clone()));
-            bound_paths.extend(set.principles.iter().map(|e| e.path.clone()));
-            bound_paths.extend(set.standards.iter().map(|e| e.path.clone()));
-            bound_paths.extend(set.process.iter().map(|e| e.path.clone()));
-        }
-    }
-
-    let mut affected_workspaces: Vec<AffectedWorkspace> = Vec::new();
-    let mut affected_repos: Vec<AffectedRepo> = Vec::new();
-
-    let workspaces = state.workspaces.list().await.unwrap_or_default();
-    for workspace in &workspaces {
-        let ws_id = workspace.id.as_str();
-        let effective = crate::reconciliation::resolve_effective_meta_spec_set(state, workspace)
-            .await
-            .unwrap_or_default();
-
-        let references_any_bound = bound_paths.iter().any(|bp| {
-            effective.personas.values().any(|e| &e.path == bp)
-                || effective.principles.iter().any(|e| &e.path == bp)
-                || effective.standards.iter().any(|e| &e.path == bp)
-                || effective.process.iter().any(|e| &e.path == bp)
-        });
-
-        if references_any_bound {
-            affected_workspaces.push(AffectedWorkspace {
-                id: ws_id.to_string(),
-            });
-
-            let repos = state
-                .repos
-                .list_by_workspace(&Id::new(ws_id))
-                .await
-                .unwrap_or_default();
-
-            for repo in &repos {
-                affected_repos.push(AffectedRepo {
-                    id: repo.id.to_string(),
-                    workspace_id: ws_id.to_string(),
-                    reason: "workspace_binding".to_string(),
-                });
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             }
         }
     }
@@ -1088,7 +1011,7 @@ pub async fn get_meta_spec_preview_status(
     Path(preview_id): Path<String>,
     auth: AuthenticatedAgent,
 ) -> Result<Json<PreviewStatusResponse>, ApiError> {
-    require_preview_role(&auth)?;
+    require_preview_role(&state, &auth, "GET /api/v1/meta-specs/preview/:preview_id").await?;
     let record = load_preview(&state, &preview_id).await?;
     require_preview_scope(&state, &auth, &record).await?;
 
@@ -1127,7 +1050,12 @@ pub async fn delete_meta_spec_preview(
     Path(preview_id): Path<String>,
     auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
-    require_preview_role(&auth)?;
+    require_preview_role(
+        &state,
+        &auth,
+        "DELETE /api/v1/meta-specs/preview/:preview_id",
+    )
+    .await?;
     let record = load_preview(&state, &preview_id).await?;
     require_preview_scope(&state, &auth, &record).await?;
     teardown_preview(&state, &record).await;
@@ -1244,7 +1172,12 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                 // Nothing can address this run any longer; drop the pointer and
                 // let the orphan pass below reclaim its agents.
                 tracing::error!(preview_id = %key, "preview record is corrupt: {e}");
-                let _ = state.kv_store.kv_remove(PREVIEW_NS, &key).await;
+                if let Err(rm_err) = state.kv_store.kv_remove(PREVIEW_NS, &key).await {
+                    tracing::warn!(
+                        preview_id = %key,
+                        "failed to drop corrupt preview record: {rm_err}"
+                    );
+                }
                 continue;
             }
         };
@@ -1273,7 +1206,12 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                 tracing::error!(agent_id, "preview agent record is corrupt: {e}");
                 stop_preview_agent_row(state, &agent_id).await;
                 revoke_preview_token(state, &agent_id).await;
-                let _ = state.kv_store.kv_remove(PREVIEW_AGENTS_NS, &agent_id).await;
+                if let Err(rm_err) = state.kv_store.kv_remove(PREVIEW_AGENTS_NS, &agent_id).await {
+                    tracing::warn!(
+                        agent_id,
+                        "failed to drop corrupt preview agent record: {rm_err}"
+                    );
+                }
                 continue;
             }
         };
@@ -1297,7 +1235,12 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
         remove_preview_worktree(state, &agent_ref).await;
         delete_preview_branch(state, &agent_ref).await;
         release_preview_slot(state, &agent_ref).await;
-        let _ = state.kv_store.kv_remove(PREVIEW_AGENTS_NS, &agent_id).await;
+        if let Err(rm_err) = state.kv_store.kv_remove(PREVIEW_AGENTS_NS, &agent_id).await {
+            tracing::warn!(
+                agent_id,
+                "failed to drop orphaned preview agent record: {rm_err}"
+            );
+        }
     }
     Ok(())
 }
@@ -1573,6 +1516,11 @@ async fn provision_preview_agent(
     branch: &str,
     now: u64,
 ) -> Result<Provisioned, ApiError> {
+    // non-atomic-create:ok - the agent row is written before the worktree row
+    // across two stores with no cross-repo transaction, but every failure
+    // path after the first create routes through rollback_preview_agent,
+    // which deletes the partially-provisioned agent row, worktree rows and
+    // branch — the compensation is proven by the launch-failure tests.
     let repo = &target.repo;
 
     // Pin the branch to the default-branch tip so the diff a human reads is
@@ -1674,12 +1622,18 @@ async fn provision_preview_agent(
 
     // Short-lived token: a preview agent must not outlive its run. The preview
     // id takes the task slot of the claim set — there is no task to name.
+    // Scope claims are derived from the loaded workspace/repo rows, never
+    // caller-supplied (§1 Token Scoping).
     let token = match state.agent_signing_key.mint(
         &agent.id.to_string(),
         preview_id,
         &auth.agent_id,
         &state.base_url,
         state.preview_jwt_ttl_secs,
+        target.workspace.tenant_id.as_str(),
+        target.workspace.id.as_str(),
+        repo.id.as_str(),
+        &repo.name,
     ) {
         Ok(token) => token,
         Err(e) => {
@@ -1818,7 +1772,7 @@ async fn launch_preview_agent(
     );
 
     let clone_url = super::spawn::build_clone_url(state, Some(&p.workspace), &p.repo);
-    let outcome = super::spawn::launch_agent_process(super::spawn::AgentLaunchParams {
+    let outcome = super::spawn::launch_taskless_agent_process(super::spawn::AgentLaunchParams {
         state,
         agent: &p.agent,
         repo: &p.repo,
@@ -1835,7 +1789,7 @@ async fn launch_preview_agent(
     .await
     .map_err(|e| format!("{e:?}"))?;
 
-    // `launch_agent_process` treats a failed process spawn as best-effort: it
+    // `launch_taskless_agent_process` treats a failed process spawn as best-effort: it
     // logs and returns Ok. A preview whose process never started would sit
     // "running" until the GC sweep, so require the handle.
     let started = if target_type == "container" {
@@ -1854,8 +1808,20 @@ async fn launch_preview_agent(
 async fn mark_preview_agent_failed(state: &AppState, preview_id: &str, p: &mut Provisioned) {
     if let Ok(Some(mut agent)) = state.agents.find_by_id(&p.agent.id).await {
         if agent.status == AgentStatus::Active {
-            let _ = agent.transition_status(AgentStatus::Failed);
-            let _ = state.agents.update(&agent).await;
+            // transition_status can only fail on an invalid transition; log
+            // rather than discard so a stuck row is visible in operations.
+            if let Err(te) = agent.transition_status(AgentStatus::Failed) {
+                tracing::warn!(
+                    agent_id = %p.agent.id,
+                    "preview agent failure transition rejected: {te:?}"
+                );
+            }
+            if let Err(ue) = state.agents.update(&agent).await {
+                tracing::warn!(
+                    agent_id = %p.agent.id,
+                    "preview agent failure status write failed: {ue:#}"
+                );
+            }
         }
     }
     revoke_preview_token(state, &p.agent_ref.agent_id).await;
@@ -1917,7 +1883,12 @@ async fn rollback_preview_agent(state: &AppState, agent_ref: &PreviewAgentRef) {
         .await
     {
         for wt in wts {
-            let _ = state.worktrees.delete(&wt.id).await;
+            if let Err(e) = state.worktrees.delete(&wt.id).await {
+                tracing::warn!(
+                    worktree_id = %wt.id,
+                    "preview rollback worktree row cleanup failed: {e:#}"
+                );
+            }
         }
     }
     if let Err(e) = state.agents.delete(&Id::new(&agent_ref.agent_id)).await {
@@ -1947,8 +1918,14 @@ async fn kill_preview_process(state: &AppState, agent_id: &str) {
 async fn stop_preview_agent_row(state: &AppState, agent_id: &str) {
     if let Ok(Some(mut agent)) = state.agents.find_by_id(&Id::new(agent_id)).await {
         if agent.status == AgentStatus::Active || agent.status == AgentStatus::Idle {
-            let _ = agent.transition_status(AgentStatus::Stopped);
-            let _ = state.agents.update(&agent).await;
+            // transition_status can only fail on an invalid transition; log
+            // rather than discard so a stuck row is visible in operations.
+            if let Err(te) = agent.transition_status(AgentStatus::Stopped) {
+                tracing::warn!(agent_id, "preview agent stop transition rejected: {te:?}");
+            }
+            if let Err(ue) = state.agents.update(&agent).await {
+                tracing::warn!(agent_id, "preview agent stop status write failed: {ue:#}");
+            }
         }
     }
 }
@@ -1981,7 +1958,12 @@ async fn remove_preview_worktree(state: &AppState, agent_ref: &PreviewAgentRef) 
         .await
     {
         for wt in wts {
-            let _ = state.worktrees.delete(&wt.id).await;
+            if let Err(e) = state.worktrees.delete(&wt.id).await {
+                tracing::warn!(
+                    worktree_id = %wt.id,
+                    "preview worktree row cleanup failed: {e:#}"
+                );
+            }
         }
     }
 }
@@ -2089,6 +2071,32 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// Create a workspace through the REST surface (Admin token) and return
+    /// its id — shared by the rollout-policy and preview tests.
+    async fn create_workspace(app: &Router, name: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"name":"{name}","slug":"{name}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "workspace creation failed"
+        );
+        body_json(resp).await["id"].as_str().unwrap().to_string()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn blast_radius_empty() {
         let resp = app()
@@ -2182,18 +2190,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-<<<<<<< HEAD
-    // Preview mode (§5) — real-agent tests
-    //
-    // These exercise the production path end to end: real git repository on
-    // disk (Git2OpsAdapter), real branch + worktree creation, real agent
-    // rows, and a real spawned process whose environment is captured to a
-    // file so the draft-injection contract is verified against what the
-    // agent actually received — not against a field that was set.
-    //
-    // `GYRE_AGENT_COMMAND` is process-global, so every test that spawns a
-    // process holds `ENV_LOCK` for its whole body.
-=======
     // Tenant meta-spec set endpoints (§8)
     // -----------------------------------------------------------------------
 
@@ -2617,8 +2613,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Preview endpoint tests
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
+    // Preview mode (§5) — real-agent tests
+    //
+    // These exercise the production path end to end: real git repository on
+    // disk (Git2OpsAdapter), real branch + worktree creation, real agent
+    // rows, and a real spawned process whose environment is captured to a
+    // file so the draft-injection contract is verified against what the
+    // agent actually received — not against a field that was set.
+    //
+    // `GYRE_AGENT_COMMAND` is process-global, so every test that spawns a
+    // process holds `ENV_LOCK` for its whole body.
     // -----------------------------------------------------------------------
 
     /// Serializes tests that touch `GYRE_AGENT_COMMAND` (read at launch time
@@ -3279,13 +3283,9 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let jwt_state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-<<<<<<< HEAD
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&jwt_state))
-=======
             tokio::runtime::Handle::current()
-                .block_on(seed_builtin_policies(&state))
+                .block_on(seed_builtin_policies(&jwt_state))
                 .expect("seed built-in policies")
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
         });
         let ro_token = sign_test_jwt(
             &serde_json::json!({
@@ -3470,7 +3470,9 @@ mod tests {
 
             // The preview agent's own live JWT, driven through the production
             // router (auth + ABAC middleware), mirroring the review probe.
-            crate::abac_middleware::seed_builtin_policies(&state).await;
+            crate::abac_middleware::seed_builtin_policies(&state)
+                .await
+                .expect("seed built-in policies");
             let prod = crate::build_router(state.clone());
             let jwt = state
                 .kv_store
@@ -3629,7 +3631,9 @@ mod tests {
             let preview_id = json["preview_id"].as_str().unwrap().to_string();
             let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
 
-            crate::abac_middleware::seed_builtin_policies(&state).await;
+            crate::abac_middleware::seed_builtin_policies(&state)
+                .await
+                .expect("seed built-in policies");
             let prod = crate::build_router(state.clone());
             let jwt = state
                 .kv_store
@@ -3727,9 +3731,16 @@ mod tests {
             // route to reach past its 404 lookup; an admin-created MR on the
             // preview branch supplies it.
             let branch = json["agents"][0]["branch"].as_str().unwrap().to_string();
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
             let mr = gyre_domain::MergeRequest::new(
                 gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
                 gyre_common::Id::new(&repo_id),
+                repo.workspace_id.clone(),
                 "enqueue probe".to_string(),
                 branch,
                 "main".to_string(),
@@ -3884,9 +3895,16 @@ mod tests {
 
             // An open MR on the preview branch (e.g. created before a gate
             // existed, or by an admin).
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
             let mut mr = gyre_domain::MergeRequest::new(
                 gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
                 gyre_common::Id::new(&repo_id),
+                repo.workspace_id.clone(),
                 "mr on preview branch".to_string(),
                 branch.clone(),
                 "main".to_string(),
@@ -4012,45 +4030,74 @@ fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
 /// Role gate for registry mutations: creating, editing, approving, or deleting
 /// a meta-spec rewrites the rules agents operate under — same authority class
 /// as the workspace meta-spec-set binding (Admin-only, NEW-26).
-fn require_registry_admin(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
+async fn require_registry_admin(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    route: &str,
+) -> Result<(), ApiError> {
     if auth.roles.contains(&UserRole::Admin) {
         Ok(())
     } else {
+        crate::rbac::record_rbac_denied(state, auth, "Admin", route).await;
         Err(ApiError::Forbidden(
             "only Admin role may modify the meta-spec registry".to_string(),
         ))
     }
 }
 
-/// Tenant containment for a Workspace-scoped meta-spec: the named workspace
-/// must exist and belong to the caller's tenant (Admin bypasses). Global
-/// scope crosses tenants by definition, so only the role gate applies to it.
-/// A `scope_id` that does not resolve to a workspace is denied rather than
-/// ridden on an assumed identity (AGENTS.md — never fabricate a scope).
+/// Scope containment for a scoped meta-spec: the named entity must exist and
+/// belong to the caller's tenant (Admin bypasses). Global scope crosses
+/// tenants by definition, so only the role gate applies to it. A `scope_id`
+/// that does not resolve to a real entity is denied rather than ridden on an
+/// assumed identity (AGENTS.md — never fabricate a scope).
 async fn require_registry_scope(
     state: &AppState,
     auth: &AuthenticatedAgent,
     scope: &MetaSpecScope,
     scope_id: &Option<String>,
 ) -> Result<(), ApiError> {
-    if matches!(scope, MetaSpecScope::Global) {
-        return Ok(());
-    }
-    let Some(ws_id) = scope_id else {
-        return Err(ApiError::BadRequest(
-            "workspace-scoped meta-spec requires scope_id".to_string(),
-        ));
-    };
-    match state.workspaces.find_by_id(&Id::new(ws_id)).await? {
-        Some(ws)
-            if ws.tenant_id.as_str() == auth.tenant_id || auth.roles.contains(&UserRole::Admin) =>
-        {
-            Ok(())
+    match scope {
+        MetaSpecScope::Global => Ok(()),
+        MetaSpecScope::Tenant => {
+            // Tenant-scoped meta-specs carry the tenant ID in scope_id
+            // (mirroring the Workspace design); the tenant must exist so the
+            // §8 tenant propagation trigger has a real scope to fan out to.
+            let tenant_id = scope_id.as_deref().ok_or_else(|| {
+                ApiError::BadRequest(
+                    "scope_id (tenant id) is required for Tenant-scoped meta-specs".to_string(),
+                )
+            })?;
+            match state.tenants.find_by_id(&Id::new(tenant_id)).await? {
+                Some(t)
+                    if t.id.as_str() == auth.tenant_id || auth.roles.contains(&UserRole::Admin) =>
+                {
+                    Ok(())
+                }
+                Some(_) => Err(ApiError::Forbidden(format!(
+                    "tenant-scoped meta-spec '{tenant_id}' is outside the caller's tenant"
+                ))),
+                None => Err(ApiError::NotFound(format!(
+                    "tenant '{tenant_id}' not found"
+                ))),
+            }
         }
-        Some(_) => Err(ApiError::Forbidden(format!(
-            "workspace-scoped meta-spec '{ws_id}' is outside the caller's tenant"
-        ))),
-        None => Err(ApiError::NotFound(format!("workspace '{ws_id}' not found"))),
+        MetaSpecScope::Workspace => {
+            let ws_id = scope_id.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("workspace-scoped meta-spec requires scope_id".to_string())
+            })?;
+            match state.workspaces.find_by_id(&Id::new(ws_id)).await? {
+                Some(ws)
+                    if ws.tenant_id.as_str() == auth.tenant_id
+                        || auth.roles.contains(&UserRole::Admin) =>
+                {
+                    Ok(())
+                }
+                Some(_) => Err(ApiError::Forbidden(format!(
+                    "workspace-scoped meta-spec '{ws_id}' is outside the caller's tenant"
+                ))),
+                None => Err(ApiError::NotFound(format!("workspace '{ws_id}' not found"))),
+            }
+        }
     }
 }
 
@@ -4175,6 +4222,14 @@ pub async fn list_meta_specs_registry(
             .collect();
         results.retain(|ms| match ms.scope {
             MetaSpecScope::Global => true,
+            // §8 tenant-scoped entry: visible to members of the scope
+            // tenant. An unresolvable scope_id fails closed — it can never
+            // match the caller's tenant, so a dangling row is invisible.
+            MetaSpecScope::Tenant => ms
+                .scope_id
+                .as_deref()
+                .map(|tenant_id| tenant_id == auth.tenant_id)
+                .unwrap_or(false),
             MetaSpecScope::Workspace => ms
                 .scope_id
                 .as_deref()
@@ -4194,42 +4249,12 @@ pub async fn create_meta_spec_registry(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateMetaSpecRequest>,
 ) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
-<<<<<<< HEAD
-    require_registry_admin(&auth)?;
+    require_registry_admin(&state, &auth, "POST /api/v1/meta-specs-registry").await?;
     let kind = parse_kind(&req.kind)?;
     let scope = parse_scope(&req.scope)?;
     // Scope containment: `scope_id` is caller-supplied, so it is validated
     // against the caller's tenant, never trusted.
     require_registry_scope(&state, &auth, &scope, &req.scope_id).await?;
-=======
-    // Admin-only (ABAC-exempt route — the handler is the authorization
-    // surface): creating registry entries defines tenant-wide governance;
-    // non-Admin callers must not mint meta-specs.
-    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        crate::rbac::record_rbac_denied(&state, &auth, "Admin", "POST /api/v1/meta-specs-registry")
-            .await;
-        return Err(ApiError::Forbidden(
-            "only Admin role may create meta-specs registry entries".to_string(),
-        ));
-    }
-    let kind = parse_kind(&req.kind)?;
-    let scope = parse_scope(&req.scope)?;
-    // Tenant-scoped meta-specs carry the tenant ID in scope_id (mirroring the
-    // Workspace design); the tenant must exist so the §8 tenant propagation
-    // trigger has a real scope to fan out to.
-    if scope == MetaSpecScope::Tenant {
-        let tenant_id = req.scope_id.as_deref().ok_or_else(|| {
-            ApiError::BadRequest(
-                "scope_id (tenant id) is required for Tenant-scoped meta-specs".to_string(),
-            )
-        })?;
-        state
-            .tenants
-            .find_by_id(&Id::new(tenant_id))
-            .await?
-            .ok_or_else(|| ApiError::NotFound(format!("tenant '{tenant_id}' not found")))?;
-    }
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
     let prompt = req.prompt.unwrap_or_default();
     let content_hash = sha256_hex(&prompt);
     let now = now_secs();
@@ -4285,32 +4310,8 @@ pub async fn update_meta_spec_registry(
     Path(id): Path<String>,
     Json(req): Json<UpdateMetaSpecRequest>,
 ) -> Result<Json<MetaSpec>, ApiError> {
-<<<<<<< HEAD
-    require_registry_admin(&auth)?;
+    require_registry_admin(&state, &auth, "PUT /api/v1/meta-specs-registry/:id").await?;
     let mut ms = require_meta_spec_access(&state, &auth, &id).await?;
-=======
-    // Admin-only (docs: "Admin only for PUT/DELETE"; ABAC-exempt route —
-    // the handler is the authorization surface). Without this gate, any
-    // authenticated agent could edit governance prompts and reset approvals.
-    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
-        crate::rbac::record_rbac_denied(
-            &state,
-            &auth,
-            "Admin",
-            "PUT /api/v1/meta-specs-registry/:id",
-        )
-        .await;
-        return Err(ApiError::Forbidden(
-            "only Admin role may update meta-specs registry entries".to_string(),
-        ));
-    }
-    let mut ms = state
-        .meta_specs
-        .get_by_id(&Id::new(&id))
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
 
     // §8 tenant-admin force flag: only defined for Tenant-scoped specs, and
     // only an admin of THAT tenant may force propagation into its
@@ -4675,7 +4676,7 @@ pub async fn delete_meta_spec_registry(
     auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    require_registry_admin(&auth)?;
+    require_registry_admin(&state, &auth, "DELETE /api/v1/meta-specs-registry/:id").await?;
     // Load the entity, derive scope from the record (never the request), and
     // check tenant containment before deleting.
     require_meta_spec_access(&state, &auth, &id).await?;
@@ -4765,8 +4766,6 @@ pub async fn get_meta_spec_version(
         })?;
     Ok(Json(ver))
 }
-<<<<<<< HEAD
-=======
 
 // ---------------------------------------------------------------------------
 // Spec-level binding management (agent-runtime spec §2 Spec-Level Binding)
@@ -4962,7 +4961,6 @@ pub async fn get_spec_meta_spec_bindings(
 // Registry-level tests
 // ---------------------------------------------------------------------------
 
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
 #[cfg(test)]
 mod registry_tests {
     use crate::mem::test_state;
@@ -5006,7 +5004,17 @@ mod registry_tests {
             .unwrap();
         let token = state
             .agent_signing_key
-            .mint(&agent_id, "task-x", "system", &state.base_url, 300)
+            .mint(
+                &agent_id,
+                "task-x",
+                "system",
+                &state.base_url,
+                300,
+                "default",
+                "ws-1",
+                "r-1",
+                "repo",
+            )
             .unwrap();
         state
             .kv_store

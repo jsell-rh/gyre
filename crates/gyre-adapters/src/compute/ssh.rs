@@ -504,6 +504,21 @@ impl ComputeTarget for SshDockerTarget {
             id: container_id,
             target_type: "ssh".to_string(),
             pid: None,
+            // Connection details for out-of-band operations. The handle id
+            // is the remote container id (not `user@host:pid`), so
+            // `SshTarget::from_handle` refuses to reconstruct a bare-ssh
+            // target from it — kills must go through the recorded backend
+            // (`spawned_backends`), which knows this is a remote container.
+            options: {
+                let mut options = HashMap::new();
+                if let Some(ref id) = self.ssh.identity_file {
+                    options.insert("identity_file".to_string(), id.clone());
+                }
+                if let Some(port) = self.ssh.port {
+                    options.insert("port".to_string(), port.to_string());
+                }
+                options
+            },
         })
     }
 

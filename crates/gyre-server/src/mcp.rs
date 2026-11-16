@@ -4894,7 +4894,6 @@ pub async fn mcp_handler(
                 ));
             }
 
-<<<<<<< HEAD
             // Preview agents (meta-spec reconciliation §5) run with all
             // ceremony stripped: no task ledger, no MR, no merge queue, no
             // provenance. The runner withholds these tools client-side, but
@@ -4920,13 +4919,13 @@ pub async fn mcp_handler(
                         auth_agent_id = auth.agent_id
                     ),
                 ));
-=======
+            }
+
             // §1 Token Scoping: validate the caller's token scope on every
             // tool call. Scoped callers (agent JWTs) may only act within the
             // tenant/workspace/repo their token encodes.
             if let Err(denial) = validate_tool_scope(&state, tool_name, &args, &auth).await {
                 return Json(JsonRpcResponse::err(id, PERMISSION_DENIED, denial));
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             }
 
             // Repo-scope validation (TASK-216): an agent JWT is scoped to the
@@ -10250,7 +10249,17 @@ concepts:
 
         let token = state
             .agent_signing_key
-            .mint(&agent_id, "preview-test", "system", &state.base_url, 300)
+            .mint(
+                &agent_id,
+                "preview-test",
+                "system",
+                &state.base_url,
+                300,
+                "default",
+                "ws-1",
+                "r-1",
+                "repo",
+            )
             .unwrap();
         state
             .kv_store

@@ -79,13 +79,6 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
-<<<<<<< HEAD
-    // Meta-spec preview GC (§5 of meta-spec-reconciliation.md): expire preview
-    // runs so throwaway branches, worktrees and tokens cannot outlive their TTL.
-    jobs::spawn_job(
-        Arc::clone(&state.job_registry),
-        "meta_spec_preview_gc".to_string(),
-=======
     // Hourly code-search file reindex (search.md §Index Updates — file
     // content is eventually consistent; pushes also trigger the job on
     // demand via the job registry).
@@ -151,7 +144,14 @@ async fn main() -> Result<()> {
     jobs::spawn_job(
         Arc::clone(&state.job_registry),
         "email_digest".to_string(),
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
+        Arc::clone(&state),
+    );
+
+    // Meta-spec preview GC (§5 of meta-spec-reconciliation.md): expire preview
+    // runs so throwaway branches, worktrees and tokens cannot outlive their TTL.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "meta_spec_preview_gc".to_string(),
         Arc::clone(&state),
     );
 

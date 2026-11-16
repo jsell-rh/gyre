@@ -9,20 +9,7 @@
 # (fail-closed / recorded merge_commit_sha) and were deleted from this
 # file.
 #
-<<<<<<< HEAD
-# FROZEN at 2 entries. It must SHRINK, never grow:
-#   - Fix a site by failing closed (propagate the None as an error/404, or
-#     log + return a failure), then delete the line here and lower
-#     FROZEN_EXEMPTION_COUNT in scripts/check-fail-open-ref-resolution.sh.
-#   - NEVER add a new entry. A new resolve_ref call must not be fail-opened.
-#
-# crates/gyre-server/src/api/recovery.rs:227 — repo_status main_green fails open on ref-resolution failure (R3-F3 headline).
-crates/gyre-server/src/api/recovery.rs:227
-# crates/gyre-server/src/api/recovery.rs:279 — revert_mr resolves "the merge commit" as current target-branch HEAD with a fail-open default (R3-F1).
-crates/gyre-server/src/api/recovery.rs:279
-=======
 # FROZEN at 0 entries. It must STAY empty, never grow:
 #   - NEVER add a new entry. A new resolve_ref call must not be fail-opened
 #     (there is no valid empty-string SHA; None means "state unknown", which
 #     is unsafe-to-proceed for a health/safety decision signal).
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c

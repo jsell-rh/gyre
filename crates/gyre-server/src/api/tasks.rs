@@ -220,11 +220,23 @@ pub async fn create_task(
         .collect();
     task.spec_path = req.spec_path;
     task.spec_ref = req.spec_ref;
-    if let Some(ws_id) = req.workspace_id {
-        task.workspace_id = Id::new(ws_id);
+    // Caller-supplied scope fields are validated against the caller's tenant
+    // before they are persisted (task-102 F2 anti-forgery: the auth extractor
+    // already knows the caller's scope; a body field must never re-attribute
+    // the task to another tenant's workspace/repo). The repo check also
+    // verifies repo∈workspace when BOTH fields are supplied.
+    let requested_ws: Option<Id> = req
+        .workspace_id
+        .as_ref()
+        .map(|ws_id| Id::new(ws_id.clone()));
+    if let Some(ws_id) = &requested_ws {
+        super::audit::validate_workspace_scope(&state, ws_id, &auth).await?;
+        task.workspace_id = ws_id.clone();
     }
-    if let Some(repo_id) = req.repo_id {
-        task.repo_id = Id::new(repo_id);
+    if let Some(repo_id) = &req.repo_id {
+        super::audit::validate_repo_scope(&state, &Id::new(repo_id), &auth, requested_ws.as_ref())
+            .await?;
+        task.repo_id = Id::new(repo_id.clone());
     }
     state.tasks.create(&task).await?;
     // Index for search (search.md §Searchable Entities: task facets
@@ -421,6 +433,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -481,6 +494,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
                     .unwrap(),
@@ -553,7 +567,32 @@ mod tests {
         );
         let app = crate::api::api_router().with_state(state.clone());
 
-        // Create a task scoped to a known workspace/repo.
+        // Create a task scoped to a known workspace/repo. The workspace and
+        // repo rows must exist in the caller's tenant: create_task derives
+        // the task's scope fields through the caller-scope validators
+        // (task-102 F2), so the rows are seeded before the request.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-scope-1"),
+                gyre_common::Id::new("default"),
+                "Scoped",
+                "scoped",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-scope-1"),
+                gyre_common::Id::new("ws-scope-1"),
+                "scoped-repo",
+                "/tmp/scoped-repo.git".to_string(),
+                1000,
+            ))
+            .await
+            .unwrap();
         let body = serde_json::json!({
             "title": "Scoped transition probe",
             "workspace_id": "ws-scope-1",
@@ -565,6 +604,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/tasks")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -669,6 +709,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&assign_body).unwrap()))
                     .unwrap(),

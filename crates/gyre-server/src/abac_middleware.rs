@@ -722,14 +722,14 @@ impl ResourceResolver {
                     "meta_spec",
                     None,
                 ),
-<<<<<<< HEAD
                 RouteResourceMapping::api("/api/v1/meta-specs/preview", "meta_spec", None),
                 RouteResourceMapping::api(
                     "/api/v1/meta-specs/preview/:preview_id",
-=======
+                    "meta_spec",
+                    None,
+                ),
                 RouteResourceMapping::api(
                     "/api/v1/specs/:path/meta-spec-bindings",
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
                     "meta_spec",
                     None,
                 ),

@@ -305,7 +305,6 @@ Use \`gyre_agent_heartbeat\` periodically to signal liveness.
 
 Begin by reading your task description, then implement it completely.`;
 
-<<<<<<< HEAD
 const draftKind = process.env.GYRE_META_SPEC_DRAFT_KIND || 'unknown';
 const draftContent = process.env.GYRE_META_SPEC_DRAFT_CONTENT || 'unknown';
 const targetSpecPath = process.env.GYRE_TARGET_SPEC_PATH || 'unknown';
@@ -346,7 +345,7 @@ Use \`gyre_agent_heartbeat\` periodically to signal liveness.
 Begin by reading ${targetSpecPath}, then implement it completely.`;
 
 const taskPrompt = process.env.GYRE_TASK_PROMPT || (previewMode ? previewPrompt : defaultPrompt);
-=======
+
 // ── Meta-spec system prompt (agent-runtime spec §2) ─────────────────────────
 //
 // The server assembles the agent's meta-spec prompt set (required tenant →
@@ -355,11 +354,12 @@ const taskPrompt = process.env.GYRE_TASK_PROMPT || (previewMode ? previewPrompt 
 // the behavioral instructions lead the context the LLM receives. Without this
 // hop the registry is stored and attested but never actually shapes agent
 // behavior — "the meta-spec registry IS the prompt configuration".
+// Preview agents get no assembled set — their governing context is the draft
+// meta-spec delivered via GYRE_META_SPEC_DRAFT_* in the preview prompt.
 const metaSpecPrompt = (process.env.GYRE_META_SPEC_PROMPT || '').trim();
 const fullPrompt = metaSpecPrompt
   ? `${metaSpecPrompt}\n---\n${taskPrompt}`
   : taskPrompt;
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
 
 // ── Main execution ──────────────────────────────────────────────────────────
 

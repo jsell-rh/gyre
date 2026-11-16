@@ -884,19 +884,11 @@
       "meta_spec_label": "Meta-spec",
       "persona_aria": "Persona",
       "diff_readonly_aria": "Meta-spec diff (read-only)",
-<<<<<<< HEAD
       "textarea_placeholder": "Enter prompt content for this meta-spec\u2026",
       "textarea_aria": "Persona system prompt",
       "iterate": "Iterate",
       "preview": "Preview",
       "publishing": "Publishing\u2026",
-=======
-      "textarea_placeholder": "Enter prompt content for this meta-spec…",
-      "textarea_aria": "Persona system prompt",
-      "iterate": "Iterate",
-      "preview": "Preview",
-      "publishing": "Publishing…",
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
       "publish": "Publish",
       "preview_against": "Preview against specs:",
       "select_all": "Select All",
@@ -904,7 +896,6 @@
       "no_specs_available": "No specs available in this workspace.",
       "preview_running": "Preview: Running",
       "status_complete": "Complete",
-<<<<<<< HEAD
       "status_failed": "Failed",
       "status_stopped": "Stopped",
       "status_dead": "Dead",
@@ -919,18 +910,12 @@
       "preview_malformed": "Preview response from server was malformed \u2014 no agents were started.",
       "clear_preview": "Clean Up",
       "diff_files": "files",
-      "no_diff_available": "No diff available.",
-=======
-      "agent_implementing": "Agent implementing…",
-      "progress_label": "Progress: {done}/{total} specs",
-      "cancel_preview": "Cancel Preview",
       "sim_banner": "Preview unavailable — showing example layout only.",
       "preview_unavailable_label": "Preview unavailable — showing example layout.",
       "no_arch_changes": "No architecture changes detected.",
       "no_diff_available": "No diff available.",
       "architecture": "Architecture",
       "code_diff": "Code Diff",
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
       "impact_view_aria": "Impact view"
     },
     "create": {
@@ -1089,15 +1074,11 @@
     "preview_starting": "Starting…",
     "preview_running": "Preview: Running",
     "status_complete": "Complete",
-<<<<<<< HEAD
     "status_failed": "Failed",
     "status_stopped": "Stopped",
     "status_dead": "Dead",
     "status_unknown": "Unknown",
     "agent_implementing": "Agent implementing\u2026",
-=======
-    "agent_implementing": "Agent implementing…",
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
     "progress_label": "Progress: {done}/{total} specs",
     "cancel_preview": "Cancel Preview",
     "iterate": "Iterate",
@@ -1127,18 +1108,14 @@
     "md_undo_aria": "Undo",
     "md_redo_aria": "Redo",
     "preview_error_label": "Preview failed",
-<<<<<<< HEAD
     "preview_agents_title": "Preview agents",
     "diff_files": "files",
-    "no_line_diff_available": "No preview agent produced a line-level diff."
-=======
+    "no_line_diff_available": "No preview agent produced a line-level diff.",
     "impact_scope": "Scope",
     "impact_affected_spec_count": "Affected specs",
     "impact_affected_workspaces": "Affected workspaces",
     "impact_affected_repos": "Affected repos",
-    "impact_reason": "Reason",
-    "no_line_diff_available": "This preview reports per-spec completion only — no line-level diff is produced by this preview endpoint."
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
+    "impact_reason": "Reason"
   },
   "concurrent_edit": {
     "warning_one": "{user} is also editing this spec",

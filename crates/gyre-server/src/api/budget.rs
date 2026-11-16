@@ -287,26 +287,6 @@ pub async fn budget_summary(
 // ── GET /api/v1/workspaces/{id}/budget/by-team  (user-management.md §Team
 //    Management — budget reporting: aggregate budget usage by team) ─────────
 
-<<<<<<< HEAD
-/// Check if spawning another agent would exceed workspace/tenant budget limits.
-pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<(), String> {
-    check_spawn_budget_for(state, project_id, 1).await
-}
-
-/// Check if spawning `requested` more agents at once would exceed
-/// workspace/tenant budget limits. A caller provisioning N agents in a single
-/// request must reserve all N slots up front: checking each spawn against
-/// current usage only (before any increments land) over-admits when
-/// max_concurrent_agents < N. Only the concurrency checks scale with
-/// `requested` — token/cost limits are daily consumption and do not depend on
-/// how many agents this one request spawns.
-pub async fn check_spawn_budget_for(
-    state: &AppState,
-    project_id: &str,
-    requested: u32,
-) -> Result<(), String> {
-    let key = workspace_key(project_id);
-=======
 #[derive(Debug, Serialize)]
 pub struct TeamBudgetReport {
     pub team_id: String,
@@ -318,7 +298,6 @@ pub struct TeamBudgetReport {
     pub output_tokens: u64,
     pub cost_usd: f64,
 }
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
 
 #[derive(Debug, Serialize)]
 pub struct TeamBudgetSummary {
@@ -329,32 +308,6 @@ pub struct TeamBudgetSummary {
     pub unattributed: TeamBudgetReport,
 }
 
-<<<<<<< HEAD
-        if let Some(max) = config.max_concurrent_agents {
-            if usage.active_agents.saturating_add(requested) > max {
-                return Err(format!(
-                    "workspace budget exceeded: max_concurrent_agents={max} ({} active, {requested} requested)",
-                    usage.active_agents
-                ));
-            }
-        }
-        if let Some(max_tokens) = config.max_tokens_per_day {
-            if usage.tokens_used_today >= max_tokens {
-                return Err(format!(
-                    "workspace budget exceeded: max_tokens_per_day={max_tokens} (used {} today)",
-                    usage.tokens_used_today
-                ));
-            }
-        }
-        if let Some(max_cost) = config.max_cost_per_day {
-            if usage.cost_today >= max_cost {
-                return Err(format!(
-                    "workspace budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${:.4})",
-                    usage.cost_today
-                ));
-            }
-        }
-=======
 /// GET /api/v1/workspaces/{id}/budget/by-team — aggregate the workspace's
 /// LLM budget usage by team membership.
 ///
@@ -380,7 +333,6 @@ pub async fn budget_by_team(
         return Err(ApiError::Forbidden(
             "cross-tenant workspace access denied".to_string(),
         ));
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
     }
 
     let teams = state
@@ -446,14 +398,6 @@ pub async fn budget_by_team(
                 .await
                 .ok()
                 .flatten()
-<<<<<<< HEAD
-                .map(|u| u.active_agents)
-                .unwrap_or(0);
-            if current.saturating_add(requested) > max {
-                return Err(format!(
-                    "tenant budget exceeded: max_concurrent_agents={max} ({current} active, {requested} requested)"
-                ));
-=======
                 .and_then(|a| a.spawned_by),
             None => None,
         };
@@ -470,7 +414,6 @@ pub async fn budget_by_team(
                 if !attributed {
                     report_target(&mut unattributed);
                 }
->>>>>>> c3c7a522b721d266843b9590b14b847ac323593c
             }
             None => report_target(&mut unattributed),
         }
@@ -536,6 +479,21 @@ async fn emit_budget_warning(
 /// Uses the EFFECTIVE workspace limits (tighter of workspace config and the
 /// tenant ceiling) so a lowered tenant ceiling binds immediately.
 pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<(), String> {
+    check_spawn_budget_for(state, project_id, 1).await
+}
+
+/// Check if spawning `requested` more agents at once would exceed
+/// workspace/tenant budget limits. A caller provisioning N agents in a single
+/// request must reserve all N slots up front: checking each spawn against
+/// current usage only (before any increments land) over-admits when
+/// max_concurrent_agents < N. Only the concurrency check scales with
+/// `requested` — token/cost limits are daily consumption and do not depend on
+/// how many agents this one request spawns.
+pub async fn check_spawn_budget_for(
+    state: &AppState,
+    project_id: &str,
+    requested: u32,
+) -> Result<(), String> {
     let key = workspace_key(project_id);
     let config = effective_workspace_config(state, &key).await;
     let usage = state
@@ -555,9 +513,9 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
             max as f64,
         )
         .await;
-        if usage.active_agents >= max {
+        if usage.active_agents.saturating_add(requested) > max {
             return Err(format!(
-                "workspace budget exceeded: max_concurrent_agents={max} ({} active)",
+                "workspace budget exceeded: max_concurrent_agents={max} ({} active, {requested} requested)",
                 usage.active_agents
             ));
         }
