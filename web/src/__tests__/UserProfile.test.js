@@ -13,6 +13,13 @@ vi.mock('../lib/api.js', () => ({
     notificationCount: vi.fn(),
     getNotificationPreferences: vi.fn(),
     updateNotificationPreferences: vi.fn(),
+    userByUsername: vi.fn(),
+    myInvitations: vi.fn(),
+    acceptWorkspaceInvitation: vi.fn(),
+    declineWorkspaceInvitation: vi.fn(),
+    listMySessions: vi.fn(),
+    revokeMySession: vi.fn(),
+    revokeAllMySessions: vi.fn(),
   },
 }));
 
@@ -90,6 +97,15 @@ beforeEach(() => {
   api.notificationCount.mockResolvedValue(1);
   api.getNotificationPreferences.mockResolvedValue({ preferences: [] });
   api.updateNotificationPreferences.mockResolvedValue({});
+  api.userByUsername.mockResolvedValue({ id: 'u-1', username: 'jsell', memberships: [] });
+  // Real GET /users/me/invitations wire shape (task-110): WorkspaceInvitation
+  // rows with status/expires_at, not unaccepted membership rows.
+  api.myInvitations.mockResolvedValue({ invitations: [] });
+  api.acceptWorkspaceInvitation.mockResolvedValue(null); // 204
+  api.declineWorkspaceInvitation.mockResolvedValue(null);
+  api.listMySessions.mockResolvedValue({ sessions: [] });
+  api.revokeMySession.mockResolvedValue(null);
+  api.revokeAllMySessions.mockResolvedValue(null);
 });
 
 describe('UserProfile', () => {
@@ -118,13 +134,15 @@ describe('UserProfile', () => {
     expect(adminEls.length).toBeGreaterThan(0);
   });
 
-  it('exposes exactly the six permitted tabs -- HSI §12 forbids My Agents/Tasks/MRs', async () => {
+  it('exposes exactly the eight permitted tabs — HSI §12 forbids My Agents/Tasks/MRs', async () => {
     const { container, findAllByText } = r();
     await findAllByText('James Sell');
     const ids = [...container.querySelectorAll('[role="tab"]')].map((el) => el.dataset.id);
-    expect(ids).toEqual(['info', 'tokens', 'memberships', 'ledger', 'notif-prefs', 'notifications']);
+    expect(ids).toEqual(['info', 'tokens', 'sessions', 'memberships', 'invitations', 'ledger', 'notif-prefs', 'notifications']);
     // HSI §12 "What the Profile Is NOT": tasks are agent work units, MRs are
-    // judged not authored, agents are machinery -- none is a per-user surface.
+    // judged not authored, agents are machinery — none is a per-user surface.
+    // Sessions IS a per-user surface (user-management.md §UI Pages >
+    // Session Management) and is served from User Settings per that spec.
     for (const forbidden of ['my-agents', 'my-tasks', 'my-mrs']) {
       expect(ids).not.toContain(forbidden);
     }
@@ -364,8 +382,9 @@ describe('UserProfile', () => {
     await fireEvent.click(saveBtn);
     expect(api.updateNotificationPreferences).toHaveBeenCalledTimes(1);
     const arg = api.updateNotificationPreferences.mock.calls[0][0];
-    // Backend PUT expects { preferences: [{ notification_type, enabled }] }
-    // with canonical names -- anything else is a 400.
+    // Real PUT /users/me/notification-preferences contract (task-112/125):
+    // per-type items with canonical NotificationType names + delivery
+    // channels — not a flat type→bool map and not fabricated names.
     expect(Array.isArray(arg.preferences)).toBe(true);
     expect(arg.preferences.length).toBe(NOTIF_TYPE_IDS.length);
     const types = arg.preferences.map(p => p.notification_type);
@@ -387,6 +406,132 @@ describe('UserProfile', () => {
     for (const p of arg.preferences) {
       expect(typeof p.enabled).toBe('boolean');
     }
+    // Delivery channels ride the same PUT (user-management.md
+    // §Delivery Channels): in_app always on, email defaults off.
+    expect(arg.channels.in_app).toBe(true);
+    expect(arg.channels.email).toEqual({ enabled: false, digest: 'Off', min_priority: 'Medium' });
+  });
+
+  it('lists pending invitations and accepts one via the API', async () => {
+    api.myInvitations.mockResolvedValue({
+      invitations: [
+        { id: 'inv-1', workspace_id: 'ws-9', user_id: 'u-1', invited_by: 'u-2', role: 'Developer', status: 'Pending', expires_at: NOW + 6 * 86400, created_at: 1700000000, accepted_at: null },
+      ],
+    });
+    const { container, findByText } = r();
+    const invitationsTab = await findByText('Invitations');
+    await fireEvent.click(invitationsTab);
+    const acceptBtn = await waitFor(() => container.querySelector('[data-testid="invitation-accept-inv-1"]'));
+    expect(container.querySelector('[data-testid="invitation-decline-inv-1"]')).toBeTruthy();
+    await fireEvent.click(acceptBtn);
+    await waitFor(() => {
+      expect(api.acceptWorkspaceInvitation).toHaveBeenCalledWith('ws-9');
+    });
+  });
+
+  it('declines a pending invitation via the invitee decline endpoint', async () => {
+    api.myInvitations.mockResolvedValue({
+      invitations: [
+        { id: 'inv-2', workspace_id: 'ws-9', user_id: 'u-1', invited_by: 'u-2', role: 'Developer', status: 'Pending', expires_at: NOW + 6 * 86400, created_at: 1700000000, accepted_at: null },
+      ],
+    });
+    const { container, findByText } = r();
+    const invitationsTab = await findByText('Invitations');
+    await fireEvent.click(invitationsTab);
+    const declineBtn = await waitFor(() => container.querySelector('[data-testid="invitation-decline-inv-2"]'));
+    await fireEvent.click(declineBtn);
+    await waitFor(() => {
+      expect(api.declineWorkspaceInvitation).toHaveBeenCalledWith('ws-9');
+    });
+  });
+
+  it('filters out non-pending invitation rows (terminal statuses are not actionable)', async () => {
+    api.myInvitations.mockResolvedValue({
+      invitations: [
+        { id: 'inv-3', workspace_id: 'ws-9', user_id: 'u-1', invited_by: 'u-2', role: 'Developer', status: 'Expired', expires_at: NOW - 86400, created_at: 1700000000, accepted_at: null },
+      ],
+    });
+    const { container, findByText } = r();
+    const invitationsTab = await findByText('Invitations');
+    await fireEvent.click(invitationsTab);
+    // The expired row is filtered — the none state renders instead of an
+    // actionable invitation.
+    await findByText('No pending invitations');
+    expect(container.querySelector('[data-testid="invitation-accept-inv-3"]')).toBeNull();
+    expect(container.querySelector('[data-testid="invitation-decline-inv-3"]')).toBeNull();
+  });
+
+  // ── Sessions tab (user-management.md §UI Pages > Session Management,
+  // endpoints from task-111) ───────────────────────────────────────────────
+  const SESSIONS = {
+    sessions: [
+      // task-111 contract: epoch-second timestamps, UA empty for
+      // WebSocket-minted sessions, no token hash on the wire.
+      { id: 'sess-1', user_agent: 'Mozilla/5.0 (X11; Linux x86_64) Firefox/121.0', ip_address: '10.0.0.4', created_at: 1731500000, last_active_at: 1731590000, expires_at: 1734178000 },
+      { id: 'sess-2', user_agent: '', ip_address: '192.168.1.9', created_at: 1731400000, last_active_at: 1731580000, expires_at: 1733998000 },
+    ],
+  };
+
+  it('lists active sessions from GET /users/me/sessions in the Sessions tab', async () => {
+    api.listMySessions.mockResolvedValue(SESSIONS);
+    const { container, findByText } = r();
+    const sessionsTab = await findByText('Sessions');
+    await fireEvent.click(sessionsTab);
+    expect(await waitFor(() => container.querySelector('[data-testid="session-sess-1"]'))).toBeTruthy();
+    expect(container.querySelector('[data-testid="session-sess-2"]')).toBeTruthy();
+    // UA-less session renders the WebSocket device label, not an empty row.
+    expect(await findByText('WebSocket / terminal session')).toBeTruthy();
+    expect(api.listMySessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes one session via DELETE /users/me/sessions/:id and removes the row', async () => {
+    api.listMySessions.mockResolvedValue(SESSIONS);
+    const { container, findByText } = r();
+    const sessionsTab = await findByText('Sessions');
+    await fireEvent.click(sessionsTab);
+    const revokeBtn = await waitFor(() => container.querySelector('[data-testid="session-revoke-sess-1"]'));
+    await fireEvent.click(revokeBtn);
+    await waitFor(() => {
+      expect(api.revokeMySession).toHaveBeenCalledWith('sess-1');
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="session-sess-1"]')).toBeNull();
+    });
+    // The other session stays listed.
+    expect(container.querySelector('[data-testid="session-sess-2"]')).toBeTruthy();
+  });
+
+  it('sign out everywhere calls POST /users/me/sessions/revoke-all and empties the list', async () => {
+    api.listMySessions.mockResolvedValue(SESSIONS);
+    const { container, findByText } = r();
+    const sessionsTab = await findByText('Sessions');
+    await fireEvent.click(sessionsTab);
+    const revokeAllBtn = await waitFor(() => container.querySelector('[data-testid="sessions-revoke-all"]'));
+    await fireEvent.click(revokeAllBtn);
+    await waitFor(() => {
+      expect(api.revokeAllMySessions).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="session-sess-1"]')).toBeNull();
+      expect(container.querySelector('[data-testid="session-sess-2"]')).toBeNull();
+    });
+    expect(await findByText('No active sessions.')).toBeTruthy();
+  });
+
+  it('edit form saves user preferences (theme/density/diff view) via PUT /users/me', async () => {
+    api.me.mockResolvedValue({ ...ME, preferences: { theme: 'Dark', ui_density: 'Comfortable', diff_view: 'Unified' } });
+    api.updateMe.mockResolvedValue({ ...ME });
+    const { findAllByText, findByText, findByDisplayValue, container } = r();
+    await findAllByText('James Sell');
+    await fireEvent.click(await findByText('Edit'));
+    expect(await findByDisplayValue('Dark')).toBeTruthy();
+    await fireEvent.change(container.querySelector('[data-testid="prefs-theme"]'), { target: { value: 'System' } });
+    await fireEvent.click(container.querySelector('[data-testid="prefs-save-btn"]'));
+    await waitFor(() => {
+      expect(api.updateMe).toHaveBeenCalledWith(expect.objectContaining({
+        preferences: expect.objectContaining({ theme: 'System', diff_view: 'Unified' }),
+      }));
+    });
   });
 
   it('shows notifications in Notifications tab', async () => {
