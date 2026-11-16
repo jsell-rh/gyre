@@ -1102,8 +1102,8 @@ mod tests {
             50,
             0,
         )
-                .await
-                .unwrap();
+        .await
+        .unwrap();
         assert_eq!(all.len(), 3, "no type filter returns everything");
     }
 
