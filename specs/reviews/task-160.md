@@ -57,3 +57,59 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — candidate `99caf0d` verification (verdict: approved)
+
+Assignment: review exact candidate `99caf0d1d35f7d6ff0407ee9719c9f92b1469893`
+against base `6f5f408`. This head folds the review-repair rounds (`0c0a0ff1`
+tenant_isolation compile fix, `6f74b1a6` exemptions/skip-list conflict repair,
+`531f1bcf`/`32a42f7e` rebase-fallout repairs). All durable prior findings
+re-checked independently at this exact head; all probes below ran at
+`99caf0d` with a clean tree (each mutation restored and re-verified green).
+
+**Clean-tree runs (all exit 0):** `check-hierarchy.sh`;
+`check-tenant-filter.sh` (124 read methods on tenant-column tables, 0
+violations); `check-api-auth.sh`; `check-abac-route-registry.sh`;
+`check-abac-exempt-handlers.sh`; `check-mcp-write-tools.sh`;
+`check-migration-versions.sh`; `check-dead-message-kinds.sh`;
+`check-scope-literal-defaults.sh crates` (exemptions file empty at frozen
+baseline 0); `check-fabricated-scope-defaults.sh`; `check-arch.sh`;
+`SKIP_WEB_BUILD=1 cargo check -p gyre-server` (4m05s); `SKIP_WEB_BUILD=1
+cargo test -p gyre-adapters --test tenant_isolation` → **2 passed, 0
+failed** (7m18s cold compile — the round-4 blocking finding stays fixed:
+test compiles against the 7-arg `MergeRequest::new`).
+
+**Mutation kills (each restored + re-verified green after):**
+`Task.workspace_id → Option<Id>` → hierarchy exit 1 naming task.rs:60;
+deleting the field → hierarchy exit 1 "missing from the struct"; stripping
+the tenant predicate from `sqlite/notification.rs::count_unread` →
+tenant-filter exit 1 (1 violation / 124); deleting the `abac_middleware`
+layer from the api router section of lib.rs → api-auth Check 1 FAIL;
+adding an unregistered route to api/mod.rs → api-auth exit 1 via the
+delegated registry check. No mutation survived.
+
+**Prior durable findings, repaired at this head:** no merge-conflict
+markers anywhere under crates/, scripts/, .github/; `count_unresolved`
+carries `.filter(notifications::tenant_id.eq(&tenant))` in BOTH the sqlite
+and postgres twins; analytics `query_filtered`/`count_grouped` filter by
+tenant in both backends; `scope-literal-defaults-exemptions.txt` is empty
+(comments only) at the frozen 0-entry baseline; the task's `commits:`
+frontmatter at the candidate records all 15 branch commits including the
+repair commit `0c0a0ff1`.
+
+**Skip-list spot-check:** `budget_call.rs::list_since` rationale matches
+the code (deliberately cross-tenant rolling-window resync; the task-119
+test `list_since_spans_workspaces_inside_the_window` asserts exactly that
+behavior) and `invitation.rs` rows carry the domain entity's tenant with
+handler-layer scope checks — both are the spec §3 structural-isolation
+exemption class, per-file documented.
+
+**Deferred to the verifier (build-budget rules):** `SKIP_WEB_BUILD=1
+cargo test --all` (full workspace suite — server lib/bin/doc tests and all
+integration targets), the web build + `npm test`, and the full pre-commit
+hook run. Everything this task owns (three scripts, adapter tenant
+filters, tenant_isolation.rs, CI/pre-commit wiring) is verified green
+above.
+
+Evidence: `/tmp/stage/review-evidence/` (clean-run logs, mutation logs,
+cargo check/test logs, this round's probe commands and exit codes).
