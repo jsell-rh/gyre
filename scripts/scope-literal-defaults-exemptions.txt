@@ -1,27 +1,5 @@
 # scope-literal-defaults-exemptions.txt — legacy pre-existing sites that
 # fabricate a "default" tenant/workspace identity at construction time.
-<<<<<<< HEAD
-# Frozen at 0 entries (seeded at 24 by the task-099 process revision;
-# lowered to 18 by task-160 — the four adapter create() sites now stamp
-# the storage's real tenant; lowered to 12 in the task-160 repair round —
-# the six record-conversion From-impl / analytics create-stamp sites now
-# carry the storage's real tenant too; lowered to 10 in the task-160
-# verification-repair round — emit_event/emit_telemetry resolve the
-# owning tenant from the workspace record and drop messages whose scope
-# cannot be determined; lowered to 2 in the task-160 rebase onto base
-# cfeefbda — the seven auth.rs AuthenticatedAgent/admin sites were fixed
-# upstream by the task-099 F1 revision (admin user never bound to a
-# tenant; API-key callers resolve the real principal), and the domain
-# Agent constructor default was fixed upstream via the documented
-# `bootstrap_workspace` helper; lowered to 0 in the task-160 final round —
-# the last two domain constructor sites (Task::new, MergeRequest::new)
-# now bind the documented `bootstrap_workspace()` helper from lib.rs,
-# the same contract Agent::new uses, instead of inlining the literal).
-# Fix a site by resolving the real scope (or refusing to create the
-# entity without it), then DELETE its line and lower FROZEN_EXEMPTION_COUNT
-# in scripts/check-scope-literal-defaults.sh.
-# NEVER add entries; NEVER raise the frozen count.
-=======
 # Seeded at 24 entries with 9 task-099-owned sites when the check was
 # introduced; those 9 were fixed and removed in the task-099 F1 revision
 # round; the domain Agent constructor default was fixed via the documented
@@ -41,4 +19,3 @@
 #
 # The file is intentionally empty: every seeded site has been fixed for
 # real (or referenced a file removed upstream). Keep it empty.
->>>>>>> c3c7a522
