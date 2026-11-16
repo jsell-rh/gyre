@@ -6,7 +6,7 @@ from .repair_budget import source_findings
 def check(execution, task):
     latest = execution.store.setting('observed_main')
     candidate = execution.claim['input']['candidate']
-    if not latest or latest == execution.claim['input'].get('base'):
+    if not latest or latest == candidate:
         return None
     from .stages import checkout
     path = checkout(execution, candidate)
