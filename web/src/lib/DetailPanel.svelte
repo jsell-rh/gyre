@@ -25,6 +25,7 @@
   import SpecChatInput from './SpecChatInput.svelte';
   import SpecSuggestion from './SpecSuggestion.svelte';
   import { applyDiffOps, streamAssist, suggestionText } from './specAssist.js';
+  import { normalizeGhosts } from './ghostOverlay.js';
   import { sendEditingPresence, specEditingEntity } from './presence.js';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
@@ -1327,10 +1328,10 @@
           draft_content: content,
         });
         const overlays = result?.predictions ?? result?.overlays ?? [];
-        archGhostOverlays = overlays.map((p) => ({
-          nodeId: p.node_id ?? p.nodeId,
-          type: p.change_type ?? p.type ?? 'modified',
-        }));
+        // Shared §3 ghost model (ghostOverlay.js): keeps action, confidence
+        // and reason so the Editor Split / arch tab ghost layer renders the
+        // full ghost visual language — same normalization EditorSplit uses.
+        archGhostOverlays = normalizeGhosts(overlays);
       } catch {
         // Silent failure — predictions are best-effort
       }
