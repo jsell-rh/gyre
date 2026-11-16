@@ -88,12 +88,14 @@ struct TaskRow {
     tenant_id: String,
     workspace_id: String,
     spec_path: Option<String>,
+    spec_ref: Option<String>,
     repo_id: String,
     cancelled_at: Option<i64>,
     cancelled_reason: Option<String>,
     task_type: Option<String>,
     order: Option<i32>,
     depends_on: String,
+    generation: i32,
 }
 
 impl TaskRow {
@@ -115,6 +117,7 @@ impl TaskRow {
             workspace_id: Id::new(self.workspace_id),
             repo_id: Id::new(self.repo_id),
             spec_path: self.spec_path,
+            spec_ref: self.spec_ref,
             cancelled_at: self.cancelled_at.map(|v| v as u64),
             cancelled_reason: self.cancelled_reason,
             task_type: self
@@ -128,6 +131,7 @@ impl TaskRow {
                 .into_iter()
                 .map(Id::new)
                 .collect(),
+            generation: self.generation.max(1) as u32,
         })
     }
 }
@@ -150,12 +154,14 @@ struct NewTaskRow<'a> {
     tenant_id: &'a str,
     workspace_id: &'a str,
     spec_path: Option<&'a str>,
+    spec_ref: Option<&'a str>,
     repo_id: &'a str,
     cancelled_at: Option<i64>,
     cancelled_reason: Option<&'a str>,
     task_type: Option<&'a str>,
     order: Option<i32>,
     depends_on: &'a str,
+    generation: i32,
 }
 
 #[async_trait]
@@ -190,12 +196,14 @@ impl TaskRepository for PgStorage {
                 tenant_id: &tenant,
                 workspace_id: t.workspace_id.as_str(),
                 spec_path: t.spec_path.as_deref(),
+                spec_ref: t.spec_ref.as_deref(),
                 repo_id: t.repo_id.as_str(),
                 cancelled_at: t.cancelled_at.map(|v| v as i64),
                 cancelled_reason: t.cancelled_reason.as_deref(),
                 task_type: task_type_str,
                 order: t.order.map(|v| v as i32),
                 depends_on: &depends_on_json,
+                generation: t.generation as i32,
             };
             diesel::insert_into(tasks::table)
                 .values(&row)
@@ -214,12 +222,14 @@ impl TaskRepository for PgStorage {
                     tasks::updated_at.eq(row.updated_at),
                     tasks::workspace_id.eq(row.workspace_id),
                     tasks::spec_path.eq(row.spec_path),
+                    tasks::spec_ref.eq(row.spec_ref),
                     tasks::repo_id.eq(row.repo_id),
                     tasks::cancelled_at.eq(row.cancelled_at),
                     tasks::cancelled_reason.eq(row.cancelled_reason),
                     tasks::task_type.eq(row.task_type),
                     tasks::order.eq(row.order),
                     tasks::depends_on.eq(row.depends_on),
+                    tasks::generation.eq(row.generation),
                 ))
                 .execute(&mut *conn)
                 .context("insert task")?;
@@ -349,6 +359,7 @@ impl TaskRepository for PgStorage {
                 tasks::task_type.eq(task_type_str),
                 tasks::order.eq(t.order.map(|v| v as i32)),
                 tasks::depends_on.eq(&depends_on_json),
+                tasks::generation.eq(t.generation as i32),
             ))
             .execute(&mut *conn)
             .context("update task")?;

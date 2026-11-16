@@ -12,13 +12,18 @@ pub mod agent_commit;
 pub mod analytics;
 pub mod attestation;
 pub mod audit;
+pub mod breaking_change;
 pub mod budget;
+pub mod budget_call;
 pub mod chain_attestation;
+pub mod commit_signature;
 pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
+pub mod dependency_policy;
 pub mod graph;
+pub mod invitation;
 pub mod key_binding;
 pub mod kv_store;
 pub mod llm_config;
@@ -33,8 +38,10 @@ pub mod policy;
 pub mod prompt_template;
 pub mod push_gate;
 pub mod quality_gate;
+pub mod repo_access;
 pub mod repository;
 pub mod review;
+pub mod rollout_policy;
 pub mod saved_view;
 pub mod search;
 pub mod secret;
@@ -43,6 +50,8 @@ pub mod spec_approval;
 pub mod spec_approval_event;
 pub mod spec_assertion_results;
 pub mod spec_ledger;
+pub mod spec_lifecycle;
+pub mod spec_links;
 pub mod spec_policy;
 pub mod task;
 pub mod team;
@@ -239,12 +248,16 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "tenant_meta_spec_sets",
+            "rollout_policies",
             "gate_traces",
             "trace_spans",
             "conversations",
             "turn_commit_links",
             "budget_call_records",
             "user_workspace_state",
+            // Per-repo access overrides (task-121, user-management.md §Repo Access)
+            "repo_access_overrides",
             // Previously shadowed by duplicate version prefixes — regression guard
             // (these tables were silently skipped on fresh installs before the fix)
             "kv_store",
@@ -265,6 +278,12 @@ mod tests {
             "trust_anchors",
             "key_bindings",
             "chain_attestations",
+            // Spec-link graph (spec-links.md §Forge-Maintained Spec Graph,
+            // migration 000056, task-198)
+            "spec_links",
+            // Dependency breaking changes + policies (migration 000060, task-163)
+            "breaking_changes",
+            "dependency_policies",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
             "prompt_templates",
@@ -301,12 +320,549 @@ mod tests {
     }
 
     #[test]
+    fn migrations_create_000060_repo_columns_and_overrides() {
+        // 000060 collision (task-121's repo_access_overrides vs task-118's
+        // repo_agent_limits, same-day merges): Diesel ran only the
+        // alphabetically-first repo_access_overrides, silently dropping the
+        // repositories.max_agents / max_agent_iterations columns. Guard
+        // asserts both sides of the collision exist after the renumbered
+        // 000061.
+        let (_tmp, storage) = tmp_storage();
+        let mut conn = storage.pool.get().unwrap();
+        for (table, column) in [
+            ("repositories", "max_agents"),
+            ("repositories", "max_agent_iterations"),
+        ] {
+            use diesel::RunQueryDsl;
+            let ok = diesel::sql_query(format!("SELECT {column} FROM {table} LIMIT 0"))
+                .execute(&mut *conn)
+                .is_ok();
+            assert!(ok, "column '{table}.{column}' missing after migrations");
+        }
+        // ...and the other side of the collision (the table the
+        // alphabetically-first migration owns) must still be applied.
+        use diesel::RunQueryDsl;
+        diesel::sql_query("SELECT 1 FROM repo_access_overrides LIMIT 0")
+            .execute(&mut *conn)
+            .unwrap_or_else(|e| panic!("table 'repo_access_overrides' missing: {e}"));
+    }
+
+    #[test]
     fn migration_is_idempotent() {
         let tmp = NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap();
         // Run twice — should not fail.
         SqliteStorage::new(path).unwrap();
         SqliteStorage::new(path).unwrap();
+    }
+
+    /// Regression guard for migration 000058 (task-120): the username
+    /// backfill must actually run on SQLite and must leave every legacy row
+    /// with a unique, URL-safe handle.
+    ///
+    /// The first version of this migration expressed the "contains a
+    /// character outside [a-z0-9_-]" predicate as one 39-deep nested
+    /// REPLACE(...) chain, which dies with "parser stack overflow" on both
+    /// the bundled and system SQLite — since `SqliteStorage::new` runs the
+    /// embedded migrations on every construction, that broke the default
+    /// deployment's startup entirely. The fix runs the deletion as
+    /// sequential depth-1 UPDATEs over a scratch column.
+    ///
+    /// This test builds a pre-000058 database (all migrations except 000058
+    /// applied, legacy rows inserted), applies 000058 alone, and asserts the
+    /// backfill semantics: sanitization of non-URL-safe and over-long
+    /// handles, empty-handle coverage, de-duplication, and the pass-2
+    /// collision hardening where a dedup suffix collides with a distinct
+    /// pre-existing handle. It fails on every regression class above.
+    ///
+    /// (The migration was originally numbered 000056; after main landed
+    /// task-180's `spec_assertion_results` under the same 000056 version,
+    /// Diesel would have silently dropped this one — alphabetically-first
+    /// wins — so it was renumbered to 000057. Main then landed task-193's
+    /// `spec_approval_attestation` under 000057, so it was renumbered
+    /// again to the next unused sequence, 000058.)
+    #[test]
+    fn migration_000058_backfills_unique_url_safe_usernames() {
+        use diesel::migration::MigrationSource;
+        use diesel::Connection;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let mut conn = SqliteConnection::establish(path).unwrap();
+
+        // Apply every migration except 000058: the pre-migration state.
+        // (000056 here is task-180's spec_assertion_results and 000057 is
+        // task-193's spec_approval_attestation — different migrations that
+        // legitimately own those versions on main.)
+        // 2026-11-13-000065_user_tenant_scope (task-110) is excluded too:
+        // after the rebase onto c5deca801 it only creates the tenant-scope
+        // index and depends on 000058's tenant_id column, so it cannot run
+        // in the pre-000058 set. It runs right after the target batch (in
+        // version order, after 000058) — index creation only, so the
+        // backfill assertions below are unaffected. (Renumbered from
+        // 20261009000057 to 20261108000060 when upstream landed
+        // agent_persona_id under the same version, then to 20261113000065
+        // when the task-110 rebase onto main head f764bc00 collided with
+        // upstream's 2026-11-08 numbering; see its up.sql.)
+        let all = MIGRATIONS.migrations().unwrap();
+        // 000060 (user_preferences_channel_shape, task-112) must also be
+        // excluded from `pre`: it rewrites 000058's flat backfill literal
+        // into the current nested notification_channels shape, so it is run
+        // explicitly after 000058 below (the same order a deployed database
+        // sees them).
+        let (pre, deferred): (Vec<_>, Vec<_>) = all.into_iter().partition(|m| {
+            let v = m.name().version().to_string();
+            v != "20261008000058" && v != "20261109000060" && v != "20261113000065"
+        });
+        let (target, rest): (Vec<_>, Vec<_>) = deferred
+            .into_iter()
+            .partition(|m| m.name().version().to_string() == "20261008000058");
+        assert_eq!(target.len(), 1, "000058 not found in embedded migrations");
+        let (m60, m65): (Vec<_>, Vec<_>) = rest
+            .into_iter()
+            .partition(|m| m.name().version().to_string() == "20261109000060");
+        assert_eq!(m60.len(), 1, "000060 not found in embedded migrations");
+        assert_eq!(
+            m65.len(),
+            1,
+            "tenant-scope index migration not found in embedded migrations"
+        );
+        use diesel::migration::MigrationConnection;
+        // run_migrations is the raw harness method — unlike
+        // run_pending_migrations (used by SqliteStorage::new) it does not
+        // set up __diesel_schema_migrations, so initialize the bookkeeping
+        // table first.
+        conn.setup().unwrap();
+        conn.run_migrations(&pre).unwrap();
+
+        // Legacy rows exactly as a pre-000058 deployment would hold them
+        // (users: id, external_id, name NOT NULL; display_name from 000036
+        // left NULL so the backfill reads `name`).
+        use diesel::RunQueryDsl;
+        let long_name = "x".repeat(65);
+        for (id, ext, name, created) in [
+            ("u-alice-1", "ext-alice-1", "Alice Smith", 100),
+            ("u-alice-2", "ext-alice-2", "Alice Smith", 200),
+            ("u-jorg", "ext-jorg", "jörg", 300),
+            ("u-jsell-1", "ext-jsell-1", "jsell", 400),
+            ("u-jsell-2", "ext-jsell-2", "jsell", 500),
+            ("u-jsell-3", "ext-jsell-3", "jsell-2", 600),
+            ("u-empty", "", "", 700),
+            ("u-long", "ext-long", &long_name, 800),
+        ] {
+            diesel::sql_query(format!(
+                "INSERT INTO users (id, external_id, name, created_at, updated_at) \
+                 VALUES ('{id}', '{ext}', '{name}', {created}, {created})"
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        }
+
+        // Run 000058 alone. Panics here on the original parser-overflow
+        // version and on a dedup collision aborting at CREATE UNIQUE INDEX.
+        conn.run_migrations(&target).unwrap();
+        // The tenant-scope index migration (2026-11-13-000065) runs in the
+        // same batch position a deployed database sees it: after 000058
+        // (whose tenant_id column it indexes). Index creation only — the
+        // backfill assertions below are unaffected.
+        conn.run_migrations(&m65).unwrap();
+
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }` with spans mapped onto the field
+        // declarations, so clippy::redundant_field_names fires on
+        // derive-generated code. The generated construction sits in a dummy
+        // module that inherits neither struct- nor field-level `#[allow]`
+        // (verified in this repo on the same diesel version — see
+        // sqlite/search.rs), so the lint is scoped off for this row-carrier
+        // module instead. Nothing in here writes `field: field`
+        // initializations by hand.
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+
+            #[derive(diesel::QueryableByName)]
+            pub(super) struct Row {
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) username: String,
+            }
+
+            // Defaults backfilled for rows predating the new columns.
+            #[derive(diesel::QueryableByName)]
+            pub(super) struct Defaults {
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) timezone: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) locale: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) global_role: String,
+                #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+                pub(super) preferences: Option<String>,
+            }
+        }
+        use rows::{Defaults, Row};
+
+        let rows: Vec<Row> = diesel::sql_query("SELECT id, username FROM users")
+            .load(&mut conn)
+            .unwrap();
+        let by_id: std::collections::HashMap<String, String> =
+            rows.into_iter().map(|r| (r.id, r.username)).collect();
+
+        let expected = [
+            // Backfill from display name, lowercased, separators mapped.
+            ("u-alice-1", "alice-smith"),
+            // Duplicate display names get a numeric suffix (dedup pass 1).
+            ("u-alice-2", "alice-smith-2"),
+            // Non-URL-safe names are replaced wholesale with "u-<id>"
+            // (sanitization must never leave a non-URL-safe handle).
+            ("u-jorg", "u-u-jorg"),
+            // Dedup pass 1: second "jsell" becomes "jsell-2".
+            ("u-jsell-1", "jsell"),
+            ("u-jsell-2", "jsell-2"),
+            // Dedup pass 2: u-jsell-2's "jsell-2" collides with the distinct
+            // pre-existing "jsell-2" handle; the later row is renamed to
+            // "<handle>-<row id>" so CREATE UNIQUE INDEX cannot fail.
+            ("u-jsell-3", "jsell-2-u-jsell-3"),
+            // Empty legacy name + empty external id: still caught, never
+            // persisted as "".
+            ("u-empty", "u-u-empty"),
+            // Over 64 chars: replaced with "u-<id>".
+            ("u-long", "u-u-long"),
+        ];
+        for (id, want) in expected {
+            let got = by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("user {id} missing after migration"));
+            assert_eq!(got, want, "unexpected backfilled username for {id}");
+            assert!(
+                gyre_domain::User::validate_username(got).is_ok(),
+                "backfilled username {got:?} for {id} violates the URL-safe handle contract"
+            );
+        }
+        let mut handles: Vec<&String> = by_id.values().collect();
+        handles.sort();
+        let distinct = {
+            let mut d = handles.clone();
+            d.dedup();
+            d.len()
+        };
+        assert_eq!(
+            handles.len(),
+            distinct,
+            "backfilled usernames are not unique: {handles:?}"
+        );
+
+        let d: Defaults = diesel::sql_query(
+            "SELECT timezone, locale, global_role, preferences FROM users WHERE id = 'u-alice-1'",
+        )
+        .load(&mut conn)
+        .unwrap()
+        .pop()
+        .expect("row u-alice-1");
+        assert_eq!(d.timezone, "UTC");
+        assert_eq!(d.locale, "en-US");
+        assert_eq!(d.global_role, "Member");
+        // 000058's backfill literal is the pre-task-112 flat
+        // notification_channels shape (the migration is shipped, so its
+        // literal is historical). It must still deserialize to the current
+        // defaults via the NotificationChannels compat path — a reset to
+        // defaults here would mean every upgraded deployment silently loses
+        // user-customized preferences.
+        let backfilled: gyre_domain::UserPreferences =
+            serde_json::from_str(d.preferences.as_deref().expect("preferences"))
+                .expect("000058 flat backfill literal must deserialize");
+        assert_eq!(backfilled, gyre_domain::UserPreferences::default());
+
+        // 000060 converges the flat backfill to the current nested shape:
+        // after it runs, the stored row must be byte-identical to the
+        // current UserPreferences::default() serialization.
+        conn.run_migrations(&m60).unwrap();
+        let d: Defaults = diesel::sql_query(
+            "SELECT timezone, locale, global_role, preferences FROM users WHERE id = 'u-alice-1'",
+        )
+        .load(&mut conn)
+        .unwrap()
+        .pop()
+        .expect("row u-alice-1");
+        let want_prefs = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
+        assert_eq!(d.preferences.as_deref(), Some(want_prefs.as_str()));
+    }
+
+    /// Task-112 review repair: migration 000060 converges stored
+    /// users.preferences from the pre-task-112 flat notification_channels
+    /// shape (`in_app`/`email_enabled`/`email_digest`) to the nested §Delivery
+    /// Channels shape. Drives the REAL embedded up.sql against seeded rows —
+    /// the exact transition an upgraded deployment makes — and asserts:
+    /// stored email config values survive (all combinations are covered by
+    /// the migration's REPLACE needles), sibling preference fields pass
+    /// through untouched, already-nested rows are left byte-identical, and
+    /// NULL preferences stay NULL. Without the rewrite, every pre-task-112
+    /// row fails UserPreferences deserialization in the adapters'
+    /// `.ok().unwrap_or_default()` read path and user customizations are
+    /// silently reset on upgrade.
+    #[test]
+    fn migration_000060_rewrites_legacy_notification_channels() {
+        use diesel::sql_types::{Nullable, Text};
+        use diesel::RunQueryDsl;
+
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }`, so clippy::redundant_field_names fires
+        // on derive-generated code; the lint is scoped off for this
+        // row-carrier module (same pattern as the tests above).
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::{Nullable, Text};
+            use diesel::QueryableByName;
+
+            #[derive(QueryableByName)]
+            pub(super) struct PrefsRow {
+                #[diesel(sql_type = Nullable<Text>)]
+                pub(super) preferences: Option<String>,
+            }
+            #[derive(QueryableByName)]
+            pub(super) struct VersionRow {
+                #[diesel(sql_type = Text)]
+                pub(super) version: String,
+            }
+        }
+        use rows::{PrefsRow, VersionRow};
+
+        let (_tmp, storage) = tmp_storage();
+        let mut conn = storage.pool.get().unwrap();
+
+        // Seed representative rows: the exact 000058 backfill literal, a
+        // customized flat row, a flat row with in_app=false (the needle must
+        // not touch it), an already-nested row, and a NULL row.
+        let flat_default = r#"{"default_workspace_id":null,"theme":"System","notification_channels":{"in_app":true,"email_enabled":false,"email_digest":"Off"},"ui_density":"Comfortable","code_font_size":14,"diff_view":"SideBySide","activity_feed_scope":"MyActivity"}"#;
+        let flat_custom = r#"{"default_workspace_id":null,"theme":"Dark","notification_channels":{"in_app":true,"email_enabled":true,"email_digest":"Daily"},"ui_density":"Compact","code_font_size":16,"diff_view":"Unified","activity_feed_scope":"All"}"#;
+        let flat_inapp_false = r#"{"default_workspace_id":null,"theme":"System","notification_channels":{"in_app":false,"email_enabled":true,"email_digest":"Hourly"},"ui_density":"Comfortable","code_font_size":14,"diff_view":"SideBySide","activity_feed_scope":"MyActivity"}"#;
+        let nested = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
+        let insert =
+            "INSERT INTO users (id, external_id, name, created_at, updated_at, preferences) \
+                      VALUES (?, ?, ?, 1, 1, ?)";
+        for (id, prefs) in [
+            ("u-flat-default", flat_default),
+            ("u-flat-custom", flat_custom),
+            ("u-flat-inapp-false", flat_inapp_false),
+            ("u-nested", nested.as_str()),
+        ] {
+            diesel::sql_query(insert)
+                .bind::<Text, _>(id)
+                .bind::<Text, _>(format!("ext-{id}"))
+                .bind::<Text, _>("name")
+                .bind::<Nullable<Text>, _>(prefs)
+                .execute(&mut conn)
+                .unwrap();
+        }
+        diesel::sql_query(insert)
+            .bind::<Text, _>("u-null")
+            .bind::<Text, _>("ext-u-null")
+            .bind::<Text, _>("name")
+            .bind::<Nullable<Text>, _>(Option::<String>::None)
+            .execute(&mut conn)
+            .unwrap();
+
+        // Un-mark 000060 so the runner re-applies the real up.sql to the
+        // seeded rows (the same transition a deployed database makes).
+        // Pinned to the exact version: the base also ships a distinct
+        // 20261009000060 (commit_signatures) whose version string must not
+        // match.
+        let versions: Vec<VersionRow> = diesel::sql_query(
+            "SELECT version FROM __diesel_schema_migrations WHERE version = '20261109000060'",
+        )
+        .load(&mut conn)
+        .unwrap();
+        assert_eq!(versions.len(), 1, "expected exactly one 000060 version row");
+        let deleted = diesel::sql_query("DELETE FROM __diesel_schema_migrations WHERE version = ?")
+            .bind::<Text, _>(&versions[0].version)
+            .execute(&mut conn)
+            .unwrap();
+        assert_eq!(deleted, 1, "failed to un-mark migration 000060");
+        conn.run_pending_migrations(MIGRATIONS)
+            .expect("portable 000060 up.sql must run");
+
+        let mut get = |id: &str| -> Option<String> {
+            let row: PrefsRow = diesel::sql_query("SELECT preferences FROM users WHERE id = ?")
+                .bind::<Text, _>(id)
+                .load(&mut conn)
+                .unwrap()
+                .pop()
+                .unwrap_or_else(|| panic!("user {id} missing"));
+            row.preferences
+        };
+
+        // The 000058 backfill literal converges to the current default
+        // serialization byte-for-byte.
+        let want = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
+        assert_eq!(get("u-flat-default").as_deref(), Some(want.as_str()));
+
+        // Customized flat row: values survive, shape is canonical.
+        let got = get("u-flat-custom").expect("custom prefs");
+        let parsed: gyre_domain::UserPreferences =
+            serde_json::from_str(&got).expect("rewritten prefs must deserialize");
+        assert_eq!(parsed.theme, gyre_domain::Theme::Dark);
+        assert_eq!(parsed.ui_density, gyre_domain::UiDensity::Compact);
+        assert_eq!(parsed.code_font_size, 16);
+        assert_eq!(parsed.diff_view, gyre_domain::DiffView::Unified);
+        assert_eq!(parsed.activity_feed_scope, gyre_domain::FeedScope::All);
+        assert!(parsed.notification_channels.in_app);
+        assert!(parsed.notification_channels.email.enabled);
+        assert_eq!(
+            parsed.notification_channels.email.digest,
+            gyre_domain::DigestFrequency::Daily
+        );
+        assert_eq!(
+            parsed.notification_channels.email.min_priority,
+            gyre_domain::NotificationPriority::Medium
+        );
+        assert_eq!(parsed.notification_channels.webhook, None);
+        assert_eq!(parsed.notification_channels.slack, None);
+        assert!(
+            !got.contains("email_enabled"),
+            "flat fields must be gone: {got}"
+        );
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            got,
+            "rewritten row must be in canonical (re-serializable) form"
+        );
+
+        // in_app is outside the REPLACE needle and passes through untouched.
+        let got = get("u-flat-inapp-false").expect("inapp-false prefs");
+        let parsed: gyre_domain::UserPreferences = serde_json::from_str(&got).unwrap();
+        assert!(!parsed.notification_channels.in_app);
+        assert!(parsed.notification_channels.email.enabled);
+        assert_eq!(
+            parsed.notification_channels.email.digest,
+            gyre_domain::DigestFrequency::Hourly
+        );
+
+        // Already-nested rows are left byte-identical; NULL stays NULL.
+        assert_eq!(get("u-nested").as_deref(), Some(nested.as_str()));
+        assert_eq!(get("u-null"), None);
+    }
+
+    /// Regression guard for migration 000062 (task-122): teams gain a
+    /// workspace-unique URL-safe `slug` and a `lead`, and membership moves
+    /// from the legacy `member_ids` JSON column to a `team_memberships`
+    /// table. This test builds a pre-000062 database (all migrations except
+    /// 000062 applied, legacy rows inserted), applies 000062 alone, and
+    /// asserts the backfill semantics: slug falls back to the team id
+    /// (stable, unique, URL-safe), lead falls back to the workspace Owner,
+    /// the (workspace_id, slug) unique index rejects duplicates, the
+    /// `member_ids` column is gone, and `team_memberships` enforces its
+    /// composite primary key.
+    #[test]
+    fn migration_000062_backfills_team_slug_and_lead() {
+        use diesel::migration::MigrationConnection;
+        use diesel::migration::MigrationSource;
+        use diesel::Connection;
+        use diesel::RunQueryDsl;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let mut conn = SqliteConnection::establish(path).unwrap();
+
+        let all = MIGRATIONS.migrations().unwrap();
+        let (pre, target): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|m| m.name().version().to_string() != "20261113000062");
+        assert_eq!(target.len(), 1, "000062 not found in embedded migrations");
+        conn.setup().unwrap();
+        conn.run_migrations(&pre).unwrap();
+
+        // Workspace with an Owner membership (created by 000007's tables).
+        diesel::sql_query(
+            "INSERT INTO workspaces (id, tenant_id, name, slug, description, trust_level, \
+             created_at) VALUES ('ws-1', 't-1', 'WS One', 'ws-one', NULL, 'Guided', 1)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        diesel::sql_query(
+            "INSERT INTO workspace_memberships (id, user_id, workspace_id, role, invited_by, \
+             accepted, created_at) \
+             VALUES ('m-1', 'u-owner', 'ws-1', 'Owner', 'system', 1, 1)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+
+        // Legacy team rows exactly as a pre-000062 deployment would hold
+        // them (member_ids JSON, no slug/lead).
+        for (id, name, member_ids) in [
+            ("team-legacy-1", "Platform Team", "[]"),
+            ("team-legacy-2", "Weird Name!!", "[]"),
+        ] {
+            diesel::sql_query(format!(
+                "INSERT INTO teams (id, workspace_id, name, description, member_ids, created_at) \
+                 VALUES ('{id}', 'ws-1', '{name}', NULL, '{member_ids}', 100)"
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        }
+
+        conn.run_migrations(&target).unwrap();
+
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::Text;
+            use diesel::QueryableByName;
+
+            #[derive(QueryableByName)]
+            pub(super) struct TeamRow {
+                #[diesel(sql_type = Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = Text)]
+                pub(super) slug: String,
+                #[diesel(sql_type = Text)]
+                pub(super) lead: String,
+            }
+        }
+        use rows::TeamRow;
+
+        let rows: Vec<TeamRow> = diesel::sql_query("SELECT id, slug, lead FROM teams")
+            .load(&mut conn)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            // Slug backfills from the id: stable, unique, URL-safe.
+            assert_eq!(r.slug, r.id, "slug must backfill from the team id");
+            // Lead backfills from the workspace Owner.
+            assert_eq!(
+                r.lead, "u-owner",
+                "lead must backfill from the workspace owner"
+            );
+        }
+
+        // The (workspace_id, slug) unique index rejects a duplicate slug in
+        // the same workspace but allows the same slug in another workspace.
+        let dup = diesel::sql_query(
+            "INSERT INTO teams (id, workspace_id, name, slug, description, lead, created_at) \
+             VALUES ('team-dup', 'ws-1', 'Dup', 'team-legacy-1', NULL, 'u-owner', 100)",
+        )
+        .execute(&mut conn);
+        assert!(dup.is_err(), "duplicate (workspace, slug) must be rejected");
+
+        // The legacy member_ids column is gone.
+        let legacy_col =
+            diesel::sql_query("SELECT member_ids FROM teams LIMIT 0").execute(&mut conn);
+        assert!(legacy_col.is_err(), "member_ids column must be dropped");
+
+        // team_memberships enforces its composite primary key.
+        diesel::sql_query(
+            "INSERT INTO team_memberships (team_id, user_id, added_at) \
+             VALUES ('team-legacy-1', 'u-1', 1000)",
+        )
+        .execute(&mut conn)
+        .unwrap();
+        let dup_member = diesel::sql_query(
+            "INSERT INTO team_memberships (team_id, user_id, added_at) \
+             VALUES ('team-legacy-1', 'u-1', 2000)",
+        )
+        .execute(&mut conn);
+        assert!(
+            dup_member.is_err(),
+            "duplicate team membership must be rejected"
+        );
     }
 
     /// Task-102 F1 regression: migration 000054 folds legacy path/pid
@@ -452,7 +1008,6 @@ mod tests {
             serde_json::json!({"path": "already", "k": 2})
         );
 
-        // Envelope backfill columns for legacy rows.
         for r in &rows {
             assert_eq!(r.agent_id.as_deref(), Some("ag-1"));
             assert_eq!(r.resource_type, "agent");

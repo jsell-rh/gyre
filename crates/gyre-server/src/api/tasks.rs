@@ -4,10 +4,9 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{AnalyticsEvent, Task, TaskPriority, TaskStatus, TaskType};
-use gyre_ports::search::SearchDocument;
+use gyre_domain::{Task, TaskPriority, TaskStatus, TaskType};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tracing::instrument;
 
 use crate::AppState;
@@ -28,8 +27,11 @@ pub struct CreateTaskRequest {
     pub order: Option<u32>,
     /// Task IDs that must complete before this task starts.
     pub depends_on: Option<Vec<String>>,
-    /// Spec path this task implements (e.g. "system/hello-world.md").
+    /// Spec path this task implements (e.g. "system/hello-world.md"). Bare path.
     pub spec_path: Option<String>,
+    /// Pinned approved spec blob this task implements: "path@sha". Optional;
+    /// when absent, decomposition falls back to the ledger's current SHA.
+    pub spec_ref: Option<String>,
     /// Workspace ID to scope this task to.
     pub workspace_id: Option<String>,
     /// Repository ID this task targets.
@@ -78,6 +80,8 @@ pub struct TaskResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub task_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<u32>,
@@ -85,6 +89,8 @@ pub struct TaskResponse {
     pub depends_on: Vec<String>,
     pub workspace_id: String,
     pub repo_id: String,
+    /// Deployment generation — incremented on reassignment (§2.4 replay prevention).
+    pub generation: u32,
 }
 
 impl From<Task> for TaskResponse {
@@ -103,11 +109,13 @@ impl From<Task> for TaskResponse {
             created_at: t.created_at,
             updated_at: t.updated_at,
             spec_path: t.spec_path,
+            spec_ref: t.spec_ref,
             task_type: t.task_type.map(|tt| task_type_str(&tt)),
             order: t.order,
             depends_on: t.depends_on.into_iter().map(|id| id.to_string()).collect(),
             workspace_id: t.workspace_id.to_string(),
             repo_id: t.repo_id.to_string(),
+            generation: t.generation,
         }
     }
 }
@@ -197,6 +205,7 @@ pub async fn create_task(
         .map(Id::new)
         .collect();
     task.spec_path = req.spec_path;
+    task.spec_ref = req.spec_ref;
     if let Some(ws_id) = req.workspace_id {
         task.workspace_id = Id::new(ws_id);
     }
@@ -204,22 +213,9 @@ pub async fn create_task(
         task.repo_id = Id::new(repo_id);
     }
     state.tasks.create(&task).await?;
-    // Index for search.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "backlog".to_string());
-    facets.insert("priority".to_string(), task_priority_str(&task.priority));
-    let _ = state
-        .search
-        .index(SearchDocument {
-            entity_type: "task".to_string(),
-            entity_id: task.id.to_string(),
-            title: task.title.clone(),
-            body: task.description.clone().unwrap_or_default(),
-            workspace_id: None,
-            repo_id: None,
-            facets,
-        })
-        .await;
+    // Index for search (search.md §Searchable Entities: task facets
+    // status/priority/assigned_to, workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
@@ -298,7 +294,13 @@ pub async fn update_task(
         task.priority = parse_task_priority(&p)?;
     }
     if let Some(agent_id) = req.assigned_to {
-        task.assigned_to = Some(Id::new(agent_id));
+        let new_assignee = Id::new(agent_id);
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        if task.assigned_to.as_ref() != Some(&new_assignee) {
+            task.generation = task.generation.saturating_add(1);
+        }
+        task.assigned_to = Some(new_assignee);
     }
     if let Some(branch) = req.branch {
         task.branch = Some(branch);
@@ -311,6 +313,9 @@ pub async fn update_task(
     }
     task.updated_at = now_secs();
     state.tasks.update(&task).await?;
+    // search.md §Index Updates: task updated -> index updated (status/priority
+    // facets must reflect current values, not create-time ones).
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     Ok(Json(TaskResponse::from(task)))
 }
 
@@ -326,11 +331,14 @@ pub async fn transition_task_status(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {id} not found")))?;
     let new_status = parse_task_status(&req.status)?;
-    task.transition_status(new_status)
+    let old_status = task.status.clone();
+    task.transition_status(new_status.clone())
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     let ts = now_secs();
     task.updated_at = ts;
     state.tasks.update(&task).await?;
+    // search.md §Index Updates: status change -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
@@ -342,7 +350,9 @@ pub async fn transition_task_status(
 
     // meta-spec-reconciliation.md §11: ReconciliationCompleted /
     // MetaSpecDriftResolved fire when the last open reconciliation /
-    // drift-review task for a workspace reaches terminal status.
+    // drift-review task for a workspace reaches terminal status. The
+    // shared hook also advances a §7 rolling rollout (next batch) before
+    // the completion check.
     if matches!(
         task.status,
         gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
@@ -350,23 +360,13 @@ pub async fn transition_task_status(
         l == crate::reconciliation::RECONCILIATION_LABEL
             || l == crate::reconciliation::DRIFT_REVIEW_LABEL
     }) {
-        crate::reconciliation::maybe_emit_reconciliation_completed(&state, &task.workspace_id)
-            .await;
-        crate::reconciliation::maybe_emit_drift_resolved(&state, &task.workspace_id).await;
+        crate::reconciliation::on_reconciliation_task_terminal(&state, &task.workspace_id).await;
     }
 
-    // Auto-track status transition as analytics event
-    let event = AnalyticsEvent::new(
-        new_id(),
-        "task.status_changed",
-        task.assigned_to.as_ref().map(|id| id.to_string()),
-        serde_json::json!({
-            "task_id": task.id.to_string(),
-            "new_status": req.status,
-        }),
-        ts,
-    );
-    let _ = state.analytics.record(&event).await;
+    // Auto-track status transition as analytics event (task-146 helper:
+    // spec-required old_status/new_status/assigned_to properties,
+    // caller-bound scope, search-indexed on write).
+    super::analytics::record_task_status_changed(&state, &task, &old_status).await;
 
     Ok(Json(TaskResponse::from(task)))
 }
@@ -511,6 +511,93 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// Regression (task-202 review): the `task.status_changed` activity event
+    /// emitted on the transition write path must carry its workspace/repo
+    /// scope, so search.md §Searchable Entities' Activity Event workspace/repo
+    /// filters actually match write-path-indexed events (the scope used to be
+    /// dropped at every emit site except the orchestrator spawn path).
+    #[tokio::test]
+    async fn task_transition_activity_event_is_workspace_scoped() {
+        use gyre_ports::search::SearchQuery;
+        use std::sync::Arc;
+
+        // Real SQLite FTS5 backend — the workspace filter is SQL, not a stub.
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let storage = gyre_adapters::SqliteStorage::new(db.path().to_str().unwrap()).unwrap();
+        let state = crate::mem::test_state_with_search(
+            Arc::new(storage) as Arc<dyn gyre_ports::SearchPort>
+        );
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a task scoped to a known workspace/repo.
+        let body = serde_json::json!({
+            "title": "Scoped transition probe",
+            "workspace_id": "ws-scope-1",
+            "repo_id": "repo-scope-1",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let id = json["id"].as_str().unwrap().to_string();
+
+        // Transition it — emits and indexes task.status_changed.
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The activity event must be retrievable through the workspace
+        // filter — this is exactly the query that returned nothing when the
+        // emit sites dropped the scope.
+        let results = state
+            .search
+            .search(SearchQuery {
+                query: "task.status_changed".to_string(),
+                parsed: gyre_ports::search::parse_query("task.status_changed"),
+                entity_type: Some("activity_event".to_string()),
+                workspace_id: Some("ws-scope-1".to_string()),
+                limit: 10,
+                tenant_id: String::new(),
+                accessible_workspace_ids: None,
+                accessible_repo_ids: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "activity event must be findable via the workspace filter"
+        );
+        assert_eq!(
+            results[0].facets.get("workspace").map(String::as_str),
+            Some("ws-scope-1")
+        );
+        assert_eq!(
+            results[0].facets.get("repo").map(String::as_str),
+            Some("repo-scope-1")
+        );
+    }
+
     #[tokio::test]
     async fn list_tasks_by_status() {
         let app = app();
@@ -540,5 +627,58 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn task_status_transition_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: task.status_changed must carry
+        // old_status, new_status, task_id, assigned_to.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_task(app, "Analytics task").await;
+
+        // Assign the task so assigned_to is populated in the event.
+        let assign_body = serde_json::json!({ "assigned_to": "agent-77" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assign_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one status_changed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], id);
+        assert_eq!(ev.properties["old_status"], "Backlog");
+        assert_eq!(ev.properties["new_status"], "InProgress");
+        assert_eq!(ev.properties["assigned_to"], "agent-77");
+        // agent_id on the event is the assigned agent.
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-77"));
     }
 }

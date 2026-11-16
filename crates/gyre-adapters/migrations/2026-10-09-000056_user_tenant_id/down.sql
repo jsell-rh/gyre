@@ -1,0 +1,4 @@
+-- No-op revert: `users.tenant_id` is owned by
+-- 2026-10-08-000058_user_entity_profile_fields (see up.sql) — dropping it
+-- here would break that migration's symmetry on redo. Reverting 000058
+-- drops the column.

@@ -8,6 +8,13 @@ pub struct LocalTarget;
 
 #[async_trait]
 impl ComputeTarget for LocalTarget {
+    fn name(&self) -> &str {
+        "local"
+    }
+
+    fn target_type(&self) -> &'static str {
+        "local"
+    }
     async fn spawn_process(&self, config: &SpawnConfig) -> Result<ProcessHandle> {
         let child = Command::new(&config.command)
             .args(&config.args)

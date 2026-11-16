@@ -222,10 +222,16 @@ describe('WorkspaceHome — basic rendering', () => {
 // ── Workspace orchestrator chat (HSI §4) ────────────────────────────────────────
 
 describe('WorkspaceHome — orchestrator scoped chat', () => {
-  const ORCH = { id: 'seed-agent-1', name: 'orchestrator', status: 'active', repo_id: 'repo-1' };
+  const ORCH = {
+    id: 'seed-agent-1',
+    name: 'orchestrator',
+    status: 'active',
+    repo_id: 'repo-1',
+    orchestrator_type: 'workspace_orchestrator',
+  };
 
   it('renders the orchestrator chat widget with recipient label when an orchestrator agent exists', async () => {
-    api.agents.mockResolvedValue([ORCH, { id: 'a2', name: 'worker-backend', status: 'active', repo_id: 'repo-1' }]);
+    api.agents.mockResolvedValue([ORCH, { id: 'a2', name: 'worker-backend', status: 'active', repo_id: 'repo-1', orchestrator_type: 'worker' }]);
     const { container, getByText } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
       expect(container.querySelector('[data-testid="section-orchestrator-chat"]')).toBeTruthy();
@@ -235,12 +241,46 @@ describe('WorkspaceHome — orchestrator scoped chat', () => {
   });
 
   it('does NOT render the orchestrator widget when no orchestrator agent exists', async () => {
-    api.agents.mockResolvedValue([{ id: 'a2', name: 'worker-backend', status: 'active', repo_id: 'repo-1' }]);
+    api.agents.mockResolvedValue([{ id: 'a2', name: 'worker-backend', status: 'active', repo_id: 'repo-1', orchestrator_type: 'worker' }]);
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     // Give loadAgents time to resolve, then confirm the widget is absent.
     await waitFor(() => expect(api.agents).toHaveBeenCalled());
     await new Promise((r) => setTimeout(r, 0));
     expect(container.querySelector('[data-testid="section-orchestrator-chat"]')).toBeNull();
+  });
+
+  it('does NOT select a repo orchestrator as the workspace chat recipient', async () => {
+    // Regression (requirements gap d382faa3): the recipient used to be chosen
+    // by name-substring, so a repo orchestrator ("{repo}-orchestrator") or a
+    // worker whose name contains "orchestrator" could be selected over the
+    // real workspace orchestrator. Selection is by orchestrator_type only.
+    api.agents.mockResolvedValue([
+      { id: 'repo-orch-1', name: 'payments-orchestrator', status: 'active', repo_id: 'repo-1', orchestrator_type: 'repo_orchestrator' },
+      { id: 'worker-1', name: 'search-orchestrator-worker', status: 'active', repo_id: 'repo-1', orchestrator_type: 'worker' },
+    ]);
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => expect(api.agents).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(container.querySelector('[data-testid="section-orchestrator-chat"]')).toBeNull();
+  });
+
+  it('targets the workspace orchestrator by role, not by name convention', async () => {
+    // Regression (requirements gap d382faa3): a workspace orchestrator spawned
+    // with a custom name (SpawnOrchestratorRequest.name, e.g. "coord") used to
+    // match no name-substring, so the widget never rendered. With role-based
+    // selection it is the chat recipient even alongside live repo orchestrators.
+    api.agents.mockResolvedValue([
+      { id: 'repo-orch-1', name: 'payments-orchestrator', status: 'active', repo_id: 'repo-1', orchestrator_type: 'repo_orchestrator' },
+      { id: 'ws-orch-1', name: 'coord', status: 'active', orchestrator_type: 'workspace_orchestrator' },
+    ]);
+    const { container, getByText } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="section-orchestrator-chat"]')).toBeTruthy();
+    });
+    // The custom-named workspace orchestrator is the recipient, not the
+    // name-matching repo orchestrator.
+    expect(getByText('Message to coord ▸')).toBeTruthy();
+    expect(container.textContent).not.toContain('Message to payments-orchestrator');
   });
 
   it('sends a Directed-tier priority message to the orchestrator agent', async () => {
@@ -871,12 +911,22 @@ describe('Agent Rules section (ui-navigation.md §2 — meta-spec cascade)', () 
     await waitFor(() => {
       const items = container.querySelectorAll('[data-testid="rule-item"]');
       expect(items.length).toBeGreaterThan(0);
-      // All shown items should have the lock span
-      items.forEach(item => {
-        expect(item.querySelector('.rule-lock')).toBeTruthy();
-      });
     });
+    // The section shows the FULL cascade (required + optional, tenant +
+    // workspace, ui-navigation.md §2). Every REQUIRED rule must carry the
+    // lock; optional ones must not — the lock is the required marker.
+    const required = ['conventional-commits', 'security'];
+    const optional = ['test-coverage'];
+    for (const item of container.querySelectorAll('[data-testid="rule-item"]')) {
+      const name = item.querySelector('.rule-name')?.textContent ?? '';
+      if (required.includes(name)) {
+        expect(item.querySelector('.rule-lock')).toBeTruthy();
+      } else if (optional.includes(name)) {
+        expect(item.querySelector('.rule-lock')).toBeNull();
+      }
+    }
   });
+
 
   it('shows required meta-spec names', async () => {
     const { getByText } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });

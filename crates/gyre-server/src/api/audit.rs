@@ -94,6 +94,26 @@ impl From<AuditEvent> for AuditEventResponse {
     }
 }
 
+/// Record a server-initiated audit event and broadcast it to SSE subscribers.
+///
+/// Shared emission path for every server-side audit event (task-104:
+/// observability.md §Audit Event Types source control + access control
+/// events). Recording is best-effort — a storage failure is logged and the
+/// requesting path continues; the audit trail must never take down the
+/// operation it observes.
+pub async fn emit_server_audit_event(state: &AppState, event: AuditEvent) {
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(
+            error = %e,
+            event_type = event.event_type.as_str(),
+            "failed to record server-side audit event"
+        );
+    }
+    if let Ok(json) = serde_json::to_string(&AuditEventResponse::from(event)) {
+        let _ = state.audit_broadcast_tx.send(json);
+    }
+}
+
 /// Caller-scope validation (task-102 F2): the scoping fields on a recorded
 /// audit event must resolve within the caller's tenant. `agent_id` is bound
 /// server-side in the handler; letting `workspace_id`/`repo_id` pass through
@@ -102,7 +122,8 @@ impl From<AuditEvent> for AuditEventResponse {
 /// another workspace and corrupt the compliance record the query API
 /// filters on. Each named scope is looked up and its tenant compared
 /// against the caller's; mismatch or unknown id rejects the write.
-async fn validate_workspace_scope(
+/// Shared with the analytics record handler (task-146 review F1).
+pub(crate) async fn validate_workspace_scope(
     state: &AppState,
     id: &gyre_common::Id,
     auth: &AuthenticatedAgent,
@@ -124,7 +145,7 @@ async fn validate_workspace_scope(
 /// must resolve within the caller's tenant, and — when the event is also
 /// labeled with a workspace — the repo must belong to that workspace.
 /// Inconsistent or cross-tenant attribution is rejected.
-async fn validate_repo_scope(
+pub(crate) async fn validate_repo_scope(
     state: &AppState,
     id: &gyre_common::Id,
     auth: &AuthenticatedAgent,
@@ -156,6 +177,38 @@ async fn validate_repo_scope(
     Ok(())
 }
 
+/// Decision-scope validation for the analytics Decision API (analytics.md
+/// §Decision API for Agents): a decision context naming a
+/// `workspace_id`/`repo_id` scopes the events the decision is computed
+/// over, so a forged id would surface another scope's aggregated
+/// analytics through the decision outcome. Same lookup-and-compare rule
+/// as `validate_workspace_scope`/`validate_repo_scope` above; returns the
+/// validated ids for the event query filter. Absent fields scope to
+/// nothing (platform-wide), consistent with the analytics query API.
+pub(crate) async fn validate_decision_scope(
+    state: &AppState,
+    context: &serde_json::Value,
+    auth: &AuthenticatedAgent,
+) -> Result<(Option<gyre_common::Id>, Option<gyre_common::Id>), ApiError> {
+    let workspace_id = match context.get("workspace_id").and_then(|v| v.as_str()) {
+        Some(w) => {
+            let id = gyre_common::Id::new(w);
+            validate_workspace_scope(state, &id, auth).await?;
+            Some(id)
+        }
+        None => None,
+    };
+    let repo_id = match context.get("repo_id").and_then(|v| v.as_str()) {
+        Some(r) => {
+            let id = gyre_common::Id::new(r);
+            validate_repo_scope(state, &id, auth, workspace_id.as_ref()).await?;
+            Some(id)
+        }
+        None => None,
+    };
+    Ok((workspace_id, repo_id))
+}
+
 pub async fn record_audit_event(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -172,7 +225,14 @@ pub async fn record_audit_event(
     } else {
         Some(gyre_common::Id::new(auth.agent_id.clone()))
     };
-    let user_id = auth.user_id.clone();
+    // Identity-security.md §Impersonation: events pushed during an
+    // impersonation session are attributed to the impersonator (the admin
+    // acting as the target), with the attribution context in detail.
+    let user_id = auth
+        .impersonation
+        .as_ref()
+        .map(|imp| imp.impersonator_id.clone())
+        .or_else(|| auth.user_id.clone());
 
     // Caller-scope validation (task-102 F2), see `validate_workspace_scope` /
     // `validate_repo_scope` above: mismatch or unknown scope rejects the
@@ -222,6 +282,17 @@ pub async fn record_audit_event(
             obj.entry("pid").or_insert(serde_json::json!(p));
         }
     }
+    // Impersonation attribution context (identity-security.md §Impersonation):
+    // the record's user_id is the impersonator; detail carries both identities
+    // plus the session so the trail shows the impersonator acting as the target.
+    if let (Some(obj), Some(imp)) = (detail.as_object_mut(), auth.impersonation.as_ref()) {
+        obj.entry("impersonator_id")
+            .or_insert(serde_json::json!(imp.impersonator_id.as_str()));
+        obj.entry("target_user_id")
+            .or_insert(serde_json::json!(imp.target_user_id.as_str()));
+        obj.entry("impersonation_session_id")
+            .or_insert(serde_json::json!(imp.session_id));
+    }
 
     let event = AuditEvent::new(
         new_id(),
@@ -240,6 +311,9 @@ pub async fn record_audit_event(
         now_secs(),
     );
     state.audit.record(&event).await?;
+    // search.md §Searchable Entities: audit events are indexed on write
+    // (event_type, details, path facets).
+    crate::search_indexer::index(&state, crate::search_indexer::audit_event_document(&event)).await;
 
     // Broadcast to SSE stream subscribers via broadcast channel
     let _ = state
@@ -799,6 +873,7 @@ mod tests {
         // Agent-role JWT with known sub.
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "known-agent-sub",
                 "preferred_username": "known-agent",
                 "realm_access": { "roles": ["agent"] }

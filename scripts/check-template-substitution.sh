@@ -44,13 +44,22 @@ for const_name in $PROMPT_CONSTS; do
     # Extract all {{variable}} placeholders from this constant's definition.
     # The constant may span multiple lines; collect from the definition line
     # until the next `pub const` or end of file.
-    CONST_LINE=$(grep -n "pub const $const_name" "$DEFAULTS_FILE" | head -1 | cut -d: -f1)
+    CONST_LINE=$(grep -n -m1 "pub const $const_name" "$DEFAULTS_FILE" | cut -d: -f1)
     [ -z "$CONST_LINE" ] && continue
 
-    NEXT_CONST_LINE=$(tail -n +"$((CONST_LINE + 1))" "$DEFAULTS_FILE" \
-        | grep -n 'pub const PROMPT_' \
-        | head -1 \
-        | cut -d: -f1 || echo "")
+    # Find the next const's definition to bound this one's span. Single awk
+    # process reading the file directly — no `tail | grep -n -m1 | cut`
+    # pipeline: grep -m1 exits at its match while tail is still writing, and
+    # under `set -o pipefail` the pipeline reports 141, so the `|| echo`
+    # fallback fires and APPENDS a second line to the partial output already
+    # captured. That poisons the line arithmetic ("38\n200" → bash syntax
+    # error) and, inside the consumer loop, silently leaves the previous
+    # iteration's stale span — a false pass. awk exits after printing the
+    # first match; empty output means "no next const" (span to EOF).
+    NEXT_CONST_LINE=$(awk -v first="$((CONST_LINE + 1))" \
+        'NR >= first && /pub const PROMPT_/ { print NR - first + 1; exit }' \
+        "$DEFAULTS_FILE")
+
 
     if [ -n "$NEXT_CONST_LINE" ]; then
         END_LINE=$((CONST_LINE + NEXT_CONST_LINE - 1))
@@ -58,10 +67,18 @@ for const_name in $PROMPT_CONSTS; do
         END_LINE=$(wc -l < "$DEFAULTS_FILE")
     fi
 
-    # Extract all {{...}} variables from the constant body
+    # Extract all {{...}} variables from the constant body. Comment lines
+    # are stripped first: the span ends just before the next `pub const`,
+    # so it always includes the NEXT constant's `/// Variables:` doc block,
+    # whose placeholders belong to that constant — they are documentation,
+    # never part of this constant's value. Only a placeholder in the string
+    # value itself can reach an LLM prompt, so only those are enforced.
+    # (Span bug found in specs/reviews/task-152.md round 2: the unfiltered
+    # window attributed PROMPT_SPECS_ASSIST's doc vars to its neighbors.)
     TEMPLATE_VARS=$(sed -n "${CONST_LINE},${END_LINE}p" "$DEFAULTS_FILE" \
+        | grep -v '^[[:space:]]*//' \
         | grep -oP '\{\{[a-z_]+\}\}' \
-        | sort -u)
+        | sort -u || true)
 
     [ -z "$TEMPLATE_VARS" ] && continue
 
@@ -86,12 +103,16 @@ for const_name in $PROMPT_CONSTS; do
                 | grep -n 'async fn \|pub fn \|fn ' \
                 | tail -1 \
                 | cut -d: -f1 || echo "1")
-
-            # Find function end (next fn definition or +200 lines, whichever is first)
-            FN_END_SEARCH=$(tail -n +"$((ref_lineno + 1))" "$consumer_file" \
-                | grep -n 'async fn \|pub fn ' \
-                | head -1 \
-                | cut -d: -f1 || echo "200")
+            # Find function end (next fn definition or +200 lines, whichever
+            # comes first). Same single-awk pattern as NEXT_CONST_LINE: the
+            # old `tail | grep -n -m1 | cut || echo 200` raced identically
+            # (grep -m1 exit → tail SIGPIPE → 141 under pipefail → fallback
+            # appends to partial output → poisoned/stale FN_END). Empty awk
+            # output (no next fn) defaults to the +200 cap.
+            FN_END_SEARCH=$(awk -v first="$((ref_lineno + 1))" \
+                'NR >= first && /async fn |pub fn / { print NR - first + 1; exit }' \
+                "$consumer_file")
+            FN_END_SEARCH=${FN_END_SEARCH:-200}
             FN_END=$((ref_lineno + FN_END_SEARCH))
 
             fn_name=$(sed -n "${FN_START}p" "$consumer_file" \
@@ -103,17 +124,40 @@ for const_name in $PROMPT_CONSTS; do
             # Check each template variable
             for var in $TEMPLATE_VARS; do
                 # Check if the function body contains .replace("{{var}}", ...)
-                # The var includes {{ and }}, e.g., {{spec_content}}
-                if ! echo "$FN_BODY" | grep -q "replace(\"$var\""; then
+                # The var includes {{ and }}, e.g., {{spec_content}}.
+                # Here-string, not `echo | grep -q`: under CPU load, grep -q
+                # can match and exit before echo finishes writing, SIGPIPE-ing
+                # echo; with `set -o pipefail` the pipeline then reports 141,
+                # which `if !` misreads as "variable not substituted" — a
+                # false violation on correct code (observed on graph.rs
+                # briefing_ask/predict_graph under load). A here-string has no
+                # upstream writer to signal.
+                if ! grep -qF "replace(\"$var\"" <<< "$FN_BODY"; then
+                    # Shared-helper form (task-171): consumers may substitute
+                    # via llm_helpers::substitute_template(&tpl, &[("var", value), ...])
+                    # instead of an inline .replace chain — semantically
+                    # identical (the helper does out.replace("{{var}}", value)
+                    # for every tuple). Recognize a tuple whose first element
+                    # is the quoted bare var name, but ONLY in a function that
+                    # actually calls substitute_template — an unrelated
+                    # ("var", ...) tuple must not count. A blanked placeholder
+                    # ("var", "") still counts: the literal {{var}} text is
+                    # replaced either way, which is what this check enforces.
+                    var_bare=$(printf '%s' "$var" | tr -d '{}')
+                    if grep -qF 'substitute_template(' <<< "$FN_BODY" && grep -qF "(\"$var_bare\"," <<< "$FN_BODY"; then
+                        continue
+                    fi
                     echo ""
                     echo "MISSING TEMPLATE SUBSTITUTION: $consumer_file:$ref_lineno (fn $fn_name)"
                     echo "  Template $const_name declares variable $var"
-                    echo "  but this consumer does not call .replace(\"$var\", ...)."
+                    echo "  but this consumer neither calls .replace(\"$var\", ...) nor passes"
+                    echo "  a (\"$var_bare\", value) tuple to llm_helpers::substitute_template."
                     echo "  The literal text '$var' will appear in the LLM prompt."
                     echo ""
                     echo "  Fix: Add .replace(\"$var\", &value) to the template substitution"
-                    echo "  chain in this function. Load the value from the appropriate source"
-                    echo "  (see the other consumers of $const_name for the pattern)."
+                    echo "  chain in this function, or add a (\"$var_bare\", &value) tuple to"
+                    echo "  its substitute_template call. Load the value from the appropriate"
+                    echo "  source (see the other consumers of $const_name for the pattern)."
                     echo ""
                     echo "  Exempt with '// template-sub:ok — <reason>' on the $const_name line."
                     VIOLATIONS=$((VIOLATIONS + 1))

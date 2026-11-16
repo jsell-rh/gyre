@@ -57,6 +57,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         .await
         .insert(connection_id, targeted_tx);
 
+    // Record the connection's verified user identity for user-targeted
+    // pushes (identity-security.md §Impersonation). Connections without a
+    // user identity (shared token, agent tokens) are not registered.
+    if let Some(uid) = &caller.user_id {
+        state
+            .ws_connection_users
+            .write()
+            .await
+            .insert(connection_id, uid.as_str().to_string());
+    }
+
     // Subscribed workspace IDs authorized for this connection.
     let mut subscribed_workspaces: Vec<gyre_common::Id> = vec![];
 
@@ -323,14 +334,23 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     description,
                                     timestamp,
                                 } => {
-                                    // Scope telemetry to the caller's first subscribed workspace
-                                    // (or a per-tenant default workspace).
-                                    let ws_id = subscribed_workspaces
-                                        .first()
-                                        .cloned()
-                                        .unwrap_or_else(|| {
-                                            gyre_common::Id::new(format!("default-{}", caller.tenant_id))
-                                        });
+                                    // Scope telemetry to the caller's first subscribed
+                                    // workspace, or the tenant's default (earliest-created)
+                                    // workspace when the connection has subscribed to none.
+                                    // The fallback must be a real workspace record:
+                                    // emit_telemetry resolves the tenant scope from the
+                                    // workspace and skips messages addressed to ids that
+                                    // do not exist, so a fabricated `default-{tenant}` id
+                                    // would silently drop the event.
+                                    let ws_id = match subscribed_workspaces.first() {
+                                        Some(ws_id) => ws_id.clone(),
+                                        None => {
+                                            match tenant_default_workspace(&state, &caller.tenant_id).await {
+                                                Some(ws_id) => ws_id,
+                                                None => continue,
+                                            }
+                                        }
+                                    };
                                     state.emit_telemetry(
                                         ws_id,
                                         MessageKind::StateChanged,
@@ -341,7 +361,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             "description": description,
                                             "timestamp": timestamp,
                                         })),
-                                    );
+                                    ).await;
                                 }
                                 WsMessage::ActivityQuery { since, limit } => {
                                     // Query TelemetryBuffer scoped to subscribed workspaces.
@@ -350,8 +370,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     let mut events: Vec<gyre_common::ActivityEventData> = vec![];
 
                                     let scoped_workspaces: Vec<_> = if subscribed_workspaces.is_empty() {
-                                        // No subscription yet: fall back to tenant-default workspace.
-                                        vec![gyre_common::Id::new(format!("default-{}", caller.tenant_id))]
+                                        // No subscription yet: fall back to the tenant's default
+                                        // workspace (same real-record resolution as the
+                                        // ActivityEvent path above).
+                                        tenant_default_workspace(&state, &caller.tenant_id)
+                                            .await
+                                            .map(|ws_id| vec![ws_id])
+                                            .unwrap_or_default()
                                     } else {
                                         subscribed_workspaces.clone()
                                     };
@@ -409,7 +434,26 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 // Must be subscribed AND workspace must be in caller's tenant.
                                 subscribed_workspaces.contains(ws_id)
                             }
-                            Destination::Agent(_) => false, // Agent-directed: not delivered via WS
+                            Destination::Agent(aid) => {
+                                // Agent-directed messages reach the WS only on
+                                // the agent's OWN live session (agent-gates.md
+                                // §Gate Failure Feedback: "For live sessions:
+                                // also broadcast via WebSocket for immediate
+                                // reaction"). Identity, not subscription,
+                                // gates delivery: the caller was verified
+                                // against the per-agent token store, so a
+                                // match on the verified agent id IS the
+                                // destination. User identities (user_id set)
+                                // and the global token (Admin role,
+                                // agent_id "system") never match — they see
+                                // agent inboxes through the REST/MCP read
+                                // paths, not the bus.
+                                caller.user_id.is_none()
+                                    && !caller
+                                        .roles
+                                        .contains(&gyre_domain::UserRole::Admin)
+                                    && caller.agent_id == aid.as_str()
+                            }
                         };
                         if deliver {
                             let payload = serde_json::to_string(&msg).unwrap();
@@ -454,12 +498,53 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
     state.ws_connections.write().await.remove(&connection_id);
     state
+        .ws_connection_users
+        .write()
+        .await
+        .remove(&connection_id);
+    state
         .ws_connection_workspaces
         .write()
         .await
         .remove(&connection_id);
 
     info!("WebSocket connection closed");
+}
+
+/// Resolve the fallback telemetry scope for a subscription-less connection on
+/// the legacy Activity path: the caller's tenant's earliest-created workspace.
+/// Returns `None` (skip-and-log, never a fabricated id) when the tenant has no
+/// workspaces or the lookup fails — `emit_telemetry` derives the tenant scope
+/// from the workspace record, so an id that does not resolve would silently
+/// drop the message (task-099 F1 regression class).
+async fn tenant_default_workspace(state: &AppState, tenant_id: &str) -> Option<gyre_common::Id> {
+    let tenant = gyre_common::Id::new(tenant_id);
+    match state.workspaces.list_by_tenant(&tenant).await {
+        Ok(mut workspaces) if !workspaces.is_empty() => {
+            // Deterministic default: earliest created, ties broken by id.
+            workspaces.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+            });
+            Some(workspaces.swap_remove(0).id)
+        }
+        Ok(_) => {
+            warn!(
+                tenant = tenant_id,
+                "Activity: caller's tenant has no workspaces; skipping telemetry (no scope to attribute it to)"
+            );
+            None
+        }
+        Err(e) => {
+            warn!(
+                tenant = tenant_id,
+                error = %e,
+                "Activity: failed to list tenant workspaces; skipping telemetry"
+            );
+            None
+        }
+    }
 }
 
 /// Broadcast a presence departure to every other subscriber of the workspace.
@@ -519,6 +604,19 @@ async fn authenticate(
 
     match crate::auth::authenticate_token(&token, state).await {
         Ok(auth) => {
+            // Identity-security.md §Impersonation: a WebSocket connection
+            // opened with an impersonation token is an action taken during
+            // impersonation — attribute it to the impersonator.
+            if let Some(imp) = &auth.impersonation {
+                crate::impersonation::spawn_record_impersonated_action(
+                    state,
+                    imp,
+                    "WS",
+                    "/ws",
+                    true,
+                    "websocket",
+                );
+            }
             let result = WsMessage::AuthResult {
                 success: true,
                 message: "authenticated".to_string(),
@@ -629,6 +727,85 @@ mod tests {
         }
     }
 
+    // ── Agent-directed WS delivery (agent-gates.md §Gate Failure Feedback:
+    // "For live sessions: also broadcast via WebSocket for immediate
+    // reaction") ────────────────────────────────────────────────────────
+
+    /// Seed a per-agent token + a workspace so a live agent session can
+    /// authenticate over WS and the bus emission resolves its tenant scope.
+    async fn seed_agent_ws_identity(state: &Arc<AppState>, agent_id: &str, token: &str) {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-live-agents"),
+            gyre_common::Id::new("default"),
+            "live-agents",
+            "live-agents",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent_id, token.to_string())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ws_agent_directed_message_reaches_own_live_session_only() {
+        let (url, state) = start_test_server("tok").await;
+        seed_agent_ws_identity(&state, "agent-ws-live", "live-agent-token").await;
+        seed_agent_ws_identity(&state, "agent-ws-other", "other-agent-token").await;
+
+        let (mut ws_live, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws_live, "live-agent-token").await;
+        let (mut ws_other, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws_other, "other-agent-token").await;
+
+        // The forge emits a GateResult addressed to the live agent's inbox
+        // (the exact §Gate Failure Feedback message shape).
+        state
+            .emit_event(
+                Some(gyre_common::Id::new("ws-live-agents")),
+                gyre_common::message::Destination::Agent(gyre_common::Id::new("agent-ws-live")),
+                gyre_common::message::MessageKind::GateResult,
+                Some(serde_json::json!({
+                    "mr_id": "mr-42",
+                    "gate_name": "security-review",
+                    "gate_type": "AgentReview",
+                    "status": "Failed",
+                    "output": "ChangesRequested: SQL query uses string interpolation",
+                    "spec_ref": "specs/system/identity-security@abc123",
+                    "attempt": 2,
+                    "gate_agent_id": "security-gate-7",
+                })),
+            )
+            .await;
+
+        // The agent's own live session receives it immediately.
+        let msg = ws_live.next().await.unwrap().unwrap();
+        if let tungstenite::Message::Text(text) = msg {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["kind"], "gate_result");
+            assert_eq!(v["to"], serde_json::json!({"agent": "agent-ws-live"}));
+            assert_eq!(v["payload"]["mr_id"], "mr-42");
+            assert_eq!(v["payload"]["attempt"], 2);
+            assert_eq!(v["payload"]["gate_name"], "security-review");
+        } else {
+            panic!("expected text message");
+        }
+
+        // A different agent's live session does not receive it: identity,
+        // not subscription, gates agent-directed delivery.
+        let got =
+            tokio::time::timeout(std::time::Duration::from_millis(300), ws_other.next()).await;
+        // Pass on timeout (Err) or clean stream close (Ok(None)); any
+        // delivered message means agent-directed delivery leaked.
+        let leaked = got.ok().flatten().is_some();
+        assert!(
+            !leaked,
+            "agent-directed message must not reach another agent's session"
+        );
+    }
+
     #[tokio::test]
     async fn ws_ping_pong() {
         let (url, _state) = start_test_server("tok").await;
@@ -660,6 +837,12 @@ mod tests {
     /// Create a user + API key in the state so a WS connection authenticating
     /// with `raw_key` has user_id Some(...) — required for presence tracking
     /// (shared-token connections have user_id None and are excluded).
+    ///
+    /// The user carries a tenant binding on purpose: API-key auth fails
+    /// closed for users without one (task-099 F1), and production creates
+    /// users exclusively through paths that bind the caller's tenant. The
+    /// binding matches the seeded workspace's tenant so Subscribe's
+    /// tenant-match validation accepts it.
     async fn seed_api_key_user(state: &Arc<AppState>, user_id: &str, raw_key: &str) {
         use gyre_domain::{User, Workspace};
         let ws = Workspace::new(
@@ -670,12 +853,15 @@ mod tests {
             now_secs(),
         );
         state.workspaces.create(&ws).await.unwrap();
-        let user = User::new(
-            gyre_common::Id::new(user_id),
-            format!("ext-{user_id}"),
-            format!("user-{user_id}"),
-            1000,
-        );
+        let user = User {
+            tenant_id: Some(gyre_common::Id::new("default")),
+            ..User::new(
+                gyre_common::Id::new(user_id),
+                format!("ext-{user_id}"),
+                format!("user-{user_id}"),
+                1000,
+            )
+        };
         state.users.create(&user).await.unwrap();
         state
             .api_keys
@@ -979,10 +1165,25 @@ mod tests {
     #[tokio::test]
     async fn ws_activity_event_emits_to_telemetry() {
         let (url, state) = start_test_server("tok").await;
+        // Seed a workspace in the caller's tenant (the shared dev token
+        // authenticates as the "default" system tenant). Telemetry emission
+        // resolves the tenant scope from the workspace record and skips
+        // messages addressed to ids that do not exist (task-099 F1), so the
+        // legacy ActivityEvent path scopes to a real tenant workspace —
+        // without one the event would be dropped.
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-activity"),
+            gyre_common::Id::new("default"),
+            "activity-test",
+            "activity-test",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         auth_ws(&mut ws, "tok").await;
 
-        // Send ActivityEvent (legacy path).
+        // Send ActivityEvent (legacy path, no subscription yet).
         let event = WsMessage::ActivityEvent {
             event_id: "ev1".to_string(),
             agent_id: "agent1".to_string(),
@@ -999,11 +1200,58 @@ mod tests {
         // Give async emit a moment to process.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Verify it landed in the telemetry buffer.
+        // The event must land in the telemetry buffer scoped to the tenant's
+        // default (earliest-created, here: only) workspace — not dropped, and
+        // not addressed to a fabricated `default-{tenant}` id that no lookup
+        // can resolve.
+        let scoped =
+            state
+                .telemetry_buffer
+                .list_since(&gyre_common::Id::new("ws-activity"), 0, 100);
+        assert_eq!(
+            scoped.len(),
+            1,
+            "telemetry event must land scoped to the tenant-default workspace"
+        );
+        let m = &scoped[0];
+        assert_eq!(m.tenant_id.to_string(), "default");
+        assert_eq!(m.kind.as_str(), MessageKind::StateChanged.as_str());
+        let payload = m.payload.as_ref().expect("telemetry payload");
+        assert_eq!(payload["event_id"], "ev1");
+        assert_eq!(payload["agent_id"], "agent1");
+        assert_eq!(payload["description"], "test description");
+    }
+
+    #[tokio::test]
+    async fn ws_activity_event_without_tenant_workspace_skips_emission() {
+        // Skip-and-log contract (task-099 F1): when the caller's tenant has
+        // no workspace to scope to, the legacy ActivityEvent path drops the
+        // event instead of addressing it to a fabricated workspace id.
+        let (url, state) = start_test_server("tok").await;
+        // No workspace seeded — the tenant-default resolution finds none.
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut ws, "tok").await;
+
+        let event = WsMessage::ActivityEvent {
+            event_id: "ev-none".to_string(),
+            agent_id: "agent1".to_string(),
+            event_type: gyre_common::AgEventType::RunStarted,
+            description: "no scope".to_string(),
+            timestamp: 1000,
+        };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&event).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
         let all = state.telemetry_buffer.list_all_since(0, 100);
         assert!(
-            !all.is_empty(),
-            "telemetry buffer should have at least one entry"
+            all.is_empty(),
+            "no tenant workspace to scope to: the event must be skipped, not attributed to a fabricated one"
         );
     }
 

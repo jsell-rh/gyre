@@ -18,12 +18,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use gyre_common::Id;
+use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome};
 use gyre_ports::{GateOutcome, PushContext};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
@@ -73,22 +74,48 @@ fn service_header(service: &str) -> Vec<u8> {
 ///
 /// Resolution steps:
 ///   1. Look up the workspace by slug under the caller's tenant.
+///      For the genuine system principal (the global dev/system token —
+///      `is_system_principal()`, never a bare agent_id string match), a
+///      tenant-scoped miss falls back to a slug-only lookup: the system
+///      principal is the bootstrap principal that created the tenant and
+///      workspace (gyre bootstrap --dev creates tenant "dev" while the
+///      system principal's tenant_id stays "default"), so a strict filter
+///      would 404 the bootstrap flow's own push. The fallback grants
+///      nothing the token lacks elsewhere (on REST it is allowed by the
+///      seeded `system-full-access` policy through normal ABAC evaluation,
+///      not by a bypass), and
+///      the repo is still resolved inside the workspace the slug names.
 ///   2. Look up the repo by name within that workspace.
 async fn resolve_repo_by_slug(
     state: &Arc<AppState>,
-    tenant_id: &str,
+    auth: &crate::auth::AuthenticatedAgent,
     workspace_slug: &str,
     repo_name: &str,
 ) -> Result<gyre_domain::Repository, Response> {
     let repo_name = repo_name.strip_suffix(".git").unwrap_or(repo_name);
-    let tid = Id::new(tenant_id);
 
-    let workspace = state
+    let mut workspace = state
         .workspaces
-        .find_by_slug(&tid, workspace_slug)
+        .find_by_slug(&Id::new(&auth.tenant_id), workspace_slug)
         .await
-        .map_err(|e| git_err(format!("db error: {e}")))?
-        .ok_or_else(|| not_found(format!("workspace '{workspace_slug}' not found")))?;
+        .map_err(|e| git_err(format!("db error: {e}")))?;
+    if workspace.is_none() && auth.is_system_principal() {
+        // System-principal fallback (see doc comment). `find_by_slug` is
+        // tenant-scoped, so the fallback scans by slug alone. The system
+        // principal is the bootstrap principal that created the tenant and
+        // workspace; a strict tenant filter would 404 the bootstrap flow's
+        // own push (gyre bootstrap --dev creates tenant "dev" while the
+        // system principal's tenant_id stays "default").
+        workspace = state
+            .workspaces
+            .list()
+            .await
+            .map_err(|e| git_err(format!("db error: {e}")))?
+            .into_iter()
+            .find(|ws| ws.slug == workspace_slug);
+    }
+    let workspace =
+        workspace.ok_or_else(|| not_found(format!("workspace '{workspace_slug}' not found")))?;
 
     state
         .repos
@@ -102,16 +129,120 @@ async fn resolve_repo_by_slug(
         })
 }
 
-/// Resolve to just the filesystem path (convenience wrapper).
-async fn resolve_repo_path_by_slug(
+// ---------------------------------------------------------------------------
+// Repo access enforcement (user-management.md §Repo Access)
+// ---------------------------------------------------------------------------
+
+/// Enforce repo access for a user principal: repo access is inherited from
+/// workspace membership (per the §Repo Access table) and per-repo overrides
+/// can restrict but not expand it.
+///
+/// - The system principal (bootstrap token) is allowed.
+/// - Agent tokens and other principals without a user identity are allowed:
+///   agents are scoped to their repos at spawn time and their pushes run
+///   through the gate chain; membership is a human-authorization concept.
+/// - Global TenantAdmins are allowed (tenant-wide administration).
+/// - Every other user principal MUST hold a membership in the repo's
+///   workspace whose effective role (workspace role capped by any per-repo
+///   override) carries `perm`; otherwise 403 with an `RbacDenied` audit event.
+async fn authorize_repo_access(
     state: &Arc<AppState>,
-    tenant_id: &str,
-    workspace_slug: &str,
-    repo_name: &str,
-) -> Result<String, Response> {
-    resolve_repo_by_slug(state, tenant_id, workspace_slug, repo_name)
+    auth: &AuthenticatedAgent,
+    repo: &gyre_domain::Repository,
+    perm: gyre_domain::RepoPermission,
+) -> Result<(), Box<Response>> {
+    if auth.is_system_principal() || auth.user_id.is_none() {
+        return Ok(());
+    }
+    if auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Ok(());
+    }
+    let Some(user_id) = &auth.user_id else {
+        return Ok(());
+    };
+
+    let denial = |reason: String, effective: Option<gyre_domain::WorkspaceRole>| -> Response {
+        warn!(
+            user_id = %user_id,
+            repo_id = %repo.id,
+            permission = perm.as_str(),
+            "git http 403: repo access denied ({reason})"
+        );
+        // RbacDenied audit event (observability.md §Audit Event Types):
+        // the membership/override check rejected the operation.
+        let event = AuditEvent::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            AuditEventType::RbacDenied,
+            Some(Id::new(auth.agent_id.clone())),
+            Some(user_id.clone()),
+            None,
+            Some(repo.workspace_id.clone()),
+            Some(repo.id.clone()),
+            "repo".to_string(),
+            Some(repo.id.to_string()),
+            AuditOutcome::Blocked,
+            serde_json::json!({
+                "permission": perm.as_str(),
+                "reason": reason,
+                "effective_role": effective.map(|r| r.as_str()),
+            }),
+            None,
+            None,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            if let Err(e) = state.audit.record(&event).await {
+                error!("failed to record RbacDenied audit event: {e}");
+            }
+        });
+        (
+            StatusCode::FORBIDDEN,
+            format!("repo access denied: {reason}"),
+        )
+            .into_response()
+    };
+
+    let membership = match state
+        .workspace_memberships
+        .find_by_user_and_workspace(user_id, &repo.workspace_id)
         .await
-        .map(|r| r.path)
+    {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return Err(Box::new(denial(
+                "no workspace membership".to_string(),
+                None,
+            )));
+        }
+        Err(e) => return Err(Box::new(git_err(format!("db error: {e}")))),
+    };
+
+    // Per-repo override caps the workspace role (restrict-only).
+    let override_role = match state
+        .repo_access_overrides
+        .find_by_repo_and_user(&repo.id, user_id)
+        .await
+    {
+        Ok(o) => o.map(|o| o.restricted_role),
+        Err(e) => return Err(Box::new(git_err(format!("db error: {e}")))),
+    };
+    let effective = gyre_domain::effective_repo_role(membership.role, override_role);
+
+    if !effective.has_repo_permission(perm) {
+        return Err(Box::new(denial(
+            format!(
+                "effective role {} lacks the {} permission",
+                effective.as_str(),
+                perm.as_str()
+            ),
+            Some(effective),
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +263,6 @@ pub struct GitPath {
 pub struct InfoRefsQuery {
     service: String,
 }
-
 pub async fn git_info_refs(
     State(state): State<Arc<AppState>>,
     Path(GitPath {
@@ -152,12 +282,46 @@ pub async fn git_info_refs(
 
     let content_type = format!("application/x-{service}-advertisement");
 
-    let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
-        {
-            Ok(p) => p,
-            Err(r) => return r,
-        };
+    // Repo access enforcement (user-management.md §Repo Access): fetching
+    // (upload-pack) needs Read, pushing (receive-pack) needs Write.
+    let needed_perm = if service == "git-upload-pack" {
+        gyre_domain::RepoPermission::Read
+    } else {
+        gyre_domain::RepoPermission::Write
+    };
+    let repo = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+
+    // repo-lifecycle.md §4 step 5: archived repos are read-only. Reject the
+    // push at the service-advertisement stage with an `ERR` pkt-line — the
+    // git-smart-HTTP convention for service-level errors — so the client
+    // actually displays the reason ("fatal: remote error: ... "). A plain
+    // HTTP 403 here would hide the body from `git push` output entirely.
+    // The receive-pack POST handler keeps its own archived 403 as
+    // defense-in-depth for clients that skip the advertisement.
+    if subcommand == "receive-pack" && repo.is_archived() {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "info/refs receive-pack advertisement rejected: repository is archived"
+        );
+        let mut body = service_header(&service);
+        body.extend(pkt_line("ERR push rejected: repository is archived\n"));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", content_type)
+            .header("Cache-Control", "no-cache")
+            .body(Body::from(body))
+            .unwrap();
+    }
+
+    if let Err(resp) = authorize_repo_access(&state, &auth, &repo, needed_perm).await {
+        return *resp;
+    }
+    let repo_path = repo.path.clone();
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -194,6 +358,179 @@ pub async fn git_info_refs(
 }
 
 // ---------------------------------------------------------------------------
+// task-104: source control audit events (observability.md §Audit Event Types)
+// ---------------------------------------------------------------------------
+
+/// Record a `GitClone` audit event — an agent cloned/fetched a repo over
+/// smart HTTP (`git-upload-pack`).
+async fn emit_git_clone_audit(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    auth: &AuthenticatedAgent,
+) {
+    let repo_id = repo.id.to_string();
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::GitClone,
+        Some(Id::new(auth.agent_id.clone())),
+        auth.user_id.clone(),
+        None,
+        Some(repo.workspace_id.clone()),
+        Some(repo.id.clone()),
+        "repo".to_string(),
+        Some(repo_id.clone()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "repo_id": repo_id,
+            "agent_id": auth.agent_id,
+        }),
+        None,
+        None,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
+}
+
+/// Result of one pre-accept gate evaluation for a push.
+#[derive(Debug, Clone)]
+pub(crate) struct PushGateOutcomeEntry {
+    pub gate_name: String,
+    pub passed: bool,
+    pub reason: Option<String>,
+}
+
+/// A pre-accept gate rejection: which gate rejected and why.
+pub(crate) struct PushGateRejection {
+    pub gate_name: String,
+    pub reason: String,
+    pub branch: String,
+}
+
+/// Serialize gate outcomes for the `push_gate_results` detail field of a
+/// `GitPushAccepted` audit event.
+fn gate_results_json(outcomes: &[PushGateOutcomeEntry]) -> serde_json::Value {
+    serde_json::Value::Array(
+        outcomes
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "gate": o.gate_name,
+                    "passed": o.passed,
+                    "reason": o.reason,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Record a `GitPushRejected` audit event — a push gate rejected the push
+/// (observability.md: detail fields repo_id, branch, gate_name, reason).
+async fn emit_git_push_rejected_audit(
+    state: &AppState,
+    repo_id: &str,
+    workspace_id: &Id,
+    agent_id: &str,
+    branch: &str,
+    gate_name: &str,
+    reason: &str,
+) {
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::GitPushRejected,
+        Some(Id::new(agent_id)),
+        None,
+        None,
+        Some(workspace_id.clone()),
+        Some(Id::new(repo_id)),
+        "repo".to_string(),
+        Some(repo_id.to_string()),
+        AuditOutcome::Blocked,
+        serde_json::json!({
+            "repo_id": repo_id,
+            "branch": branch,
+            "gate_name": gate_name,
+            "reason": reason,
+        }),
+        None,
+        None,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
+}
+
+/// Record a `GitPushAccepted` audit event for one accepted ref update
+/// (observability.md: detail fields repo_id, branch, commit_sha, agent_id,
+/// push_gate_results).
+async fn emit_git_push_accepted_audit(
+    state: &AppState,
+    repo_id: &str,
+    workspace_id: &Id,
+    agent_id: &str,
+    branch: &str,
+    commit_sha: &str,
+    gate_results: &[PushGateOutcomeEntry],
+) {
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::GitPushAccepted,
+        Some(Id::new(agent_id)),
+        None,
+        None,
+        Some(workspace_id.clone()),
+        Some(Id::new(repo_id)),
+        "repo".to_string(),
+        Some(repo_id.to_string()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "repo_id": repo_id,
+            "branch": branch,
+            "commit_sha": commit_sha,
+            "agent_id": agent_id,
+            "push_gate_results": gate_results_json(gate_results),
+        }),
+        None,
+        None,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
+}
+
+/// Record a `SpecChanged` audit event — a spec file was modified in a push to
+/// the default branch (observability.md: detail fields repo_id, spec_path,
+/// change_kind, task_id).
+async fn emit_spec_changed_audit(
+    state: &AppState,
+    repo_id: &str,
+    workspace_id: Option<&Id>,
+    spec_path: &str,
+    change_kind: &str,
+    task_id: Option<&str>,
+) {
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::SpecChanged,
+        None,
+        None,
+        None,
+        workspace_id.cloned(),
+        Some(Id::new(repo_id)),
+        "spec".to_string(),
+        Some(spec_path.to_string()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "repo_id": repo_id,
+            "spec_path": spec_path,
+            "change_kind": change_kind,
+            "task_id": task_id,
+        }),
+        None,
+        None,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
+}
+
+// ---------------------------------------------------------------------------
 // POST /git/:repo_id/:repo/git-upload-pack  (clone / fetch)
 // ---------------------------------------------------------------------------
 
@@ -206,12 +543,18 @@ pub async fn git_upload_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
-        {
-            Ok(p) => p,
-            Err(r) => return r,
-        };
+    let repo = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    // Repo access enforcement: clone/fetch needs Read
+    // (user-management.md §Repo Access).
+    if let Err(resp) =
+        authorize_repo_access(&state, &auth, &repo, gyre_domain::RepoPermission::Read).await
+    {
+        return *resp;
+    }
+    let repo_path = repo.path.clone();
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
@@ -224,6 +567,10 @@ pub async fn git_upload_pack(
     };
 
     info!(%repo_path, "served git-upload-pack");
+
+    // task-104: GitClone audit event (observability.md §Audit Event Types) —
+    // an agent cloned/fetched the repo over smart HTTP.
+    emit_git_clone_audit(&state, &repo, &auth).await;
 
     Response::builder()
         .status(StatusCode::OK)
@@ -245,11 +592,37 @@ pub async fn git_receive_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    let resolved =
-        match resolve_repo_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await {
-            Ok(r) => r,
-            Err(r) => return r,
-        };
+    // Task-134: scoped gate-agent tokens are read-only — a `review:submit`
+    // reviewer or `validation:report` validator may read MR context, never
+    // push code (agent-gates.md §Gate Agent Lifecycle: "read-only access").
+    // Caller-scoped capability, exact-match (review F3): checked before
+    // workspace/repo resolution so the denial does not depend on (or leak
+    // the existence of) the target. §1 Token Scoping: the scope claim is a
+    // list; read it through the extractor-derived `auth.scope` (mirrored
+    // from signature-verified claims), never the raw JSON string form —
+    // an array claim read as a string silently fails open.
+    if auth
+        .scope
+        .iter()
+        .any(|s| s == crate::auth::REVIEW_SUBMIT_SCOPE || s == crate::auth::VALIDATION_REPORT_SCOPE)
+    {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: scoped gate-agent token cannot push"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: gate-agent scoped tokens are read-only".to_string(),
+        )
+            .into_response();
+    }
+
+    let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     if resolved.is_mirror {
         warn!(
             agent_id = %auth.agent_id,
@@ -263,6 +636,29 @@ pub async fn git_receive_pack(
         )
             .into_response();
     }
+    // repo-lifecycle.md §4 Archive step 5: archived repos are read-only —
+    // reject the push before the packfile is processed.
+    if resolved.is_archived() {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: repository is archived"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: repository is archived".to_string(),
+        )
+            .into_response();
+    }
+    // Repo access enforcement: pushing needs Write
+    // (user-management.md §Repo Access).
+    if let Err(resp) =
+        authorize_repo_access(&state, &auth, &resolved, gyre_domain::RepoPermission::Write).await
+    {
+        return *resp;
+    }
+
     let repo_id = resolved.id.to_string();
     let repo_workspace_id = resolved.workspace_id.clone();
     let repo_path = resolved.path;
@@ -277,6 +673,17 @@ pub async fn git_receive_pack(
             has_jwt_claims = auth.jwt_claims.is_some(),
             "git-receive-pack 403: ABAC denied"
         );
+        // task-104: AbacDenied audit event — the repo-level ABAC check
+        // rejected the push outside the ABAC middleware.
+        crate::abac_middleware::record_abac_denied(
+            &state,
+            &auth,
+            "repo",
+            "push",
+            None,
+            "POST /git/:workspace_slug/:repo_name/git-receive-pack",
+        )
+        .await;
         return (StatusCode::FORBIDDEN, reason).into_response();
     }
 
@@ -307,27 +714,61 @@ pub async fn git_receive_pack(
         Err(e) => return git_err(e),
     };
 
+    // Review repair (task-104): receive-pack reports per-ref rejections
+    // (non-fast-forward, stale client, `receive.denyNonFastForwards`, ref
+    // lock contention) in the report-status stream back to the client — the
+    // process still exits 0. The ref updates parsed from the request are
+    // therefore only *requests*. Verify which of them actually landed
+    // before any push-acceptance signaling runs: a declined update must not
+    // produce a GitPushAccepted audit event (spec trigger: "Smart HTTP push
+    // accepted") or any other post-receive acceptance processing.
+    let applied_updates = verify_applied_ref_updates(&repo_path, &ref_updates).await;
+
     // Pre-accept gate checks: run after git accepts packfile, undo refs on failure.
+    // task-104: gate outcomes are captured so the GitPushAccepted audit event
+    // carries the spec'd push_gate_results detail field.
+    let mut push_gate_outcomes: Vec<PushGateOutcomeEntry> = Vec::new();
     if !ref_updates.is_empty() {
-        if let Err(rejection) =
-            check_pre_accept_gates(&state, &repo_id, &repo_path, &ref_updates, &auth.agent_id).await
+        match check_pre_accept_gates(&state, &repo_id, &repo_path, &ref_updates, &auth.agent_id)
+            .await
         {
-            undo_ref_updates(&repo_path, &ref_updates).await;
-            // Emit PushRejected event via unified message bus.
-            state
-                .emit_event(
-                    Some(repo_workspace_id.clone()),
-                    gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
-                    gyre_common::message::MessageKind::PushRejected,
-                    Some(serde_json::json!({
-                        "repo_id": repo_id,
-                        "branch": ref_updates.first().map(|u| u.refname.clone()).unwrap_or_default(),
-                        "agent_id": auth.agent_id,
-                        "reason": rejection,
-                    })),
+            Ok(outcomes) => push_gate_outcomes = outcomes,
+            Err(rejection) => {
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                // Emit PushRejected event via unified message bus.
+                state
+                    .emit_event(
+                        Some(repo_workspace_id.clone()),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": ref_updates.first().map(|u| u.refname.clone()).unwrap_or_default(),
+                            "agent_id": auth.agent_id,
+                            "reason": format!("push rejected by gate '{}': {}", rejection.gate_name, rejection.reason),
+                        })),
+                    )
+                    .await;
+                // task-104: GitPushRejected audit event (gate rejection).
+                emit_git_push_rejected_audit(
+                    &state,
+                    &repo_id,
+                    &repo_workspace_id,
+                    &auth.agent_id,
+                    &rejection.branch,
+                    &rejection.gate_name,
+                    &rejection.reason,
                 )
                 .await;
-            return (StatusCode::FORBIDDEN, rejection).into_response();
+                return (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "push rejected by gate '{}': {}",
+                        rejection.gate_name, rejection.reason
+                    ),
+                )
+                    .into_response();
+            }
         }
     }
 
@@ -372,6 +813,20 @@ pub async fn git_receive_pack(
                         })),
                     )
                     .await;
+                // task-104: GitPushRejected audit event (constraint gate).
+                emit_git_push_rejected_audit(
+                    &state,
+                    &repo_id,
+                    &repo_workspace_id,
+                    &auth.agent_id,
+                    &ref_updates
+                        .first()
+                        .map(|u| u.refname.trim_start_matches("refs/heads/").to_string())
+                        .unwrap_or_default(),
+                    "constraint-enforcement",
+                    &rejection,
+                )
+                .await;
                 return (StatusCode::FORBIDDEN, rejection).into_response();
             }
         }
@@ -415,6 +870,17 @@ pub async fn git_receive_pack(
                         })),
                     )
                     .await;
+                // task-104: GitPushRejected audit event (manifest gate).
+                emit_git_push_rejected_audit(
+                    &state,
+                    &repo_id,
+                    &repo_workspace_id,
+                    &auth.agent_id,
+                    &default_branch,
+                    "manifest-coverage",
+                    &rejection,
+                )
+                .await;
                 return (StatusCode::FORBIDDEN, rejection).into_response();
             }
         }
@@ -443,6 +909,17 @@ pub async fn git_receive_pack(
                         })),
                     )
                     .await;
+                // task-104: GitPushRejected audit event (spec-link cycle gate).
+                emit_git_push_rejected_audit(
+                    &state,
+                    &repo_id,
+                    &repo_workspace_id,
+                    &auth.agent_id,
+                    &default_branch,
+                    "spec-link-cycles",
+                    &rejection,
+                )
+                .await;
                 return (StatusCode::FORBIDDEN, rejection).into_response();
             }
         }
@@ -514,11 +991,12 @@ pub async fn git_receive_pack(
     let conversation_turn_clone = conversation_turn;
     let push_tenant_id = auth.tenant_id.clone();
     let push_workspace_id = repo_workspace_id.clone();
+    let push_gate_outcomes_clone = push_gate_outcomes.clone();
     tokio::spawn(async move {
         let commit_count = record_pushed_commits(
             &state_clone,
             &repo_path_clone,
-            &ref_updates,
+            &applied_updates,
             &agent_id,
             task_id_clone.as_deref(),
             parent_agent_id_clone.as_deref(),
@@ -535,26 +1013,50 @@ pub async fn git_receive_pack(
                 &agent_id,
                 &tenant_id_clone,
                 turn,
-                &ref_updates,
+                &applied_updates,
                 crate::api::now_secs(),
             )
             .await;
         }
-        // Emit PushAccepted event via unified message bus.
-        state_clone
-            .emit_event(
-                Some(repo_workspace_id_clone.clone()),
-                gyre_common::message::Destination::Workspace(repo_workspace_id_clone),
-                gyre_common::message::MessageKind::PushAccepted,
-                Some(serde_json::json!({
-                    "repo_id": repo_id_clone,
-                    "branch": branch_clone,
-                    "agent_id": agent_id,
-                    "commit_count": commit_count as u64,
-                    "task_id": task_id_clone,
-                })),
+        // Emit PushAccepted event via unified message bus — only when git
+        // actually applied at least one ref update. A push git declined in
+        // full (e.g. every update non-fast-forward) is not an accepted push.
+        if !applied_updates.is_empty() {
+            state_clone
+                .emit_event(
+                    Some(repo_workspace_id_clone.clone()),
+                    gyre_common::message::Destination::Workspace(repo_workspace_id_clone),
+                    gyre_common::message::MessageKind::PushAccepted,
+                    Some(serde_json::json!({
+                        "repo_id": repo_id_clone,
+                        "branch": branch_clone,
+                        "agent_id": agent_id,
+                        "commit_count": commit_count as u64,
+                        "task_id": task_id_clone,
+                    })),
+                )
+                .await;
+        }
+
+        // task-104: GitPushAccepted audit event (observability.md §Audit
+        // Event Types) — one event per ref update git actually applied
+        // (verified via rev-parse; git-declined updates emit nothing),
+        // carrying the branch, commit SHA, and the pre-accept gate results.
+        for update in applied_updates.iter() {
+            emit_git_push_accepted_audit(
+                &state_clone,
+                &repo_id_clone,
+                &push_workspace_id,
+                &agent_id,
+                update
+                    .refname
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&update.refname),
+                &update.new_sha,
+                &push_gate_outcomes_clone,
             )
             .await;
+        }
 
         // TASK-006 (Phase 1) + TASK-007 (Phase 2): Audit-only attestation chain
         // verification AND strategy-implied constraint evaluation.
@@ -590,43 +1092,39 @@ pub async fn git_receive_pack(
 
                     // TASK-061 (§7.2): Populate attestation chain ABAC subject
                     // attributes and evaluate policies with action=push,
-                    // resource_type=attestation. Audit-only — logged but not enforced.
+                    // resource_type=attestation. Audit-only — logged and
+                    // recorded to the decision audit trail (see
+                    // evaluate_push_attestation_abac), never enforced. A
+                    // store-read failure inside the evaluation is logged
+                    // and the evaluation skipped (review round 6): the
+                    // push itself is unaffected either way, but a store
+                    // error must be visible, never silently reshaped into
+                    // a tenant-scope-less evaluation.
                     if let Some(leaf) = attestations.iter().max_by_key(|a| a.metadata.chain_depth) {
                         let chain = state_clone
                             .chain_attestations
                             .load_chain(&leaf.id)
                             .await
                             .unwrap_or_default();
-                        let chain_depth = leaf.metadata.chain_depth;
-                        let signer = gyre_domain::root_signer(&chain);
-                        let cc = gyre_domain::constraint_count(&chain) as i64;
-
-                        let mut ctx = crate::policy_engine::AttributeContext::default();
-                        ctx.set("subject.type", "agent");
-                        ctx.set("subject.id", &agent_id);
-                        ctx.set("subject.tenant_id", &push_tenant_id);
-                        ctx.set_number("subject.chain_depth", chain_depth as i64);
-                        ctx.set_number("subject.constraint_count", cc);
-                        if let Some(ref rs) = signer {
-                            ctx.set("subject.root_signer", rs);
+                        if let Err(e) = evaluate_push_attestation_abac(
+                            &state_clone,
+                            tid,
+                            &repo_id_clone,
+                            &repo_workspace_id_str,
+                            &agent_id,
+                            &push_tenant_id,
+                            leaf,
+                            &chain,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                task_id = %tid,
+                                repo_id = %repo_id_clone,
+                                error = %e,
+                                "push attestation ABAC evaluation unavailable (audit-only, push proceeds)"
+                            );
                         }
-                        ctx.set("resource.type", "attestation");
-                        ctx.set("resource.repo_id", &repo_id_clone);
-
-                        let policies = state_clone.policies.list().await.unwrap_or_default();
-                        let eval_result =
-                            crate::policy_engine::evaluate(policies, &ctx, "push", "attestation");
-
-                        tracing::info!(
-                            task_id = %tid,
-                            repo_id = %repo_id_clone,
-                            chain_depth = chain_depth,
-                            root_signer = ?signer,
-                            constraint_count = cc,
-                            decision = ?eval_result.effect,
-                            matched_policy = ?eval_result.matched_policy,
-                            "attestation ABAC evaluation for push (audit-only)" // enforcement-mode:ok
-                        );
                     }
                 }
                 Ok(_) => {
@@ -646,7 +1144,8 @@ pub async fn git_receive_pack(
             }
 
             // Phase 2: strategy-implied constraint evaluation (TASK-007).
-            let constraint_ref_updates: Vec<(String, String, String)> = ref_updates
+            // Only for ref updates git actually applied.
+            let constraint_ref_updates: Vec<(String, String, String)> = applied_updates
                 .iter()
                 .map(|u| (u.old_sha.clone(), u.new_sha.clone(), u.refname.clone()))
                 .collect();
@@ -663,8 +1162,21 @@ pub async fn git_receive_pack(
             .await;
         }
 
-        // Spec lifecycle: auto-create tasks for spec changes on the default branch.
+        // Spec lifecycle: auto-create tasks for spec changes on the default
+        // branch — only for ref updates git actually applied.
         process_spec_lifecycle(
+            &state_clone,
+            &repo_id_clone,
+            &repo_path_clone,
+            &default_branch_clone,
+            &applied_updates,
+        )
+        .await;
+
+        // Repo-defined personas (platform-model.md §2): detect persona file
+        // changes on the default branch, update the entity, reset approval,
+        // auto-create the approval task and notify the owner.
+        process_persona_changes(
             &state_clone,
             &repo_id_clone,
             &repo_path_clone,
@@ -680,7 +1192,7 @@ pub async fn git_receive_pack(
         //   item 3: "if the parent MR is later rebased, the dependency is
         //   re-evaluated") — the dependent child's edge is re-checked even
         //   though the child's branch never moved.
-        let pushed_branches: Vec<String> = ref_updates
+        let pushed_branches: Vec<String> = applied_updates
             .iter()
             .filter_map(|u| u.refname.strip_prefix("refs/heads/").map(str::to_string))
             .collect();
@@ -705,11 +1217,12 @@ pub async fn git_receive_pack(
             .ok()
             .flatten()
             .map(|ws| ws.tenant_id);
-        for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+        for update in applied_updates.iter().filter(|u| u.refname == default_ref) {
             let now = crate::api::now_secs();
             crate::spec_registry::sync_spec_ledger(
                 &state_clone.spec_ledger,
                 &state_clone.spec_links_store,
+                &state_clone.spec_link_repo,
                 &repo_path_clone,
                 &update.new_sha,
                 now,
@@ -719,6 +1232,17 @@ pub async fn git_receive_pack(
                 Some(&state_clone.repos),
                 workspace_tenant_id.as_ref(),
                 Some(&state_clone.tasks),
+            )
+            .await;
+            // search.md §Index Updates: "Spec pushed -> index updated (content
+            // extracted from git blob)". Runs after the ledger sync so
+            // approval_status/owner facets reflect this push.
+            crate::search_indexer::index_repo_specs(
+                &state_clone,
+                &repo_id_clone,
+                &repo_workspace_id_str,
+                &repo_path_clone,
+                &update.new_sha,
             )
             .await;
             // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
@@ -771,9 +1295,25 @@ pub async fn git_receive_pack(
             } else {
                 None
             };
+            // §API > Notifications: pass the broadcasting wrapper, not the
+            // bare repo — push-scoped notifications must fan out to live
+            // /notifications/stream subscribers (task-125 review repair) —
+            // plus channel fan-out after in-app create (user-management.md
+            // §Delivery Channels). The closure clones the state Arc so the
+            // boxed future is 'static.
+            let divergence_notifications = state_clone.broadcasting_notifications();
+            let fanout_state = std::sync::Arc::clone(&state_clone);
+            let on_created = move |notif: &gyre_common::Notification| {
+                let state = std::sync::Arc::clone(&fanout_state);
+                let notif = notif.clone();
+                futures_util::FutureExt::boxed(async move {
+                    crate::notification_dispatcher::dispatch_to_channels(&state, &notif).await;
+                })
+            };
             let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                notification_repo: state_clone.notifications.as_ref(),
+                notification_repo: &divergence_notifications,
                 membership_repo: state_clone.workspace_memberships.as_ref(),
+                on_created: Some(Box::new(on_created)),
             });
             // §9 spec-assertion notifications are scoped by the repo's
             // workspace — every push type notifies, not just agent pushes.
@@ -797,6 +1337,26 @@ pub async fn git_receive_pack(
                 }),
             )
             .await;
+        }
+
+        // search.md §Index Updates: code search (file content) is indexed
+        // asynchronously on push via the background job registry — eventually
+        // consistent, never inline in the push path. The job walks the default
+        // branch, so only default-branch pushes need to trigger it.
+        if ref_updates
+            .iter()
+            .any(|u| u.refname == format!("refs/heads/{default_branch_clone}"))
+        {
+            let st = Arc::clone(&state_clone);
+            tokio::spawn(async move {
+                if let Err(e) = st
+                    .job_registry
+                    .trigger("search_code_index", Arc::clone(&st))
+                    .await
+                {
+                    tracing::warn!("search-index: code index job failed: {e}");
+                }
+            });
         }
     });
 
@@ -1056,6 +1616,18 @@ async fn record_pushed_commits(
             } else {
                 total_recorded += 1;
             }
+            // search.md §Index Updates: "Commit pushed -> commit messages
+            // indexed" — message and author are read from the git object store.
+            crate::search_indexer::index_pushed_commit(
+                state,
+                &repo.id.to_string(),
+                &repo.workspace_id.to_string(),
+                repo_path,
+                sha,
+                &update.refname,
+                agent_id,
+            )
+            .await;
         }
     }
     total_recorded
@@ -1114,14 +1686,17 @@ async fn record_turn_commit_links(
 // ---------------------------------------------------------------------------
 
 /// Run the configured pre-accept gates for a repository against the pushed commits.
-/// Returns `Ok(())` if all gates pass, or `Err(reason)` if any gate rejects the push.
+/// Returns `Ok(outcomes)` — one entry per evaluated gate — if all gates pass,
+/// or `Err(rejection)` naming the rejecting gate if any gate rejects the push.
+/// The outcomes feed the `push_gate_results` detail of the GitPushAccepted
+/// audit event (task-104).
 async fn check_pre_accept_gates(
     state: &Arc<AppState>,
     repo_id: &str,
     repo_path: &str,
     ref_updates: &[RefUpdate],
     agent_id: &str,
-) -> Result<(), String> {
+) -> Result<Vec<PushGateOutcomeEntry>, PushGateRejection> {
     // Get gate names configured for this repo.
     let gate_names = state
         .repo_push_gates
@@ -1129,7 +1704,7 @@ async fn check_pre_accept_gates(
         .await
         .unwrap_or_default();
     if gate_names.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // M14.2: Resolve agent stack fingerprint and repo policy once for all ref updates.
@@ -1154,6 +1729,7 @@ async fn check_pre_accept_gates(
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
+    let mut outcomes: Vec<PushGateOutcomeEntry> = Vec::new();
     for update in ref_updates {
         // Collect commit messages for this ref update.
         let range = if update.old_sha.starts_with("00000000") {
@@ -1216,7 +1792,7 @@ async fn check_pre_accept_gates(
         let ctx = PushContext {
             repo_id: repo_id.to_string(),
             refname: update.refname.clone(),
-            branch,
+            branch: branch.clone(),
             commit_messages,
             changed_files,
             agent_id: Some(agent_id.to_string()),
@@ -1232,7 +1808,11 @@ async fn check_pre_accept_gates(
                 .find(|g| g.name() == gate_name)
             {
                 match gate.check(&ctx) {
-                    GateOutcome::Passed => {}
+                    GateOutcome::Passed => outcomes.push(PushGateOutcomeEntry {
+                        gate_name: gate_name.clone(),
+                        passed: true,
+                        reason: None,
+                    }),
                     GateOutcome::Failed(reason) => {
                         warn!(
                             repo_id,
@@ -1241,14 +1821,18 @@ async fn check_pre_accept_gates(
                             %reason,
                             "pre-accept gate rejected push"
                         );
-                        return Err(format!("push rejected by gate '{gate_name}': {reason}"));
+                        return Err(PushGateRejection {
+                            gate_name: gate_name.clone(),
+                            reason,
+                            branch: branch.clone(),
+                        });
                     }
                 }
             }
         }
     }
 
-    Ok(())
+    Ok(outcomes)
 }
 
 /// Undo ref updates in the repository (e.g., after a gate rejection).
@@ -1297,18 +1881,83 @@ async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
     }
 }
 
+/// Verify which of the requested ref updates `git receive-pack` actually
+/// applied (task-104 review repair).
+///
+/// receive-pack reports per-ref rejections (non-fast-forward, stale client,
+/// `receive.denyNonFastForwards`, ref lock contention) in the report-status
+/// stream back to the client — the process still exits 0. A ref update parsed
+/// from the request body is therefore only a *request*. Confirm each ref now
+/// points at the requested new SHA (`git rev-parse <refname> == new_sha`);
+/// updates git declined are dropped so no acceptance signaling runs for them.
+async fn verify_applied_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) -> Vec<RefUpdate> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let mut applied = Vec::with_capacity(ref_updates.len());
+
+    for update in ref_updates {
+        // Refnames come from the client request body; only plain ref paths
+        // are ever handed to the git subprocess.
+        if !update.refname.starts_with("refs/") {
+            warn!(
+                repo_path,
+                refname = %update.refname,
+                "ref update with non-'refs/' refname; treating as not applied"
+            );
+            continue;
+        }
+        let resolved = Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("rev-parse")
+            .arg("--verify")
+            // Refnames are client-controlled; never let one parse as an option.
+            .arg("--end-of-options")
+            .arg(&update.refname)
+            .output()
+            .await;
+        let is_applied = match resolved {
+            Ok(o) if o.status.success() => {
+                let sha = String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .to_ascii_lowercase();
+                sha == update.new_sha.to_ascii_lowercase()
+            }
+            _ => false,
+        };
+        if is_applied {
+            applied.push(RefUpdate {
+                old_sha: update.old_sha.clone(),
+                new_sha: update.new_sha.clone(),
+                refname: update.refname.clone(),
+            });
+        } else {
+            warn!(
+                repo_path,
+                refname = %update.refname,
+                new_sha = %update.new_sha,
+                "git receive-pack declined this ref update; not recording push acceptance for it"
+            );
+        }
+    }
+
+    applied
+}
+
 // ---------------------------------------------------------------------------
 // Spec lifecycle: auto-create tasks on spec changes in the default branch
 // ---------------------------------------------------------------------------
 
-/// Spec path prefixes that trigger lifecycle task creation (per spec-lifecycle.md).
-const SPEC_WATCHED_PATHS: &[&str] = &["specs/system/", "specs/development/"];
-
 /// Classify a spec file change and return (title, labels, priority).
+///
+/// Priorities come from the repo's `SpecLifecycleConfig`
+/// (spec-lifecycle.md §Configuration): new/rename -> `default_priority_new`,
+/// modified -> `default_priority_modified`, deleted ->
+/// `default_priority_deleted`.
 fn classify_spec_change(
     status_char: char,
     path: &str,
     old_path: Option<&str>,
+    config: &gyre_domain::SpecLifecycleConfig,
 ) -> Option<(String, Vec<String>, gyre_domain::TaskPriority)> {
     match status_char {
         'A' => Some((
@@ -1317,33 +1966,37 @@ fn classify_spec_change(
                 "spec-implementation".to_string(),
                 "auto-created".to_string(),
             ],
-            gyre_domain::TaskPriority::Medium,
+            config.default_priority_new.clone(),
         )),
         'M' => Some((
             format!("Review spec change: {path}"),
             vec!["spec-drift-review".to_string(), "auto-created".to_string()],
-            gyre_domain::TaskPriority::High,
+            config.default_priority_modified.clone(),
         )),
         'D' => Some((
             format!("Handle spec removal: {path}"),
             vec!["spec-deprecated".to_string(), "auto-created".to_string()],
-            gyre_domain::TaskPriority::High,
+            config.default_priority_deleted.clone(),
         )),
         'R' => {
             let old = old_path.unwrap_or(path);
             Some((
                 format!("Update spec references: {old} -> {path}"),
                 vec!["spec-housekeeping".to_string(), "auto-created".to_string()],
-                gyre_domain::TaskPriority::Medium,
+                config.default_priority_new.clone(),
             ))
         }
         _ => None,
     }
 }
 
-/// Parse `git diff --name-status` output into (status_char, new_path, old_path) tuples.
-/// Only returns entries in watched spec paths.
-pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
+/// Parse `git diff --name-status` output into (status_char, new_path, old_path)
+/// tuples. Returns every entry, unfiltered — which entries actually trigger
+/// lifecycle work is decided downstream: the spec-manifest gate for task
+/// creation (spec-registry.md §15, `should_create_lifecycle_task`), the
+/// repo's `SpecLifecycleConfig` watched prefixes as the manifest-less
+/// fallback, and persona-file detection for the persona push hook.
+fn parse_name_status(diff_output: &str) -> Vec<(char, String, Option<String>)> {
     let mut changes = Vec::new();
 
     for line in diff_output.lines() {
@@ -1369,19 +2022,6 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
             (None, parts[1])
         };
 
-        let is_watched = SPEC_WATCHED_PATHS
-            .iter()
-            .any(|prefix| new_path.starts_with(prefix));
-        let old_is_watched = old_path.is_some_and(|p| {
-            SPEC_WATCHED_PATHS
-                .iter()
-                .any(|prefix| p.starts_with(prefix))
-        });
-
-        if !is_watched && !old_is_watched {
-            continue;
-        }
-
         changes.push((
             status_char,
             new_path.to_string(),
@@ -1392,6 +2032,442 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
     changes
 }
 
+/// Decide whether a changed spec file should create a lifecycle task
+/// (spec-registry.md §15 — manifest-driven, not path-prefix driven).
+///
+/// - `Some(manifest)` (a manifest exists at the pushed HEAD): the manifest is
+///   the single source of truth. A task is created only when the changed file
+///   has a manifest entry whose effective `auto_create_tasks` (per-entry
+///   override, else the `defaults:` section) is true. Files not registered in
+///   the manifest create no lifecycle task.
+/// - `None` (manifest-less repo): the repo's `SpecLifecycleConfig` watched /
+///   ignored path prefixes decide (spec-lifecycle.md §Configuration — the
+///   `[spec_lifecycle]` config block is superseded by the manifest only when
+///   a manifest exists), so existing repos keep working. A rename (or copy)
+///   triggers the fallback when **either** side of the rename sits under a
+///   watched prefix, matching the pre-manifest behavior.
+pub fn should_create_lifecycle_task(
+    manifest: Option<&crate::spec_registry::SpecManifest>,
+    config: &gyre_domain::SpecLifecycleConfig,
+    status_char: char,
+    path: &str,
+    old_path: Option<&str>,
+) -> bool {
+    // Change kinds that don't classify into a task never create one.
+    if classify_spec_change(status_char, path, old_path, config).is_none() {
+        return false;
+    }
+    match manifest {
+        // Manifest mode matches on the NEW path only (task-194 instruction:
+        // "For renames (R), match on the new path").
+        Some(m) => crate::spec_registry::manifest_entry_for_path(m, path)
+            .map(|e| e.effective_auto_create_tasks(&m.defaults))
+            .unwrap_or(false),
+        None => config.is_watched(path) || old_path.is_some_and(|p| config.is_watched(p)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Repo-defined personas: push detection + approval reset
+// (platform-model.md §2 Repo-Defined Personas)
+// ---------------------------------------------------------------------------
+
+/// Directory holding repo-defined persona files (platform-model.md §2).
+const PERSONA_FILES_DIR: &str = "specs/personas/";
+
+/// True for repo-defined persona files: `*.md` directly under `specs/personas/`
+/// (e.g. `specs/personas/security.md`). Nested paths are not persona files —
+/// the spec's example set is flat.
+fn is_persona_file(path: &str) -> bool {
+    match path.strip_prefix(PERSONA_FILES_DIR) {
+        Some(rest) => !rest.is_empty() && rest.ends_with(".md") && !rest.contains('/'),
+        None => false,
+    }
+}
+
+/// Derive the persona slug from a persona file path:
+/// `specs/personas/security.md` → `security`.
+fn persona_slug_from_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(PERSONA_FILES_DIR)?;
+    let slug = rest.strip_suffix(".md")?;
+    if slug.is_empty() || slug.contains('/') {
+        return None;
+    }
+    Some(slug.to_string())
+}
+
+/// Parse `git diff --name-status` output, returning only repo-defined persona
+/// file changes (entries where the old or the new side is a persona file).
+pub fn parse_persona_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
+    parse_name_status(diff_output)
+        .into_iter()
+        .filter(|(_, new_path, old_path)| {
+            is_persona_file(new_path) || old_path.as_deref().is_some_and(is_persona_file)
+        })
+        .collect()
+}
+
+/// Build the auto-created approval task for a persona change
+/// (platform-model.md §2: "Creates a task: Persona change requires human
+/// approval").
+fn persona_approval_task(
+    slug: &str,
+    persona_path: &str,
+    repo_id: &Id,
+    workspace_id: &Id,
+    change_kind: &str,
+    now: u64,
+) -> gyre_domain::Task {
+    let title = format!("Persona change requires human approval: {slug}");
+    let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+    let mut task = gyre_domain::Task::new(task_id, &title, now);
+    task.priority = gyre_domain::TaskPriority::High;
+    task.labels = vec!["persona-change".to_string(), "auto-created".to_string()];
+    task.description = Some(format!(
+        "Auto-created by the persona push hook (platform-model.md §2).\n\
+         Persona file: {persona_path}\nRepo: {repo_id}\nChange: {change_kind}\n\
+         The persona's approval was reset to Pending; a human must re-approve \
+         before the persona is used again."
+    ));
+    task.repo_id = repo_id.clone();
+    task.workspace_id = workspace_id.clone();
+    task.spec_path = Some(persona_path.to_string());
+    // task_type intentionally left as None: push-hook tasks are informational
+    // and must NOT trigger agent spawning (agent-runtime.md §1 Phase 4).
+    task
+}
+
+/// Read a file's content at a specific commit (`git show <sha>:<path>`).
+/// Returns `None` on failure or when the content is not valid UTF-8
+/// (persona prompts are markdown; mangled bytes would corrupt the prompt).
+async fn read_file_at(git_bin: &str, repo_path: &str, sha: &str, path: &str) -> Option<String> {
+    let out = Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("show")
+        .arg(format!("{sha}:{path}"))
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        warn!(repo_path, path, "persona-push: git show failed: {err}");
+        return None;
+    }
+    match String::from_utf8(out.stdout) {
+        Ok(content) => Some(content),
+        Err(_) => {
+            warn!(
+                repo_path,
+                path, "persona-push: file content is not valid UTF-8; skipping"
+            );
+            None
+        }
+    }
+}
+
+/// After a successful push to the default branch, detect repo-defined persona
+/// file changes and reset their approval (platform-model.md §2
+/// Repo-Defined Personas). Runs in the same post-receive pipeline as
+/// spec-lifecycle processing.
+///
+/// For each changed `specs/personas/<slug>.md` file:
+/// 1. the persona entity (looked up by slug + `PersonaScope::Repo`) is updated
+///    with the new file content and a recomputed `content_hash` — or a new
+///    repo-scoped persona is created as `Pending` when none exists yet,
+/// 2. approval is reset to `Pending` (`approved_by`/`approved_at` cleared,
+///    `version` incremented, `updated_at` refreshed),
+/// 3. a "Persona change requires human approval" task is auto-created
+///    (deduplicated against open tasks with the same title),
+/// 4. the persona owner is notified via the inbox.
+///
+/// Deleted persona files have no new content: the entity keeps its last
+/// registered prompt, but its approval still resets — a removed persona file
+/// must not keep running on a stale approval.
+async fn process_persona_changes(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    default_branch: &str,
+    ref_updates: &[RefUpdate],
+) {
+    let default_ref = format!("refs/heads/{default_branch}");
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    // Well-known SHA for the empty git tree (used as base for initial pushes).
+    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+        let old = if update.old_sha.starts_with("00000000") {
+            EMPTY_TREE.to_string()
+        } else {
+            update.old_sha.clone()
+        };
+
+        let out = match Command::new(&git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("diff")
+            .arg("--name-status")
+            .arg("--diff-filter=AMDR")
+            .arg(format!("{old}..{}", update.new_sha))
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => o,
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                warn!(repo_path, "persona-push: git diff failed: {err}");
+                continue;
+            }
+            Err(e) => {
+                warn!(repo_path, "persona-push: git diff spawn failed: {e}");
+                continue;
+            }
+        };
+
+        let changes = parse_persona_changes(&String::from_utf8_lossy(&out.stdout));
+        if changes.is_empty() {
+            continue;
+        }
+
+        // Scope resolution: the repo row carries the workspace (task scoping)
+        // and its workspace carries the tenant (notification scoping). A
+        // lookup failure means the scope cannot be determined — skip the
+        // affected entity rather than fabricating a scope identity
+        // (task-097 F3 class).
+        let Some(repo) = state
+            .repos
+            .find_by_id(&Id::new(repo_id))
+            .await
+            .ok()
+            .flatten()
+        else {
+            warn!(
+                repo_id,
+                "persona-push: repo not found; skipping persona processing"
+            );
+            return;
+        };
+        let tenant_id = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| ws.tenant_id.to_string());
+
+        let existing_tasks = state.tasks.list().await.unwrap_or_default();
+        let now = crate::api::now_secs();
+        let repo_scope = gyre_domain::PersonaScope::Repo(repo.id.clone());
+
+        for (status_char, path, old_path) in changes {
+            // A change can affect two persona paths: a rename carries content
+            // for the new path and removes the old one.
+            let mut affected: Vec<(&str, bool)> = Vec::new(); // (path, has_new_content)
+            match status_char {
+                'A' | 'M' => affected.push((path.as_str(), true)),
+                'D' => affected.push((path.as_str(), false)),
+                'R' => {
+                    if let Some(old) = old_path.as_deref() {
+                        affected.push((old, false));
+                    }
+                    affected.push((path.as_str(), true));
+                }
+                _ => {}
+            }
+
+            for (persona_path, has_content) in affected {
+                let Some(slug) = persona_slug_from_path(persona_path) else {
+                    continue;
+                };
+
+                let content = if has_content {
+                    match read_file_at(&git_bin, repo_path, &update.new_sha, persona_path).await {
+                        Some(c) => Some(c),
+                        None => continue,
+                    }
+                } else {
+                    None
+                };
+
+                let existing = state
+                    .personas
+                    .find_by_slug_and_scope(&slug, &repo_scope)
+                    .await
+                    .ok()
+                    .flatten();
+
+                // Step 1+2: update the entity (or register a new one) and
+                // reset approval to Pending.
+                let persona_after: Option<gyre_domain::Persona> = match existing {
+                    Some(mut p) => {
+                        if let Some(c) = content {
+                            p.system_prompt = c;
+                            p.refresh_content_hash();
+                        }
+                        p.version += 1;
+                        p.approval_status = gyre_domain::PersonaApprovalStatus::Pending;
+                        p.approved_by = None;
+                        p.approved_at = None;
+                        p.updated_at = now;
+                        if let Err(e) = state.personas.update(&p).await {
+                            warn!(slug, "persona-push: failed to update persona: {e}");
+                            continue;
+                        }
+                        info!(
+                            slug,
+                            "persona-push: updated persona and reset approval to Pending"
+                        );
+                        Some(p)
+                    }
+                    None => match content {
+                        Some(c) => {
+                            let p = gyre_domain::Persona::new(
+                                Id::new(uuid::Uuid::new_v4().to_string()),
+                                slug.clone(),
+                                slug.clone(),
+                                repo_scope.clone(),
+                                c,
+                                now,
+                            );
+                            if let Err(e) = state.personas.create(&p).await {
+                                warn!(slug, "persona-push: failed to create persona: {e}");
+                                continue;
+                            }
+                            info!(
+                                slug,
+                                "persona-push: registered new repo-defined persona (Pending)"
+                            );
+                            Some(p)
+                        }
+                        None => {
+                            // Deleted persona file with no registered entity —
+                            // nothing to reset, nothing to approve.
+                            info!(
+                                slug,
+                                "persona-push: deleted persona file has no registered entity; skipping"
+                            );
+                            continue;
+                        }
+                    },
+                };
+
+                let change_kind = match (status_char, has_content) {
+                    ('A', true) => "added",
+                    ('M', true) => "modified",
+                    ('R', true) => "renamed",
+                    ('D', false) => "deleted",
+                    ('R', false) => "renamed (old path removed)",
+                    _ => "changed",
+                };
+
+                // Step 3: auto-create the human-approval task.
+                let title = format!("Persona change requires human approval: {slug}");
+                let task_exists = existing_tasks.iter().any(|t| {
+                    t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done)
+                });
+                if task_exists {
+                    info!(
+                        title,
+                        "persona-push: approval task already exists, skipping"
+                    );
+                } else {
+                    let task = persona_approval_task(
+                        &slug,
+                        persona_path,
+                        &repo.id,
+                        &repo.workspace_id,
+                        change_kind,
+                        now,
+                    );
+                    match state.tasks.create(&task).await {
+                        Err(e) => warn!(title, "persona-push: failed to create task: {e}"),
+                        Ok(()) => {
+                            info!(
+                                title,
+                                "persona-push: created approval task for persona change"
+                            );
+                            state
+                                .emit_event(
+                                    Some(repo.workspace_id.clone()),
+                                    gyre_common::message::Destination::Workspace(
+                                        repo.workspace_id.clone(),
+                                    ),
+                                    gyre_common::message::MessageKind::TaskCreated,
+                                    Some(serde_json::json!({"task_id": task.id.to_string()})),
+                                )
+                                .await;
+                        }
+                    }
+                }
+
+                // Step 4: notify the persona owner. A persona discovered from
+                // git has no owner yet, and an owner that does not resolve to
+                // a known user (e.g. an agent id) has no inbox to deliver to —
+                // skip rather than write an undeliverable notification.
+                let notify_owner = persona_after
+                    .as_ref()
+                    .and_then(|p| p.owner.clone())
+                    .filter(|o| !o.is_empty());
+                if let Some(owner) = notify_owner {
+                    let owner_id = Id::new(owner.clone());
+                    let user_exists = state
+                        .users
+                        .find_by_id(&owner_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    match (user_exists, tenant_id.as_deref()) {
+                        (false, _) => {
+                            info!(
+                                slug,
+                                owner,
+                                "persona-push: owner is not a known user; skipping notification"
+                            );
+                        }
+                        (true, None) => {
+                            warn!(
+                                slug,
+                                "persona-push: workspace tenant could not be resolved; skipping owner notification"
+                            );
+                        }
+                        (true, Some(tenant)) => {
+                            let mut notif = gyre_common::Notification::new(
+                                Id::new(uuid::Uuid::new_v4().to_string()),
+                                repo.workspace_id.clone(),
+                                owner_id,
+                                gyre_common::NotificationType::PersonaChangePendingApproval,
+                                title,
+                                tenant,
+                                now as i64,
+                            );
+                            notif.body = Some(format!(
+                                "Persona \"{slug}\" was {change_kind} in {persona_path} \
+                                 (repo {}). Its approval was reset to Pending and requires \
+                                 human review.",
+                                repo.name
+                            ));
+                            notif.source.entity_type = "persona".to_string();
+                            notif.source.entity_id = slug.clone();
+                            notif.source.repo_id = Some(repo.id.clone());
+                            if let Err(e) = state.create_notification(&notif).await {
+                                warn!(slug, "persona-push: failed to notify persona owner: {e}");
+                            } else {
+                                // Channel fan-out per user-management.md
+                                // §Delivery Channels.
+                                crate::notification_dispatcher::dispatch_to_channels(state, &notif)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// After a successful push to the default branch, detect spec changes and create tasks.
 async fn process_spec_lifecycle(
     state: &Arc<AppState>,
@@ -1400,6 +2476,17 @@ async fn process_spec_lifecycle(
     default_branch: &str,
     ref_updates: &[RefUpdate],
 ) {
+    // Per-repo config (spec-lifecycle.md §Configuration); defaults when unset.
+    let config = state
+        .spec_lifecycle_configs
+        .get_for_repo(repo_id)
+        .await
+        .unwrap_or_default();
+    if !config.enabled {
+        info!(repo_id, "spec-lifecycle: disabled for repo, skipping");
+        return;
+    }
+
     let default_ref = format!("refs/heads/{default_branch}");
     let relevant_updates: Vec<&RefUpdate> = ref_updates
         .iter()
@@ -1442,21 +2529,65 @@ async fn process_spec_lifecycle(
                 continue;
             }
         };
-
         let diff_text = String::from_utf8_lossy(&out.stdout);
-        let changes = parse_spec_changes(&diff_text);
+        // Parse the diff unfiltered: task-creation eligibility is decided by
+        // the manifest gate (`should_create_lifecycle_task`), or by the
+        // config watched-prefix fallback in manifest-less repos — not here.
+        let changes = parse_name_status(&diff_text);
         if changes.is_empty() {
             continue;
         }
 
+        // Manifest-driven lifecycle policy (spec-registry.md §15): the
+        // manifest at the pushed HEAD is the single source of truth for
+        // which spec files trigger lifecycle tasks and their priority.
+        // When the repo has no manifest, `should_create_lifecycle_task`
+        // falls back to the config's watched-prefix rules.
+        let manifest = crate::spec_registry::read_manifest(repo_path, &update.new_sha).await;
+        if manifest.is_none() {
+            debug!(
+                repo_path,
+                "spec-lifecycle: no specs/manifest.yaml at HEAD — using path-prefix fallback"
+            );
+        }
+
+        // Resolve the repo's workspace scope once per push. Events are scoped
+        // to the workspace the repo actually belongs to; if the repo cannot be
+        // resolved there is no valid scope to emit under, so skip the events
+        // and log rather than fabricating one (task-097 F3 class). Approval
+        // invalidation is independent of the repo row: it is keyed by spec
+        // path against the on-disk repo, so it still runs below.
+        let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
+            Ok(Some(repo)) => Some(repo.workspace_id),
+            Ok(None) => {
+                warn!(
+                    repo_id,
+                    "spec-lifecycle: repo not found, skipping workspace events"
+                );
+                None
+            }
+            Err(e) => {
+                warn!(
+                    repo_id,
+                    "spec-lifecycle: repo lookup failed: {e}, skipping workspace events"
+                );
+                None
+            }
+        };
         let existing_tasks = state.tasks.list().await.unwrap_or_default();
         let now = crate::api::now_secs();
 
         for (status_char, path, old_path) in changes {
             // Auto-invalidate active spec approvals when the spec file is modified,
-            // deleted, or renamed. An approval is stale once the spec content changes.
-            {
+            // deleted, or renamed (configurable, spec-lifecycle.md §Configuration).
+            if config.auto_invalidate_approvals {
                 // For renames, the old path is stale; for M/D, the current path is stale.
+                // Diff paths are git paths ("specs/system/foo.md"); approval rows are
+                // keyed by ledger paths ("system/foo.md" — spec_registry strips the
+                // specs/ prefix). Normalize so revocation actually matches rows.
+                fn ledger_path(p: &str) -> &str {
+                    p.strip_prefix("specs/").unwrap_or(p)
+                }
                 let stale_paths: Vec<&str> = match status_char {
                     'M' | 'D' => vec![path.as_str()],
                     'R' => old_path
@@ -1465,6 +2596,13 @@ async fn process_spec_lifecycle(
                         .unwrap_or_else(|| vec![path.as_str()]),
                     _ => vec![],
                 };
+                // Only `specs/…` files carry approval-ledger rows; the
+                // unfiltered diff also lists source and doc files, which
+                // have no approvals to invalidate.
+                let stale_paths: Vec<&str> = stale_paths
+                    .into_iter()
+                    .filter(|p| p.starts_with("specs/"))
+                    .collect();
 
                 if !stale_paths.is_empty() {
                     let reason = format!(
@@ -1478,10 +2616,15 @@ async fn process_spec_lifecycle(
                         default_branch
                     );
                     let mut invalidated = 0usize;
-                    for &stale_path in &stale_paths {
+                    for stale_path in &stale_paths {
                         let _ = state
                             .spec_approvals
-                            .revoke_all_for_path(stale_path, "system:spec-lifecycle", &reason, now)
+                            .revoke_all_for_path(
+                                ledger_path(stale_path),
+                                "system:spec-lifecycle",
+                                &reason,
+                                now,
+                            )
                             .await;
                         invalidated += 1;
                     }
@@ -1495,19 +2638,68 @@ async fn process_spec_lifecycle(
                 }
             }
 
+            if !should_create_lifecycle_task(
+                manifest.as_ref(),
+                &config,
+                status_char,
+                &path,
+                old_path.as_deref(),
+            ) {
+                debug!(
+                    spec_path = %path,
+                    "spec-lifecycle: change excluded from task creation by manifest policy"
+                );
+                continue;
+            }
+
             let Some((title, labels, priority)) =
-                classify_spec_change(status_char, &path, old_path.as_deref())
+                classify_spec_change(status_char, &path, old_path.as_deref(), &config)
             else {
                 continue;
             };
+            let change_kind = match status_char {
+                'A' => "added",
+                'M' => "modified",
+                'D' => "deleted",
+                'R' => "renamed",
+                _ => "unknown",
+            };
 
-            // Dedup: skip if a non-Done task with the same title already exists.
-            let exists = existing_tasks
-                .iter()
-                .any(|t| t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done));
-            if exists {
-                info!(title, "spec-lifecycle: task already exists, skipping");
-                continue;
+            // Per-spec priority override (spec-registry.md §15): apply the
+            // manifest-declared priority when present, else keep the
+            // change-kind default from `classify_spec_change` (which itself
+            // honors the repo's SpecLifecycleConfig default priorities).
+            let priority = manifest
+                .as_ref()
+                .and_then(|m| {
+                    crate::spec_registry::manifest_entry_for_path(m, &path)
+                        .and_then(|e| e.effective_priority(&m.defaults))
+                })
+                .unwrap_or(priority);
+
+            // Dedup: skip if a non-Done task with the same title already exists
+            // (configurable, spec-lifecycle.md §Configuration).
+            if config.dedup_open_tasks {
+                let exists = existing_tasks.iter().any(|t| {
+                    t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done)
+                });
+                if exists {
+                    info!(title, "spec-lifecycle: task already exists, skipping");
+                    // task-104: SpecChanged audit event — the spec file changed on
+                    // the default branch regardless of task dedup; no new task id.
+                    // Scope comes from the per-push ws_id resolution above
+                    // (None when unresolvable — never a fabricated identity).
+                    emit_spec_changed_audit(
+                        state,
+                        repo_id,
+                        ws_id.as_ref(),
+                        &path,
+                        change_kind,
+                        None,
+                    )
+                    .await;
+                    continue;
+                }
             }
 
             let task_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
@@ -1522,59 +2714,63 @@ async fn process_spec_lifecycle(
             // task_type intentionally left as None: push-hook tasks are informational
             // and must NOT trigger agent spawning (agent-runtime.md §1 Phase 4).
 
+            // Workspace scope for the SpecChanged audit event comes from the
+            // per-push ws_id resolution above: a lookup failure means the
+            // scope cannot be determined, so the audit event is recorded
+            // without a workspace scope rather than fabricating a "default"
+            // identity (task-097 F3 class).
             match state.tasks.create(&task).await {
-                Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
+                Err(e) => {
+                    warn!(title, "spec-lifecycle: failed to create task: {e}");
+                    emit_spec_changed_audit(
+                        state,
+                        repo_id,
+                        ws_id.as_ref(),
+                        &path,
+                        change_kind,
+                        None,
+                    )
+                    .await;
+                }
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Look up workspace_id from repo for proper scoping.
-                    // A lookup failure means the scope cannot be determined —
-                    // skip the workspace-scoped emission rather than
-                    // fabricating a "default" identity (task-097 F3 class).
-                    let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
-                        Ok(Some(repo)) => repo.workspace_id,
-                        Ok(None) => {
-                            warn!(
-                                repo_id,
-                                "spec-lifecycle: repo not found; skipping task events"
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!(
-                                repo_id,
-                                "spec-lifecycle: failed to resolve repo workspace: {e}"
-                            );
-                            continue;
-                        }
-                    };
-                    let change_kind = match status_char {
-                        'A' => "added",
-                        'M' => "modified",
-                        'D' => "deleted",
-                        'R' => "renamed",
-                        _ => "unknown",
-                    };
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id.clone()),
-                            gyre_common::message::MessageKind::SpecChanged,
-                            Some(serde_json::json!({
-                                "repo_id": repo_id,
-                                "spec_path": path,
-                                "change_kind": change_kind,
-                                "task_id": task_id.to_string(),
-                            })),
-                        )
-                        .await;
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id),
-                            gyre_common::message::MessageKind::TaskCreated,
-                            Some(serde_json::json!({"task_id": task_id.to_string()})),
-                        )
-                        .await;
+                    // task-104: SpecChanged audit event (observability.md
+                    // §Audit Event Types) with the auto-created task id.
+                    emit_spec_changed_audit(
+                        state,
+                        repo_id,
+                        ws_id.as_ref(),
+                        &path,
+                        change_kind,
+                        Some(task_id.as_str()),
+                    )
+                    .await;
+                    // ws_id resolved once per push above; None when the repo
+                    // row is unresolvable — skip workspace-scoped events
+                    // rather than emitting under a fabricated scope.
+                    if let Some(ws_id) = ws_id.as_ref() {
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::SpecChanged,
+                                Some(serde_json::json!({
+                                    "repo_id": repo_id,
+                                    "spec_path": path,
+                                    "change_kind": change_kind,
+                                    "task_id": task_id.to_string(),
+                                })),
+                            )
+                            .await;
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::TaskCreated,
+                                Some(serde_json::json!({"task_id": task_id.to_string()})),
+                            )
+                            .await;
+                    }
 
                     // Cross-workspace spec change notification (priority 4):
                     // Find inbound cross-workspace links targeting this spec path
@@ -1612,8 +2808,6 @@ async fn notify_cross_workspace_dependents(
     if inbound_links.is_empty() {
         return;
     }
-
-    let now = crate::api::now_secs();
 
     // Collect unique source repo IDs from inbound links.
     let mut notified_workspaces: std::collections::HashSet<String> =
@@ -1671,7 +2865,6 @@ async fn notify_cross_workspace_dependents(
                 continue;
             }
 
-            let notif_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
             let display = link.target_display.as_deref().unwrap_or(changed_spec_path);
             let title = format!("Cross-workspace spec changed: {display}");
             let source_repo_name = state
@@ -1681,26 +2874,26 @@ async fn notify_cross_workspace_dependents(
                 .ok()
                 .flatten()
                 .map(|r| r.name.clone())
-                .unwrap_or_else(|| source_repo_id[..8.min(source_repo_id.len())].to_string());
+                .unwrap_or_else(|| source_repo_id.chars().take(8).collect());
             let body = format!(
                 "{display} changed in repo {source_repo_name}. Your spec {} depends on it. Review for impact.",
                 link.source_path
             );
-            let mut notif = gyre_common::Notification::new(
-                notif_id,
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notifications::notify_rich(
+                state,
                 dep_repo.workspace_id.clone(),
                 member.user_id,
                 gyre_common::NotificationType::CrossWorkspaceSpecChange,
                 title,
                 dep_workspace.tenant_id.to_string(),
-                now as i64,
-            );
-            notif.body = Some(body);
-            notif.entity_ref = Some(changed_spec_path.to_string());
-
-            if let Err(e) = state.notifications.create(&notif).await {
-                tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
-            }
+                Some(body),
+                Some(changed_spec_path.to_string()),
+                None,
+                "spec",
+                None,
+            )
+            .await;
         }
     }
 }
@@ -2936,12 +4129,17 @@ pub(crate) async fn process_breaking_changes(
                     state,
                     dep_workspace_id.clone(),
                     member.user_id.clone(),
-                    gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                    // user-management.md §Notification Entity: the breaking
+                    // change taxonomy type, not the generic
+                    // CrossWorkspaceSpecChange stand-in.
+                    gyre_common::NotificationType::BreakingChangeDetected,
                     format!("Breaking change in {repo_name}: {description}"),
                     tenant_id,
                     Some(body_json),
                     Some(dep_edge.source_repo_id.to_string()),
                     Some(repo_id.to_string()),
+                    "repo",
+                    None,
                 )
                 .await;
             }
@@ -3070,6 +4268,145 @@ pub(crate) async fn detect_breaking_changes_on_push(
         now,
     )
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// Push-time attestation ABAC evaluation (TASK-006 §7.2 / task-129 audit)
+// ---------------------------------------------------------------------------
+
+/// TASK-006 (§7.2) push path: build the attestation-chain subject context and
+/// evaluate action=push / resource_type=attestation policies.
+///
+/// §Audit Integration (task-129): the PolicyDecision is PERSISTED to the
+/// policy-decision audit trail via `record_decision` — exactly like the
+/// middleware request path and the merge-time attestation gate — so
+/// push-time evaluations are queryable via GET /api/v1/policies/decisions.
+/// The gate itself remains audit-only (Phase 1): the result is logged and
+/// recorded, never enforced.
+///
+/// Returns `Err` when the workspace or policy store cannot be READ (review
+/// round 6, task-129): the previous `if let Ok(Some(ws))` swallow degraded
+/// a workspace-store failure to "no resource tenant scope", silently
+/// un-applying tenant-scoped Deny policies on this evaluation. The caller
+/// logs the failure and skips the audit evaluation (the gate is
+/// audit-only; the push itself is unaffected) — the point is that a store
+/// error is VISIBLE, never silently reshaped into a different decision.
+#[allow(clippy::too_many_arguments)]
+async fn evaluate_push_attestation_abac(
+    state: &AppState,
+    task_id: &str,
+    repo_id: &str,
+    repo_workspace_id: &str,
+    agent_id: &str,
+    subject_tenant_id: &str,
+    leaf: &gyre_common::Attestation,
+    chain: &[gyre_common::Attestation],
+) -> anyhow::Result<crate::policy_engine::EvalResult> {
+    use anyhow::Context as _;
+
+    let chain_depth = leaf.metadata.chain_depth;
+    let signer = gyre_domain::root_signer(chain);
+    let cc = gyre_domain::constraint_count(chain) as i64;
+
+    let mut ctx = crate::policy_engine::AttributeContext::default();
+    ctx.set("subject.type", "agent");
+    ctx.set("subject.id", agent_id);
+    ctx.set("subject.tenant_id", subject_tenant_id);
+    ctx.set_number("subject.chain_depth", chain_depth as i64);
+    ctx.set_number("subject.constraint_count", cc);
+    if let Some(ref rs) = signer {
+        ctx.set("subject.root_signer", rs);
+    }
+    // An attestation chain was located for this push — the attribute
+    // `builtin:require-signed-authorization` (§7.2) keys its unless-clause on.
+    ctx.set_bool("subject.attestation_chain_present", true);
+    ctx.set("resource.type", "attestation");
+    ctx.set("resource.repo_id", repo_id);
+    // Complete the resource scope chain so the engine's canonical scope
+    // filter (policy_engine::scope_applies) scopes policies on this
+    // audit path exactly like the HTTP middleware path. The resource
+    // tenant comes from the repo's workspace (entity lookup), never from
+    // the caller's tenant claim — and a store-read failure PROPAGATES
+    // (see doc comment) instead of silently dropping the tenant scope.
+    ctx.set("resource.workspace_id", repo_workspace_id);
+    let workspace = state
+        .workspaces
+        .find_by_id(&gyre_common::Id::new(repo_workspace_id))
+        .await
+        .context("push attestation ABAC: workspace store read failed")?;
+    if let Some(ws) = workspace {
+        ctx.set("resource.tenant_id", ws.tenant_id.to_string());
+    }
+
+    let policies = state
+        .policies
+        .list()
+        .await
+        .context("push attestation ABAC: policy store read failed")?;
+    let eval_result = crate::policy_engine::evaluate(policies, &ctx, "push", "attestation");
+
+    // Record the decision in the policy-decision audit trail, exactly as
+    // the ABAC middleware does for HTTP requests and evaluate_merge_abac /
+    // evaluate_attestation_abac do at merge time (task-129 §Audit
+    // Integration: every evaluation path records).
+    //
+    // `request_id`: this path has no HTTP request to key the decision on —
+    // the triggering push task IS the correlation key (the chain under
+    // evaluation was located via `find_by_task(task_id)`). Stamping the
+    // task id here, instead of the opaque random UUID `build_decision`
+    // generates, makes the persisted trail answer “which task's push
+    // produced this decision” when queried via
+    // GET /api/v1/policies/decisions.
+    let mut decision = crate::policy_engine::build_decision(
+        &eval_result,
+        agent_id,
+        "agent",
+        "push",
+        "attestation",
+        repo_id,
+    );
+    decision.request_id = task_id.to_string();
+    crate::policy_engine::record_decision_audit(state, &decision).await;
+
+    // §Audit Integration log-level contract (review round 6, task-129):
+    // denials at warn, allowances at debug. A Deny additionally emits an
+    // AbacDenied audit event marked enforced=false — this gate is
+    // audit-only by spec (TASK-006 Phase 1), so the push is NOT rejected;
+    // the event records that the policy evaluation returned Deny.
+    if eval_result.effect == gyre_domain::policy::PolicyEffect::Deny {
+        tracing::warn!(
+            task_id = %task_id,
+            repo_id = %repo_id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation for push denied (audit-only)" // enforcement-mode:ok
+        );
+        crate::abac_middleware::record_abac_denied_service(
+            state,
+            agent_id,
+            "attestation",
+            "push",
+            eval_result.matched_policy.as_deref(),
+            "git-push",
+            false,
+        )
+        .await;
+    } else {
+        tracing::debug!(
+            task_id = %task_id,
+            repo_id = %repo_id,
+            chain_depth = chain_depth,
+            root_signer = ?signer,
+            constraint_count = cc,
+            decision = ?eval_result.effect,
+            matched_policy = ?eval_result.matched_policy,
+            "attestation ABAC evaluation for push (audit-only)" // enforcement-mode:ok
+        );
+    }
+
+    Ok(eval_result)
 }
 
 // ---------------------------------------------------------------------------
@@ -3397,6 +4734,158 @@ pub(crate) fn verify_chain(
     }
 }
 
+/// Context binding verification for the root `SignedInput` (§2.4 Replay Prevention).
+///
+/// Compares the signed `InputContent` against the actual target of the current
+/// push/merge. A `SignedInput` that authorizes work on repo-A must not be
+/// replayable to authorize work on repo-B; a modified spec (different SHA)
+/// must require a new approval; an `expected_generation` pin is only valid for
+/// that specific deployment generation of the task.
+///
+/// `task_spec_sha` — the task's currently approved spec SHA (`None` when it
+/// cannot be resolved; the spec_sha binding is then skipped rather than
+/// failing on absent data). `task_generation` — the task's CURRENT persisted
+/// deployment generation. Both are looked up from real state by the caller;
+/// this function performs no lookups itself.
+///
+/// `valid_until` is NOT re-checked here — it is enforced by
+/// `verify_attestation_audit_only` (signed_input.valid_until node) and must
+/// not be duplicated.
+///
+/// Fail closed: every present binding must match exactly; a mismatch yields
+/// `valid: false` with a `context_binding.*` child naming the failing binding.
+pub(crate) fn verify_context_binding(
+    root: &gyre_common::SignedInput,
+    target_repo_id: &str,
+    target_workspace_id: &str,
+    task_spec_sha: Option<&str>,
+    task_generation: Option<u32>,
+) -> gyre_common::VerificationResult {
+    let mut children = Vec::new();
+    let mut all_valid = true;
+
+    // Binding 1: repo_id — the input cannot be replayed to a different repo.
+    let repo_ok = root.content.repo_id == target_repo_id;
+    children.push(gyre_common::VerificationResult {
+        label: "context_binding.repo_id".to_string(),
+        valid: repo_ok,
+        message: if repo_ok {
+            format!("signed repo_id {} matches target", root.content.repo_id)
+        } else {
+            format!(
+                "signed repo_id {} does not match target repo {} — authorization is \
+                 bound to a different repository",
+                root.content.repo_id, target_repo_id
+            )
+        },
+        children: vec![],
+    });
+    if !repo_ok {
+        all_valid = false;
+    }
+
+    // Binding 2: workspace_id — the input cannot be replayed across workspaces.
+    let ws_ok = root.content.workspace_id == target_workspace_id;
+    children.push(gyre_common::VerificationResult {
+        label: "context_binding.workspace_id".to_string(),
+        valid: ws_ok,
+        message: if ws_ok {
+            format!(
+                "signed workspace_id {} matches target",
+                root.content.workspace_id
+            )
+        } else {
+            format!(
+                "signed workspace_id {} does not match target workspace {} — \
+                 authorization is bound to a different workspace",
+                root.content.workspace_id, target_workspace_id
+            )
+        },
+        children: vec![],
+    });
+    if !ws_ok {
+        all_valid = false;
+    }
+
+    // Binding 3: spec_sha — a modified spec requires a new approval and new
+    // SignedInput. Only compared when the task's current approved SHA is
+    // resolvable; an empty signed SHA cannot match any real spec and fails.
+    if let Some(current_sha) = task_spec_sha {
+        let spec_ok = !root.content.spec_sha.is_empty() && root.content.spec_sha == current_sha;
+        children.push(gyre_common::VerificationResult {
+            label: "context_binding.spec_sha".to_string(),
+            valid: spec_ok,
+            message: if spec_ok {
+                format!(
+                    "signed spec_sha {} matches current approved spec",
+                    root.content.spec_sha.chars().take(8).collect::<String>()
+                )
+            } else {
+                format!(
+                    "signed spec_sha {} does not match current approved spec {} — \
+                     the spec changed after this authorization was signed",
+                    root.content.spec_sha, current_sha
+                )
+            },
+            children: vec![],
+        });
+        if !spec_ok {
+            all_valid = false;
+        }
+    }
+
+    // Binding 4: expected_generation — when present, the input is only valid
+    // for that specific deployment generation of the task (prevents replay of
+    // an old authorization after reassignment). Absent → no pin, no check.
+    if let Some(expected) = root.expected_generation {
+        let gen_ok = task_generation == Some(expected);
+        children.push(gyre_common::VerificationResult {
+            label: "context_binding.expected_generation".to_string(),
+            valid: gen_ok,
+            message: if gen_ok {
+                format!("signed expected_generation {expected} matches task generation")
+            } else {
+                format!(
+                    "signed expected_generation {expected} does not match current task \
+                     generation {} — the task was reassigned after this authorization \
+                     was signed",
+                    task_generation
+                        .map(|g| g.to_string())
+                        .unwrap_or_else(|| "unavailable".to_string())
+                )
+            },
+            children: vec![],
+        });
+        if !gen_ok {
+            all_valid = false;
+        }
+    }
+
+    gyre_common::VerificationResult {
+        label: "context_binding".to_string(),
+        valid: all_valid,
+        message: if all_valid {
+            "signed input context matches the verification target".to_string()
+        } else {
+            "context binding failed — signed input targets a different context".to_string()
+        },
+        children,
+    }
+}
+
+/// Constraints accumulated from a verified chain (§4.3, §6.2 Phase 2).
+/// Named carrier (TASK-048 F1): the previous positional tuple was a
+/// field-swap hazard.
+pub(crate) struct ChainConstraints {
+    /// The root SignedInput of the chain, if it carries one.
+    pub root_input: Option<gyre_common::attestation::SignedInput>,
+    /// Explicit constraints from the root SignedInput plus additional
+    /// constraints from each DerivedInput (additive only).
+    pub explicit_constraints: Vec<gyre_common::attestation::OutputConstraint>,
+    /// Gate constraints from gate attestations on each node.
+    pub gate_constraints: Vec<gyre_common::attestation::GateConstraint>,
+}
+
 /// Accumulate all constraints from a verified chain (§4.3, §6.2 Phase 2).
 ///
 /// Walks the chain root→leaf, collecting:
@@ -3405,13 +4894,7 @@ pub(crate) fn verify_chain(
 /// 3. Gate constraints from gate attestations on each node
 ///
 /// Returns the full constraint set for evaluation.
-pub(crate) fn accumulate_chain_constraints(
-    chain: &[gyre_common::Attestation],
-) -> (
-    Option<gyre_common::attestation::SignedInput>,
-    Vec<gyre_common::attestation::OutputConstraint>,
-    Vec<gyre_common::attestation::GateConstraint>,
-) {
+pub(crate) fn accumulate_chain_constraints(chain: &[gyre_common::Attestation]) -> ChainConstraints {
     let mut explicit_constraints = Vec::new();
     let mut gate_constraints = Vec::new();
     let mut root_input = None;
@@ -3419,7 +4902,11 @@ pub(crate) fn accumulate_chain_constraints(
     for att in chain {
         match &att.input {
             gyre_common::AttestationInput::Signed(si) => {
-                root_input = Some(si.clone());
+                // Root-first chain ordering (see `verify_chain`): the first
+                // Signed input is the chain root.
+                if root_input.is_none() {
+                    root_input = Some(si.clone());
+                }
                 explicit_constraints.extend(si.output_constraints.iter().cloned());
             }
             gyre_common::AttestationInput::Derived(di) => {
@@ -3436,7 +4923,11 @@ pub(crate) fn accumulate_chain_constraints(
         }
     }
 
-    (root_input, explicit_constraints, gate_constraints)
+    ChainConstraints {
+        root_input,
+        explicit_constraints,
+        gate_constraints,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3541,6 +5032,432 @@ mod tests {
         )
     }
 
+    /// task-129 §Audit Integration (review round 5): the push-time
+    /// attestation evaluation records its PolicyDecision to the audit
+    /// trail (evaluate_push_attestation_abac). Previously this path only
+    /// logged at tracing::info, so push-time evaluations were invisible to
+    /// GET /api/v1/policies/decisions.
+    #[tokio::test]
+    async fn push_attestation_abac_records_decision_to_audit_trail() {
+        use gyre_common::{
+            Attestation, AttestationInput, AttestationMetadata, AttestationOutput, InputContent,
+            KeyBinding, OutputConstraint, PersonaRef, ScopeConstraint, SignedInput,
+        };
+        use gyre_domain::policy::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
+        };
+
+        let state = test_state();
+
+        // Workspace so the resource tenant resolves via entity lookup
+        // (repo → workspace), never the caller's tenant claim.
+        let ws = Workspace {
+            id: Id::new("ws-push-audit"),
+            tenant_id: Id::new("tenant-push-audit"),
+            name: "ws-push-audit".to_string(),
+            slug: "ws-push-audit".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        // Minimal single-root attestation chain (depth 0).
+        let leaf = Attestation {
+            id: "sha256:push-root".to_string(),
+            input: AttestationInput::Signed(SignedInput {
+                content: InputContent {
+                    spec_path: "specs/system/test.md".to_string(),
+                    spec_sha: "abc123".to_string(),
+                    workspace_id: "ws-push-audit".to_string(),
+                    repo_id: "repo-push-audit".to_string(),
+                    persona_constraints: vec![PersonaRef {
+                        name: "security".to_string(),
+                    }],
+                    meta_spec_set_sha: "def456".to_string(),
+                    scope: ScopeConstraint {
+                        allowed_paths: vec!["src/**".to_string()],
+                        forbidden_paths: vec![],
+                    },
+                },
+                output_constraints: vec![OutputConstraint {
+                    name: "scope-check".to_string(),
+                    expression: "output.check(\"scope-check\")".to_string(),
+                }],
+                valid_until: 1_700_000_000,
+                expected_generation: Some(1),
+                signature: vec![10, 20, 30],
+                key_binding: KeyBinding {
+                    public_key: vec![1, 2, 3, 4],
+                    user_identity: "user:test-signer".to_string(),
+                    issuer: "https://keycloak.example.com".to_string(),
+                    trust_anchor_id: "tenant-keycloak".to_string(),
+                    issued_at: 1_700_000_000,
+                    expires_at: 1_700_003_600,
+                    user_signature: vec![10, 20, 30, 40],
+                    platform_countersign: vec![50, 60, 70, 80],
+                },
+            }),
+            output: AttestationOutput {
+                content_hash: vec![1, 2, 3],
+                commit_sha: "aaa111".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-push-audit".to_string(),
+                repo_id: "repo-push-audit".to_string(),
+                task_id: "TASK-PUSH-AUDIT".to_string(),
+                agent_id: "agent:worker-push".to_string(),
+                chain_depth: 0,
+            },
+        };
+        let chain = vec![leaf.clone()];
+
+        // Seed an Allow keyed on the attestation-chain attribute so the
+        // recorded decision carries a real matched policy — a no-policy run
+        // would record the engine default deny with no matched_policy,
+        // which would not distinguish a faithful record from a stub that
+        // persists a hardcoded decision.
+        let allow = Policy {
+            id: Id::new("allow-attested-push"),
+            name: "allow-attested-push".to_string(),
+            description: "Allow pushes carrying an attestation chain".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 200,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.attestation_chain_present".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::Bool(true),
+            }],
+            actions: vec!["push".to_string()],
+            resource_types: vec!["attestation".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: Id::new("test"),
+            created_at: 0,
+            updated_at: 0,
+        };
+        state.policies.create(&allow).await.unwrap();
+
+        // The pushing subject belongs to the workspace's tenant
+        // ("tenant-push-audit"): the seeded builtin `tenant-isolation`
+        // Deny (950) is above this test's Allow (200), so a cross-tenant
+        // subject would flip the decision to the containment Deny — this
+        // test is about the DECISION RECORDING, not tenant containment.
+        let result = evaluate_push_attestation_abac(
+            &state,
+            "TASK-PUSH-AUDIT",
+            "repo-push-audit",
+            "ws-push-audit",
+            "agent:worker-push",
+            "tenant-push-audit",
+            &leaf,
+            &chain,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.effect, PolicyEffect::Allow);
+        assert_eq!(
+            result.matched_policy,
+            Some("allow-attested-push".to_string())
+        );
+
+        // The decision must be persisted and queryable via the audit
+        // store — the exact surface GET /api/v1/policies/decisions reads.
+        let decisions = state
+            .policies
+            .list_decisions(Some("agent:worker-push"), Some("attestation"), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            decisions.len(),
+            1,
+            "push-time evaluation must persist its decision"
+        );
+        let d = &decisions[0];
+        assert_eq!(d.subject_id, "agent:worker-push");
+        assert_eq!(d.subject_type, "agent");
+        assert_eq!(d.action, "push");
+        assert_eq!(d.resource_id, "repo-push-audit");
+        // The decision's request_id is the triggering push TASK — the
+        // correlation key for this path (no HTTP request exists), so the
+        // trail answers “which task's push produced this decision”.
+        assert_eq!(d.request_id, "TASK-PUSH-AUDIT");
+        assert_eq!(d.decision, PolicyEffect::Allow);
+        assert_eq!(
+            d.matched_policy.as_ref().map(|p| p.as_str()),
+            Some("allow-attested-push")
+        );
+    }
+
+    #[tokio::test]
+    async fn system_token_resolves_workspace_in_foreign_tenant() {
+        // Dev-mode bootstrap shape (task-099): `gyre bootstrap --dev`
+        // creates tenant "dev" and a workspace under it, but the global
+        // system token's tenant_id is "default". The git smart-HTTP push
+        // the bootstrap flow performs must still resolve the workspace —
+        // via the system-principal slug-only fallback — or the dev-mode
+        // spec-registry step 404s forever while reporting success-ish
+        // output. Non-system principals keep the strict tenant filter.
+        let state = test_state();
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("dev-demo.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&repo_path)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git init --bare failed");
+
+        // Workspace under a NON-"default" tenant — the dev-mode topology.
+        let ws = Workspace {
+            id: Id::new("ws-dev"),
+            tenant_id: Id::new("t-dev"),
+            name: "Default".to_string(),
+            slug: "default".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = Repository::new(
+            Id::new("repo-dev"),
+            Id::new("ws-dev"),
+            "gyre-demo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let app = Router::new()
+            .route(
+                "/git/:workspace_slug/:repo_name/info/refs",
+                get(git_info_refs),
+            )
+            .with_state(state.clone());
+
+        // System token (tenant "default") resolves the foreign-tenant
+        // workspace via the fallback.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/git/default/gyre-demo/info/refs?service=git-upload-pack")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "system token must resolve the dev-mode (foreign-tenant) workspace"
+        );
+
+        // A user principal from an unrelated tenant is still contained.
+        // (agent token path: Agent role, tenant "default".)
+        let mut user = gyre_domain::User::new(Id::new("u-x"), "ext-x", "someone", 0);
+        user.tenant_id = Some(Id::new("t-other"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_test_git_foreign_key";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "test")
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/git/default/gyre-demo/info/refs?service=git-upload-pack")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "non-system principals must keep the strict tenant filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_access_enforced_on_git_transport_for_user_principals() {
+        // user-management.md §Repo Access on the git smart-HTTP transport —
+        // the enforcement point for clone/fetch/push. The rest of this suite
+        // authenticates with the system token, which authorize_repo_access
+        // admits unconditionally; these assertions use real user principals
+        // (API keys + workspace memberships) so the membership/override
+        // check actually gates the transport and regresses loudly if the
+        // Read/Write permission mapping or the restrict-only override
+        // logic breaks.
+        let (app, state, _tmp, ws_slug, repo_name, _repo_path) = git_app_with_repo().await;
+
+        async fn member_user(
+            state: &Arc<crate::AppState>,
+            ws_id: &str,
+            role: gyre_domain::WorkspaceRole,
+            key: &str,
+        ) -> Id {
+            let id = Id::new(format!("user-{key}"));
+            let mut user =
+                gyre_domain::User::new(id.clone(), format!("ext-{key}"), format!("u-{key}"), 0);
+            user.tenant_id = Some(Id::new("default"));
+            user.global_role = gyre_domain::GlobalRole::Member;
+            user.roles = vec![gyre_domain::UserRole::Developer];
+            state.users.create(&user).await.unwrap();
+            let mut m = gyre_domain::WorkspaceMembership::new(
+                Id::new(format!("m-{key}")),
+                id.clone(),
+                Id::new(ws_id),
+                role,
+                Id::new("system"),
+                0,
+            );
+            m.accept(0);
+            state.workspace_memberships.create(&m).await.unwrap();
+            state
+                .api_keys
+                .create(&crate::auth::hash_api_key(key), &id, "test")
+                .await
+                .unwrap();
+            id
+        }
+
+        let dev_id = member_user(
+            &state,
+            "ws-test",
+            gyre_domain::WorkspaceRole::Developer,
+            "gyre-test-dev-key",
+        )
+        .await;
+        let _viewer_id = member_user(
+            &state,
+            "ws-test",
+            gyre_domain::WorkspaceRole::Viewer,
+            "gyre-test-viewer-key",
+        )
+        .await;
+        // A user of the same tenant with NO workspace membership.
+        let mut outsider =
+            gyre_domain::User::new(Id::new("user-outsider"), "ext-out", "outsider", 0);
+        outsider.tenant_id = Some(Id::new("default"));
+        outsider.global_role = gyre_domain::GlobalRole::Member;
+        outsider.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&outsider).await.unwrap();
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key("gyre-test-outsider-key"),
+                &outsider.id,
+                "test",
+            )
+            .await
+            .unwrap();
+
+        let info_refs =
+            |service: &str| format!("/git/{ws_slug}/{repo_name}/info/refs?service={service}");
+
+        // Effective role → transport permission per the §Repo Access
+        // table: Developer reads and writes, Viewer reads only, non-members
+        // nothing.
+        for (key, service, expected) in [
+            ("gyre-test-dev-key", "git-upload-pack", StatusCode::OK),
+            ("gyre-test-dev-key", "git-receive-pack", StatusCode::OK),
+            ("gyre-test-viewer-key", "git-upload-pack", StatusCode::OK),
+            (
+                "gyre-test-viewer-key",
+                "git-receive-pack",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "gyre-test-outsider-key",
+                "git-upload-pack",
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(info_refs(service))
+                        .header("Authorization", format!("Bearer {key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), expected, "{key} on {service}");
+        }
+
+        // A per-repo override restricting the Developer to Viewer on this
+        // repo: fetch (Read) stays allowed, push (Write) is denied — the
+        // override restricts, never expands.
+        let over = gyre_domain::RepoAccessOverride::new(
+            Id::new("override-git-1"),
+            Id::new("repo-1"),
+            dev_id.clone(),
+            gyre_domain::WorkspaceRole::Viewer,
+            Id::new("system"),
+            0,
+        );
+        state.repo_access_overrides.create(&over).await.unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(info_refs("git-upload-pack"))
+                    .header("Authorization", "Bearer gyre-test-dev-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a Developer restricted to Viewer keeps read (fetch) access"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(info_refs("git-receive-pack"))
+                    .header("Authorization", "Bearer gyre-test-dev-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a Developer restricted to Viewer loses write (push) access"
+        );
+    }
+
     fn auth_header() -> &'static str {
         "Bearer test-token"
     }
@@ -3621,6 +5538,133 @@ mod tests {
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/x-git-receive-pack-advertisement"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_refs_receive_pack_archived_repo_returns_err_pkt_line() {
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        // Archive the repo (repo-lifecycle.md §4 step 5).
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-receive-pack"
+                    ))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The advertisement is a valid 200 response whose pkt-line stream
+        // carries an ERR line — the git-smart-HTTP convention that makes
+        // `git push` print "fatal: remote error: push rejected: repository is
+        // archived" instead of a bare HTTP 403 whose body git never shows.
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/x-git-receive-pack-advertisement"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        // Exact pkt-line framing: the service header pkt-line (001f = 4 + 27
+        // bytes of "# service=git-receive-pack\n"), a flush-pkt, then the
+        // ERR pkt-line. Hardcoded so a framing regression in pkt_line()/
+        // service_header() fails here rather than being mirrored in.
+        assert!(
+            text.starts_with("001f# service=git-receive-pack\n0000"),
+            "advertisement must start with the service header pkt-line + flush-pkt, got: {text}"
+        );
+        assert!(
+            text.contains("ERR push rejected: repository is archived"),
+            "archived repo advertisement must carry the ERR pkt-line, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_refs_upload_pack_archived_repo_still_serves_clone_advertisement() {
+        // Archived repos are read-only, not invisible: clone/fetch
+        // (git-upload-pack) must keep working (repo-lifecycle.md §4 step 5).
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/{ws_slug}/{repo_name}/info/refs?service=git-upload-pack"
+                    ))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            !text.contains("ERR "),
+            "upload-pack advertisement must not be rejected for archived repo, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_pack_archived_repo_returns_403() {
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        // Archive the repo (repo-lifecycle.md §4 step 5).
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("archived"),
+            "rejection must explain the repo is archived, got: {text}"
         );
     }
 
@@ -3820,15 +5864,15 @@ mod tests {
     // ── Spec lifecycle tests ─────────────────────────────────────────────────
 
     #[test]
-    fn parse_spec_changes_empty_input() {
-        let changes = super::parse_spec_changes("");
+    fn parse_name_status_empty_input() {
+        let changes = super::parse_name_status("");
         assert!(changes.is_empty());
     }
 
     #[test]
-    fn parse_spec_changes_added_spec() {
+    fn parse_name_status_added_spec() {
         let input = "A\tspecs/system/new-spec.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'A');
         assert_eq!(changes[0].1, "specs/system/new-spec.md");
@@ -3836,27 +5880,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_spec_changes_modified_spec() {
+    fn parse_name_status_modified_spec() {
         let input = "M\tspecs/development/architecture.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'M');
         assert_eq!(changes[0].1, "specs/development/architecture.md");
     }
 
     #[test]
-    fn parse_spec_changes_deleted_spec() {
+    fn parse_name_status_deleted_spec() {
         let input = "D\tspecs/system/old-spec.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'D');
         assert_eq!(changes[0].1, "specs/system/old-spec.md");
     }
 
     #[test]
-    fn parse_spec_changes_renamed_spec() {
+    fn parse_name_status_renamed_spec() {
         let input = "R090\tspecs/system/old.md\tspecs/system/new.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'R');
         assert_eq!(changes[0].1, "specs/system/new.md");
@@ -3864,18 +5908,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_spec_changes_ignores_non_watched_paths() {
-        // milestones and src changes should be ignored
-        let input = "M\tspecs/milestones/m1.md\nM\tsrc/main.rs\nA\tspecs/system/real.md\n";
-        let changes = super::parse_spec_changes(input);
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].1, "specs/system/real.md");
+    fn parse_name_status_returns_all_paths_unfiltered() {
+        // Parsing is path-agnostic: which entries create lifecycle tasks is
+        // decided by `should_create_lifecycle_task` (the manifest gate for
+        // manifest repos, the config watched prefixes otherwise) — specs/
+        // files outside the watched prefixes must reach that gate
+        // (spec-registry.md §15), and non-specs files are excluded there.
+        let input =
+            "M\tspecs/milestones/m1.md\nM\tsrc/main.rs\nM\tspecs/coverage/system/spec-registry.md\n";
+        let changes = super::parse_name_status(input);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[2].1, "specs/coverage/system/spec-registry.md");
     }
 
     #[test]
-    fn parse_spec_changes_development_path_watched() {
+    fn parse_name_status_development_path() {
         let input = "A\tspecs/development/database-migrations.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes = super::parse_name_status(input);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/development/database-migrations.md");
     }
@@ -3883,7 +5932,8 @@ mod tests {
     #[test]
     fn classify_spec_change_added() {
         let (title, labels, priority) =
-            super::classify_spec_change('A', "specs/system/foo.md", None).unwrap();
+            super::classify_spec_change('A', "specs/system/foo.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Implement spec: specs/system/foo.md");
         assert!(labels.contains(&"spec-implementation".to_string()));
         assert!(labels.contains(&"auto-created".to_string()));
@@ -3893,7 +5943,8 @@ mod tests {
     #[test]
     fn classify_spec_change_modified() {
         let (title, labels, priority) =
-            super::classify_spec_change('M', "specs/system/foo.md", None).unwrap();
+            super::classify_spec_change('M', "specs/system/foo.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Review spec change: specs/system/foo.md");
         assert!(labels.contains(&"spec-drift-review".to_string()));
         assert_eq!(priority, gyre_domain::TaskPriority::High);
@@ -3902,7 +5953,8 @@ mod tests {
     #[test]
     fn classify_spec_change_deleted() {
         let (title, labels, priority) =
-            super::classify_spec_change('D', "specs/system/old.md", None).unwrap();
+            super::classify_spec_change('D', "specs/system/old.md", None, &Default::default())
+                .unwrap();
         assert_eq!(title, "Handle spec removal: specs/system/old.md");
         assert!(labels.contains(&"spec-deprecated".to_string()));
         assert_eq!(priority, gyre_domain::TaskPriority::High);
@@ -3910,9 +5962,13 @@ mod tests {
 
     #[test]
     fn classify_spec_change_renamed() {
-        let (title, labels, priority) =
-            super::classify_spec_change('R', "specs/system/new.md", Some("specs/system/old.md"))
-                .unwrap();
+        let (title, labels, priority) = super::classify_spec_change(
+            'R',
+            "specs/system/new.md",
+            Some("specs/system/old.md"),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             title,
             "Update spec references: specs/system/old.md -> specs/system/new.md"
@@ -3923,7 +5979,873 @@ mod tests {
 
     #[test]
     fn classify_spec_change_unknown_returns_none() {
-        assert!(super::classify_spec_change('X', "specs/system/foo.md", None).is_none());
+        assert!(
+            super::classify_spec_change('X', "specs/system/foo.md", None, &Default::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn classify_spec_change_respects_configured_priorities() {
+        // spec-lifecycle.md §Configuration: default_priority_* must override
+        // the built-in Medium/High/High for task creation.
+        let config = gyre_domain::SpecLifecycleConfig {
+            default_priority_new: gyre_domain::TaskPriority::Critical,
+            default_priority_modified: gyre_domain::TaskPriority::Low,
+            default_priority_deleted: gyre_domain::TaskPriority::Medium,
+            ..Default::default()
+        };
+        let (_, _, p_new) =
+            super::classify_spec_change('A', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_mod) =
+            super::classify_spec_change('M', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_del) =
+            super::classify_spec_change('D', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_ren) = super::classify_spec_change(
+            'R',
+            "specs/system/new.md",
+            Some("specs/system/old.md"),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(p_new, gyre_domain::TaskPriority::Critical);
+        assert_eq!(p_mod, gyre_domain::TaskPriority::Low);
+        assert_eq!(p_del, gyre_domain::TaskPriority::Medium);
+        assert_eq!(p_ren, gyre_domain::TaskPriority::Critical);
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_no_manifest_custom_watched_paths() {
+        // Custom watched paths replace the default prefixes entirely
+        // (spec-lifecycle.md §Configuration) — including paths outside
+        // specs/, which the unfiltered diff parser still delivers to the gate.
+        let config = gyre_domain::SpecLifecycleConfig {
+            watched_paths: vec!["docs/specs/".to_string()],
+            ..Default::default()
+        };
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &config,
+            'A',
+            "docs/specs/new.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &config,
+            'M',
+            "specs/system/foo.md",
+            None
+        ));
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_no_manifest_ignored_overrides_watched() {
+        // Ignored prefixes take precedence over watched ones.
+        let config = gyre_domain::SpecLifecycleConfig {
+            watched_paths: vec!["specs/".to_string()],
+            ignored_paths: vec!["specs/milestones/".to_string()],
+            ..Default::default()
+        };
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &config,
+            'M',
+            "specs/system/a.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &config,
+            'M',
+            "specs/milestones/b.md",
+            None
+        ));
+    }
+
+    // ── process_spec_lifecycle: per-repo config end-to-end ────────────────
+
+    /// Set up a real bare repo with two pushed commits to main:
+    /// one adding `specs/system/a.md`, one adding `docs/guides/b.md`.
+    /// Returns (state, repo_id, tmp_dir, first_commit_sha, second_commit_sha).
+    async fn spec_lifecycle_fixture() -> (Arc<crate::AppState>, String, TempDir, String, String) {
+        let tmp = TempDir::new().unwrap();
+        let bare = tmp.path().join("repo.git");
+        let status = std::process::Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main", "-q"])
+            .arg(&bare)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init --bare failed");
+
+        // Clone to a work dir, commit the spec files, push to main.
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let bare_str = bare.to_str().unwrap().to_string();
+        let work_str = work.to_str().unwrap().to_string();
+        tokio::task::spawn_blocking(move || {
+            fn git(dir: &str, args: &[&str]) {
+                let out = std::process::Command::new("git")
+                    .args(["-C", dir])
+                    .args(args)
+                    .env("GIT_CONFIG_COUNT", "2")
+                    .env("GIT_CONFIG_KEY_0", "user.email")
+                    .env("GIT_CONFIG_VALUE_0", "t@t")
+                    .env("GIT_CONFIG_KEY_1", "user.name")
+                    .env("GIT_CONFIG_VALUE_1", "T")
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git {} failed: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            // Local clone of the (empty) bare repo, then two commits.
+            let clone = std::process::Command::new("git")
+                .args(["clone", &bare_str, &work_str])
+                .output()
+                .unwrap();
+            assert!(
+                clone.status.success()
+                    || String::from_utf8_lossy(&clone.stderr).contains("empty repository"),
+                "clone of empty bare repo failed: {}",
+                String::from_utf8_lossy(&clone.stderr)
+            );
+            git(&work_str, &["checkout", "-q", "-b", "main"]);
+            std::fs::create_dir_all(std::path::Path::new(&work_str).join("specs/system")).unwrap();
+            std::fs::write(
+                std::path::Path::new(&work_str).join("specs/system/a.md"),
+                "# A\n",
+            )
+            .unwrap();
+            git(&work_str, &["add", "."]);
+            git(&work_str, &["commit", "-q", "-m", "feat(x): add spec a"]);
+            git(&work_str, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+            git(&work_str, &["pull", "-q", "origin", "main"]);
+            std::fs::create_dir_all(std::path::Path::new(&work_str).join("docs/guides")).unwrap();
+            std::fs::write(
+                std::path::Path::new(&work_str).join("docs/guides/b.md"),
+                "# B\n",
+            )
+            .unwrap();
+            git(&work_str, &["add", "."]);
+            git(&work_str, &["commit", "-q", "-m", "feat(x): add guide b"]);
+            git(&work_str, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        })
+        .await
+        .unwrap();
+
+        // Read the pushed SHAs from the bare repo.
+        let first = {
+            let out = std::process::Command::new("git")
+                .args(["-C", bare.to_str().unwrap(), "rev-parse", "main~1"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let second = {
+            let out = std::process::Command::new("git")
+                .args(["-C", bare.to_str().unwrap(), "rev-parse", "main"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let state = test_state();
+        let repo = Repository::new(
+            Id::new("repo-slc"),
+            Id::new("ws-test"),
+            "slc-repo",
+            bare.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        (state, "repo-slc".to_string(), tmp, first, second)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_disabled_skips_task_creation() {
+        // spec-lifecycle.md §Configuration: `enabled = false` must skip
+        // processing entirely — no task, no approval invalidation.
+        // Zero old_sha models the initial push (hook substitutes the
+        // empty-tree SHA itself).
+        let (state, repo_id, _tmp, _first, second) = spec_lifecycle_fixture().await;
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+
+        // Disable via the same port the PUT handler writes through.
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                &repo_id,
+                gyre_domain::SpecLifecycleConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let updates = vec![super::RefUpdate {
+            old_sha: zeros,
+            new_sha: second,
+            refname: "refs/heads/main".to_string(),
+        }];
+        let repo_path = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .path
+            .clone();
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(
+            tasks.iter().all(|t| t.repo_id.to_string() != repo_id),
+            "no tasks must be created when spec lifecycle is disabled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_per_repo_config_drives_filtering_and_priority() {
+        // Custom config: watch docs/guides instead, with a custom priority.
+        // This must replace the default watched prefixes entirely — the
+        // specs/system file in the same diff must NOT produce a task.
+        let (state, repo_id, _tmp, _first, second) = spec_lifecycle_fixture().await;
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                &repo_id,
+                gyre_domain::SpecLifecycleConfig {
+                    watched_paths: vec!["docs/guides/".to_string()],
+                    default_priority_new: gyre_domain::TaskPriority::Critical,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let updates = vec![super::RefUpdate {
+            old_sha: zeros,
+            new_sha: second,
+            refname: "refs/heads/main".to_string(),
+        }];
+        let repo_path = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .path
+            .clone();
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let created: Vec<&gyre_domain::Task> = tasks
+            .iter()
+            .filter(|t| t.repo_id.to_string() == repo_id)
+            .collect();
+        assert_eq!(
+            created.len(),
+            1,
+            "exactly one task for the watched docs/guides path, got: {created:?}"
+        );
+        let task = created[0];
+        assert_eq!(task.spec_path.as_deref(), Some("docs/guides/b.md"));
+        assert_eq!(task.priority, gyre_domain::TaskPriority::Critical);
+        assert!(
+            task.labels.contains(&"spec-implementation".to_string()),
+            "labels: {:?}",
+            task.labels
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_dedup_skip_still_records_spec_changed_audit() {
+        // Rebase union of task-109 (config-driven dedup gate) and task-104
+        // (SpecChanged audit): when dedup skips task creation, the audit
+        // event must still fire — with task_id null.
+        let (state, repo_id, _tmp, first, _second) = spec_lifecycle_fixture().await;
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+
+        let updates = vec![super::RefUpdate {
+            old_sha: zeros.clone(),
+            new_sha: first.clone(),
+            refname: "refs/heads/main".to_string(),
+        }];
+        let repo_path = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .path
+            .clone();
+
+        // Same diff processed twice: the second pass hits the open-task
+        // dedup gate (default config: dedup_open_tasks = true).
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let created: Vec<&gyre_domain::Task> = tasks
+            .iter()
+            .filter(|t| t.repo_id.to_string() == repo_id)
+            .collect();
+        assert_eq!(
+            created.len(),
+            1,
+            "dedup must collapse the repeated change into one task"
+        );
+
+        let events = wait_for_audit_event(&state, "spec_changed").await;
+        let dedup_events: Vec<&gyre_domain::AuditEvent> = events
+            .iter()
+            .filter(|e| e.detail["task_id"].is_null())
+            .collect();
+        assert_eq!(
+            dedup_events.len(),
+            1,
+            "the dedup-skipped pass must record exactly one task_id-less SpecChanged event, got: {events:?}"
+        );
+        assert_eq!(dedup_events[0].detail["spec_path"], "specs/system/a.md");
+        // The first pass recorded its event referencing the auto-created task.
+        let with_task: Vec<&gyre_domain::AuditEvent> = events
+            .iter()
+            .filter(|e| e.detail["task_id"].as_str().is_some())
+            .collect();
+        assert_eq!(with_task.len(), 1, "events: {events:?}");
+    }
+
+    // ── Manifest-driven lifecycle gating (spec-registry.md §15) ──────────
+
+    const GATE_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/spec-a.md
+    title: Spec A
+    owner: user:test
+    auto_create_tasks: false
+  - path: system/spec-b.md
+    title: Spec B
+    owner: user:test
+    auto_create_tasks: true
+  - path: coverage/coverage-matrix.md
+    title: Coverage Matrix
+    owner: user:test
+"#;
+
+    #[test]
+    fn should_create_lifecycle_task_manifest_gate() {
+        let m = crate::spec_registry::parse_manifest(GATE_MANIFEST).unwrap();
+        // Registered with auto_create_tasks: false → never spawns a task,
+        // regardless of change kind.
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/spec-a.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'A',
+            "specs/system/spec-a.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'D',
+            "specs/system/spec-a.md",
+            None
+        ));
+        // Registered with auto_create_tasks: true → task.
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/spec-b.md",
+            None
+        ));
+        // Unregistered specs/ file → no task (manifest is the source of truth).
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/unregistered.md",
+            None
+        ));
+        // Registered under a non-watched prefix: the manifest, not the path
+        // prefix, decides — defaults.auto_create_tasks is true here.
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/coverage/coverage-matrix.md",
+            None
+        ));
+        // Manifest-mode renames match on the NEW path only (task-194
+        // instruction): a rename whose old path is registered but whose new
+        // path is not registered creates no task.
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'R',
+            "specs/milestones/renamed-away.md",
+            Some("specs/system/spec-b.md")
+        ));
+        // …while a rename onto a registered path creates one.
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'R',
+            "specs/system/spec-b.md",
+            Some("specs/milestones/renamed-from.md")
+        ));
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_defaults_section_applies() {
+        // defaults.auto_create_tasks: false — per-entry override wins.
+        let yaml = "version: 1\ndefaults:\n  auto_create_tasks: false\nspecs:\n  - path: system/opt-in.md\n    title: Opt In\n    owner: user:test\n    auto_create_tasks: true\n  - path: system/opt-out.md\n    title: Opt Out\n    owner: user:test\n";
+        let m = crate::spec_registry::parse_manifest(yaml).unwrap();
+        assert!(super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/opt-in.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            Some(&m),
+            &Default::default(),
+            'M',
+            "specs/system/opt-out.md",
+            None
+        ));
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_no_manifest_falls_back_to_prefixes() {
+        // Manifest-less repo: legacy path-prefix watch rules keep working.
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'M',
+            "specs/system/foo.md",
+            None
+        ));
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'A',
+            "specs/development/bar.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'M',
+            "specs/milestones/m1.md",
+            None
+        ));
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'M',
+            "src/main.rs",
+            None
+        ));
+        // Unclassified change kinds never create tasks.
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'X',
+            "specs/system/foo.md",
+            None
+        ));
+    }
+
+    #[test]
+    fn should_create_lifecycle_task_no_manifest_rename_either_side_watched() {
+        // Manifest-less repo, renames: the legacy prefix fallback admits a
+        // rename when EITHER side sits under a watched prefix (matching base
+        // pre-manifest `parse_spec_changes` + `classify_spec_change('R')`, which always
+        // created a task). Regression test for the task-194 review finding:
+        // the None arm previously checked only the new path.
+        // Old path watched, new path under specs/ but unwatched → task.
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "specs/milestones/a.md",
+            Some("specs/system/foo.md")
+        ));
+        // Old path watched, new path outside specs/ entirely → task.
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "docs/b.md",
+            Some("specs/system/foo.md")
+        ));
+        // New path watched, old path unwatched → task (already worked).
+        assert!(super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "specs/system/new.md",
+            Some("specs/milestones/old.md")
+        ));
+        // Neither side watched → no task.
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "docs/b.md",
+            Some("specs/milestones/old.md")
+        ));
+        // Neither side watched, both outside specs/ → no task.
+        assert!(!super::should_create_lifecycle_task(
+            None,
+            &Default::default(),
+            'R',
+            "docs/b.md",
+            Some("docs/old.md")
+        ));
+    }
+
+    /// Build a real (non-bare) git repo in a temp dir with one commit per
+    /// entry; each commit is a list of (path, contents) files. Returns
+    /// (temp_dir, repo_path, commit_shas_in_order).
+    fn git_repo_with_commits(commits: &[Vec<(&str, String)>]) -> (TempDir, String, Vec<String>) {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        git(&["init", "-b", "main"]);
+
+        let mut shas = Vec::new();
+        for files in commits {
+            for (path, contents) in files {
+                let full = repo_path.join(path);
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                std::fs::write(&full, contents).unwrap();
+                git(&["add", "--", path]);
+            }
+            git(&["commit", "-m", "test commit"]);
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("rev-parse")
+                .arg("HEAD")
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            shas.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        }
+
+        (tmp, repo_path.to_str().unwrap().to_string(), shas)
+    }
+
+    /// A test state with a workspace (ws-test) and a repo (repo-1) whose
+    /// storage path points at the given git repo, so lifecycle task events
+    /// can resolve their workspace scope.
+    async fn state_with_registered_repo(repo_path: &str) -> Arc<crate::AppState> {
+        let state = test_state();
+        let ws = Workspace {
+            id: Id::new("ws-test"),
+            tenant_id: Id::new("default"),
+            name: "Test Workspace".to_string(),
+            slug: TEST_WS_SLUG.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = Repository::new(
+            Id::new("repo-1"),
+            Id::new("ws-test"),
+            TEST_REPO_NAME,
+            repo_path,
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        state
+    }
+
+    #[tokio::test]
+    async fn spec_lifecycle_manifest_gates_task_creation_e2e() {
+        // Manifest marks spec-a auto_create_tasks: false, spec-b true (with a
+        // priority override); spec-c is not registered at all.
+        let manifest = r#"
+version: 1
+specs:
+  - path: system/spec-a.md
+    title: Spec A
+    owner: user:test
+    auto_create_tasks: false
+  - path: system/spec-b.md
+    title: Spec B
+    owner: user:test
+    auto_create_tasks: true
+    priority: Critical
+"#
+        .to_string();
+
+        let (_tmp, repo_path, shas) = git_repo_with_commits(&[
+            vec![
+                ("specs/manifest.yaml", manifest),
+                ("specs/system/spec-a.md", "# A v1".to_string()),
+                ("specs/system/spec-b.md", "# B v1".to_string()),
+            ],
+            vec![
+                ("specs/system/spec-a.md", "# A v2".to_string()),
+                ("specs/system/spec-b.md", "# B v2".to_string()),
+                ("specs/system/spec-c.md", "# C v1".to_string()),
+            ],
+        ]);
+
+        let state = state_with_registered_repo(&repo_path).await;
+        let mut events = state.message_broadcast_tx.subscribe();
+
+        let update = super::RefUpdate {
+            old_sha: shas[0].clone(),
+            new_sha: shas[1].clone(),
+            refname: "refs/heads/main".to_string(),
+        };
+        super::process_spec_lifecycle(&state, "repo-1", &repo_path, "main", &[update]).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "expected exactly one lifecycle task, got: {titles:?}"
+        );
+        assert_eq!(tasks[0].title, "Review spec change: specs/system/spec-b.md");
+        assert_eq!(
+            tasks[0].spec_path.as_deref(),
+            Some("specs/system/spec-b.md")
+        );
+        // Per-spec priority override from the manifest (§15), not the
+        // change-kind default (High).
+        assert_eq!(tasks[0].priority, gyre_domain::TaskPriority::Critical);
+        // No task for spec-a (auto_create_tasks: false) or the unregistered
+        // spec-c — asserted by title AND by spec_path.
+        assert!(tasks.iter().all(|t| {
+            t.spec_path.as_deref() != Some("specs/system/spec-a.md")
+                && t.spec_path.as_deref() != Some("specs/system/spec-c.md")
+        }));
+        assert!(!titles.iter().any(|t| t.contains("spec-a")));
+        assert!(!titles.iter().any(|t| t.contains("spec-c")));
+
+        // Event tier: exactly one SpecChanged and one TaskCreated, both for
+        // spec-b — none for the excluded specs.
+        let mut spec_changed: Vec<serde_json::Value> = Vec::new();
+        let mut task_created = 0usize;
+        while let Ok(msg) = events.try_recv() {
+            use gyre_common::message::MessageKind;
+            match msg.kind {
+                MessageKind::SpecChanged => {
+                    spec_changed.push(msg.payload.unwrap_or_default());
+                }
+                MessageKind::TaskCreated => {
+                    task_created += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            spec_changed.len(),
+            1,
+            "SpecChanged events: {spec_changed:?}"
+        );
+        assert_eq!(
+            spec_changed[0]["spec_path"].as_str(),
+            Some("specs/system/spec-b.md")
+        );
+        assert_eq!(task_created, 1);
+    }
+
+    #[tokio::test]
+    async fn spec_lifecycle_without_manifest_uses_prefix_fallback_e2e() {
+        // No specs/manifest.yaml at HEAD: legacy path-prefix behavior must
+        // keep working (no regression for manifest-less repos).
+        let (_tmp, repo_path, shas) = git_repo_with_commits(&[
+            vec![
+                ("specs/system/watched.md", "# v1".to_string()),
+                ("specs/milestones/unwatched.md", "# v1".to_string()),
+            ],
+            vec![
+                ("specs/system/watched.md", "# v2".to_string()),
+                ("specs/milestones/unwatched.md", "# v2".to_string()),
+            ],
+        ]);
+
+        let state = state_with_registered_repo(&repo_path).await;
+        let update = super::RefUpdate {
+            old_sha: shas[0].clone(),
+            new_sha: shas[1].clone(),
+            refname: "refs/heads/main".to_string(),
+        };
+        super::process_spec_lifecycle(&state, "repo-1", &repo_path, "main", &[update]).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(tasks.len(), 1, "tasks: {titles:?}");
+        assert_eq!(
+            tasks[0].title,
+            "Review spec change: specs/system/watched.md"
+        );
+        // No manifest → no priority override: change-kind default (High).
+        assert_eq!(tasks[0].priority, gyre_domain::TaskPriority::High);
+        assert!(!titles.iter().any(|t| t.contains("unwatched")));
+    }
+
+    #[tokio::test]
+    async fn spec_lifecycle_without_manifest_rename_from_watched_prefix_e2e() {
+        // Manifest-less repo, renames whose OLD path sits under a watched
+        // prefix: the legacy fallback must still create the 'Update spec
+        // references' task (base fefde2946 behavior — AC3 'no regression').
+        // Regression test for the task-194 review finding: the manifest-less
+        // arm of `should_create_lifecycle_task` previously checked only the
+        // NEW path, dropping both of these cases.
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        git(&["init", "-b", "main"]);
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(repo_path.join("specs/system/foo.md"), "# v1\n").unwrap();
+        std::fs::write(repo_path.join("specs/system/bar.md"), "# v1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "c1"]);
+        let old_sha = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        let old_sha = String::from_utf8_lossy(&old_sha.stdout).trim().to_string();
+
+        // Rename one watched spec to an unwatched specs/ path, another out
+        // of specs/ entirely — both old paths are watched, so base created
+        // tasks for both.
+        std::fs::create_dir_all(repo_path.join("specs/milestones")).unwrap();
+        std::fs::create_dir_all(repo_path.join("docs")).unwrap();
+        git(&["mv", "specs/system/foo.md", "specs/milestones/a.md"]);
+        git(&["mv", "specs/system/bar.md", "docs/b.md"]);
+        git(&["commit", "-m", "c2"]);
+        let new_sha = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("rev-parse")
+            .arg("HEAD")
+            .output()
+            .unwrap();
+        let new_sha = String::from_utf8_lossy(&new_sha.stdout).trim().to_string();
+
+        // Sanity: the commit-to-commit diff must show these as renames (R),
+        // otherwise the test would not exercise the rename code path.
+        {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .arg("diff")
+                .arg("--name-status")
+                .arg(format!("{old_sha}..{new_sha}"))
+                .output()
+                .unwrap();
+            let diff = String::from_utf8_lossy(&out.stdout).to_string();
+            assert!(
+                diff.contains("R100\tspecs/system/foo.md\tspecs/milestones/a.md"),
+                "diff: {diff}"
+            );
+            assert!(
+                diff.contains("R100\tspecs/system/bar.md\tdocs/b.md"),
+                "diff: {diff}"
+            );
+        }
+
+        let repo_path_str = repo_path.to_str().unwrap().to_string();
+        let state = state_with_registered_repo(&repo_path_str).await;
+        let update = super::RefUpdate {
+            old_sha,
+            new_sha,
+            refname: "refs/heads/main".to_string(),
+        };
+        super::process_spec_lifecycle(&state, "repo-1", &repo_path_str, "main", &[update]).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(tasks.len(), 2, "tasks: {titles:?}");
+        assert!(
+            titles
+                .contains(&"Update spec references: specs/system/foo.md -> specs/milestones/a.md"),
+            "tasks: {titles:?}"
+        );
+        assert!(
+            titles.contains(&"Update spec references: specs/system/bar.md -> docs/b.md"),
+            "tasks: {titles:?}"
+        );
     }
 
     // ── Audit-only verification tests (TASK-006) ─────────────────────────
@@ -4495,16 +7417,19 @@ mod tests {
         }
 
         let chain = vec![root, derived];
-        let (root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+        let acc = accumulate_chain_constraints(&chain);
 
-        assert!(root_si.is_some(), "should find root signed input");
+        assert!(acc.root_input.is_some(), "should find root signed input");
         // Root has 1 constraint + derived has 1 = 2 total.
         assert_eq!(
-            explicit.len(),
+            acc.explicit_constraints.len(),
             2,
             "should accumulate constraints additively"
         );
-        assert!(gate.is_empty(), "should have no gate constraints");
+        assert!(
+            acc.gate_constraints.is_empty(),
+            "should have no gate constraints"
+        );
     }
 
     #[test]
@@ -4546,11 +7471,139 @@ mod tests {
             });
 
         let chain = vec![root];
-        let (_root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+        let acc = accumulate_chain_constraints(&chain);
 
-        assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
-        assert_eq!(gate.len(), 1, "should have 1 gate constraint");
-        assert_eq!(gate[0].gate_name, "Code Review");
+        assert_eq!(
+            acc.explicit_constraints.len(),
+            1,
+            "should have 1 explicit constraint"
+        );
+        assert_eq!(
+            acc.gate_constraints.len(),
+            1,
+            "should have 1 gate constraint"
+        );
+        assert_eq!(acc.gate_constraints[0].gate_name, "Code Review");
+    }
+
+    /// Spec Approval Ledger regression (agent-gates.md §Spec Approval Ledger):
+    /// a push that modifies a spec file must auto-invalidate active approvals.
+    ///
+    /// Approval rows are keyed by ledger paths ("system/foo.md") while the push
+    /// diff carries git paths ("specs/system/foo.md"); without normalization
+    /// the revocation silently matched nothing and stale approvals stayed
+    /// active (forge then merged against a spec version nobody approved).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_modifying_spec_revokes_ledger_approvals() {
+        let state = test_state();
+
+        // Real repo with two commits: v1 of the spec, then a modification.
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("spec-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v1\n",
+        )
+        .unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "v1"]);
+        let old_sha = git(&["rev-parse", "HEAD"]);
+
+        // Active approval keyed by the LEDGER path (as approve_spec records).
+        let approval = gyre_domain::SpecApproval::new(
+            gyre_common::Id::new("apr-stale"),
+            "system/payments.md",
+            "a".repeat(40),
+            "user:approver",
+        );
+        state.spec_approvals.create(&approval).await.unwrap();
+        state
+            .spec_approvals
+            .approve(&approval.id, 1700000000)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(state
+            .spec_approvals
+            .find_by_id(&approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active());
+
+        // Second commit modifies the spec file on main.
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v2\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "v2"]);
+        let new_sha = git(&["rev-parse", "HEAD"]);
+
+        // Drive the push-time lifecycle hook (default-branch update).
+        process_spec_lifecycle(
+            &state,
+            "repo-stale",
+            repo_path.to_str().unwrap(),
+            "main",
+            &[RefUpdate {
+                old_sha,
+                new_sha,
+                refname: "refs/heads/main".to_string(),
+            }],
+        )
+        .await;
+
+        // The approval must now be Revoked — the spec content changed.
+        let reloaded = state
+            .spec_approvals
+            .find_by_id(&approval.id)
+            .await
+            .unwrap()
+            .expect("approval row survives invalidation");
+        assert_eq!(
+            reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Revoked,
+            "push modifying spec must revoke the ledger approval (it was keyed by ledger path, diff by git path)"
+        );
+        assert_eq!(
+            reloaded.approved_at, None,
+            "mutual exclusivity: approved_at cleared"
+        );
+        assert!(reloaded
+            .revocation_reason
+            .as_deref()
+            .unwrap()
+            .contains("modified"));
+
+        // And the revoked approval no longer authorizes merges (forge check).
+        let spec_ref = format!("system/payments.md@{}", "a".repeat(40));
+        assert!(
+            crate::api::gates::verify_spec_ref(&state, &spec_ref)
+                .await
+                .is_err(),
+            "revoked approval must fail verify_spec_ref"
+        );
     }
 
     /// TASK-167 / merge-dependencies.md §2: an end-to-end push through
@@ -4606,28 +7659,28 @@ mod tests {
             .find(|r| r.name == TEST_REPO_NAME)
             .unwrap();
         let mr_a_id = {
-            let mut mr = gyre_domain::MergeRequest::new(
+            let mr = gyre_domain::MergeRequest::new(
                 gyre_common::Id::new("mr-a"),
                 repo.id.clone(),
+                gyre_common::Id::new("ws-test"),
                 "A",
                 "feat/a".to_string(),
                 "main".to_string(),
                 0,
             );
-            mr.workspace_id = gyre_common::Id::new("ws-test");
             state.merge_requests.create(&mr).await.unwrap();
             mr.id.to_string()
         };
         let mr_b_id = {
-            let mut mr = gyre_domain::MergeRequest::new(
+            let mr = gyre_domain::MergeRequest::new(
                 gyre_common::Id::new("mr-b"),
                 repo.id.clone(),
+                gyre_common::Id::new("ws-test"),
                 "B",
                 "feat/b".to_string(),
                 "main".to_string(),
                 0,
             );
-            mr.workspace_id = gyre_common::Id::new("ws-test");
             state.merge_requests.create(&mr).await.unwrap();
             mr.id.to_string()
         };
@@ -4748,5 +7801,1256 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(mr_a.depends_on.is_empty());
+    }
+
+    // -- task-104: source control audit events (observability.md §Audit
+    //    Event Types) -----------------------------------------------
+
+    async fn audit_events_of(
+        state: &crate::AppState,
+        event_type: &str,
+    ) -> Vec<gyre_domain::AuditEvent> {
+        gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                event_type: Some(event_type.to_string()),
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Poll the audit store until at least one event of the given type
+    /// appears (post-receive processing runs in a spawned task), bounded.
+    async fn wait_for_audit_event(
+        state: &crate::AppState,
+        event_type: &str,
+    ) -> Vec<gyre_domain::AuditEvent> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let events = audit_events_of(state, event_type).await;
+            if !events.is_empty() {
+                return events;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no '{event_type}' audit event was recorded within 30s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Run a git command in the repo with stdin input; returns trimmed stdout.
+    fn git_with_input(repo_path: &str, args: &[&str], input: &str) -> String {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_records_git_push_accepted_audit_event() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // Configure the conventional-commit gate so the accepted event
+        // carries a real push_gate_results entry.
+        state
+            .repo_push_gates
+            .set_for_repo("repo-1", vec!["conventional-commit".to_string()])
+            .await
+            .unwrap();
+
+        let tree = git(&["mktree"]);
+        let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
+        git(&["update-ref", "refs/heads/main", &base]);
+        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: move main"]);
+        git(&["update-ref", "refs/heads/main", &tip]);
+
+        // Push body: ref update command + flush + packfile with the objects.
+        let line = format!("{base} {tip} refs/heads/main");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{tip}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            git(&["rev-parse", "refs/heads/main"]),
+            tip,
+            "receive-pack did not move refs/heads/main"
+        );
+
+        let events = wait_for_audit_event(&state, "git_push_accepted").await;
+        assert_eq!(events.len(), 1, "one event per ref update");
+        let e = &events[0];
+        assert_eq!(e.detail["repo_id"], "repo-1");
+        assert_eq!(e.detail["branch"], "main");
+        assert_eq!(e.detail["commit_sha"], tip.as_str());
+        assert_eq!(e.detail["agent_id"], "system");
+        // The configured gate passed and its outcome is recorded.
+        let gates = e.detail["push_gate_results"].as_array().unwrap();
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0]["gate"], "conventional-commit");
+        assert_eq!(gates[0]["passed"], true);
+        // Envelope scoping.
+        assert_eq!(e.agent_id.as_ref().unwrap().as_str(), "system");
+        assert_eq!(e.repo_id.as_ref().unwrap().as_str(), "repo-1");
+        assert_eq!(e.workspace_id.as_ref().unwrap().as_str(), "ws-test");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Success);
+        assert_eq!(e.resource_type, "repo");
+    }
+
+    /// Review repair regression test (task-104): `git receive-pack` declines
+    /// a non-fast-forward ref update in its report-status stream while the
+    /// process still exits 0. The stale-client push below (server ref at
+    /// `tip`, client pushes `base -> divergent`) must NOT record a
+    /// GitPushAccepted audit event — the spec trigger is "Smart HTTP push
+    /// accepted", and the update never landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_declined_by_git_records_no_git_push_accepted_audit_event() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // Server history: base <- tip, with refs/heads/main at `tip`.
+        let tree = git(&["mktree"]);
+        let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
+        git(&["update-ref", "refs/heads/main", &base]);
+        let tip = git(&["commit-tree", &tree, "-p", &base, "-m", "feat: move main"]);
+        git(&["update-ref", "refs/heads/main", &tip]);
+        // Stale client diverged from `base`; its update is non-fast-forward
+        // relative to the server's `tip`.
+        let stale = git(&[
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-m",
+            "feat: stale client",
+        ]);
+
+        // Push body: stale client sends `base -> stale` (its outdated view of
+        // the ref) plus a packfile containing the stale commit.
+        let line = format!("{base} {stale} refs/heads/main");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{stale}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // receive-pack exits 0 even though it declined the ref update —
+        // the rejection travels in the report-status stream, so the HTTP
+        // response stays 200 with git's own report.
+        assert_eq!(resp.status(), StatusCode::OK);
+        // The ref update was NOT applied: main still points at `tip`.
+        assert_eq!(
+            git(&["rev-parse", "refs/heads/main"]),
+            tip,
+            "receive-pack must not have moved refs/heads/main"
+        );
+
+        // Give the spawned post-receive task ample opportunity to (wrongly)
+        // emit acceptance events, then assert none exist.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let accepted = audit_events_of(&state, "git_push_accepted").await;
+        assert!(
+            accepted.is_empty(),
+            "git declined the ref update, but git_push_accepted events were recorded: {}",
+            serde_json::to_string_pretty(
+                &accepted
+                    .iter()
+                    .map(|e| e.detail.clone())
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
+        );
+        // A git-level decline is not a gate rejection either — the spec
+        // reserves GitPushRejected for "push rejected by gate".
+        let rejected = audit_events_of(&state, "git_push_rejected").await;
+        assert!(rejected.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_rejected_by_gate_records_git_push_rejected_audit_event() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {:?} failed", args);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        state
+            .repo_push_gates
+            .set_for_repo("repo-1", vec!["conventional-commit".to_string()])
+            .await
+            .unwrap();
+
+        let tree = git(&["mktree"]);
+        let base = git(&["commit-tree", &tree, "-m", "chore: base"]);
+        git(&["update-ref", "refs/heads/main", &base]);
+        // Non-conventional commit message: the gate must reject the push.
+        let tip = git(&[
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-m",
+            "not conventional at all",
+        ]);
+        git(&["update-ref", "refs/heads/main", &tip]);
+
+        let line = format!("{base} {tip} refs/heads/main");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{tip}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // The ref must have been rolled back (existing undo behavior).
+        assert_eq!(git(&["rev-parse", "refs/heads/main"]), base);
+
+        // The rejection is synchronous — the audit event is recorded before
+        // the response is returned, but query anyway for uniformity.
+        let events = wait_for_audit_event(&state, "git_push_rejected").await;
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.detail["repo_id"], "repo-1");
+        assert_eq!(e.detail["branch"], "main");
+        assert_eq!(e.detail["gate_name"], "conventional-commit");
+        assert!(
+            e.detail["reason"]
+                .as_str()
+                .unwrap()
+                .contains("conventional"),
+            "rejection reason should name the violation: {}",
+            e.detail["reason"]
+        );
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
+        assert_eq!(e.agent_id.as_ref().unwrap().as_str(), "system");
+        // No accepted event may exist for the rejected push.
+        let accepted = audit_events_of(&state, "git_push_accepted").await;
+        assert!(accepted.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_spec_change_records_spec_changed_audit_event() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Build a commit whose tree adds specs/system/new-spec.md.
+        let blob = git_with_input(&repo_path, &["hash-object", "-w", "--stdin"], "# spec");
+        let tree_system = git_with_input(
+            &repo_path,
+            &["mktree"],
+            &format!("100644 blob {blob}\tnew-spec.md"),
+        );
+        let tree_specs = git_with_input(
+            &repo_path,
+            &["mktree"],
+            &format!("040000 tree {tree_system}\tsystem"),
+        );
+        let tree = git_with_input(
+            &repo_path,
+            &["mktree"],
+            &format!("040000 tree {tree_specs}\tspecs"),
+        );
+        let sha = git_with_input(
+            &repo_path,
+            &["commit-tree", &tree, "-m", "docs: add spec"],
+            "",
+        );
+        git_with_input(&repo_path, &["update-ref", "refs/heads/main", &sha], "");
+
+        // Push creating refs/heads/main (old SHA = zeros).
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+        let line = format!("{zeros} {sha} refs/heads/main");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            use std::io::Write as _;
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{sha}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        body.extend_from_slice(&pack);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = wait_for_audit_event(&state, "spec_changed").await;
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.detail["repo_id"], "repo-1");
+        assert_eq!(e.detail["spec_path"], "specs/system/new-spec.md");
+        assert_eq!(e.detail["change_kind"], "added");
+        assert!(
+            e.detail["task_id"].as_str().is_some(),
+            "spec change must reference the auto-created task"
+        );
+        assert_eq!(e.repo_id.as_ref().unwrap().as_str(), "repo-1");
+        assert_eq!(e.resource_type, "spec");
+        assert_eq!(e.resource_id.as_deref(), Some("specs/system/new-spec.md"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clone_records_git_clone_audit_event() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Seed the bare repo with a commit so the clone actually negotiates
+        // and fetches objects (an empty-repo clone skips the upload-pack
+        // POST entirely — nothing to fetch).
+        {
+            let git = |args: &[&str]| -> String {
+                let out = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .args(args)
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {:?} failed", args);
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            };
+            let tree = git(&["mktree"]);
+            let sha = git(&["commit-tree", &tree, "-m", "chore: init"]);
+            git(&["update-ref", "refs/heads/main", &sha]);
+        }
+
+        // Serve on a real listener so a real `git clone` runs through the
+        // smart-HTTP handlers (the sandbox permits local TCP listeners).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let clone_dir = TempDir::new().unwrap();
+        let url = format!("http://127.0.0.1:{port}/git/{ws_slug}/{repo_name}");
+        let clone_target = clone_dir.path().join("cloned");
+        let result = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .arg("clone")
+                .arg(&url)
+                .arg(&clone_target)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_ASKPASS", "true")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env("GIT_CONFIG_VALUE_0", "Authorization: Bearer test-token")
+                .output()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            result.status.success(),
+            "git clone failed (exit={:?}): {stderr}",
+            result.status.code()
+        );
+
+        let events = wait_for_audit_event(&state, "git_clone").await;
+        assert_eq!(events.len(), 1, "one git_clone event per upload-pack");
+        let e = &events[0];
+        assert_eq!(e.detail["repo_id"], "repo-1");
+        assert_eq!(e.detail["agent_id"], "system");
+        assert_eq!(e.agent_id.as_ref().unwrap().as_str(), "system");
+        assert_eq!(e.repo_id.as_ref().unwrap().as_str(), "repo-1");
+        assert_eq!(e.workspace_id.as_ref().unwrap().as_str(), "ws-test");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Success);
+        assert_eq!(e.resource_type, "repo");
+    }
+
+    // ── Repo-defined persona push detection (platform-model.md §2) ──────────
+
+    /// SHA-256 of `prompt` + empty capabilities joined — the persona
+    /// content-hash contract for a persona with no capabilities
+    /// (domain `Persona::hash_content`).
+    fn persona_content_hash(prompt: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(prompt.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Run git in the bare repo, assert success, return trimmed stdout.
+    fn git_bare(repo_path: &str, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Write a blob with the given content; returns its SHA.
+    fn write_blob(repo_path: &str, content: &str) -> String {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "hash-object failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Build a tree object from (path, blob-sha) entries, creating
+    /// intermediate trees for nested paths (`mktree` is single-level).
+    fn write_tree(repo_path: &str, files: &[(&str, &str)]) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        let mut subdirs: std::collections::BTreeMap<&str, Vec<(&str, &str)>> =
+            std::collections::BTreeMap::new();
+        for (path, sha) in files {
+            match path.split_once('/') {
+                None => lines.push(format!("100644 blob {sha}\t{path}")),
+                Some((seg, rest)) => subdirs.entry(seg).or_default().push((rest, sha)),
+            }
+        }
+        for (seg, entries) in subdirs {
+            let subtree = write_tree(repo_path, &entries);
+            lines.push(format!("040000 tree {subtree}\t{seg}"));
+        }
+        lines.sort();
+        let input = lines.join("\n");
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["mktree"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "mktree failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Create a commit with the given (path, content) files on top of
+    /// `parent` (or a root commit when None) WITHOUT updating any ref.
+    fn commit_files(
+        repo_path: &str,
+        parent: Option<&str>,
+        msg: &str,
+        files: &[(&str, &str)],
+    ) -> String {
+        let blob_shas: Vec<String> = files
+            .iter()
+            .map(|(_, c)| write_blob(repo_path, c))
+            .collect();
+        let entries: Vec<(&str, &str)> = files
+            .iter()
+            .zip(&blob_shas)
+            .map(|((p, _), s)| (*p, s.as_str()))
+            .collect();
+        let tree = write_tree(repo_path, &entries);
+        match parent {
+            Some(p) => git_bare(repo_path, &["commit-tree", &tree, "-p", p, "-m", msg]),
+            None => git_bare(repo_path, &["commit-tree", &tree, "-m", msg]),
+        }
+    }
+
+    /// Push `new` onto `refname` (expected current value `old`) through the
+    /// real receive-pack HTTP handler. Asserts the push is accepted and the
+    /// ref actually moved — a push that did not move the ref would make the
+    /// post-receive assertions pass vacuously.
+    async fn push_ref(
+        app: &Router,
+        ws_slug: &str,
+        repo_name: &str,
+        repo_path: &str,
+        old: &str,
+        new: &str,
+        refname: &str,
+    ) {
+        let line = format!("{old} {new} {refname}");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write as _;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{new}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        assert!(!pack.is_empty(), "pack-objects produced empty pack");
+        body.extend_from_slice(&pack);
+
+        let uri = format!("/git/{ws_slug}/{repo_name}/git-receive-pack");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            git_bare(repo_path, &["rev-parse", refname]),
+            new,
+            "receive-pack did not move {refname}"
+        );
+    }
+
+    /// Poll `state.tasks.list()` until a task with the given title exists
+    /// (bounded) — the post-receive pipeline runs in a spawned task.
+    async fn wait_for_task_title(state: &Arc<crate::AppState>, title: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let tasks = state.tasks.list().await.unwrap();
+            if tasks.iter().any(|t| t.title == title) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "task {title:?} was never created"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Poll until the user has a notification of the given kind. Persona
+    /// owner notifications are written by a post-receive stage that runs
+    /// AFTER the approval task is created, so the notification can lag the
+    /// task — checking it exactly once races the background job.
+    async fn wait_for_notification(
+        state: &Arc<crate::AppState>,
+        user_id: &str,
+        kind: gyre_common::NotificationType,
+    ) -> gyre_common::Notification {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user_id), None, None, None, None, None, &[], 100, 0)
+                .await
+                .unwrap();
+            if let Some(n) = notifs.into_iter().find(|n| n.notification_type == kind) {
+                return n;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "notification of kind {kind:?} for user {user_id:?} was never created"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[test]
+    fn parse_persona_changes_added_modified_deleted() {
+        let input =
+            "A\tspecs/personas/new.md\nM\tspecs/personas/security.md\nD\tspecs/personas/old.md\n";
+        let changes = super::parse_persona_changes(input);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0], ('A', "specs/personas/new.md".to_string(), None));
+        assert_eq!(
+            changes[1],
+            ('M', "specs/personas/security.md".to_string(), None)
+        );
+        assert_eq!(changes[2], ('D', "specs/personas/old.md".to_string(), None));
+    }
+
+    #[test]
+    fn parse_persona_changes_renamed() {
+        let input = "R090\tspecs/personas/old.md\tspecs/personas/new.md\n";
+        let changes = super::parse_persona_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0],
+            (
+                'R',
+                "specs/personas/new.md".to_string(),
+                Some("specs/personas/old.md".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn parse_persona_changes_ignores_non_persona_paths() {
+        // Spec-lifecycle paths, source files, nested persona paths, and
+        // non-markdown files in the persona dir are all ignored.
+        let input = "M\tspecs/system/architecture.md\nM\tsrc/main.rs\n\
+                     A\tspecs/personas/nested/deep.md\nA\tspecs/personas/notes.txt\n\
+                     M\tspecs/README.md\n";
+        let changes = super::parse_persona_changes(input);
+        assert!(changes.is_empty(), "got: {changes:?}");
+    }
+
+    #[test]
+    fn parse_persona_changes_rename_into_persona_dir() {
+        // A rename whose OLD side is a persona file is still a persona change.
+        let input = "R100\tspecs/personas/gone.md\tdocs/gone.md\n";
+        let changes = super::parse_persona_changes(input);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, 'R');
+        assert_eq!(changes[0].1, "docs/gone.md");
+        assert_eq!(changes[0].2.as_deref(), Some("specs/personas/gone.md"));
+    }
+
+    #[test]
+    fn persona_slug_from_path_direct_files_only() {
+        assert_eq!(
+            super::persona_slug_from_path("specs/personas/security.md"),
+            Some("security".to_string())
+        );
+        assert_eq!(
+            super::persona_slug_from_path("specs/personas/domain-reviewer.md"),
+            Some("domain-reviewer".to_string())
+        );
+        assert_eq!(
+            super::persona_slug_from_path("specs/personas/nested/deep.md"),
+            None
+        );
+        assert_eq!(super::persona_slug_from_path("specs/system/x.md"), None);
+        assert_eq!(super::persona_slug_from_path("specs/personas/.md"), None);
+    }
+
+    #[test]
+    fn persona_approval_task_shape() {
+        let task = super::persona_approval_task(
+            "security",
+            "specs/personas/security.md",
+            &Id::new("repo-1"),
+            &Id::new("ws-test"),
+            "modified",
+            4242,
+        );
+        assert_eq!(
+            task.title,
+            "Persona change requires human approval: security"
+        );
+        assert_eq!(
+            task.labels,
+            vec!["persona-change".to_string(), "auto-created".to_string()]
+        );
+        assert_eq!(task.priority, gyre_domain::TaskPriority::High);
+        assert_eq!(task.repo_id, Id::new("repo-1"));
+        assert_eq!(task.workspace_id, Id::new("ws-test"));
+        assert_eq!(
+            task.spec_path.as_deref(),
+            Some("specs/personas/security.md")
+        );
+        // Push-hook tasks must never trigger agent spawning.
+        assert!(task.task_type.is_none());
+        assert_eq!(task.created_at, 4242);
+    }
+
+    /// End-to-end: pushing a modification of `specs/personas/security.md`
+    /// through the real receive-pack handler updates the repo-scoped persona
+    /// entity (content + content_hash + version), resets its approval to
+    /// Pending, clears approved_by/approved_at, auto-creates the approval
+    /// task, and notifies the owner (platform-model.md §2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_persona_change_updates_entity_resets_approval_and_notifies_owner() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // The persona owner must be a real user — the hook notifies owners
+        // through the inbox.
+        let owner = gyre_domain::User::new(Id::new("user-1"), "ext-user-1", "user-1", 0);
+        state.users.create(&owner).await.unwrap();
+        // Email channel configured (Immediate, all bands) — the emitter-path
+        // guard below asserts the push-hook notification fans out to it.
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-1"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Seed an APPROVED repo-scoped persona whose prompt matches the git
+        // state before the push.
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-security"),
+            "Security Agent",
+            "security",
+            gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+            "old prompt",
+            1000,
+        );
+        persona.owner = Some("user-1".to_string());
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        persona.approved_by = Some("user-1".to_string());
+        persona.approved_at = Some(1234);
+        persona.updated_at = 1234;
+        state.personas.create(&persona).await.unwrap();
+        let hash_before = persona.content_hash.clone();
+
+        // git state: main holds specs/personas/security.md with the old
+        // content (authored with plumbing — no push, so no hook runs yet).
+        let c0 = commit_files(
+            &repo_path,
+            None,
+            "base",
+            &[("specs/personas/security.md", "old prompt")],
+        );
+        git_bare(&repo_path, &["update-ref", "refs/heads/main", &c0]);
+
+        // Push a commit that modifies the persona file.
+        let c1 = commit_files(
+            &repo_path,
+            Some(&c0),
+            "change persona",
+            &[
+                ("specs/personas/security.md", "new prompt v1"),
+                ("src/main.rs", "fn main() {}"),
+            ],
+        );
+        push_ref(
+            &app,
+            &ws_slug,
+            &repo_name,
+            &repo_path,
+            &c0,
+            &c1,
+            "refs/heads/main",
+        )
+        .await;
+
+        // Post-receive processing runs in a spawned task — poll until the
+        // persona entity reflects the push.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let updated = loop {
+            let p = state
+                .personas
+                .find_by_slug_and_scope(
+                    "security",
+                    &gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+                )
+                .await
+                .unwrap()
+                .expect("persona must exist");
+            if p.system_prompt == "new prompt v1" {
+                break p;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "persona was never updated; still: {:?}",
+                p.system_prompt
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        // Content, hash, and version updated.
+        assert_eq!(updated.system_prompt, "new prompt v1");
+        assert_eq!(updated.content_hash, persona_content_hash("new prompt v1"));
+        assert_ne!(updated.content_hash, hash_before);
+        assert_eq!(
+            updated.version, 2,
+            "version must increment on content change"
+        );
+        // Approval reset.
+        assert_eq!(
+            updated.approval_status,
+            gyre_domain::PersonaApprovalStatus::Pending
+        );
+        assert_eq!(updated.approved_by, None);
+        assert_eq!(updated.approved_at, None);
+        assert!(updated.updated_at >= 1234);
+        // Scope and identity preserved.
+        assert_eq!(updated.id, Id::new("persona-security"));
+        assert_eq!(
+            updated.scope,
+            gyre_domain::PersonaScope::Repo(Id::new("repo-1"))
+        );
+        assert_eq!(updated.owner.as_deref(), Some("user-1"));
+
+        // Approval task auto-created with the contract title/labels/priority.
+        let title = "Persona change requires human approval: security";
+        wait_for_task_title(&state, title).await;
+        let tasks = state.tasks.list().await.unwrap();
+        let task = tasks
+            .iter()
+            .find(|t| t.title == title)
+            .expect("approval task must exist");
+        assert_eq!(
+            task.labels,
+            vec!["persona-change".to_string(), "auto-created".to_string()]
+        );
+        assert_eq!(task.priority, gyre_domain::TaskPriority::High);
+        assert_eq!(task.repo_id, Id::new("repo-1"));
+        assert_eq!(task.workspace_id, Id::new("ws-test"));
+        assert_eq!(
+            task.spec_path.as_deref(),
+            Some("specs/personas/security.md")
+        );
+        // Exactly one approval task for this persona (no duplicates).
+        assert_eq!(tasks.iter().filter(|t| t.title == title).count(), 1);
+
+        // The owner was notified (polled: the notification is written after
+        // the approval task by the same background job).
+        let notif = wait_for_notification(
+            &state,
+            "user-1",
+            gyre_common::NotificationType::PersonaChangePendingApproval,
+        )
+        .await;
+        assert_eq!(notif.title, title);
+        assert_eq!(notif.source.entity_type, "persona");
+        assert_eq!(notif.source.entity_id, "security");
+        assert_eq!(notif.source.repo_id, Some(Id::new("repo-1")));
+        assert_eq!(notif.workspace_id, Id::new("ws-test"));
+        assert!(notif.body.as_deref().unwrap().contains("security"));
+
+        // Emitter-path guard (task-112 review F1): the persona-push hook's
+        // notification creation must go through the channel dispatcher —
+        // the configured email channel queued an outbox entry. Bounded
+        // poll: the dispatch runs in the post-receive task right after the
+        // record becomes visible.
+        let mut outbox_hit = false;
+        for _ in 0..40 {
+            let outbox = state
+                .kv_store
+                .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+                .await
+                .unwrap();
+            if outbox.iter().any(|(k, _)| k.starts_with("user-1:")) {
+                outbox_hit = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            outbox_hit,
+            "persona-push approval notification must reach the configured email channel"
+        );
+    }
+
+    /// End-to-end: pushing a NEW persona file registers a fresh
+    /// repo-scoped persona entity with Pending approval (no prior entity,
+    /// no owner yet → task but no notification).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_new_persona_file_registers_pending_repo_scoped_entity() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let c0 = commit_files(&repo_path, None, "base", &[("src/main.rs", "fn main() {}")]);
+        git_bare(&repo_path, &["update-ref", "refs/heads/main", &c0]);
+
+        let c1 = commit_files(
+            &repo_path,
+            Some(&c0),
+            "add persona",
+            &[
+                ("src/main.rs", "fn main() {}"),
+                ("specs/personas/domain-reviewer.md", "review prompt"),
+            ],
+        );
+        push_ref(
+            &app,
+            &ws_slug,
+            &repo_name,
+            &repo_path,
+            &c0,
+            &c1,
+            "refs/heads/main",
+        )
+        .await;
+
+        // Poll until the new entity is registered.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let persona = loop {
+            let p = state
+                .personas
+                .find_by_slug_and_scope(
+                    "domain-reviewer",
+                    &gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+                )
+                .await
+                .unwrap();
+            if let Some(p) = p {
+                break p;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "new persona entity was never registered"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        assert_eq!(
+            persona.scope,
+            gyre_domain::PersonaScope::Repo(Id::new("repo-1"))
+        );
+        assert_eq!(persona.system_prompt, "review prompt");
+        assert_eq!(persona.content_hash, persona_content_hash("review prompt"));
+        assert_eq!(persona.version, 1);
+        assert_eq!(
+            persona.approval_status,
+            gyre_domain::PersonaApprovalStatus::Pending
+        );
+        assert_eq!(persona.approved_by, None);
+        assert_eq!(persona.approved_at, None);
+        assert_eq!(persona.owner, None);
+
+        // Approval task auto-created.
+        wait_for_task_title(
+            &state,
+            "Persona change requires human approval: domain-reviewer",
+        )
+        .await;
+
+        // No owner on a newly discovered persona → no notification for anyone.
+        let recent = state.notifications.list_recent(100).await.unwrap();
+        assert!(
+            recent.iter().all(|n| n.notification_type
+                != gyre_common::NotificationType::PersonaChangePendingApproval),
+            "no owner notification expected for a persona without an owner"
+        );
+    }
+
+    /// End-to-end: a push with no persona file changes must not touch persona
+    /// entities, must not create persona approval tasks, and must not notify.
+    /// The push includes a `specs/system/` change so spec-lifecycle processing
+    /// provably runs (positive control); the assertion then verifies persona
+    /// state is byte-identical after the full pipeline (graph-extraction delta
+    /// for the pushed commit is the pipeline's last write).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_without_persona_changes_leaves_personas_untouched() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let owner = gyre_domain::User::new(Id::new("user-1"), "ext-user-1", "user-1", 0);
+        state.users.create(&owner).await.unwrap();
+
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-untouched"),
+            "Security Agent",
+            "security",
+            gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+            "stable prompt",
+            1000,
+        );
+        persona.owner = Some("user-1".to_string());
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        persona.approved_by = Some("user-1".to_string());
+        persona.approved_at = Some(1234);
+        state.personas.create(&persona).await.unwrap();
+        let snapshot = persona.clone();
+
+        let c0 = commit_files(&repo_path, None, "base", &[("src/main.rs", "fn main() {}")]);
+        git_bare(&repo_path, &["update-ref", "refs/heads/main", &c0]);
+
+        // Non-persona changes only: a Rust package (a Cargo.toml makes the
+        // knowledge-graph extractor produce nodes — its delta record is the
+        // pipeline's last write and our completion marker), a source file,
+        // and a specs/system/ file (the latter proves the post-receive
+        // pipeline ran past spec lifecycle — persona processing is the
+        // immediately following stage).
+        let cargo_toml =
+            "[package]\nname = \"test-proj\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+        let c1 = commit_files(
+            &repo_path,
+            Some(&c0),
+            "no persona changes",
+            &[
+                ("Cargo.toml", cargo_toml),
+                ("src/main.rs", "fn main() { /* v2 */ }"),
+                ("specs/system/other.md", "# other\n"),
+            ],
+        );
+        push_ref(
+            &app,
+            &ws_slug,
+            &repo_name,
+            &repo_path,
+            &c0,
+            &c1,
+            "refs/heads/main",
+        )
+        .await;
+
+        // Positive control 1: spec-lifecycle task for the specs/system/ file.
+        wait_for_task_title(&state, "Implement spec: specs/system/other.md").await;
+        // Positive control 2: the pipeline's final stage (knowledge-graph
+        // extraction) records a delta for the pushed commit.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let deltas = state
+                .graph_store
+                .list_deltas(&Id::new("repo-1"), None, None)
+                .await
+                .unwrap();
+            if deltas.iter().any(|d| d.commit_sha == c1) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "post-receive pipeline never completed (no graph delta for {c1})"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Persona state is byte-identical to the pre-push snapshot.
+        let after = state
+            .personas
+            .find_by_slug_and_scope(
+                "security",
+                &gyre_domain::PersonaScope::Repo(Id::new("repo-1")),
+            )
+            .await
+            .unwrap()
+            .expect("persona must still exist");
+        assert_eq!(after.system_prompt, snapshot.system_prompt);
+        assert_eq!(after.content_hash, snapshot.content_hash);
+        assert_eq!(after.version, snapshot.version);
+        assert_eq!(
+            after.approval_status,
+            gyre_domain::PersonaApprovalStatus::Approved,
+            "approval must NOT reset when no persona file changed"
+        );
+        assert_eq!(after.approved_by, snapshot.approved_by);
+        assert_eq!(after.approved_at, snapshot.approved_at);
+        assert_eq!(after.owner, snapshot.owner);
+
+        // No persona approval tasks, no persona notifications.
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(
+            tasks.iter().all(|t| !t
+                .title
+                .starts_with("Persona change requires human approval")),
+            "no persona approval task expected: {tasks:?}"
+        );
+        let recent = state.notifications.list_recent(100).await.unwrap();
+        assert!(recent
+            .iter()
+            .all(|n| n.notification_type
+                != gyre_common::NotificationType::PersonaChangePendingApproval));
     }
 }

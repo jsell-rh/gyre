@@ -2,10 +2,10 @@
 title: "Enforce SignedInput context binding (replay prevention) at verification"
 spec_ref: "authorization-provenance.md §2.4"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
-commits: []
+commits: ["f293796daa7ba9edbb9875c56873ebb9ecc6df5a", "10d235004c24553468a4ebeb9fc55a1efd6e5714", "265cb5d2eade8aab0d9063856d6607a746a82a9b", "2a3907082535dbf9f4a84d5cb40ae9bc4ed6c905"]
 ---
 
 ## Spec Excerpt
@@ -70,3 +70,94 @@ Add a real, fail-closed context-binding check that runs at every verification bo
 - Reuse the existing `VerificationResult` tree shape and the existing violation/audit emission helpers; do not invent a parallel notification path.
 - Verify route/handler wiring by reading `crates/gyre-server/src/api/tasks.rs` for the reassignment path before editing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters as part of this task.
+
+## Shipped
+
+SignedInput §2.4 context binding is enforced at every verification boundary
+with real comparisons against the actual push/merge target; a valid
+authorization for repo-A/workspace-A cannot authorize work on
+repo-B/workspace-B.
+
+### Implementation
+
+- **`verify_context_binding`** (`crates/gyre-server/src/git_http.rs`):
+  compares the signed root `InputContent` against the real target —
+  `repo_id`, `workspace_id`, `spec_sha` (vs the task's currently approved
+  SHA), and `expected_generation` (vs the task's persisted generation) —
+  each as a `context_binding.*` child of the existing `VerificationResult`
+  tree. `valid_until` stays where it already was (not duplicated). Fails
+  closed: unresolvable task means `generation = None`, so any generation
+  pin rejects.
+- **Enforcement** (`crates/gyre-server/src/constraint_check.rs`):
+  `enforce_push_constraints` and `enforce_merge_constraints` call the check
+  after `verify_chain` succeeds, using the real `repo_id`/`workspace_id`
+  already in scope. Mismatch rejects with `Err` naming the failing
+  binding(s) plus the `attestation.chain_invalid` audit event and
+  `ConstraintViolation` messages/Inbox notifications via the existing
+  emission path. Audit-only mirrors in `evaluate_push_constraints` and
+  `evaluate_merge_constraints` log
+  `attestation.context_binding_mismatch` without blocking (Phase 2).
+- **Real generation counter**: `Task.generation` (default 1) persisted in
+  the domain, SQLite + Postgres adapters (portable migration
+  `2026-10-08-000060_task_generation`, renumbered from 000059 after the
+  dbf9edaea base merge introduced a same-version sibling) and exposed in
+  `TaskResponse`.
+  Bumped on every reassignment to a different agent in all four mutation
+  paths: `update_task` (PUT /api/v1/tasks/:id), spawn reassignment, admin
+  reassign, MCP reassign.
+
+### Test evidence
+
+Mutation-verified tests (with the binding block disabled they FAIL):
+`enforce_push_rejects_repo_id_mismatch`,
+`enforce_push_rejects_stale_generation`,
+`enforce_push_rejects_spec_sha_mismatch`,
+`enforce_merge_rejects_workspace_id_mismatch`,
+`verify_context_binding_unit_matrix`;
+`enforce_push_matching_generation_passes` /
+`enforce_push_matching_context_passes` guard against over-rejection. All
+use real git repos, real Ed25519 signatures, and real persisted state.
+`task_generation_increments_on_reassignment` (port) and
+`update_task_api_reassignment_bumps_generation` (PUT API) prove the bump.
+
+On the current head (merge of repair base dbf9edaea, then commit
+f293796da): focused filters pass — `constraint_check` 40/40,
+`verify_context_binding` 1/1, `admin_reassign` 3/3, `api::spawn` 52/52
+(both former conflict files) — `cargo build --all` (SKIP_WEB_BUILD=1)
+succeeds, and `check-arch.sh`, `check-migration-versions.sh`,
+`check-migration-sql-portability.sh` all exit 0. Evidence:
+`/tmp/stage/review-evidence/` (per-round details, including earlier
+full-suite runs: gyre-server lib 1493 passed, gyre-adapters 383 passed /
+12 ignored, on head 10d235004).
+
+### Merge-resolution rounds
+
+Four base merges were resolved (fefde294, fb1f82e31, then repair base
+dbf9edaea), each verified by re-running the focused tests and mechanical
+gates on the merged head. The fb1f82e31 round had a single conflict in
+`api/spawn.rs` (scoped secret resolution): resolved in favor of the base
+version, which functionally supersedes the branch side by adding the
+Platform Model §7 `secret.accessed` audit event; the branch side was a
+comment-only rewording with identical behavior.
+
+The dbf9edaea round had two conflicts. `gyre-domain/src/task.rs`: the
+branch's `generation: 1` field initialization was combined with the
+base's explicit `created_at`/`updated_at` initialization in `Task::new`
+(both sides kept). `api/spawn.rs` again: the base's task-106
+jj-workspace-preferred `effective_work_dir` resolution was kept — it
+functionally supersedes the branch side (comment-only rewording) and
+still canonicalizes relative worktree paths. The merge also collided on
+Diesel migration version 20261008000059 (base `spec_lifecycle_configs`
+vs branch `task_generation`): the branch migration was renumbered to
+`2026-10-08-000060_task_generation` (content unchanged) in commit
+f293796da so both migrations run. Task-188 code was otherwise unchanged
+by every merge round.
+
+### Scope note
+
+The spec-approval signing endpoint (`api/specs.rs`) still creates
+SignedInputs with `expected_generation: None` — the signer-side pin is not
+exposed in the `ApproveSpecRequest` API. Enforcement (comparison against
+the persisted `Task.generation`) is fully implemented and
+mutation-tested; exposing a signer-side pin would extend the request
+contract and was not part of this task's enumerated scope.

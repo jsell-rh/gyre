@@ -191,6 +191,111 @@ class CIReconciliationTests(unittest.TestCase):
         self.assertNotIn('candidate',updates)
         self.assertNotIn('review',updates)
 
+    def test_shared_setup_failure_has_one_repair_and_resumes_both_reviewed_candidates(self):
+        from pipeline.ci import failure
+        source=self.store.directory/'source/specs';source.mkdir(parents=True);(source/'GOAL.md').write_text('Real fixes; never weaken checks.')
+        original=self.store.task('task-001')
+        self.store.put_task('task-002','g','body',dict(original['data']))
+        prerequisites=[]
+        for name in ('task-001','task-002'):
+            task=self.store.task(name)
+            work=self.store.enqueue('observe',name,'g',{'candidate':self.candidate,'url':task['data']['pr'],'published':self.receipt})
+            execution=Execution(self.store,self.store.claim('observe','observer',ident=work))
+            log=execution.directory/'failure.log';log.write_text('Playwright does not support chromium on ubuntu26.04-x64')
+            observation={'status':'environment_failed','base':self.base,'environment':'github-fixture',
+                         'failure_signature':'e'*64,'baseline_log':str(log),'log':str(log),
+                         'environment_failure':{'kind':'playwright-unsupported-platform'}}
+            result,updates,findings=failure(execution,task,self.receipt,observation)
+            pipeline=helper('dev-pipeline')
+            with patch.dict(pipeline.HANDLERS,{'observe':lambda e,t:failure(e,t,self.receipt,observation)}):
+                pipeline.run_claim(self.store,execution.claim)
+            self.assertEqual(self.store.db.execute('SELECT state FROM work WHERE id=?',(work,)).fetchone()[0],'succeeded')
+            prerequisites.append(updates['repair']['prerequisite'])
+            data=self.store.task(name)['data']
+            self.assertEqual(data['candidate'],self.candidate)
+            self.assertTrue(data['review']['approved'])
+            self.assertNotIn('dependencies',updates)
+            self.assertEqual(data['dependencies'],[])
+            self.assertEqual(self.store.task(name)['generation'],'g')
+        self.assertEqual(prerequisites[0],prerequisites[1])
+        repair=self.store.task(prerequisites[0])
+        self.assertIn('Repair shared CI environment',repair['body'])
+        from pipeline.priority import task_priority
+        self.assertEqual(task_priority(self.store,repair)['class'],'repair')
+        implementations=discover(self.store,'implement',self.base)
+        self.assertEqual([self.store.db.execute('SELECT task FROM work WHERE id=?',(w,)).fetchone()[0] for w in implementations],[repair['name']])
+        fixed='f'*40
+        self.store.put_task(repair['name'],repair['generation'],repair['body'],repair['data']|{'delivered':{'sha':fixed}})
+        jobs=discover(self.store,'verify',fixed)
+        self.assertEqual({self.store.db.execute('SELECT task FROM work WHERE id=?',(w,)).fetchone()[0] for w in jobs},{'task-001','task-002'})
+        for name in ('task-001','task-002'):
+            self.assertIsNone(self.store.task(name)['data']['repair'])
+            self.assertTrue(self.store.task(name)['data']['review']['approved'])
+
+    def test_environment_refresh_fences_stale_verifier_and_requires_fixed_base(self):
+        from pipeline.ci import failure,verification_ready
+        target='f'*40
+        stale=self.store.enqueue('verify','task-001','g',{'candidate':self.candidate,'base':self.base})
+        stale_claim=self.store.claim('verify','old-verifier',ident=stale)
+        observer=self.observer()
+        observation={'status':'environment_refresh','target_base':target,'failure_signature':'e'*64}
+        result,updates,findings=failure(observer,self.store.task('task-001'),self.receipt,observation)
+        self.store.finish(observer.claim['id'],observer.claim['token'],result,updates,findings)
+        task=self.store.task('task-001')
+        self.assertFalse(task['data'].get('repair'));self.assertTrue(task['data']['review']['approved'])
+        self.assertIsNone(self.store.integration_lane())
+        self.assertFalse(verification_ready(self.store,task,self.base))
+        self.assertTrue(verification_ready(self.store,task,target))
+        with self.assertRaises(StaleClaim):self.store.finish(stale,stale_claim['token'],{})
+        self.assertEqual(discover(self.store,'implement',target),[])
+        self.assertEqual(len(discover(self.store,'verify',target)),1)
+        changed=dict(task['data']);changed['published_head']='9'*40;changed['published_verified']=self.receipt|{'head':'9'*40};changed['ci']={'status':'pending'}
+        self.store.put_task('task-001','g','body',changed)
+        self.assertFalse(verification_ready(self.store,self.store.task('task-001'),target))
+
+    def test_environment_refresh_keeps_verifier_already_on_fixed_base(self):
+        from pipeline.ci import failure
+        target='f'*40
+        ident=self.store.enqueue('verify','task-001','g',{'candidate':self.candidate,'base':target})
+        claim=self.store.claim('verify','new-verifier',ident=ident)
+        observer=self.observer()
+        result,updates,findings=failure(observer,self.store.task('task-001'),self.receipt,
+                                      {'status':'environment_refresh','target_base':target,'failure_signature':'e'*64})
+        self.store.finish(observer.claim['id'],observer.claim['token'],result,updates,findings)
+        self.store._current(ident,claim['token'])
+        self.assertIsNone(self.store.integration_lane())
+        self.store._current(ident,claim['token'])
+
+    def test_shared_repair_creation_is_atomic_across_observers(self):
+        import concurrent.futures,threading
+        from types import SimpleNamespace
+        from pipeline.stages import baseline_repair
+        source=self.store.directory/'source/specs';source.mkdir(parents=True);(source/'GOAL.md').write_text('Fix shared infrastructure without weakening checks.')
+        log=self.store.directory/'failure.log';log.write_text('Unsupported hosted runner')
+        barrier=threading.Barrier(2)
+        def create(base):
+            store=Store(self.temp.name)
+            try:
+                barrier.wait()
+                return baseline_repair(SimpleNamespace(store=store),{'status':'environment_failed','base':base,'environment':'github-fixture',
+                    'failure_signature':'e'*64,'baseline_log':str(log),'environment_failure':{'kind':'playwright-unsupported-platform'}})
+            finally:store.close()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            names=list(pool.map(create,('a'*40,'b'*40)))
+        self.assertEqual(names[0],names[1])
+        self.assertEqual(sum(bool(t['data'].get('ci_environment')) for t in self.store.tasks()),1)
+
+    def test_refresh_base_requires_real_git_ancestry(self):
+        from pipeline.ci import includes_base
+        source=self.store.directory/'source';source.mkdir()
+        def git(*args):return subprocess.check_output(['git',*args],cwd=source,text=True,stderr=subprocess.DEVNULL).strip()
+        git('init','-q');git('config','user.name','fixture');git('config','user.email','fixture@example.com')
+        git('-c','core.hooksPath=/dev/null','commit','--no-gpg-sign','--allow-empty','-qm','first');first=git('rev-parse','HEAD')
+        git('-c','core.hooksPath=/dev/null','commit','--no-gpg-sign','--allow-empty','-qm','second');second=git('rev-parse','HEAD')
+        self.assertTrue(includes_base(self.store,second,first))
+        self.assertFalse(includes_base(self.store,first,second))
+        self.assertFalse(includes_base(self.store,second,'missing-ref'))
+
     def test_observation_is_discarded_if_ci_recovers_or_head_changes_while_logs_download(self):
         for changed in ({'headRefOid':'f'*40},{'statusCheckRollup':[dict(self.checks[0],conclusion='SUCCESS')]}):
             with self.subTest(change=changed):

@@ -37,6 +37,27 @@ The Gyre server injects these automatically at spawn time — you do not need to
 | `GYRE_REPO_ID` | Repository UUID |
 | `GYRE_AGENT_COMMAND` | _(optional)_ Command to exec after bootstrap (e.g. a CI script path inside the image) |
 
+### cred-proxy (optional overrides)
+
+The credential proxy reads these at startup; unset values fall back to the
+listed defaults:
+
+| Variable | Default | Description |
+|---|---|---|
+| `GYRE_ANTHROPIC_BASE` | `https://api.anthropic.com` | Upstream for `/v1/*` LLM calls (Anthropic-compatible gateways) |
+| `GYRE_PRICING_JSON` | _(built-in table)_ | Cost table override: `{"claude-<model>":[input_per_million_usd, output_per_million_usd], ...}` |
+| `GYRE_CRED_SOCK_PATH` | `/run/gyre/cred.sock` | Unix socket path for the primary proxy listener |
+| `GYRE_CRED_ALLOWED_HOSTS` | `api.anthropic.com,gitlab.com,api.github.com` | Destination allowlist for `POST /proxy` |
+
+### Usage reporting
+
+After each proxied LLM call, cred-proxy reports token usage back to the
+server via `POST $GYRE_SERVER_URL/api/v1/agents/$GYRE_AGENT_ID/usage`
+(authenticated with `GYRE_AUTH_TOKEN`). The server aggregates usage per
+workspace and runs the budget enforcement cascade (agent-runtime.md §4:
+80% warn / 100% graceful stop / beyond-limit hard kill). Reports are
+best-effort and never fail the LLM call itself.
+
 ## What the Entrypoint Does
 
 1. Validates that required env vars are set

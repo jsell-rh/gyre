@@ -12,9 +12,14 @@
    *   scope     — 'workspace' | 'tenant'
    *   onScopeChange — (scope) => void
    *   onNodeClick   — (node) => void — navigate to repo detail / impact analysis
+   *   onNodeDblClick — (node) => void — double-click drill (ui-layout.md §5 workspace
+   *                   scope: double-click a repo node → scope change to repo)
+   *   showScopeToggle — hide the workspace/tenant toggle when embedded in a
+   *                   workspace-scoped surface (scope escape is not offered there)
    */
 
   import { elkLayout } from '../lib/layout-engines.js';
+  import DependencyDetail from './DependencyDetail.svelte';
 
   let {
     nodes = [],
@@ -22,6 +27,9 @@
     scope = 'workspace',
     onScopeChange = () => {},
     onNodeClick = () => {},
+    onNodeDblClick = null,
+    showScopeToggle = true,
+    onRefresh = null,
   } = $props();
 
   // ── Layout state ──────────────────────────────────────────────────────────
@@ -36,6 +44,12 @@
 
   // ── Hover state ───────────────────────────────────────────────────────────
   let hoveredNodeId = $state(null);
+
+  // ── Edge selection (dependency detail panel) ──────────────────────────────
+  let selectedEdgeId = $state(null);
+  // Rebound against the current data — after a refresh (e.g. an acknowledge)
+  // the panel reflects the fresh edge state, and a removed edge deselects.
+  const selectedEdge = $derived(edges.find(e => e.id === selectedEdgeId) ?? null);
 
   // ── Node dimensions ───────────────────────────────────────────────────────
   const NODE_W = 160;
@@ -75,8 +89,10 @@
     const repoEdges = edges.filter(e => e.source === repoId || e.target === repoId);
     const hasBreaking = repoEdges.some(e => e.status === 'breaking');
     const hasStale = repoEdges.some(e => e.status === 'stale');
+    const hasOrphaned = repoEdges.some(e => e.status === 'orphaned');
     if (hasBreaking) return 'breaking';
     if (hasStale) return 'stale';
+    if (hasOrphaned) return 'orphaned';
     return 'healthy';
   }
 
@@ -84,6 +100,7 @@
     switch (health) {
       case 'breaking': return { fill: '#450a0a', stroke: '#ef4444', text: '#fecaca', badge: '#ef4444' };
       case 'stale':    return { fill: '#422006', stroke: '#eab308', text: '#fef9c3', badge: '#eab308' };
+      case 'orphaned': return { fill: '#111214', stroke: '#9ca3af', text: '#d1d5db', badge: '#9ca3af' };
       default:         return { fill: '#1e293b', stroke: '#60a5fa', text: '#e2e8f0', badge: '#22c55e' };
     }
   }
@@ -92,6 +109,7 @@
   function edgeStyle(edge) {
     const isStale = edge.status === 'stale';
     const isBreaking = edge.status === 'breaking';
+    const isOrphaned = edge.status === 'orphaned';
     const depType = edge.type ?? '';
 
     if (isBreaking) {
@@ -99,6 +117,9 @@
     }
     if (isStale) {
       return { stroke: '#eab308', dasharray: '', width: 2, label: depType };
+    }
+    if (isOrphaned) {
+      return { stroke: '#9ca3af', dasharray: '2 4', width: 1.5, label: 'orphaned' };
     }
 
     switch (depType) {
@@ -129,7 +150,7 @@
       id: n.repo_id,
       node_type: 'repo',
       width: NODE_W,
-      height: NODE_H,
+      height: n.types != null ? 68 : NODE_H,
     }));
     const elkEdges = edges.map((e, i) => ({
       id: e.id ?? `e${i}`,
@@ -186,7 +207,7 @@
 
   // ── Pan handlers ──────────────────────────────────────────────────────────
   function handlePointerDown(e) {
-    if (e.target.closest('.dep-node')) return;
+    if (e.target.closest('.dep-node') || e.target.closest('.dep-edge')) return;
     isPanning = true;
     panStart = { x: e.clientX, y: e.clientY };
     svgEl.setPointerCapture(e.pointerId);
@@ -225,27 +246,41 @@
     switch (health) {
       case 'breaking': return '!';
       case 'stale':    return '~';
+      case 'orphaned': return '○';
       default:         return '✓';
     }
+  }
+
+  // ── Edge selection (dependency detail panel) ──────────────────────────────
+  function selectEdge(edge) {
+    selectedEdgeId = edge.id;
+  }
+
+  async function handleAcknowledge(bcId) {
+    // Refresh the parent's graph data after an acknowledge — the server may
+    // revert the edge status to active once all breaking changes are cleared.
+    if (onRefresh) await onRefresh(bcId);
   }
 </script>
 
 <div class="dep-graph-container" data-testid="dep-graph">
-  <!-- Scope toggle -->
-  <div class="dep-scope-toggle" data-testid="dep-scope-toggle">
-    <button
-      class="dep-scope-btn"
-      class:active={scope === 'workspace'}
-      onclick={() => onScopeChange('workspace')}
-      data-testid="dep-scope-workspace"
-    >Workspace</button>
-    <button
-      class="dep-scope-btn"
-      class:active={scope === 'tenant'}
-      onclick={() => onScopeChange('tenant')}
-      data-testid="dep-scope-tenant"
-    >Tenant</button>
-  </div>
+  <!-- Scope toggle (hidden when embedded in a scope-contained surface) -->
+  {#if showScopeToggle}
+    <div class="dep-scope-toggle" data-testid="dep-scope-toggle">
+      <button
+        class="dep-scope-btn"
+        class:active={scope === 'workspace'}
+        onclick={() => onScopeChange('workspace')}
+        data-testid="dep-scope-workspace"
+      >Workspace</button>
+      <button
+        class="dep-scope-btn"
+        class:active={scope === 'tenant'}
+        onclick={() => onScopeChange('tenant')}
+        data-testid="dep-scope-tenant"
+      >Tenant</button>
+    </div>
+  {/if}
 
   <!-- Legend -->
   <div class="dep-legend" data-testid="dep-legend">
@@ -254,6 +289,7 @@
     <span class="dep-legend-item"><span class="dep-legend-swatch dep-legend-dotted" style="border-color: #34d399"></span>API</span>
     <span class="dep-legend-item"><span class="dep-legend-swatch" style="background: #eab308"></span>Stale</span>
     <span class="dep-legend-item"><span class="dep-legend-swatch" style="background: #ef4444"></span>Breaking</span>
+    <span class="dep-legend-item"><span class="dep-legend-swatch dep-legend-dotted" style="border-color: #9ca3af"></span>Orphaned</span>
   </div>
 
   {#if !layoutReady}
@@ -261,6 +297,7 @@
   {:else if nodes.length === 0}
     <div class="dep-empty" data-testid="dep-empty">No cross-repo dependencies to display.</div>
   {:else}
+    <div class="dep-graph-body">
     <svg
       bind:this={svgEl}
       class="dep-svg"
@@ -283,6 +320,7 @@
           { id: 'manual', color: '#9ca3af' },
           { id: 'stale', color: '#eab308' },
           { id: 'breaking', color: '#ef4444' },
+          { id: 'orphaned', color: '#9ca3af' },
           { id: 'dep', color: '#9ca3af' },
         ] as marker}
           <marker
@@ -309,10 +347,16 @@
         {#if path}
           <g
             class="dep-edge"
+            class:selected={selectedEdge?.id === edge.id}
             data-testid="dep-edge-{i}"
             data-type={edge.type}
             data-status={edge.status}
             opacity={dimmed ? 0.15 : 1}
+            tabindex="0"
+            role="button"
+            aria-label="Dependency {edge.type} from {edge.source} to {edge.target}, status {edge.status}"
+            onclick={() => selectEdge(edge)}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectEdge(edge); } }}
           >
             <path d={path} fill="none" stroke="transparent" stroke-width="12" />
             <path
@@ -358,24 +402,30 @@
         {@const colors = nodeColors(health)}
         {@const highlighted = isHighlighted(node.repo_id)}
         {@const dimmed = hoveredNodeId && !highlighted}
+        <!-- HSI §3 Level 1 node boxes carry type/endpoint counts: nodes with
+             counts get a taller box so the counts render as a sub-label
+             between the repo name and the health indicator. -->
+        {@const hasStats = node.types != null}
+        {@const nh = hasStats ? 68 : NODE_H}
         {#if pos}
           <g
             class="dep-node"
             data-testid="dep-node-{node.repo_id}"
             data-health={health}
-            transform="translate({pos.x - NODE_W / 2}, {pos.y - NODE_H / 2})"
+            transform="translate({pos.x - NODE_W / 2}, {pos.y - nh / 2})"
             tabindex="0"
             role="button"
-            aria-label="{node.name} — {health}"
+            aria-label="{node.name} — {health}{hasStats ? `, ${node.types} types, ${node.endpoints} endpoints` : ''}"
             opacity={dimmed ? 0.25 : 1}
             onclick={() => onNodeClick(node)}
+            ondblclick={onNodeDblClick ? () => onNodeDblClick(node) : undefined}
             onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNodeClick(node); } }}
             onpointerenter={() => { hoveredNodeId = node.repo_id; }}
             onpointerleave={() => { hoveredNodeId = null; }}
           >
             <rect
               width={NODE_W}
-              height={NODE_H}
+              height={nh}
               rx={NODE_RX}
               fill={colors.fill}
               stroke={highlighted ? '#f8fafc' : colors.stroke}
@@ -385,7 +435,7 @@
             <text
               class="dep-node-label"
               x={NODE_W / 2}
-              y={NODE_H / 2 - 6}
+              y={hasStats ? 16 : NODE_H / 2 - 6}
               text-anchor="middle"
               dominant-baseline="central"
               fill={colors.text}
@@ -394,11 +444,27 @@
             >
               {node.name}
             </text>
+            <!-- HSI §3 Level 1: type/endpoint counts sub-label -->
+            {#if hasStats}
+              <text
+                class="dep-node-counts"
+                data-testid="dep-node-counts-{node.repo_id}"
+                x={NODE_W / 2}
+                y={31}
+                text-anchor="middle"
+                dominant-baseline="central"
+                fill={colors.text}
+                font-size="9"
+                opacity="0.75"
+              >
+                {node.types} types · {node.endpoints} endpoints
+              </text>
+            {/if}
             <!-- Health indicator -->
             <text
               class="dep-node-health"
               x={NODE_W / 2}
-              y={NODE_H / 2 + 12}
+              y={hasStats ? 52 : NODE_H / 2 + 12}
               text-anchor="middle"
               dominant-baseline="central"
               fill={colors.badge}
@@ -411,6 +477,17 @@
         {/if}
       {/each}
     </svg>
+    <!-- Dependency detail panel (§UI: click an edge for version drift +
+         breaking-change context) -->
+    {#if selectedEdge}
+      <DependencyDetail
+        edge={selectedEdge}
+        {nodes}
+        onClose={() => { selectedEdgeId = null; }}
+        onAcknowledge={handleAcknowledge}
+      />
+    {/if}
+    </div>
   {/if}
 </div>
 
@@ -484,6 +561,14 @@
     height: 0;
   }
 
+  .dep-graph-body {
+    display: flex;
+    flex: 1;
+    gap: 8px;
+    min-height: 0;
+    align-items: stretch;
+  }
+
   .dep-svg {
     width: 100%;
     flex: 1;
@@ -526,7 +611,16 @@
   }
 
   .dep-edge {
+    cursor: pointer;
     transition: opacity 0.15s;
+  }
+
+  .dep-edge.selected path {
+    stroke-width: 4;
+  }
+
+  .dep-edge:focus-visible path {
+    stroke-width: 4;
   }
 
   .dep-edge-label {

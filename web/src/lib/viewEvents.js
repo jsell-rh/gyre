@@ -58,6 +58,12 @@ export function onViewEvent(handler) {
 /**
  * Build a ViewEvent from a DOM mouse/pointer event.
  *
+ * Events performed by an integrated emitter that already carried out the
+ * shell action itself (e.g. ExplorerCanvas opens the detail panel through
+ * its own onNodeDetail callback) are marked `handled: true` after
+ * construction — the Explorer shell's uniform handler skips re-performing
+ * an already-serviced action, while global listeners still observe it.
+ *
  * @param {MouseEvent} domEvent
  * @param {EntityType} entity_type
  * @param {string} entity_id

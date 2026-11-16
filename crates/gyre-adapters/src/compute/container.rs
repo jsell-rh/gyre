@@ -130,64 +130,118 @@ impl ContainerTarget {
         self
     }
 
+    /// Build the `{runtime} run` argument vector for a spawn.
+    ///
+    /// Factored out of [`spawn_process`](ComputeTarget::spawn_process) so
+    /// the spec §3 security defaults are pinned by tests against the real
+    /// argv (same pattern as `SshDockerTarget::docker_run_args`).
+    fn docker_run_args(&self, config: &SpawnConfig) -> Vec<String> {
+        let mut args = vec![
+            "run".to_string(),
+            "--detach".to_string(),
+            "--rm".to_string(),
+            format!("--name={}", config.name),
+            format!("--workdir={}", config.work_dir),
+        ];
+
+        // --- Security defaults (CISO G8-A/B/C) ---
+
+        // G8-A: network isolation — deny all outbound by default.
+        let network = self.network.as_deref().unwrap_or("none");
+        args.push(format!("--network={}", network));
+
+        // G8-B: resource limits — prevent runaway memory and fork bombs.
+        let memory = self.memory_limit.as_deref().unwrap_or("2g");
+        args.push(format!("--memory={}", memory));
+        let pids = self.pids_limit.unwrap_or(512);
+        args.push(format!("--pids-limit={}", pids));
+
+        // G8-C: non-root user — run as nobody:nogroup (uid/gid 65534).
+        let user = self.user.as_deref().unwrap_or("65534:65534");
+        args.push(format!("--user={}", user));
+
+        // --- End security defaults ---
+
+        // Mount worktree path so the agent can access its checkout.
+        args.push(format!("--volume={}:{}", config.work_dir, config.work_dir));
+
+        // Additional user-configured volume mounts.
+        for v in &self.volumes {
+            args.push(format!("--volume={}", v));
+        }
+
+        // Pre-configured env vars (e.g. GYRE_SERVER_URL, GYRE_AGENT_TOKEN).
+        for (k, v) in &self.env_vars {
+            args.push(format!("--env={}={}", k, v));
+        }
+
+        // SpawnConfig env vars (caller-supplied, may override pre-configured).
+        for (k, v) in &config.env {
+            args.push(format!("--env={}={}", k, v));
+        }
+
+        args.push(self.image.clone());
+        args.push(config.command.clone());
+        args.extend(config.args.iter().cloned());
+        args
+    }
+
     async fn resolve_runtime(&self) -> Result<Runtime> {
         match &self.runtime {
             Some(r) => Ok(r.clone()),
             None => Runtime::detect().await,
         }
     }
+
+    /// Resolve the local image digest via `docker image inspect
+    /// --format {{.Id}}` (best-effort; `Err` when the runtime cannot
+    /// resolve the image). Callers use it for the `wl_image_hash`
+    /// attestation claim and must tolerate absence.
+    pub async fn image_digest(&self) -> Result<String> {
+        let runtime = self.resolve_runtime().await?;
+        let bin = runtime.binary();
+        let output = Command::new(bin)
+            .args(["image", "inspect", "--format={{.Id}}", &self.image])
+            .output()
+            .await
+            .with_context(|| format!("{} image inspect failed", bin))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "{} image inspect for {} failed: {}",
+                bin,
+                self.image,
+                stderr
+            ));
+        }
+        let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if digest.is_empty() {
+            return Err(anyhow::anyhow!(
+                "{} returned empty digest for {}",
+                bin,
+                self.image
+            ));
+        }
+        Ok(digest)
+    }
 }
 
 #[async_trait]
 impl ComputeTarget for ContainerTarget {
+    fn name(&self) -> &str {
+        "container"
+    }
+
+    fn target_type(&self) -> &'static str {
+        "container"
+    }
+
     async fn spawn_process(&self, config: &SpawnConfig) -> Result<ProcessHandle> {
         let runtime = self.resolve_runtime().await?;
         let bin = runtime.binary();
 
         let mut cmd = Command::new(bin);
-        cmd.arg("run")
-            .arg("--detach")
-            .arg("--rm")
-            .arg(format!("--name={}", config.name))
-            .arg(format!("--workdir={}", config.work_dir));
-
-        // --- Security defaults (CISO G8-A/B/C) ---
-
-        // G8-A: network isolation — deny all outbound by default.
-        let network = self.network.as_deref().unwrap_or("none");
-        cmd.arg(format!("--network={}", network));
-
-        // G8-B: resource limits — prevent runaway memory and fork bombs.
-        let memory = self.memory_limit.as_deref().unwrap_or("2g");
-        cmd.arg(format!("--memory={}", memory));
-        let pids = self.pids_limit.unwrap_or(512);
-        cmd.arg(format!("--pids-limit={}", pids));
-
-        // G8-C: non-root user — run as nobody:nogroup (uid/gid 65534).
-        let user = self.user.as_deref().unwrap_or("65534:65534");
-        cmd.arg(format!("--user={}", user));
-
-        // --- End security defaults ---
-
-        // Mount worktree path so the agent can access its checkout.
-        cmd.arg(format!("--volume={}:{}", config.work_dir, config.work_dir));
-
-        // Additional user-configured volume mounts.
-        for v in &self.volumes {
-            cmd.arg(format!("--volume={}", v));
-        }
-
-        // Pre-configured env vars (e.g. GYRE_SERVER_URL, GYRE_AGENT_TOKEN).
-        for (k, v) in &self.env_vars {
-            cmd.arg(format!("--env={}={}", k, v));
-        }
-
-        // SpawnConfig env vars (caller-supplied, may override pre-configured).
-        for (k, v) in &config.env {
-            cmd.arg(format!("--env={}={}", k, v));
-        }
-
-        cmd.arg(&self.image).arg(&config.command).args(&config.args);
+        cmd.args(self.docker_run_args(config));
 
         let output = cmd
             .output()
@@ -283,54 +337,176 @@ mod tests {
         assert_eq!(t.env_vars[1], ("GYRE_AGENT_TOKEN".into(), "tok-abc".into()));
     }
 
-    /// G8-A: default network flag is --network=none.
-    #[test]
-    fn security_default_network_none() {
-        let t = ContainerTarget::new("alpine:latest");
-        let network = t.network.as_deref().unwrap_or("none");
-        assert_eq!(network, "none");
+    fn container_config(name: &str) -> SpawnConfig {
+        let mut env = HashMap::new();
+        env.insert("GYRE_AGENT_ID".to_string(), "a-1".to_string());
+        SpawnConfig {
+            name: name.to_string(),
+            command: "/gyre/entrypoint.sh".to_string(),
+            args: vec![],
+            env,
+            work_dir: "/workspace".to_string(),
+        }
     }
 
-    /// G8-A: with_network overrides the default.
+    /// G8-A/B/C + spec §3: a default-config target builds a `docker run`
+    /// argv that carries every security default. Asserted against the real
+    /// argv vector — not a restatement of the `unwrap_or` fallbacks — so
+    /// dropping any flag from `docker_run_args` fails here.
     #[test]
-    fn security_network_override() {
-        let t = ContainerTarget::new("alpine:latest").with_network("bridge");
-        assert_eq!(t.network.as_deref(), Some("bridge"));
+    fn docker_run_args_enforce_security_defaults() {
+        let t = ContainerTarget::new("gyre-agent:latest");
+        let args = t.docker_run_args(&container_config("agent-1"));
+        // The four spec §3 security defaults.
+        assert!(
+            args.contains(&"--network=none".to_string()),
+            "default argv must pin --network=none: {args:?}"
+        );
+        assert!(
+            args.contains(&"--memory=2g".to_string()),
+            "default argv must pin --memory=2g: {args:?}"
+        );
+        assert!(
+            args.contains(&"--pids-limit=512".to_string()),
+            "default argv must pin --pids-limit=512: {args:?}"
+        );
+        assert!(
+            args.contains(&"--user=65534:65534".to_string()),
+            "default argv must pin --user=65534:65534: {args:?}"
+        );
+        // Structural flags and worktree volume.
+        assert!(args.contains(&"--detach".to_string()));
+        assert!(args.contains(&"--rm".to_string()));
+        assert!(args.contains(&"--name=agent-1".to_string()));
+        assert!(args.contains(&"--workdir=/workspace".to_string()));
+        assert!(args.contains(&"--volume=/workspace:/workspace".to_string()));
+        // Env vars forwarded so the container can authenticate.
+        assert!(args.contains(&"--env=GYRE_AGENT_ID=a-1".to_string()));
+        assert!(args.contains(&"gyre-agent:latest".to_string()));
+        assert!(args.contains(&"/gyre/entrypoint.sh".to_string()));
     }
 
-    /// G8-B: default memory limit is 2g and pids-limit is 512.
+    /// G8-A/B/C: overrides replace the defaults on the real argv — the
+    /// default flags must not linger alongside the configured ones.
     #[test]
-    fn security_default_resource_limits() {
-        let t = ContainerTarget::new("alpine:latest");
-        let memory = t.memory_limit.as_deref().unwrap_or("2g");
-        let pids = t.pids_limit.unwrap_or(512);
-        assert_eq!(memory, "2g");
-        assert_eq!(pids, 512);
+    fn docker_run_args_apply_overrides() {
+        let t = ContainerTarget::new("gyre-agent:latest")
+            .with_network("bridge")
+            .with_memory_limit("4g")
+            .with_pids_limit(256)
+            .with_user("1000:1000")
+            .with_volume("/host/data:/data")
+            .with_env("GYRE_SERVER_URL", "http://localhost:3000");
+        let args = t.docker_run_args(&container_config("agent-2"));
+        assert!(args.contains(&"--network=bridge".to_string()));
+        assert!(args.contains(&"--memory=4g".to_string()));
+        assert!(args.contains(&"--pids-limit=256".to_string()));
+        assert!(args.contains(&"--user=1000:1000".to_string()));
+        assert!(args.contains(&"--volume=/host/data:/data".to_string()));
+        assert!(args.contains(&"--env=GYRE_SERVER_URL=http://localhost:3000".to_string()));
+        // Defaults must not linger alongside overrides.
+        assert!(!args.contains(&"--network=none".to_string()));
+        assert!(!args.contains(&"--memory=2g".to_string()));
+        assert!(!args.contains(&"--pids-limit=512".to_string()));
+        assert!(!args.contains(&"--user=65534:65534".to_string()));
     }
 
-    /// G8-B: resource limit overrides are respected.
-    #[test]
-    fn security_resource_limit_overrides() {
-        let t = ContainerTarget::new("alpine:latest")
-            .with_memory_limit("512m")
-            .with_pids_limit(128);
-        assert_eq!(t.memory_limit.as_deref(), Some("512m"));
-        assert_eq!(t.pids_limit, Some(128));
+    /// Serializes tests that mutate `PATH`: `set_var` changes
+    /// process-global state, so PATH lookup must not race across tests
+    /// that spawn through it.
+    static PATH_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    /// Drive the REAL `spawn_process` through a stub runtime binary and
+    /// return the argv the stub actually executed plus the resulting
+    /// handle. Pins the wiring from `docker_run_args` to the spawned
+    /// process: dropping a security flag from the executed command line
+    /// fails the caller's assertions.
+    #[cfg(unix)]
+    async fn spawn_via_stub(runtime: Runtime, stub_name: &str) -> (ProcessHandle, Vec<String>) {
+        let _guard = PATH_LOCK.lock().await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let argv_dump = dir.path().join("argv");
+        let stub = dir.path().join(stub_name);
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\necho stub-container-id\n",
+                argv_dump.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), old_path));
+        let target = ContainerTarget::new("gyre-agent:latest").with_runtime(runtime);
+        let spawned = target.spawn_process(&container_config("agent-stub")).await;
+        std::env::set_var("PATH", &old_path);
+        let handle = spawned.expect("stub runtime run must succeed");
+
+        let argv: Vec<String> = std::fs::read_to_string(&argv_dump)
+            .expect("stub must have dumped its argv")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (handle, argv)
     }
 
-    /// G8-C: default user is nobody (65534:65534).
-    #[test]
-    fn security_default_user_nobody() {
-        let t = ContainerTarget::new("alpine:latest");
-        let user = t.user.as_deref().unwrap_or("65534:65534");
-        assert_eq!(user, "65534:65534");
+    /// The docker spawn path executes the spec §3 security defaults on the
+    /// argv the runtime binary actually receives (mutation check: turning
+    /// any of the four flags conditional fails here).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_executes_security_defaults_via_docker_stub() {
+        let (handle, argv) = spawn_via_stub(Runtime::Docker, "docker").await;
+        assert_eq!(handle.id, "stub-container-id");
+        assert_eq!(handle.target_type, "container");
+        assert_eq!(argv.first().map(String::as_str), Some("run"));
+        assert!(
+            argv.contains(&"--network=none".to_string()),
+            "executed argv: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--memory=2g".to_string()),
+            "executed argv: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--pids-limit=512".to_string()),
+            "executed argv: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--user=65534:65534".to_string()),
+            "executed argv: {argv:?}"
+        );
     }
 
-    /// G8-C: with_user overrides the default.
-    #[test]
-    fn security_user_override() {
-        let t = ContainerTarget::new("alpine:latest").with_user("1000:1000");
-        assert_eq!(t.user.as_deref(), Some("1000:1000"));
+    /// Same pinning for the podman runtime: the explicitly-configured
+    /// runtime selects the podman binary and the security defaults ride
+    /// the executed argv unchanged.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_executes_security_defaults_via_podman_stub() {
+        let (handle, argv) = spawn_via_stub(Runtime::Podman, "podman").await;
+        assert_eq!(handle.id, "stub-container-id");
+        assert_eq!(handle.target_type, "container");
+        assert!(
+            argv.contains(&"--network=none".to_string()),
+            "executed argv: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--memory=2g".to_string()),
+            "executed argv: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--pids-limit=512".to_string()),
+            "executed argv: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--user=65534:65534".to_string()),
+            "executed argv: {argv:?}"
+        );
     }
 
     #[test]

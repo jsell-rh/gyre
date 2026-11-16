@@ -19,6 +19,14 @@ impl DockerTarget {
 
 #[async_trait]
 impl ComputeTarget for DockerTarget {
+    fn name(&self) -> &str {
+        "docker"
+    }
+
+    fn target_type(&self) -> &'static str {
+        "container"
+    }
+
     async fn spawn_process(&self, config: &SpawnConfig) -> Result<ProcessHandle> {
         let mut cmd = Command::new("docker");
         cmd.arg("run")

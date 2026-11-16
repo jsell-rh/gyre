@@ -472,6 +472,18 @@ impl MetaSpecBindingRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_all(&self) -> Result<Vec<MetaSpecBinding>> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<Vec<MetaSpecBinding>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = meta_spec_bindings::table
+                .load::<MetaSpecBindingRow>(&mut *conn)
+                .context("list all meta_spec_bindings")?;
+            Ok(rows.into_iter().map(|r| r.into_domain()).collect())
+        })
+        .await?
+    }
+
     async fn delete(&self, id: &Id) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id_str = id.as_str().to_string();
@@ -550,6 +562,34 @@ mod tests {
         assert_eq!(got.kind, MetaSpecKind::Persona);
         assert_eq!(got.scope, MetaSpecScope::Global);
         assert!(!got.required);
+    }
+
+    /// TASK-158: Tenant-scoped meta-specs (scope = 'Tenant', scope_id = the
+    /// tenant) must round-trip — the 000057 migration widened the scope
+    /// CHECK, and this pins it against a fresh migrated database.
+    #[tokio::test]
+    async fn tenant_scoped_meta_spec_round_trip() {
+        let s = storage();
+        let mut ms = sample_meta_spec();
+        ms.scope = MetaSpecScope::Tenant;
+        ms.scope_id = Some("default".to_string());
+        MetaSpecRepository::create(&s, &ms).await.unwrap();
+        let got = MetaSpecRepository::get_by_id(&s, &ms.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.scope, MetaSpecScope::Tenant);
+        assert_eq!(got.scope_id.as_deref(), Some("default"));
+
+        // Scope filter matches the stored variant.
+        let filter = MetaSpecFilter {
+            scope: Some(MetaSpecScope::Tenant),
+            scope_id: Some("default".to_string()),
+            ..Default::default()
+        };
+        let results = MetaSpecRepository::list(&s, &filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, ms.id);
     }
 
     #[tokio::test]

@@ -405,6 +405,86 @@ describe('MergeQueueGraph', () => {
     expect(svg.getAttribute('aria-label')).toBe('Merge queue dependency graph');
   });
 
+  // ── Meta-spec drift warning (meta-spec-reconciliation.md §9) ────────────
+
+  const DRIFTED_NODES = [
+    {
+      mr_id: 'mr-drift',
+      title: 'Produced under old set',
+      status: 'approved',
+      priority: 10,
+      depends_on: [],
+      atomic_group: null,
+      meta_spec_drift: {
+        produced_set_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        current_set_sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      },
+    },
+  ];
+
+  it('renders drift warning badge on nodes with recorded meta-spec drift', async () => {
+    const { container } = render(MergeQueueGraph, {
+      props: { nodes: DRIFTED_NODES },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mq-svg"]')).toBeTruthy();
+    });
+
+    const node = container.querySelector('[data-testid="mq-node-mr-drift"]');
+    expect(node).toBeTruthy();
+    expect(node.getAttribute('data-drift')).toBe('true');
+    expect(container.querySelector('[data-testid="mq-drift-mr-drift"]')).toBeTruthy();
+  });
+
+  it('does not render drift badge on nodes without drift', async () => {
+    const { container } = render(MergeQueueGraph, {
+      props: { nodes: MOCK_NODES },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mq-svg"]')).toBeTruthy();
+    });
+
+    for (const node of container.querySelectorAll('.mq-node')) {
+      expect(node.getAttribute('data-drift')).toBe('false');
+    }
+    expect(container.querySelector('[data-testid="mq-drift-mr-1"]')).toBeNull();
+  });
+
+  it('shows meta-spec drift in the hover tooltip', async () => {
+    const { container } = render(MergeQueueGraph, {
+      props: { nodes: DRIFTED_NODES },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mq-svg"]')).toBeTruthy();
+    });
+
+    const nodeGroup = container.querySelector('[data-testid="mq-node-mr-drift"]');
+    await fireEvent.pointerEnter(nodeGroup, { clientX: 200, clientY: 100 });
+
+    const driftRow = container.querySelector('[data-testid="mq-tooltip-drift"]');
+    expect(driftRow).toBeTruthy();
+    expect(driftRow.textContent).toContain('Meta-spec drift: produced under vaaaaaaaa, current is vbbbbbbbb');
+  });
+
+  it('omits drift row from tooltip when no drift was recorded', async () => {
+    const { container } = render(MergeQueueGraph, {
+      props: { nodes: MOCK_NODES },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mq-svg"]')).toBeTruthy();
+    });
+
+    const nodeGroup = container.querySelector('[data-testid="mq-node-mr-2"]');
+    await fireEvent.pointerEnter(nodeGroup, { clientX: 200, clientY: 100 });
+
+    expect(container.querySelector('[data-testid="mq-tooltip"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="mq-tooltip-drift"]')).toBeNull();
+  });
+
   // ── Legend ────────────────────────────────────────────────────────────────
 
   it('renders legend with edge status labels', async () => {
@@ -422,5 +502,60 @@ describe('MergeQueueGraph', () => {
     expect(legend.textContent).toContain('Pending');
     expect(legend.textContent).toContain('Failed');
     expect(legend.textContent).toContain('Atomic group');
+    expect(legend.textContent).toContain('Meta-spec drift');
+  });
+});
+
+// ── Paused state (platform-model.md §6 UI: merge queue shows paused state
+//    with reason) ────────────────────────────────────────────────────────────
+
+describe('MergeQueueGraph — paused state', () => {
+  it('renders paused banner with reason when paused', async () => {
+    const { container } = render(MergeQueueGraph, {
+      props: { nodes: MOCK_NODES, paused: true, pauseReason: 'post-merge validation failed' },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mq-svg"]')).toBeTruthy();
+    });
+
+    const banner = container.querySelector('[data-testid="mq-paused-banner"]');
+    expect(banner).toBeTruthy();
+    expect(banner.getAttribute('role')).toBe('status');
+    expect(banner.textContent).toContain('Merge queue paused');
+    expect(banner.textContent).toContain('post-merge validation failed');
+  });
+
+  it('does not render the paused banner when the queue is running', async () => {
+    const { container } = render(MergeQueueGraph, {
+      props: { nodes: MOCK_NODES, paused: false },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mq-svg"]')).toBeTruthy();
+    });
+
+    expect(container.querySelector('[data-testid="mq-paused-banner"]')).toBeNull();
+  });
+
+  it('shows the paused banner even when the queue is empty', () => {
+    const { container } = render(MergeQueueGraph, {
+      props: { nodes: [], paused: true, pauseReason: 'main is broken' },
+    });
+
+    const banner = container.querySelector('[data-testid="mq-paused-banner"]');
+    expect(banner).toBeTruthy();
+    expect(banner.textContent).toContain('main is broken');
+    expect(container.querySelector('[data-testid="mq-empty"]')).toBeTruthy();
+  });
+
+  it('paused banner without a reason still states the queue is paused', () => {
+    const { container } = render(MergeQueueGraph, {
+      props: { nodes: [], paused: true, pauseReason: null },
+    });
+
+    const banner = container.querySelector('[data-testid="mq-paused-banner"]');
+    expect(banner).toBeTruthy();
+    expect(banner.textContent).toContain('Merge queue paused');
   });
 });

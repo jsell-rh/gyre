@@ -1,5 +1,7 @@
 """Admission and namespace contracts for the extracted dispatcher integration."""
 import importlib.util
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -31,6 +33,51 @@ class DispatcherContracts(unittest.TestCase):
     def another(self):
         self.store.put_task('task-002','g','requirements',{'triaged':'g','dependencies':[],'title':'Two'})
         return self.store.enqueue('review','task-002','g',{'candidate':'code','base':'main'})
+
+    def test_discovery_and_claim_with_passed_publisher_preserve_other_stages(self):
+        self.store.set_setting('slots', 4)
+        receipt = {'candidate':'ready-code','head':'tested-head','base':'main','passed':True}
+        self.store.put_task('task-002','g','requirements',{
+            'triaged':'g','dependencies':[],'candidate':'ready-code','candidate_base':'main',
+            'review':{'candidate':'ready-code','approved':True},'verified':receipt})
+        self.store.put_task('task-003','g','requirements',{
+            'triaged':'g','dependencies':[],'candidate':'unchecked-code','candidate_base':'main',
+            'review':{'candidate':'unchecked-code','approved':True}})
+        self.store.put_task('task-004','g','requirements',{
+            'triaged':'g','dependencies':[],'candidate':'unreviewed-code','candidate_base':'main'})
+        output = io.StringIO()
+        # Replace external Git/gateway reads; exercise all real stage discovery,
+        # eligibility, serialization, authorization and fenced claim predicates.
+        with patch.object(adapter, 'Store', return_value=self.store), \
+                patch.object(self.store, 'close'), \
+                patch.object(adapter.pipeline, 'source', return_value='main'), \
+                patch.object(adapter.gateway, 'login'), \
+                patch.object(adapter.gateway, 'inventory', return_value=[]), \
+                patch.object(sys, 'argv', ['dispatch-adapter.py','discover','--state',str(self.store.directory)]), \
+                contextlib.redirect_stdout(output):
+            adapter.main()
+        response = json.loads(output.getvalue())
+        self.assertEqual(response['errors'], [])
+        self.assertEqual({j['agent'] for j in response['jobs']},
+                         {'code-implementation','code-review','verify','publish'})
+        publisher = next(j for j in response['jobs'] if j['agent']=='publish')
+        self.assertTrue(adapter.authorize(self.store, publisher))
+        claim = self.store.claim('publish','publisher',ident=publisher['key'],
+                                eligible=lambda w:adapter.eligible(self.store,w))
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim['task'], 'task-002')
+
+    def test_publisher_rejects_failed_or_stale_verification_receipt(self):
+        receipt = {'candidate':'code','head':'tested-head','passed':True}
+        data = {'triaged':'g','dependencies':[],'candidate':'code',
+                'review':{'candidate':'code','approved':True},'verified':receipt}
+        self.store.put_task('task-002','g','requirements',data)
+        work = self.store.enqueue('publish','task-002','g',{'candidate':'code','verified':receipt})
+        request = adapter.job(self.store,dict(self.store.db.execute('SELECT * FROM work WHERE id=?',(work,)).fetchone()))
+        self.assertTrue(adapter.authorize(self.store,request))
+        for value in (None, receipt | {'passed':False}, receipt | {'head':'different-head'}):
+            self.store.put_task('task-002','g','requirements',data | {'verified':value})
+            self.assertFalse(adapter.authorize(self.store,request))
 
     def test_capacity_wait_does_not_launch_or_increment_failure(self):
         first=self.store.claim('implement','first',capacity=1)

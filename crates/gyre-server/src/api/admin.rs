@@ -57,6 +57,24 @@ pub async fn admin_health(
     }))
 }
 
+// ── Orphaned Workspaces (user-management.md §Ownership Transfer & Reclamation) ─
+
+/// GET /api/v1/admin/orphaned-workspaces — workspaces with no active Owner
+/// for at least the configured period (`GYRE_ORPHANED_WORKSPACE_DAYS`,
+/// default 30 days). This is the admin dashboard "orphaned" flag.
+pub async fn admin_orphaned_workspaces(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let threshold_days = crate::workspace_ownership::orphaned_threshold_days();
+    let orphaned = crate::workspace_ownership::orphaned_workspaces_with(&state, threshold_days)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(serde_json::json!({
+        "threshold_days": threshold_days,
+        "workspaces": orphaned,
+    })))
+}
+
 // ── Background Jobs ───────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -207,15 +225,55 @@ pub async fn admin_list_retention(
 
 /// PUT /api/v1/admin/retention — update retention policies (Admin only).
 ///
-/// The body must be a complete, valid policy list: all 7 spec data types
-/// (`validate_policies`); an omitted type would silently disable
-/// enforcement for it. The store persists durably before the 204 is
-/// returned — a KV write failure fails the request instead of acking a
-/// change that would be silently lost on restart.
+/// Two body forms are accepted:
+///
+/// - The complete policy list (business-continuity.md §5): all 7 spec
+///   data types (`validate_policies`); an omitted type would silently
+///   disable enforcement for it.
+/// - The analytics-scoped form `{ "retention_days": N }`
+///   (analytics.md §Data Retention): updates only the `analytics_events`
+///   policy, leaving every other data type's policy untouched.
+///
+/// The store persists durably before the 204 is returned — a KV write
+/// failure fails the request instead of acking a change that would be
+/// silently lost on restart.
 pub async fn admin_update_retention(
     State(state): State<Arc<AppState>>,
-    Json(policies): Json<Vec<RetentionPolicy>>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, ApiError> {
+    if let Some(days) = body.get("retention_days").and_then(|v| v.as_u64()) {
+        // analytics.md §Data Retention form: `{ retention_days: u32 }`.
+        if days < 1 {
+            return Err(ApiError::BadRequest(
+                "retention_days must be >= 1 (0 would purge every analytics event on the \
+                 next nightly run)"
+                    .to_string(),
+            ));
+        }
+        let mut policies = state.retention_store.list();
+        let analytics = policies
+            .iter_mut()
+            .find(|p| p.data_type == "analytics_events")
+            .ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "analytics_events retention policy is missing from the store",
+                ))
+            })?;
+        analytics.max_age_days = days;
+        state.retention_store.update(policies).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    if !body.is_array() {
+        return Err(ApiError::BadRequest(
+            "body must be a complete policy list (all 7 data types) or the analytics form \
+             { \"retention_days\": <days> }"
+                .to_string(),
+        ));
+    }
+
+    let policies: Vec<RetentionPolicy> = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid retention policy list: {e}")))?;
     validate_policies(&policies).map_err(ApiError::BadRequest)?;
     state.retention_store.update(policies).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -264,12 +322,173 @@ pub async fn admin_audit(
 
 // ── Agent Kill ────────────────────────────────────────────────────────────────
 
+/// Kill an agent: transition to `Dead`, stop its process, handle worktrees,
+/// emit `AgentStatusChanged` telemetry, emit the container-crashed audit
+/// event, revoke the agent's auth token, emit the `AgentKilled` audit event,
+/// clean up interrogation state, and release the budget active-agent slot
+/// when the agent held one.
+///
+/// Kill path for the admin kill route. Budget enforcement uses its own
+/// `budget_stop_agent` (api/budget.rs) with materially different terminal
+/// semantics mandated by agent-runtime.md §4 / platform-model.md §5:
+/// status `Stopped` (not Dead — the run is recoverable), task left
+/// InProgress (not Blocked), worktree preserved, compute minutes charged.
+/// The two paths are deliberately distinct; do not funnel budget stops
+/// through this admin-terminal helper.
+///
+/// `preserve_worktree`: preserve the agent's in-progress work (worktree,
+/// branch, partial MR); admin kills clean up.
+///
+/// `killed_by`: identity attributed in the `AgentKilled` audit event (the
+/// admin's user/agent id on admin kills).
+///
+/// `revoke_reason`: short cause tag recorded on the `AgentTokenRevoked`
+/// audit event ("admin_kill").
+pub(crate) async fn kill_agent(
+    state: &AppState,
+    agent: &gyre_domain::Agent,
+    reason: &str,
+    preserve_worktree: bool,
+    killed_by: &str,
+    revoke_reason: &str,
+) -> Result<(), ApiError> {
+    let id = agent.id.to_string();
+    if agent.status == AgentStatus::Dead {
+        return Ok(());
+    }
+    // Only an Active agent holds a budget active-agent slot (incremented at
+    // spawn, released on Idle/Failed/Stopped) — never double-release.
+    let was_active = agent.status == AgentStatus::Active;
+
+    let now = now_secs();
+
+    let mut agent = agent.clone();
+    let _ = agent.transition_status(AgentStatus::Dead);
+    state.agents.update(&agent).await?;
+
+    // Kill the actual process/container/Pod if it is running. The backend
+    // recorded at spawn time decides how: a container ID goes to
+    // `docker rm --force`, a Pod name to `kubectl delete pod`, a remote
+    // container over SSH — falling back to LocalTarget (pid kill) only for
+    // agents whose backend is unknown (pre-task-117 records). The PID is
+    // captured for the AgentKilled audit event before the registry entry
+    // is consumed.
+    let mut killed_pid: Option<u32> = None;
+    if let Some(handle) = state.process_registry.lock().await.remove(&id) {
+        killed_pid = handle.pid;
+        let backend = state.spawned_backends.lock().await.remove(&id);
+        let kill_result = match backend.as_deref() {
+            Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
+            None => {
+                gyre_ports::ComputeTarget::kill_process(
+                    &gyre_adapters::compute::LocalTarget,
+                    &handle,
+                )
+                .await
+            }
+        };
+        if let Err(e) = kill_result {
+            tracing::warn!(agent_id = %id, "kill_process failed: {e}");
+        }
+    }
+    // Fall back to the attested PID when no live process handle exists.
+    if killed_pid.is_none() {
+        killed_pid = crate::agent_audit::attested_pid(state, &id).await;
+    }
+
+    // Worktrees: preserved on budget kills (in-progress work must survive
+    // for reassignment), cleaned up on admin kills.
+    if !preserve_worktree {
+        if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
+            for wt in worktrees {
+                if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+                    let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
+                }
+                let _ = state.worktrees.delete(&wt.id).await;
+            }
+        }
+    }
+
+    // Block the agent's current task.
+    if let Some(task_id) = &agent.current_task_id {
+        if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
+            if task.status == TaskStatus::InProgress {
+                let pre_block_status = task.status.clone();
+                let _ = task.transition_status(TaskStatus::Blocked);
+                task.updated_at = now;
+                let _ = state.tasks.update(&task).await;
+                // task.status_changed analytics event (analytics.md
+                // §Auto-Emitted Events: "Task transitions status") — the
+                // kill auto-block is a production transition.
+                if task.status != pre_block_status {
+                    crate::api::analytics::record_task_status_changed(
+                        state,
+                        &task,
+                        &pre_block_status,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    // M22.2: release the budget active-agent slot this agent held.
+    if was_active {
+        crate::api::budget::decrement_active_agents(state, &agent.workspace_id.to_string()).await;
+    }
+
+    let ws_id = agent.workspace_id.clone();
+    state
+        .emit_telemetry(
+            ws_id,
+            gyre_common::message::MessageKind::AgentStatusChanged,
+            Some(serde_json::json!({
+                "event_id": uuid::Uuid::new_v4().to_string(),
+                "agent_id": agent.id.to_string(),
+                "status": "dead",
+                "description": format!("Agent {}: {}", agent.name, reason),
+                "timestamp": now,
+            })),
+        )
+        .await;
+
+    // M23: Emit container_crashed audit event if this agent had a container.
+    if let Ok(Some(rec)) = state.container_audits.find_by_agent_id(&id).await {
+        let ctx = crate::container_audit::AuditCtx {
+            audit: state.audit.as_ref(),
+            broadcast_tx: &state.audit_broadcast_tx,
+            search: state.search.as_ref(),
+        };
+        crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, reason).await;
+    }
+
+    // HSI §4: Clean up interrogation ABAC policies on kill.
+    crate::api::spawn::cleanup_interrogation_policies(state, &id).await;
+    let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
+
+    // Revoke the agent's token — killed agents must not continue to
+    // authenticate. Revocation is audited as an AgentTokenRevoked event.
+    crate::agent_audit::revoke_agent_token(state, &agent, revoke_reason).await;
+
+    // Platform Model §7: revoke task-scoped ephemeral secrets on kill
+    // ("Secrets access revoked" at teardown) — deletes Task-scoped secrets
+    // for the agent's task and logs `secret.revoked` per secret.
+    crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+
+    // Agent lifecycle audit event (observability.md §Audit Event Types):
+    // attributes who ordered the kill and which PID was terminated.
+    crate::agent_audit::emit_killed(state, &agent, reason, killed_by, killed_pid).await;
+
+    Ok(())
+}
+
 /// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
 pub async fn admin_kill_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
-    let mut agent = state
+    let agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
@@ -279,68 +498,48 @@ pub async fn admin_kill_agent(
         return Ok(StatusCode::NO_CONTENT);
     }
 
+    // Admin identity for the AgentKilled audit event.
+    let killed_by = auth
+        .user_id
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| auth.agent_id.clone());
+    kill_agent(
+        &state,
+        &agent,
+        "force-killed by admin",
+        false,
+        &killed_by,
+        "admin_kill",
+    )
+    .await?;
+
+    // Auto-track agent kill (analytics.md §Auto-Emitted Events: agent.failed
+    // covers "fails or is killed").
     let now = now_secs();
-
-    let _ = agent.transition_status(AgentStatus::Dead);
-    state.agents.update(&agent).await?;
-
-    // Kill the actual process if it is running.
-    if let Some(handle) = state.process_registry.lock().await.remove(&id) {
-        if let Err(e) =
-            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
-                .await
-        {
-            tracing::warn!(agent_id = %id, "kill_process failed: {e}");
-        }
-    }
-
-    // Clean up worktrees.
-    if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
-        for wt in worktrees {
-            if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
-                let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
-            }
-            let _ = state.worktrees.delete(&wt.id).await;
-        }
-    }
-
-    // Block the agent's current task.
-    if let Some(task_id) = &agent.current_task_id {
-        if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
-            if task.status == TaskStatus::InProgress {
-                let _ = task.transition_status(TaskStatus::Blocked);
-                task.updated_at = now;
-                let _ = state.tasks.update(&task).await;
-            }
-        }
-    }
-
-    let ws_id = agent.workspace_id.clone();
-    state.emit_telemetry(
-        ws_id,
-        gyre_common::message::MessageKind::AgentStatusChanged,
-        Some(serde_json::json!({
-            "event_id": uuid::Uuid::new_v4().to_string(),
-            "agent_id": agent.id.to_string(),
-            "status": "dead",
-            "description": format!("Agent {} force-killed by admin", agent.name),
-            "timestamp": now,
-        })),
+    let ev = gyre_domain::AnalyticsEvent::new(
+        crate::api::new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "force-killed by admin",
+            "duration_secs": now.saturating_sub(agent.spawned_at),
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
     );
+    let _ = state.analytics.record(&ev).await;
 
-    // M23: Emit container_crashed audit event if this agent had a container.
-    if let Ok(Some(rec)) = state.container_audits.find_by_agent_id(&id).await {
-        let ctx = crate::container_audit::AuditCtx {
-            audit: state.audit.as_ref(),
-            broadcast_tx: &state.audit_broadcast_tx,
-        };
-        crate::container_audit::emit_crashed(&ctx, &id, &rec.container_id, "force-killed by admin")
-            .await;
-    }
-
-    // HSI §4: Clean up interrogation ABAC policies on admin kill.
-    crate::api::spawn::cleanup_interrogation_policies(&state, &id).await;
-    let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
+    // The kill ended the run — charge the wall-clock compute minutes
+    // (spawn → kill, agent-runtime.md §4 What's Tracked). The budget
+    // active-agent slot is already released inside `kill_agent` (exactly
+    // once — only an Active agent ever held one).
+    crate::api::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -356,6 +555,7 @@ pub struct ReassignRequest {
 pub async fn admin_reassign_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<ReassignRequest>,
 ) -> Result<StatusCode, ApiError> {
     let agent = state
@@ -374,21 +574,37 @@ pub async fn admin_reassign_agent(
 
     let tasks = state.tasks.list_by_assignee(&agent.id).await?;
     let now = now_secs();
+    // Admin identity for the AgentReassigned audit events below.
+    let reassigned_by = auth
+        .user_id
+        .as_ref()
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| auth.agent_id.clone());
     for mut task in tasks {
         task.assigned_to = Some(target.id.clone());
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        task.generation = task.generation.saturating_add(1);
         task.updated_at = now;
         state.tasks.update(&task).await?;
+
+        // Agent lifecycle audit event (observability.md §Audit Event Types):
+        // one per reassigned task, attributing the admin who moved it.
+        crate::agent_audit::emit_reassigned(&state, &agent, &task.id, &target.id, &reassigned_by)
+            .await;
     }
 
     let ws_id = agent.workspace_id.clone();
-    state.emit_telemetry(
-        ws_id,
-        gyre_common::message::MessageKind::AgentStatusChanged,
-        Some(serde_json::json!({
-            "agent_id": agent.id.to_string(),
-            "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
-        })),
-    );
+    state
+        .emit_telemetry(
+            ws_id,
+            gyre_common::message::MessageKind::AgentStatusChanged,
+            Some(serde_json::json!({
+                "agent_id": agent.id.to_string(),
+                "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
+            })),
+        )
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -515,6 +731,13 @@ pub async fn admin_seed(
         );
         state.workspaces.create(&workspace).await?;
     }
+    // Platform-model.md §2: the demo tenant also gets the four built-in
+    // personas (idempotent — skipped if already present). Startup seeding
+    // only covers tenants that existed at boot, so a tenant created here
+    // (or created before the persona seeding existed) is seeded now.
+    let seed_tenant_id = Id::new(&tenant_id);
+    crate::seed_builtin_personas_for_tenant(&state, &seed_tenant_id).await;
+
     // Repo paths are derived from the configured repos root (same source as
     // repos.rs create handlers) — never relative "./..." literals, which a
     // child process resolves against its own cwd (task-106 R2-F6 class).
@@ -634,6 +857,7 @@ pub async fn admin_seed(
     let mr_open = MergeRequest::new(
         Id::new("seed-mr-1"),
         Id::new("seed-repo-1"),
+        seed_workspace_id.clone(),
         "feat: add agent spawn endpoint",
         "feat/agent-spawn",
         "main",
@@ -642,6 +866,7 @@ pub async fn admin_seed(
     let mut mr_merged = MergeRequest::new(
         Id::new("seed-mr-2"),
         Id::new("seed-repo-1"),
+        seed_workspace_id.clone(),
         "feat: add Prometheus metrics",
         "feat/metrics",
         "main",
@@ -695,17 +920,19 @@ pub async fn admin_seed(
         ),
     ];
     for (event_id, agent_id, event_type, description, timestamp) in events {
-        state.emit_telemetry(
-            gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": event_id,
-                "agent_id": agent_id,
-                "event_type": event_type,
-                "description": description,
-                "timestamp": timestamp,
-            })),
-        );
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": event_id,
+                    "agent_id": agent_id,
+                    "event_type": event_type,
+                    "description": description,
+                    "timestamp": timestamp,
+                })),
+            )
+            .await;
     }
 
     Ok(Json(SeedResponse {
@@ -800,6 +1027,7 @@ mod tests {
     fn admin_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "admin-sub",
                 "preferred_username": "admin-user",
                 "realm_access": { "roles": ["admin"] }
@@ -811,6 +1039,7 @@ mod tests {
     fn developer_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "dev-user",
                 "realm_access": { "roles": ["developer"] }
@@ -935,17 +1164,30 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_returns_events() {
         let state = test_state();
-        state.emit_telemetry(
+        // emit_telemetry resolves the tenant scope from the workspace
+        // record (task-099 F1) and skips the emission when the workspace
+        // does not exist — seed it so the event is actually emitted.
+        let ws = gyre_domain::Workspace::new(
             gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "test-event-1",
-                "agent_id": "agent-1",
-                "event_type": "state_changed",
-                "description": "Test event",
-                "timestamp": 1000u64,
-            })),
+            gyre_common::Id::new("default"),
+            "Default",
+            "default",
+            0,
         );
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "test-event-1",
+                    "agent_id": "agent-1",
+                    "event_type": "state_changed",
+                    "description": "Test event",
+                    "timestamp": 1000u64,
+                })),
+            )
+            .await;
 
         let app = api_router().with_state(state);
         let resp = app
@@ -967,28 +1209,42 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_filters_by_agent_id() {
         let state = test_state();
-        state.emit_telemetry(
+        // Same as admin_audit_returns_events: seed the workspace so the
+        // telemetry emission resolves a tenant scope (task-099 F1).
+        let ws = gyre_domain::Workspace::new(
             gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "e1",
-                "agent_id": "agent-x",
-                "event_type": "run_started",
-                "description": "From agent-x",
-                "timestamp": 1000u64,
-            })),
-        );
-        state.emit_telemetry(
             gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "e2",
-                "agent_id": "agent-y",
-                "event_type": "run_started",
-                "description": "From agent-y",
-                "timestamp": 2000u64,
-            })),
+            "Default",
+            "default",
+            0,
         );
+        state.workspaces.create(&ws).await.unwrap();
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "e1",
+                    "agent_id": "agent-x",
+                    "event_type": "run_started",
+                    "description": "From agent-x",
+                    "timestamp": 1000u64,
+                })),
+            )
+            .await;
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "e2",
+                    "agent_id": "agent-y",
+                    "event_type": "run_started",
+                    "description": "From agent-y",
+                    "timestamp": 2000u64,
+                })),
+            )
+            .await;
 
         let app = api_router().with_state(state);
         let resp = app
@@ -1042,6 +1298,121 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(killed.status, gyre_domain::AgentStatus::Dead);
+
+        // analytics.md §Auto-Emitted Events: agent.failed covers "fails or
+        // is killed" — the admin force-kill path must record it with the
+        // kill reason.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.failed event expected");
+        assert_eq!(events[0].agent_id.as_deref(), Some("agent-kill-1"));
+        assert_eq!(events[0].properties["reason"], "force-killed by admin");
+        assert!(
+            events[0].properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_kill_revokes_task_scoped_secrets() {
+        use crate::api::now_secs;
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+        use gyre_domain::{Agent, Workspace};
+
+        let state = test_state();
+        let now = now_secs();
+
+        let ws = Workspace::new(
+            Id::new("ws-kill-teardown"),
+            Id::new("default"),
+            "Kill Teardown WS",
+            "kill-teardown-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-kill-teardown"), "kill-teardown", now);
+        agent.workspace_id = Id::new("ws-kill-teardown");
+        agent.current_task_id = Some(Id::new("task-kill-teardown"));
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: &str| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-kill-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-kill-teardown",
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-kill-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-kill-teardown",
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agent-kill-teardown/kill")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-kill-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "admin kill must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-kill-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive admin kill"
+        );
     }
 
     #[tokio::test]
@@ -1081,6 +1452,25 @@ mod tests {
 
         let blocked_task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(blocked_task.status, TaskStatus::Blocked);
+
+        // analytics.md §Auto-Emitted Events: task.status_changed (trigger
+        // "Task transitions status") — the admin force-kill auto-block is a
+        // production transition and must record. Regression: previously only
+        // the HTTP status endpoint and MCP update_task recorded.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "admin force-kill auto-block must record task.status_changed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], "task-for-kill");
+        assert_eq!(ev.properties["old_status"], "InProgress");
+        assert_eq!(ev.properties["new_status"], "Blocked");
     }
 
     #[tokio::test]
@@ -1142,6 +1532,129 @@ mod tests {
             reassigned.assigned_to.as_ref().map(|id| id.as_str()),
             Some("agent-to")
         );
+    }
+
+    #[tokio::test]
+    async fn admin_kill_emits_lifecycle_audit_events() {
+        // observability.md §Audit Event Types: an admin kill must record an
+        // AgentKilled event (reason/killed_by/pid) and revoke + audit the
+        // agent's token (AgentTokenRevoked, reason admin_kill).
+        use crate::api::now_secs;
+        use gyre_common::Id;
+        use gyre_domain::Agent;
+
+        let state = test_state();
+        let now = now_secs();
+        let mut agent = Agent::new(Id::new("agent-kill-audit"), "kill-audit-target", now);
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .ok();
+        state.agents.create(&agent).await.unwrap();
+        // Seed a legacy (non-JWT) token so revocation is observable.
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                "agent-kill-audit",
+                "legacy-uuid-token".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agent-kill-audit/kill")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The token must actually be revoked, not just audited.
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", "agent-kill-audit")
+            .await
+            .unwrap();
+        assert!(token.is_none(), "killed agent's token must be removed");
+
+        let killed = crate::agent_audit::recorded_events(&state, "agent_killed").await;
+        assert_eq!(killed.len(), 1, "exactly one agent_killed event");
+        let ev = &killed[0];
+        assert_eq!(ev.resource_id.as_deref(), Some("agent-kill-audit"));
+        assert_eq!(ev.detail["reason"], "force-killed by admin");
+        // Global test token authenticates as "system".
+        assert_eq!(ev.detail["killed_by"], "system");
+        // No process handle and no attestation → pid unknown (null), not fabricated.
+        assert!(ev.detail["pid"].is_null());
+
+        let revoked = crate::agent_audit::recorded_events(&state, "agent_token_revoked").await;
+        assert_eq!(revoked.len(), 1, "exactly one agent_token_revoked event");
+        assert_eq!(revoked[0].detail["reason"], "admin_kill");
+        // Legacy non-JWT token → jti unknown (null), not fabricated.
+        assert!(revoked[0].detail["jti"].is_null());
+    }
+
+    #[tokio::test]
+    async fn admin_reassign_emits_agent_reassigned_audit_event() {
+        // observability.md §Audit Event Types: each reassigned task must
+        // record an AgentReassigned event attributing the admin who moved it.
+        use crate::api::now_secs;
+        use gyre_common::Id;
+        use gyre_domain::{Agent, Task};
+
+        let state = test_state();
+        let now = now_secs();
+        let src = Agent::new(Id::new("agent-reassign-audit-src"), "src-agent", now);
+        let dst = Agent::new(Id::new("agent-reassign-audit-dst"), "dst-agent", now);
+        state.agents.create(&src).await.unwrap();
+        state.agents.create(&dst).await.unwrap();
+        let mut task = Task::new(Id::new("task-reassign-audit"), "reassign audit task", now);
+        task.assigned_to = Some(src.id.clone());
+        state.tasks.create(&task).await.unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let body = serde_json::json!({ "target_agent_id": "agent-reassign-audit-dst" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agent-reassign-audit-src/reassign")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The task actually moved.
+        let reassigned = state
+            .tasks
+            .find_by_id(&Id::new("task-reassign-audit"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reassigned.assigned_to.as_ref().map(|id| id.as_str()),
+            Some("agent-reassign-audit-dst")
+        );
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_reassigned").await;
+        assert_eq!(events.len(), 1, "exactly one agent_reassigned event");
+        let ev = &events[0];
+        assert_eq!(ev.resource_id.as_deref(), Some("agent-reassign-audit-src"));
+        assert_eq!(ev.detail["old_task_id"], "task-reassign-audit");
+        assert_eq!(ev.detail["new_task_id"], "task-reassign-audit");
+        assert_eq!(ev.detail["reassigned_by"], "system");
+        assert_eq!(ev.detail["from_agent_id"], "agent-reassign-audit-src");
+        assert_eq!(ev.detail["to_agent_id"], "agent-reassign-audit-dst");
     }
 
     #[tokio::test]
@@ -1252,6 +1765,15 @@ mod tests {
             .map(|p| p["data_type"].as_str().unwrap())
             .collect();
         assert!(types.contains(&"activity_events"));
+        // analytics.md §Data Retention: analytics events default to 365
+        // days.
+        let analytics = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["data_type"] == "analytics_events")
+            .unwrap();
+        assert_eq!(analytics["max_age_days"], 365);
     }
 
     #[tokio::test]
@@ -1332,6 +1854,113 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // Policies unchanged — the rejected list was not applied.
+        assert_eq!(state.retention_store.list(), before);
+    }
+
+    #[tokio::test]
+    async fn admin_update_retention_analytics_form_updates_analytics_only() {
+        // analytics.md §Data Retention: `PUT /api/v1/admin/retention` with
+        // `{ "retention_days": N }` re-configures the analytics event
+        // retention without touching the other data types' policies.
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "retention_days": 30 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let policies = state.retention_store.list();
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "analytics_events")
+                .unwrap()
+                .max_age_days,
+            30
+        );
+        // Sibling policies are untouched — the analytics form must not
+        // silently reset the rest of the retention configuration.
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "audit_events")
+                .unwrap()
+                .max_age_days,
+            365
+        );
+        assert_eq!(
+            policies
+                .iter()
+                .find(|p| p.data_type == "notifications")
+                .unwrap()
+                .max_age_days,
+            365
+        );
+
+        // The change is visible through the GET (the configured value,
+        // not just the in-memory store).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let analytics = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["data_type"] == "analytics_events")
+            .unwrap();
+        assert_eq!(analytics["max_age_days"], 30);
+    }
+
+    #[tokio::test]
+    async fn admin_update_retention_rejects_invalid_analytics_form() {
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+        let before = state.retention_store.list();
+
+        // 0 days would purge every analytics event on the next nightly
+        // run — rejected, policies untouched.
+        for body in [
+            serde_json::json!({ "retention_days": 0 }),
+            serde_json::json!({ "retention_days": "30" }),
+            serde_json::json!({ "something_else": 30 }),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/admin/retention")
+                        .header("Authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body was {body}");
+        }
         assert_eq!(state.retention_store.list(), before);
     }
 

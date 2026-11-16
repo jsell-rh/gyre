@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §Self-Check Loop"
 depends_on: []
 progress: complete
 coverage_sections: []
-commits: []
+commits: ["eff64e31dd1d0b3fccb66d7ace299e7f32e42bbe"]
 ---
 
 ## Spec Excerpt
@@ -96,3 +96,54 @@ When working on this task:
 ## Git Commits
 
 Implemented as part of the explorer-canvas branch prior to task decomposition.
+
+## Shipped
+
+The self-check loop (extraction, server-side dry-run, synthetic tool-result
+feedback, 3-turn cap, "refining"/"ready" statuses) is real production code on
+both agent paths in `crates/gyre-server/src/explorer_ws.rs` (native LlmPort
+loop and Claude Agent SDK loop; predates task decomposition — task-070 owns
+coverage section explorer-implementation.md §11). This assignment audited it
+against the acceptance criteria and closed the two real gaps found; this
+round is a contract repair that preserves that fix unchanged and restores
+the assigned task document (progress notes live only here, under Shipped).
+
+### Best-version tracking at the refinement cap (eff64e31d)
+
+Spec: "If the agent hasn't resolved warnings by turn 3, send the best
+version anyway." Both loops previously sent the *latest* attempt at the
+cap — a later refinement that regressed (more actionable dry-run warnings)
+displaced an earlier, better one. Both loops now track the attempt with the
+fewest actionable warnings (`best_view_query: Option<(count, query, text)>`)
+and send that version when the cap is reached; ties keep the earlier
+attempt. On the clean path (zero warnings) the current query is the best,
+so behavior there is unchanged.
+
+### Integration tests for the refinement flow (eff64e31d)
+
+Added a scripted mode to `MockLlmPortFactory` (`scripted_tool_responses`:
+successive `complete_with_tools` calls return successive responses, last
+repeats) and two WebSocket integration tests in
+`crates/gyre-server/tests/explorer_ws_integration.rs` driving the loop
+end-to-end against a seeded graph store:
+
+- `explorer_ws_self_check_refinement_flow` — a first attempt with an
+  actionable warning (unresolved callout) is NOT forwarded; status
+  "refining" is emitted; the dry-run feedback triggers a second LLM call;
+  only the refined, warning-free query reaches the frontend; the turn ends
+  with terminal "ready".
+- `explorer_ws_self_check_sends_best_version_after_cap` — four attempts
+  with worsening warning counts run exactly 3 refinement turns; after the
+  cap the fewest-warnings (first) attempt is the one forwarded.
+
+### Test evidence (this round, post base-merge)
+
+- `cargo test -p gyre-server --test explorer_ws_integration` — 11 passed,
+  0 failed (incl. both tests above); `--lib explorer_ws` — 43 passed;
+  `cargo test -p gyre-adapters --lib llm::mock` — 9 passed (incl. 3
+  scripted-mode tests). Evidence retained in
+  /tmp/stage/review-evidence/task-034-focused-tests.txt.
+- The base merge (233664cf8) did not touch the fix: diff over the three
+  changed files between the previous checkpoint head and this HEAD is empty.
+- Earlier round mutation checks: reverting best-version tracking made the
+cap test fail; disabling the refinement trigger made both tests fail.

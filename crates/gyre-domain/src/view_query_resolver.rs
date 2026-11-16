@@ -841,6 +841,7 @@ fn resolve_scope_with_adjacency(
             expand_edges,
             expand_depth,
             expand_direction,
+            seed_match,
         } => {
             let edge_types: Vec<EdgeType> = expand_edges
                 .iter()
@@ -856,39 +857,75 @@ fn resolve_scope_with_adjacency(
             let mut result = HashSet::new();
             let mut all_depths = HashMap::new();
 
-            let total_seeds = seed_nodes.len();
-            let mut resolved_seeds = 0usize;
-            for seed_name in seed_nodes {
-                if let Some(seed) = find_node_by_name(&active_nodes, seed_name) {
-                    resolved_seeds += 1;
-                    let depth_map = bfs_traverse_with_depths(
-                        &seed.id.to_string(),
-                        &edge_types,
-                        direction,
-                        *expand_depth,
-                        outgoing,
-                        incoming,
-                    );
-                    for (id, d) in &depth_map {
-                        let entry = all_depths.entry(id.clone()).or_insert(*d);
-                        if *d < *entry {
-                            *entry = *d;
-                        }
+            // Seed resolution mode (ui-layout.md §4 "Data source
+            // distinction"): "exact" resolves each seed to the one node it
+            // names; "substring" — the ViewSpec `data.concept` mechanism —
+            // seeds EVERY node whose name or qualified_name contains the
+            // seed (case-insensitive), like the graph endpoint's
+            // `?concept=` substring filter.
+            let substring = seed_match == "substring";
+            let seed_node_ids: Vec<String> = if substring {
+                let mut ids = Vec::new();
+                for seed_name in seed_nodes {
+                    let lower = seed_name.to_lowercase();
+                    let matches: Vec<&GraphNode> = active_nodes
+                        .iter()
+                        .copied()
+                        .filter(|n| {
+                            n.name.to_lowercase().contains(&lower)
+                                || n.qualified_name.to_lowercase().contains(&lower)
+                        })
+                        .collect();
+                    if matches.is_empty() {
+                        warnings.push(format!(
+                            "Concept seed '{}' matched no node name or qualified_name (substring)",
+                            seed_name
+                        ));
                     }
-                    result.extend(depth_map.into_keys());
-                } else {
-                    warnings.push(format!(
-                        "Concept seed node '{}' not found in graph — check spelling or use qualified_name",
-                        seed_name
-                    ));
+                    for n in matches {
+                        ids.push(n.id.to_string());
+                    }
                 }
+                ids
+            } else {
+                let mut ids = Vec::new();
+                for seed_name in seed_nodes {
+                    match find_node_by_name(&active_nodes, seed_name) {
+                        Some(seed) => ids.push(seed.id.to_string()),
+                        None => warnings.push(format!(
+                            "Concept seed node '{}' not found in graph — check spelling or use qualified_name",
+                            seed_name
+                        )),
+                    }
+                }
+                ids
+            };
+
+            let resolved_seeds = seed_node_ids.len();
+            for seed_id in seed_node_ids {
+                let depth_map = bfs_traverse_with_depths(
+                    &seed_id,
+                    &edge_types,
+                    direction,
+                    *expand_depth,
+                    outgoing,
+                    incoming,
+                );
+                for (id, d) in &depth_map {
+                    let entry = all_depths.entry(id.clone()).or_insert(*d);
+                    if *d < *entry {
+                        *entry = *d;
+                    }
+                }
+                result.extend(depth_map.into_keys());
             }
             // Warn when only some seed nodes resolved — the view may look
             // complete but is silently missing part of the intended concept.
-            if resolved_seeds > 0 && resolved_seeds < total_seeds {
+            if resolved_seeds > 0 && resolved_seeds < seed_nodes.len() {
                 warnings.push(format!(
                     "Concept scope partially resolved: {} of {} seed nodes found — results may be incomplete",
-                    resolved_seeds, total_seeds
+                    resolved_seeds,
+                    seed_nodes.len()
                 ));
             }
             (result, all_depths)
@@ -2907,6 +2944,7 @@ mod tests {
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 2,
                 expand_direction: "both".to_string(),
+                seed_match: "exact".to_string(),
             },
             &nodes,
             &edges,
@@ -3858,6 +3896,7 @@ mod tests {
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 5,
                 expand_direction: "outgoing".to_string(),
+                seed_match: "exact".to_string(),
             },
             &nodes,
             &edges,
@@ -3889,6 +3928,7 @@ mod tests {
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 2,
                 expand_direction: "both".to_string(),
+                seed_match: "exact".to_string(),
             },
             &nodes,
             &edges,
@@ -3912,6 +3952,7 @@ mod tests {
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 2,
                 expand_direction: "both".to_string(),
+                seed_match: "exact".to_string(),
             },
             &nodes,
             &edges,
@@ -4338,6 +4379,7 @@ mod tests {
                 expand_edges: vec![],
                 expand_depth: 200,
                 expand_direction: "outgoing".to_string(),
+                seed_match: "exact".to_string(),
             },
             emphasis: Default::default(),
             edges: Default::default(),
@@ -5632,6 +5674,119 @@ mod tests {
         );
     }
 
+    // ── Concept scope seed_match='substring' tests (ui-layout.md §4
+    //    "Data source distinction": the ViewSpec data.concept mechanism) ──
+
+    #[test]
+    fn test_concept_substring_seed_match_seeds_all_name_matches() {
+        // No node is NAMED "auth" — exact seed matching resolves nothing
+        // here. Substring matching seeds EVERY node whose name or
+        // qualified_name contains "auth" (case-insensitive):
+        // JwtAuthProvider and AuthMiddleware, not ShippingCalculator.
+        let nodes = vec![
+            make_node("n1", "JwtAuthProvider", NodeType::Type),
+            make_node("n2", "AuthMiddleware", NodeType::Function),
+            make_node("n3", "ShippingCalculator", NodeType::Type),
+        ];
+        let result = resolve_scope(
+            &Scope::Concept {
+                seed_nodes: vec!["auth".to_string()],
+                expand_edges: vec!["calls".to_string()],
+                expand_depth: 0,
+                expand_direction: "both".to_string(),
+                seed_match: "substring".to_string(),
+            },
+            &nodes,
+            &[],
+            None,
+        );
+        assert!(result.contains("n1"), "JwtAuthProvider contains 'auth'");
+        assert!(result.contains("n2"), "AuthMiddleware contains 'auth'");
+        assert!(
+            !result.contains("n3"),
+            "ShippingCalculator must not match the 'auth' concept"
+        );
+    }
+
+    #[test]
+    fn test_concept_substring_seed_match_expands_from_all_seeds() {
+        let nodes = vec![
+            make_node("n1", "JwtAuthProvider", NodeType::Type),
+            make_node("n2", "TokenStore", NodeType::Type),
+            make_node("n3", "ShippingCalculator", NodeType::Type),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n2", EdgeType::Calls)];
+        let result = resolve_scope(
+            &Scope::Concept {
+                seed_nodes: vec!["AUTH".to_string()], // case-insensitive
+                expand_edges: vec!["calls".to_string()],
+                expand_depth: 2,
+                expand_direction: "both".to_string(),
+                seed_match: "substring".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        // n1 is the substring seed (qualified_name pkg.JwtAuthProvider);
+        // TokenStore joins via the calls edge; ShippingCalculator does not.
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"), "expansion from the substring seed");
+        assert!(!result.contains("n3"));
+    }
+
+    #[test]
+    fn test_concept_substring_seed_match_warns_when_no_node_matches() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Function)];
+        let result = resolve_scope_with_depths(
+            &Scope::Concept {
+                seed_nodes: vec!["zzz".to_string()],
+                expand_edges: vec![],
+                expand_depth: 2,
+                expand_direction: "both".to_string(),
+                seed_match: "substring".to_string(),
+            },
+            &nodes,
+            &[],
+            None,
+        );
+        assert!(result.matched.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("zzz") && w.contains("substring")),
+            "expected an unmatched-substring-seed warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_concept_invalid_seed_match() {
+        let query = ViewQuery {
+            scope: Scope::Concept {
+                seed_nodes: vec!["A".to_string()],
+                expand_edges: vec![],
+                expand_depth: 2,
+                expand_direction: "both".to_string(),
+                seed_match: "fuzzy".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("Invalid seed_match")),
+            "Should reject invalid Concept seed_match, got: {:?}",
+            errors
+        );
+    }
+
     #[test]
     fn test_viewquery_validate_concept_invalid_direction() {
         let query = ViewQuery {
@@ -5640,6 +5795,7 @@ mod tests {
                 expand_edges: vec![],
                 expand_depth: 2,
                 expand_direction: "diagonal".to_string(),
+                seed_match: "exact".to_string(),
             },
             emphasis: Default::default(),
             edges: Default::default(),
@@ -5964,6 +6120,482 @@ mod tests {
                 .any(|f| f.contains("cold_fn (1)")),
             "cold_fn should appear in top functions, got: {:?}",
             summary.top_functions_by_calls
+        );
+    }
+
+    // ── Emphasis resolution tests (spec §30: highlight, heat, tiered_colors) ──
+
+    #[test]
+    fn test_heat_emphasis_incoming_calls_values() {
+        // Three callers invoke `hot`; `hot` invokes `sink`.
+        let nodes = vec![
+            make_node("a", "caller_a", NodeType::Function),
+            make_node("b", "caller_b", NodeType::Function),
+            make_node("c", "caller_c", NodeType::Function),
+            make_node("hot", "hot_fn", NodeType::Function),
+            make_node("sink", "sink_fn", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "a", "hot", EdgeType::Calls),
+            make_edge("e2", "b", "hot", EdgeType::Calls),
+            make_edge("e3", "c", "hot", EdgeType::Calls),
+            make_edge("e4", "hot", "sink", EdgeType::Calls),
+            // Non-calls edges must not count toward incoming_calls
+            make_edge("e5", "a", "sink", EdgeType::Contains),
+        ];
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "incoming_calls".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert_eq!(result.node_metrics.get("hot").copied(), Some(3.0));
+        assert_eq!(result.node_metrics.get("sink").copied(), Some(1.0));
+        assert_eq!(result.node_metrics.get("a").copied(), Some(0.0));
+        assert_eq!(result.node_metrics.get("b").copied(), Some(0.0));
+        // Every matched node gets a metric entry (0.0 for uncalled)
+        assert_eq!(result.node_metrics.len(), 5);
+    }
+
+    #[test]
+    fn test_heat_emphasis_complexity_churn_test_coverage_values() {
+        let mut n1 = make_node("n1", "analyzed", NodeType::Function);
+        n1.complexity = Some(12);
+        n1.churn_count_30d = 7;
+        n1.test_coverage = Some(0.5);
+        let mut n2 = make_node("n2", "partial", NodeType::Function);
+        n2.complexity = None; // unanalyzed — excluded from complexity metric
+        n2.churn_count_30d = 3;
+        n2.test_coverage = None; // no coverage data — excluded from test_coverage metric
+
+        // complexity: only nodes with complexity data appear
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "complexity".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &[n1.clone(), n2.clone()], &[], None);
+        assert_eq!(result.node_metrics.get("n1").copied(), Some(12.0));
+        assert!(!result.node_metrics.contains_key("n2"));
+
+        // churn: every matched node has a churn count
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "churn".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &[n1.clone(), n2.clone()], &[], None);
+        assert_eq!(result.node_metrics.get("n1").copied(), Some(7.0));
+        assert_eq!(result.node_metrics.get("n2").copied(), Some(3.0));
+
+        // test_coverage: only nodes with coverage data appear
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "test_coverage".to_string(),
+            palette: "green-yellow-red".to_string(),
+        });
+        let result = dry_run(&query, &[n1, n2], &[], None);
+        assert_eq!(result.node_metrics.get("n1").copied(), Some(0.5));
+        assert!(!result.node_metrics.contains_key("n2"));
+    }
+
+    #[test]
+    fn test_heat_emphasis_test_fragility_counts_distinct_tests() {
+        // two tests reach `shared`; only one reaches `single`; none reach `orphan`.
+        let nodes = vec![
+            make_test_node("t1", "test_one"),
+            make_test_node("t2", "test_two"),
+            make_node("shared", "shared_fn", NodeType::Function),
+            make_node("single", "single_fn", NodeType::Function),
+            make_node("orphan", "orphan_fn", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "t1", "shared", EdgeType::Calls),
+            make_edge("e2", "t2", "shared", EdgeType::Calls),
+            make_edge("e3", "t1", "single", EdgeType::Calls),
+        ];
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "test_fragility".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert_eq!(
+            result.node_metrics.get("shared").copied(),
+            Some(2.0),
+            "shared_fn is reached by 2 distinct tests"
+        );
+        assert_eq!(
+            result.node_metrics.get("single").copied(),
+            Some(1.0),
+            "single_fn is reached by 1 test"
+        );
+        assert_eq!(
+            result.node_metrics.get("orphan").copied(),
+            Some(0.0),
+            "orphan_fn is reached by no test"
+        );
+    }
+
+    #[test]
+    fn test_heat_emphasis_trace_metric_warns_and_zeroes() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Function)];
+        let mut query = base_query();
+        query.emphasis.heat = Some(gyre_common::view_query::HeatConfig {
+            metric: "span_duration".to_string(),
+            palette: "blue-red".to_string(),
+        });
+        let result = dry_run(&query, &nodes, &[], None);
+        // Trace metrics need OTLP runtime data — resolver must warn, not silently fake values
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("span_duration") && w.contains("OTLP")),
+            "expected OTLP trace-metric warning, got: {:?}",
+            result.warnings
+        );
+        assert_eq!(
+            result.node_metrics.get("n1").copied(),
+            Some(0.0),
+            "trace metric values are 0.0 placeholders, never fabricated"
+        );
+    }
+
+    #[test]
+    fn test_tiered_colors_emphasis_populates_node_depths() {
+        // Blast-radius style query (mirrors the system default view):
+        // focus $clicked, incoming calls, tiered_colors emphasis.
+        let nodes = vec![
+            make_node("n1", "target", NodeType::Function),
+            make_node("n2", "direct_caller", NodeType::Function),
+            make_node("n3", "transitive_caller", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n2", "n1", EdgeType::Calls),
+            make_edge("e2", "n3", "n2", EdgeType::Calls),
+        ];
+        let mut query = base_query();
+        query.scope = Scope::Focus {
+            node: "$clicked".to_string(),
+            edges: vec!["calls".to_string()],
+            direction: "incoming".to_string(),
+            depth: 10,
+        };
+        query.emphasis.tiered_colors = Some(vec![
+            "#ef4444".to_string(),
+            "#f97316".to_string(),
+            "#eab308".to_string(),
+            "#94a3b8".to_string(),
+        ]);
+        let result = dry_run(&query, &nodes, &edges, Some("n1"));
+        assert_eq!(result.matched_nodes, 3);
+        // tiered_colors consumers color by BFS depth: clicked node = 0,
+        // direct caller = 1, transitive caller = 2.
+        assert_eq!(result.node_depths.get("n1").copied(), Some(0));
+        assert_eq!(result.node_depths.get("n2").copied(), Some(1));
+        assert_eq!(result.node_depths.get("n3").copied(), Some(2));
+    }
+
+    // ── Callout resolution edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_callout_prefix_match_resolves_without_warning() {
+        let nodes = vec![make_node("n1", "RealService", NodeType::Type)];
+        let mut query = base_query();
+        query.callouts = vec![ViewCallout {
+            node: "Real".to_string(), // prefix of RealService — not exact
+            text: "annotated".to_string(),
+            color: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.callouts_resolved, 1);
+        assert!(result.callouts_unresolved.is_empty());
+        assert!(
+            result.warnings.is_empty(),
+            "prefix match resolves cleanly (no precision warning), got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_callout_substring_match_resolves_with_precision_warning() {
+        let nodes = vec![make_node("n1", "RealService", NodeType::Type)];
+        let mut query = base_query();
+        query.callouts = vec![ViewCallout {
+            node: "Service".to_string(), // substring only — neither exact nor prefix
+            text: "annotated".to_string(),
+            color: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.callouts_resolved, 1);
+        assert!(result.callouts_unresolved.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("resolved via substring match")),
+            "substring callout resolution must warn for precision, got: {:?}",
+            result.warnings
+        );
+    }
+
+    // ── Narrative resolution tests (spec §30) ──────────────────────────────
+
+    #[test]
+    fn test_narrative_resolution_counts_resolved_steps() {
+        let nodes = vec![
+            make_node("n1", "Alpha", NodeType::Function),
+            make_node("n2", "BetaService", NodeType::Function),
+        ];
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "start here".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "BetaService".to_string(),
+                text: "then this".to_string(),
+                order: Some(2),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.narrative_resolved, 2);
+        assert!(
+            result.warnings.is_empty(),
+            "fully resolved narrative must not warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_narrative_unresolved_steps_warn_with_names() {
+        let nodes = vec![make_node("n1", "Alpha", NodeType::Function)];
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "resolves".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Ghost".to_string(),
+                text: "missing".to_string(),
+                order: Some(2),
+            },
+            NarrativeStep {
+                node: "Phantom".to_string(),
+                text: "also missing".to_string(),
+                order: Some(3),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.narrative_resolved, 1);
+        let warning = result
+            .warnings
+            .iter()
+            .find(|w| w.contains("Unresolved narrative steps"));
+        assert!(
+            warning.is_some(),
+            "unresolved narrative steps must warn, got: {:?}",
+            result.warnings
+        );
+        let w = warning.unwrap();
+        assert!(
+            w.contains("Ghost"),
+            "warning must name each unresolved node: {w}"
+        );
+        assert!(
+            w.contains("Phantom"),
+            "warning must name each unresolved node: {w}"
+        );
+        assert!(
+            !w.contains("Alpha"),
+            "resolved steps must not be listed: {w}"
+        );
+    }
+
+    // ── $selected scope edge cases (spec §30) ──────────────────────────────
+
+    #[test]
+    fn test_selected_no_selection_warns_interactive_not_empty() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let mut query = base_query();
+        query.scope = Scope::Focus {
+            node: "$selected".to_string(),
+            edges: vec![],
+            direction: "outgoing".to_string(),
+            depth: 5,
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 0);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("click a node")),
+            "$selected with no selection should show the interactive hint, got: {:?}",
+            result.warnings
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 0 nodes")),
+            "interactive scopes must not double-report as an empty-scope warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_selected_with_selection_resolves_focus() {
+        let nodes = vec![
+            make_node("n1", "Root", NodeType::Function),
+            make_node("n2", "Child", NodeType::Function),
+            make_node("n3", "Unrelated", NodeType::Function),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n2", EdgeType::Calls)];
+        let mut query = base_query();
+        query.scope = Scope::Focus {
+            node: "$selected".to_string(),
+            edges: vec!["calls".to_string()],
+            direction: "outgoing".to_string(),
+            depth: 2,
+        };
+        let result = dry_run(&query, &nodes, &edges, Some("n1"));
+        assert_eq!(result.matched_nodes, 2, "selected node + outgoing callee");
+        assert!(result.matched_node_names.contains(&"Child".to_string()));
+        assert!(!result.matched_node_names.contains(&"Unrelated".to_string()));
+        assert!(result.warnings.is_empty());
+    }
+
+    // ── Highlight emphasis validation (spec §30: emphasis = highlight, heat, tiered_colors) ──
+
+    #[test]
+    fn test_highlight_emphasis_color_validation() {
+        // Invalid color in highlight.matched must be rejected by validate()
+        // with an error naming the highlight.matched field.
+        let mut query = base_query();
+        query.emphasis.highlight = Some(gyre_common::view_query::Highlight {
+            matched: Some(gyre_common::view_query::HighlightStyle {
+                color: Some("not-a-color".to_string()),
+                label: None,
+            }),
+        });
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("highlight.matched")),
+            "invalid highlight color must produce an error naming highlight.matched, got: {:?}",
+            errors
+        );
+
+        // Every accepted color form passes: hex, named CSS, rgb function.
+        for valid in ["#ef4444", "tomato", "rgb(255, 0, 0)"] {
+            let mut query = base_query();
+            query.emphasis.highlight = Some(gyre_common::view_query::Highlight {
+                matched: Some(gyre_common::view_query::HighlightStyle {
+                    color: Some(valid.to_string()),
+                    label: Some("Untested".to_string()),
+                }),
+            });
+            let errors = query.validate();
+            assert!(
+                errors.is_empty(),
+                "valid highlight color '{valid}' should pass, got: {:?}",
+                errors
+            );
+        }
+
+        // Highlight with no matched style is legal — nothing to validate.
+        let mut query = base_query();
+        query.emphasis.highlight = Some(gyre_common::view_query::Highlight::default());
+        assert!(query.validate().is_empty());
+    }
+
+    // ── Group resolution edge case: patterns are scoped to the result set ──
+
+    #[test]
+    fn test_group_resolution_restricted_to_result_set() {
+        // A group pattern that also matches a node OUTSIDE the scope's result
+        // set must not pull that node into the group — groups are overlays on
+        // the scoped subgraph, not scope extensions.
+        let nodes = vec![
+            make_node("n1", "AuthService", NodeType::Type),
+            make_node("n2", "auth_handler", NodeType::Function),
+        ];
+        let mut query = base_query();
+        query.scope = Scope::Filter {
+            node_types: vec!["type".to_string()],
+            computed: None,
+            name_pattern: None,
+        };
+        query.groups = vec![gyre_common::view_query::ViewGroup {
+            name: "auth".to_string(),
+            // Substring "auth" matches both nodes by name, but only n1 is in scope.
+            nodes: vec!["auth".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 1, "scope is types only");
+        assert_eq!(
+            result.groups_resolved[0].matched, 1,
+            "group must not include out-of-scope nodes"
+        );
+        assert!(result.groups_resolved[0]
+            .nodes
+            .contains(&"pkg.AuthService".to_string()));
+        assert!(!result.groups_resolved[0]
+            .nodes
+            .contains(&"pkg.auth_handler".to_string()));
+    }
+
+    // ── Narrative ordering: ordered annotations need unambiguous orders ──
+
+    #[test]
+    fn test_narrative_duplicate_order_rejected() {
+        // Narrative steps are ordered annotations; two steps claiming the same
+        // order are ambiguous and must be rejected by validate().
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "first".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Beta".to_string(),
+                text: "second".to_string(),
+                order: Some(1),
+            },
+        ];
+        let errors = query.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("Duplicate narrative step order")),
+            "duplicate narrative order must be rejected, got: {:?}",
+            errors
+        );
+
+        // Distinct orders validate cleanly.
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "first".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Beta".to_string(),
+                text: "second".to_string(),
+                order: Some(2),
+            },
+        ];
+        let errors = query.validate();
+        assert!(
+            errors.is_empty(),
+            "distinct narrative orders should validate, got: {:?}",
+            errors
         );
     }
 

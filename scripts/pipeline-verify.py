@@ -113,14 +113,14 @@ def main():
             value=json.loads(receipt.read_text())
         import runpy
         usage=runpy.run_path(str(STAGE/'pipeline-usage.py'))['usage']() if (STAGE/'pipeline-usage.py').exists() else {}
-        print('GYRE_VERIFY_POLL ' + json.dumps({'usage':usage,'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive}))
+        print('GYRE_VERIFY_POLL ' + json.dumps({'usage':usage,'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive, 'cache_request':json.loads((STAGE/'cache-request.json').read_text()) if (STAGE/'cache-request.json').exists() and not (STAGE/'cache-ready.json').exists() else None}))
         return
     job = json.loads((STAGE / 'verify-job.json').read_text())
     identity = {key: job[key] for key in ('candidate', 'base', 'head', 'tree')}
-    env = {**os.environ, 'SKIP_WEB_BUILD': '1', 'CARGO_BUILD_JOBS': '1', 'RUST_TEST_THREADS': '1',
-           'CARGO_PROFILE_DEV_DEBUG': '0', 'CARGO_PROFILE_TEST_DEBUG': '0',
-           'CARGO_TARGET_DIR': '/sandbox/workspace/.gyre-target', 'CARGO_HOME': '/sandbox/workspace/.cargo', 'NPM_CONFIG_CACHE': '/sandbox/workspace/.npm',
-           'RUSTUP_HOME': '/usr/local/rustup', 'GYRE_DEV_IMAGE': job['image'], 'GYRE_VERIFY_KEEP_WEB_DIST':'1'}
+    import runpy
+    build_env=runpy.run_path(str(STAGE/'pipeline-build-env.py'))['environment']()
+    env = {**os.environ, **build_env, 'SKIP_WEB_BUILD':'1',
+           'GYRE_DEV_IMAGE':job['image'],'GYRE_VERIFY_KEEP_WEB_DIST':'1'}
     try:
         # Retry Git transport in this sandbox; never reallocate for clone errors.
         CHECKOUT.parent.mkdir(parents=True, exist_ok=True)
@@ -155,9 +155,16 @@ def main():
                     not isinstance(probe[1], str) or not re.fullmatch(r'scripts/check-[a-z0-9-]+\.sh', probe[1])):
                 raise ValueError('unsupported baseline probe')
             commands = [(probe, str(CHECKOUT), timeout)]
+        cache=None
+        if job.get('cache_enabled') and 'probe' not in job:
+            cache_module=runpy.run_path(str(STAGE/'pipeline-cache.py'))
+            try:cache=cache_module['prepare'](CHECKOUT,job,build_env,STAGE)
+            except Exception as exc:print('Optional build cache unavailable: '+type(exc).__name__,flush=True)
         checks_receipt = STAGE / 'verification-checks.json'
         run_checks(commands, checks_receipt, identity, env)
         value = json.loads(checks_receipt.read_text())
+        if value.get('passed') and cache is not None:
+            value['cache']=cache_module['export'](CHECKOUT,build_env,STAGE,cache)
         integrity = source_integrity(identity)
         if integrity:
             value.update(integrity,passed=False,infrastructure=True)

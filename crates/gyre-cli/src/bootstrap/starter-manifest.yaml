@@ -1,0 +1,15 @@
+version: 1
+
+defaults:
+  requires_approval: true
+  auto_create_tasks: true
+  auto_invalidate_on_change: true
+
+specs:
+  - path: system/design-principles.md
+    title: Design Principles
+    owner: admin
+    kind: system
+    approval:
+      mode: human_only
+    requires_approval: true

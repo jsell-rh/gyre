@@ -10,7 +10,6 @@
 #
 # See: specs/reviews/task-106.md R2 F6 (the finding that created this check)
 #
-# --- task-106 revision round owns these (repos_root / repo.path) ---
 # --- unowned; fix opportunistically when touching these files ---
 crates/gyre-adapters/src/sqlite/conversation.rs:191   # GYRE_CONVERSATIONS_PATH default "./conversations" — relative at rest
 crates/gyre-server/src/snapshot.rs:9                  # DEFAULT_SNAPSHOT_PATH "./snapshots" — relative at rest

@@ -360,7 +360,7 @@ docker/gyre-agent/
 - `nix build .#agent-image-docker` — Docker-loadable tarball
 - `nix build .#agent-image-tar` — Tarball for air-gapped transfer
 
-The Nix flake pins all dependencies (Node.js version, Claude Agent SDK version, git, curl) for bit-reproducible builds. The image hash is recorded in workload attestation (`wl_image_hash` JWT claim).
+The Nix flake pins all dependencies (Node.js version, Claude Agent SDK version, git, curl) for bit-reproducible builds. The image hash is recorded in workload attestation (`wl_image_hash` JWT claim): the spawn flow resolves the image digest before minting the agent JWT — `docker image inspect` needs no running container — so container and SSH backends carry the digest of the exact local image in the initial token. Kubernetes records the digest the cluster actually pulled (pod `imageID`) in the post-spawn workload attestation record (`GET /api/v1/agents/:id/workload`), because the `imageID` only exists once the Pod is scheduled and the JWT must pre-exist the Pod it is injected into.
 
 One definition, all targets. The `Dockerfile` is replaced by the Nix flake.
 
@@ -414,7 +414,7 @@ Budget is tracked per repo and aggregated to workspace. The repo-level budget (d
 
 | Threshold | Action | Mechanism |
 |---|---|---|
-| **80%** | Warn | `BudgetWarning` notification created (Inbox priority 7). Agents continue running. |
+| **80%** | Warn | `AgentBudgetWarning` notification created (Inbox, High — rank 4 in the unified notification taxonomy, `user-management.md` §Notification Entity). Agents continue running. |
 | **100%** | Graceful stop | All active agents in the workspace receive a `BudgetExhausted` message in their inbox. Agents have 60 seconds to commit current work and call `agent.complete`. After 60 seconds, agents are killed via `ComputeTarget::kill_process()`. Agents that complete within the grace period are marked `Idle`. Agents killed after the grace period are marked `Stopped`. |
 | **Beyond limit** | Hard kill | `ComputeTarget::kill_process()` called immediately. Worktree preserved for recovery. No MR created. Task remains `InProgress` for human review. "Beyond limit" means the workspace budget was reduced below current usage (e.g., tenant admin lowered the tenant ceiling, or workspace admin reduced the workspace budget while agents are running). The 100% threshold handles normal exhaustion; beyond-limit handles external budget changes. |
 

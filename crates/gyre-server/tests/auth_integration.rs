@@ -13,7 +13,7 @@
 //!   - Multiple API endpoints all enforce auth
 
 use gyre_common::Id;
-use gyre_domain::User;
+use gyre_domain::{Tenant, User};
 use gyre_server::{abac_middleware, build_router, build_state};
 use sha2::{Digest, Sha256};
 
@@ -46,6 +46,24 @@ async fn start_server() -> (String, reqwest::Client) {
     (base_url, client)
 }
 
+/// Create a workspace via the API and return its id. Spawn fails closed when
+/// the repo's workspace row is missing (platform-model.md §1: the workspace
+/// row resolves the tenant scope claim for the agent JWT), so fixture repos
+/// need their workspace row first.
+async fn create_workspace(base: &str, client: &reqwest::Client, name: &str) -> String {
+    let ws: serde_json::Value = client
+        .post(format!("{base}/api/v1/workspaces"))
+        .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    ws["id"].as_str().unwrap().to_string()
+}
+
 /// Start a server with a pre-seeded user + API key.
 /// Returns (base_url, client, raw_api_key) where raw_api_key has `gyre_` prefix.
 async fn start_server_with_api_key() -> (String, reqwest::Client, String) {
@@ -58,13 +76,18 @@ async fn start_server_with_api_key() -> (String, reqwest::Client, String) {
         .await
         .expect("seed built-in policies");
 
-    // Pre-seed a user and API key before starting the server.
-    let user = User::new(
+    // Pre-seed a user and API key before starting the server. The user is
+    // bound to a tenant (task-099 F1): API-key auth fail-closes on users
+    // without a tenant scope instead of fabricating one.
+    let tenant = Tenant::new(Id::new("auth-int-tenant-1"), "Auth Int", "auth-int", 0);
+    state.tenants.create(&tenant).await.unwrap();
+    let mut user = User::new(
         Id::new("auth-int-user-1"),
         "ext-auth-int-1",
         "api-key-tester",
         1000,
     );
+    user.tenant_id = Some(Id::new("auth-int-tenant-1"));
     state.users.create(&user).await.unwrap();
 
     // API keys are stored as SHA-256 hashes of the raw key.
@@ -310,11 +333,12 @@ async fn token_revoked_after_agent_complete() {
     let (base, client) = start_server().await;
     let auth = format!("Bearer {GLOBAL_TOKEN}");
 
-    // Create a repo and task for the spawn.
+    // Create a workspace, repo and task for the spawn.
+    let ws_id = create_workspace(&base, &client, "revoke-ws").await;
     let repo_resp: serde_json::Value = client
         .post(format!("{base}/api/v1/repos"))
         .header("Authorization", &auth)
-        .json(&serde_json::json!({"workspace_id": "revoke-proj", "name": "revoke-repo"}))
+        .json(&serde_json::json!({"workspace_id": ws_id, "name": "revoke-repo"}))
         .send()
         .await
         .unwrap()

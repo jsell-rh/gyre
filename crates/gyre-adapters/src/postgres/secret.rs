@@ -18,6 +18,10 @@ impl SecretRepository for PgStorage {
         anyhow::bail!("SecretRepository not implemented for PgStorage")
     }
 
+    async fn find_by_id(&self, _id: &Id, _tenant_id: &str) -> Result<Option<Secret>> {
+        anyhow::bail!("SecretRepository not implemented for PgStorage")
+    }
+
     async fn list_by_scope(
         &self,
         _scope: SecretScope,

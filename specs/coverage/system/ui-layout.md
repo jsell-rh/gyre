@@ -2,7 +2,7 @@
 
 **Spec:** [`system/ui-layout.md`](../../system/ui-layout.md)
 **Last audited:** 2026-09-29
-**Coverage:** 1/38
+**Coverage:** 7/38
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -13,11 +13,11 @@
 | 5 | Full-Width | 3 | task-assigned | task-175 | Used by Inbox, Briefing, Specs list |
 | 6 | Split (Main + Detail Panel) | 3 | task-assigned | task-173 | Drill-down interaction pattern |
 | 7 | Canvas + Controls | 3 | task-assigned | task-178 | Architecture tab canvas |
-| 8 | LLM Endpoint Contract | 3 | task-assigned | task-171 | SSE streaming + prompt templates |
-| 9 | Role | 2 | task-assigned | task-171 | LLM Endpoint Contract subsection |
-| 10 | Available Data | 2 | task-assigned | task-171 | LLM Endpoint Contract subsection |
-| 11 | Output Format | 2 | task-assigned | task-171 | LLM Endpoint Contract subsection |
-| 12 | Constraints | 2 | task-assigned | task-171 | LLM Endpoint Contract subsection |
+| 8 | LLM Endpoint Contract | 3 | implemented | task-171 | All three endpoints (explorer-views/generate, briefing/ask, specs/assist) + workspace meta-specs/assist stream via axum Sse with `partial`/`complete`/`error` events (llm_helpers SSE infra; mid-stream chunk failures surface as `error`, never a truncated `complete`); prompt templates resolve DB override → git tree specs/prompts/*.md → hardcoded fallback with `{{...}}` substitution via substitute_template; per-workspace llm_model with GYRE_LLM_MODEL default; per-endpoint token limits via GYRE_LLM_MAX_TOKENS_{GENERATE,ASK,ASSIST}; per-(user, workspace) sliding-window rate limit 10 req/min with 429 + Retry-After and 60s eviction (llm_rate_limit.rs); llm_query budget cost entries via record_llm_call_usage with prompt-template git SHA. Awaiting independent verification (2026-11-11) |
+| 9 | Role | 2 | implemented | task-171 | System-prompt Role sections in specs/prompts/{explorer-generate,briefing-ask,specs-assist,meta-specs-assist}.md + llm_defaults.rs fallbacks; instruction travels as user prompt with system-template placeholder blanked on repo-scoped assist (injection containment). Awaiting independent verification (2026-11-11) |
+| 10 | Available Data | 2 | implemented | task-171 | Runtime context injected at call time: workspace graph summary (node_type_summary/node_count), spec content + graph nodes for specs/assist, meta-spec-set context (workspace_meta_spec_context), draft_content for the §9 preview loop. Awaiting independent verification (2026-11-11) |
+| 11 | Output Format | 2 | implemented | task-171 | View-spec grammar for generate (validated ViewSpec), {diff, explanation} JSON for specs/meta-specs assist with op/path/content validation (invalid ops → `error` event), narrative answer for briefing/ask; structured data arrives only in `complete`, `partial` streams explanation/answer text. Awaiting independent verification (2026-11-11) |
+| 12 | Constraints | 2 | implemented | task-171 | Depth ≤ 3 / node-type constraints in the explorer prompt and ViewSpec validation; read-only query-translator framing; token caps per endpoint; retry-safe (no side effects before `complete`). Awaiting independent verification (2026-11-11) |
 | 13 | Editor Split | 3 | implemented | task-172 | EditorSplit.svelte two-pane layout: editor+LLM chat left, Architecture (default)/Code Diff tabs right; Accept/Edit/Dismiss inline diff; editing→running→complete→iterate; DetailPanel pop-out with Back/Esc (single-Esc guard in DetailPanel.handleKeydown). Both production contexts: DetailPanel mounts context="spec"; MetaSpecs workspace view (§9 preview loop) mounts context="meta-spec" with targetSpecs/onpublish — one shared implementation, no parallel §9 client. Verified via EditorSplit.test.js + DetailPanel.test.js + MetaSpecs.test.js incl. real PreviewResponse shapes and honest 404-failure paths (2026-10-10) |
 | 14 | 3. Interaction Patterns | 2 | task-assigned | task-173 | Standardized patterns |
 | 15 | Scope Transitions | 3 | task-assigned | task-173 | Cross-fade, pushState |
@@ -42,7 +42,7 @@
 | 34 | Item Structure | 3 | task-assigned | task-175 | Priority badge, accordion |
 | 35 | Action Buttons per Item Type | 3 | task-assigned | task-175 | 10 priority levels |
 | 36 | 8. Briefing Layout | 2 | task-assigned | task-175 | Narrative sections |
-| 37 | 9. Meta-specs Preview Loop Layout | 2 | task-assigned | task-176 | 3-state preview workflow |
+| 37 | 9. Meta-specs Preview Loop Layout | 2 | implemented | task-176 | 3-state preview workflow via the shared EditorSplit (§2) in meta-spec context, mounted by the MetaSpecs workspace view: State 1 target-spec checkbox selector + Preview/Publish; State 2 locked editor showing the pending-changes diff vs the published registry prompt (LCS line diff, +/- markers, add/remove summary) + per-spec ◐/✓ progress + Cancel Preview (button and Esc); State 3 Architecture (default)/Code Diff tabs rendering the real PreviewResponse fields, Iterate returns to editing with results retained, Publish → registry PUT resets approval to Pending. Preview runs against the real POST/GET /workspaces/:id/meta-specs/preview endpoints. Verified via MetaSpecs.test.js + EditorSplit.test.js + lineDiff.test.js (2026-10-11) |
 | 38 | 10. Rendering Technology | 2 | task-assigned | task-177 | SVG canvas + engines |
 | 39 | Canvas Rendering | 3 | task-assigned | task-177 | SVG, auto-filter thresholds |
 | 40 | Layout Engines | 3 | task-assigned | task-177 | ELK, d3-force, d3-scale |

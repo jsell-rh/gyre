@@ -11,12 +11,22 @@ use crate::AppState;
 const HEARTBEAT_TIMEOUT_SECS: u64 = 60;
 
 /// Run one stale-agent detection cycle. Used by the job framework for manual triggering.
-pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
+pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
+    // Server-driven orchestrators (spawned_by="system": the task-115 signal
+    // chain's workspace/repo orchestrators) have no external process to send
+    // `PUT /agents/:id/heartbeat` — the server itself is the liveness
+    // source. When one's heartbeat has aged out, refresh it here rather
+    // than applying the disconnect behavior: without this, the detector
+    // marks it Dead, `restart_orchestrator` spawns an Active replacement
+    // that equally never heartbeats, and the pair churns
+    // spawn/kill/restart forever while leaking budget (review F3).
+    // User-spawned orchestrators (task-093) have their own processes and
+    // still age out normally.
     let agents = state.agents.list().await?;
     for mut agent in agents {
         // Skip agents in terminal states.
@@ -29,25 +39,83 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
         if agent.is_alive(now, HEARTBEAT_TIMEOUT_SECS) {
             continue;
         }
+        if agent.is_orchestrator() && agent.spawned_by.as_deref() == Some("system") {
+            agent.heartbeat(now);
+            if let Err(e) = state.agents.update(&agent).await {
+                warn!(
+                    agent_id = %agent.id,
+                    "stale-agent detector: could not refresh system orchestrator heartbeat: {e}"
+                );
+            }
+            continue;
+        }
 
         match agent.disconnected_behavior {
             DisconnectedBehavior::Abort => {
                 info!(agent_id = %agent.id, agent_name = %agent.name,
                     "aborting stale agent (disconnected_behavior=abort)");
+                // Capture pre-death status: an Active agent held a budget
+                // slot (incremented at spawn); the Dead transition must
+                // release it or every orchestrator restart leaks one
+                // `active_agents` slot (review F3).
+                let was_active = agent.status == AgentStatus::Active;
                 let _ = agent.transition_status(AgentStatus::Dead);
+                // agent.failed analytics event (analytics.md §Auto-Emitted
+                // Events: "Agent fails or is killed"). Heartbeat timeout is
+                // a failure; the admin kill and fail_agent paths are others.
+                let ev = gyre_domain::AnalyticsEvent::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    "agent.failed",
+                    Some(agent.id.to_string()),
+                    serde_json::json!({
+                        "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                        "reason": "heartbeat timeout (abort)",
+                        "duration_secs": now.saturating_sub(agent.spawned_at),
+                    }),
+                    now,
+                )
+                .with_scope(
+                    None,
+                    None,
+                    Some(&agent.workspace_id),
+                    agent.repo_id.as_ref(),
+                );
+                let _ = state.analytics.record(&ev).await;
                 let _ = state.agents.update(&agent).await;
 
-                // Budget symmetry (task-093 F4): the aborted agent no longer
-                // counts against the workspace concurrency limit. Runs for
-                // every aborted agent, not just orchestrators, because the
-                // budget tracks all active agents.
-                crate::api::budget::decrement_active_agents(state, &agent.workspace_id.to_string())
+                if was_active {
+                    crate::api::budget::decrement_active_agents(
+                        state,
+                        &agent.workspace_id.to_string(),
+                    )
                     .await;
+                    // agent-runtime.md §4: wall-clock compute time
+                    // (spawn → dead).
+                    crate::api::budget::record_compute_minutes_for_agent(state, &agent).await;
+                }
+
+                // Agent lifecycle audit event (observability.md §Audit Event Types):
+                // the stale detector marked this agent Dead. pid_alive is null
+                // when no PID was ever attested (liveness unknown, not assumed).
+                let pid_alive =
+                    crate::agent_audit::attested_pid_alive(state, &agent.id.to_string()).await;
+                crate::agent_audit::emit_dead(state, &agent, agent.last_heartbeat, pid_alive).await;
 
                 // Clean up worktrees
                 if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
                     for wt in worktrees {
                         if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+                            // jj workspace teardown (source-control.md §4):
+                            // forget the workspace from the shared jj
+                            // checkout and remove the working copy dir.
+                            crate::api::spawn::cleanup_jj_workspace(
+                                state,
+                                &agent.id.to_string(),
+                                &repo.path,
+                                &wt.path,
+                                &format!("agent-{}", agent.id),
+                            )
+                            .await;
                             if let Err(e) =
                                 state.git_ops.remove_worktree(&repo.path, &wt.path).await
                             {
@@ -63,9 +131,22 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                     if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
                         use gyre_domain::TaskStatus;
                         if task.status == TaskStatus::InProgress {
+                            let pre_block_status = task.status.clone();
                             let _ = task.transition_status(TaskStatus::Blocked);
                             task.updated_at = now;
                             let _ = state.tasks.update(&task).await;
+                            // task.status_changed analytics event (analytics.md
+                            // §Auto-Emitted Events: "Task transitions status") —
+                            // the stale-abort auto-block is a production
+                            // transition.
+                            if task.status != pre_block_status {
+                                crate::api::analytics::record_task_status_changed(
+                                    state,
+                                    &task,
+                                    &pre_block_status,
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
@@ -78,6 +159,11 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                     .kv_remove("interrogation_context", &agent_id_str)
                     .await;
 
+                // Platform Model §7: heartbeat abort is a kill — revoke the
+                // agent's task-scoped ephemeral secrets (teardown; logs
+                // `secret.revoked` per secret).
+                crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+
                 let ws_id = agent.workspace_id.clone();
                 state.emit_telemetry(
                     ws_id.clone(),
@@ -87,7 +173,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "status": "dead",
                         "reason": format!("Agent {} aborted (no heartbeat, abort behavior)", agent.name),
                     })),
-                );
+                ).await;
 
                 // Notify the spawning user that the agent was abandoned (HSI §2).
                 if let Some(ref spawned_by) = agent.spawned_by {
@@ -116,6 +202,25 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                 let _ = agent.transition_status(AgentStatus::Stopped);
                 let _ = state.agents.update(&agent).await;
 
+                // analytics.md §Auto-Emitted Events: agent.failed fires when
+                // an agent "fails or is killed". Pause is a terminal stop —
+                // Stopped has no exit transitions — so the run ends here on
+                // heartbeat loss, exactly like the sibling Abort arm (task-146
+                // review F2).
+                crate::api::analytics::record_agent_failed(
+                    state,
+                    &agent,
+                    "heartbeat timeout (pause)",
+                )
+                .await;
+
+                // Platform Model §7 (task-100 review round-3 F1): Pause is a
+                // terminal stop — Stopped has no exit transitions — so the
+                // agent's run ends here and its task-scoped ephemeral
+                // secrets must be revoked like the sibling Abort arm
+                // (teardown; logs `secret.revoked` per secret).
+                crate::secret_rotation::revoke_agent_task_secrets(state, &agent).await;
+
                 let ws_id = agent.workspace_id.clone();
                 state.emit_telemetry(
                     ws_id,
@@ -125,7 +230,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "status": "stopped",
                         "reason": format!("Agent {} stopped (no heartbeat, pause behavior)", agent.name),
                     })),
-                );
+                ).await;
             }
 
             DisconnectedBehavior::ContinueOffline => {
@@ -141,9 +246,10 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 /// unique name suffix, same scope/tier/lifecycle config, new scoped JWT. No
 /// task, no worktree. Returns None (leaving the orchestrator dead) when a
 /// live orchestrator already holds the scope, the workspace spawn budget is
-/// exhausted, or persistence fails.
+/// exhausted, or persistence fails. The Arc handle relaunches the replacement
+/// process (launch_orchestrator_process) like the spawn cores do.
 async fn restart_orchestrator(
-    state: &AppState,
+    state: &Arc<AppState>,
     dead: &gyre_domain::Agent,
     now: u64,
 ) -> Option<gyre_domain::Agent> {
@@ -222,6 +328,9 @@ async fn restart_orchestrator(
     // to Pause.
     replacement.disconnected_behavior = dead.disconnected_behavior.clone();
     replacement.restart_on_failure = true;
+    // F2: keep the persona binding across restarts — the replacement must
+    // run with the same persona as the orchestrator it replaces.
+    replacement.persona_id = dead.persona_id.clone();
     if let Err(e) = replacement.transition_status(AgentStatus::Active) {
         warn!("restart: failed to activate replacement: {e}");
         return None;
@@ -235,20 +344,70 @@ async fn restart_orchestrator(
     }
 
     // Scoped JWT for the replacement (same tier and scope as the dead one).
+    // §1 Token Scoping: tenant and repo name resolved from the live stores
+    // so the replacement's scope list is minted from real hierarchy context.
+    // An unresolvable workspace means the tenant scope cannot be determined —
+    // skip the re-mint (the replacement cannot authenticate until a token
+    // exists) and log, rather than fabricating a "default" tenant identity
+    // (task-097 F3 class).
+    let tenant_id = match state
+        .workspaces
+        .find_by_id(&dead.workspace_id)
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(ws) => ws.tenant_id.to_string(),
+        None => {
+            warn!(
+                agent_id = %replacement.id,
+                workspace_id = %dead.workspace_id,
+                "restart: tenant scope cannot be determined (workspace unresolvable); \
+                 skipping orchestrator JWT re-mint"
+            );
+            // The replacement row exists (Active, budget claimed) but cannot
+            // authenticate — report it as the replacement so escalation stays
+            // truthful about scope occupancy.
+            return Some(replacement);
+        }
+    };
+    let repo_name = if let Some(rid) = dead.repo_id.as_ref() {
+        state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name)
+    } else {
+        None
+    };
+    // F2: the replacement keeps the dead orchestrator's persona binding —
+    // the persona claim names the tier's persona slug.
+    let persona = match dead.orchestrator_type {
+        gyre_domain::OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        gyre_domain::OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+        gyre_domain::OrchestratorType::Worker => "worker",
+    };
     let token = state.agent_signing_key.mint_orchestrator(
         &replacement.id.to_string(),
         dead.spawned_by.as_deref().unwrap_or("system"),
         &state.base_url,
         state.agent_jwt_ttl_secs,
+        &tenant_id,
         &dead.workspace_id.to_string(),
         dead.repo_id.as_ref().map(|r| r.to_string()).as_deref(),
+        repo_name.as_deref(),
         &dead.orchestrator_type.to_string(),
+        persona,
     );
-    match token {
+    // Register the replacement's token so the auth middleware accepts it —
+    // an unstored JWT leaves the restarted orchestrator unable to authenticate.
+    match &token {
         Ok(t) => {
             let _ = state
                 .kv_store
-                .kv_set("agent_tokens", &replacement.id.to_string(), t)
+                .kv_set("agent_tokens", &replacement.id.to_string(), t.clone())
                 .await;
         }
         Err(e) => warn!("restart: failed to mint orchestrator JWT: {e}"),
@@ -259,6 +418,34 @@ async fn restart_orchestrator(
 
     // Budget: the dead agent's slot was freed by the Dead transition, claim it.
     crate::api::budget::increment_active_agents(state, &dead.workspace_id.to_string()).await;
+
+    // F3: relaunch the process. A replacement that is only a persisted row
+    // is not a running orchestrator; if the launch fails the replacement
+    // will be declared Dead by this same detector and restarted again.
+    if let Ok(t) = &token {
+        if let Some(workspace) = state
+            .workspaces
+            .find_by_id(&replacement.workspace_id)
+            .await
+            .ok()
+            .flatten()
+        {
+            let outcome = crate::api::orchestrator::launch_orchestrator_process(
+                state,
+                &replacement,
+                &workspace,
+                t,
+            )
+            .await;
+            if outcome.launch_status != "running" {
+                warn!(
+                    agent_id = %replacement.id,
+                    detail = outcome.launch_detail.as_deref().unwrap_or_default(),
+                    "restart: orchestrator process launch failed"
+                );
+            }
+        }
+    }
 
     info!(
         agent_id = %replacement.id,
@@ -283,7 +470,7 @@ async fn restart_orchestrator(
 /// mint a replacement while a live orchestrator holds the scope (§3.2), so a
 /// stray second entry cannot produce two live orchestrators.
 pub(crate) async fn handle_orchestrator_death(
-    state: &AppState,
+    state: &Arc<AppState>,
     dead: &gyre_domain::Agent,
     now: u64,
     cause: &str,
@@ -303,7 +490,7 @@ pub(crate) async fn handle_orchestrator_death(
 /// replacement, so the recipient does not react as if the repo is
 /// unorchestrated.
 async fn escalate_repo_orchestrator_death(
-    state: &AppState,
+    state: &Arc<AppState>,
     dead: &gyre_domain::Agent,
     replacement: Option<&gyre_domain::Agent>,
     cause: &str,
@@ -378,4 +565,370 @@ pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::test_state;
+    use gyre_common::Id;
+    use gyre_domain::{Agent, AgentStatus, DisconnectedBehavior};
+
+    /// analytics.md §Auto-Emitted Events: an agent aborted by heartbeat
+    /// timeout ("fails or is killed") must record agent.failed with the
+    /// spec-required task_id/reason properties. Fails on the old behavior
+    /// where the abort path recorded no analytics event.
+    #[tokio::test]
+    async fn abort_records_agent_failed_analytics_event() {
+        let state = test_state();
+
+        let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = gyre_domain::Agent::new(Id::new("stale-agent-1"), "doomed", 1_000);
+        agent.disconnected_behavior = DisconnectedBehavior::Abort;
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // In-flight task assigned to the agent — the abort path blocks it.
+        let mut task = gyre_domain::Task::new(Id::new("task-stale-1"), "Stale task", 1_000);
+        task.transition_status(gyre_domain::TaskStatus::InProgress)
+            .ok();
+        state.tasks.create(&task).await.unwrap();
+        let mut with_task = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        with_task.current_task_id = Some(Id::new("task-stale-1"));
+        state.agents.update(&with_task).await.unwrap();
+
+        // Age past the heartbeat timeout, no heartbeat ever recorded.
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let dead = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(dead.status, AgentStatus::Dead);
+
+        let blocked = state
+            .tasks
+            .find_by_id(&Id::new("task-stale-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.status, gyre_domain::TaskStatus::Blocked);
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "stale abort must record the agent.failed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "agent.failed");
+        assert_eq!(ev.agent_id.as_deref(), Some("stale-agent-1"));
+        assert_eq!(ev.properties["reason"], "heartbeat timeout (abort)");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+
+        // analytics.md §Auto-Emitted Events: task.status_changed — the
+        // stale-abort auto-block is a production transition and must record.
+        let status_events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            status_events.len(),
+            1,
+            "stale-abort auto-block must record task.status_changed"
+        );
+        let sev = &status_events[0];
+        assert_eq!(sev.properties["task_id"], "task-stale-1");
+        assert_eq!(sev.properties["old_status"], "InProgress");
+        assert_eq!(sev.properties["new_status"], "Blocked");
+    }
+
+    /// analytics.md §Auto-Emitted Events: an agent stopped by heartbeat
+    /// timeout with pause behavior is equally "fails or is killed" — Pause
+    /// is a terminal stop (Stopped has no exit transitions), so the run
+    /// ends there and agent.failed must record with the spec-required
+    /// task_id/reason properties (task-146 review F2). Fails on the old
+    /// behavior where the Pause arm recorded no analytics event.
+    #[tokio::test]
+    async fn pause_records_agent_failed_analytics_event() {
+        let state = test_state();
+
+        let ws = gyre_domain::Workspace::new(Id::new("ws-2"), Id::new("t1"), "Ws", "ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = gyre_domain::Agent::new(Id::new("stale-agent-2"), "paused", 1_000);
+        // The agent must actually live in ws-2: the event's workspace
+        // attribution comes from agent.workspace_id, so without this the
+        // scoping assertion below would compare against a fabricated
+        // bootstrap-"default" scope and could never pass.
+        agent.workspace_id = Id::new("ws-2");
+        agent.disconnected_behavior = DisconnectedBehavior::Pause;
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // In-flight task assigned to the agent — the event must carry it.
+        let mut task = gyre_domain::Task::new(Id::new("task-stale-2"), "Stale pause task", 1_000);
+        task.transition_status(gyre_domain::TaskStatus::InProgress)
+            .ok();
+        state.tasks.create(&task).await.unwrap();
+        let mut with_task = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        with_task.current_task_id = Some(Id::new("task-stale-2"));
+        state.agents.update(&with_task).await.unwrap();
+
+        // Age past the heartbeat timeout, no heartbeat ever recorded.
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let stopped = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(stopped.status, AgentStatus::Stopped);
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "stale pause must record the agent.failed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "agent.failed");
+        assert_eq!(ev.agent_id.as_deref(), Some("stale-agent-2"));
+        assert_eq!(ev.properties["task_id"], "task-stale-2");
+        assert_eq!(ev.properties["reason"], "heartbeat timeout (pause)");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+        assert_eq!(
+            ev.workspace_id.as_deref(),
+            Some("ws-2"),
+            "event must be scoped to the workspace for filtered queries"
+        );
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    #[tokio::test]
+    async fn stale_detector_emits_agent_dead_audit_event() {
+        // observability.md §Audit Event Types: when the stale detector marks
+        // an agent Dead, an AgentDead event must record the last heartbeat
+        // time and PID liveness. Without an attestation pid_alive is null
+        // (unknown), never fabricated.
+        let state = test_state();
+        let now = now_secs();
+        let mut agent = Agent::new(Id::new("agent-stale-audit"), "stale-audit-agent", now);
+        agent.transition_status(AgentStatus::Active).ok();
+        agent.last_heartbeat = Some(now - 120);
+        agent.disconnected_behavior = DisconnectedBehavior::Abort;
+        state.agents.create(&agent).await.unwrap();
+
+        super::run_once(&state).await.unwrap();
+
+        // The agent actually transitioned to Dead.
+        let dead = state
+            .agents
+            .find_by_id(&Id::new("agent-stale-audit"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dead.status, AgentStatus::Dead);
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_dead").await;
+        assert_eq!(events.len(), 1, "exactly one agent_dead event");
+        let ev = &events[0];
+        assert_eq!(ev.resource_id.as_deref(), Some("agent-stale-audit"));
+        assert_eq!(ev.detail["last_heartbeat_at"], now - 120);
+        assert!(ev.detail["pid_alive"].is_null(), "no attestation → unknown");
+    }
+
+    #[tokio::test]
+    async fn stale_detector_reports_pid_liveness_in_agent_dead_event() {
+        // With an attested PID, the AgentDead event must carry the measured
+        // liveness: a dead PID (an exited child) reports false, proving the
+        // value is measured rather than assumed.
+        let state = test_state();
+        let now = now_secs();
+        let mut agent = Agent::new(Id::new("agent-stale-pid"), "stale-pid-agent", now);
+        agent.transition_status(AgentStatus::Active).ok();
+        agent.last_heartbeat = Some(now - 120);
+        agent.disconnected_behavior = DisconnectedBehavior::Abort;
+        state.agents.create(&agent).await.unwrap();
+
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let att = crate::workload_attestation::attest_agent(
+            "agent-stale-pid",
+            Some(dead_pid),
+            "local",
+            "",
+        );
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                "agent-stale-pid",
+                serde_json::to_string(&att).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        super::run_once(&state).await.unwrap();
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_dead").await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].detail["pid_alive"], false);
+    }
+
+    #[tokio::test]
+    async fn stale_detector_pause_revokes_task_scoped_secrets() {
+        // platform-model.md §7 (task-100 review round-3 F1): the Pause arm
+        // of the stale detector terminally stops the agent (Stopped has no
+        // exit transitions) — the task-scoped ephemeral secrets must be
+        // revoked, mirroring the Abort arm. Pause is the default
+        // DisconnectedBehavior, so the default configuration must not leak.
+        use gyre_common::{Id, Secret, SecretScope, SecretType};
+
+        let state = test_state();
+        let now = now_secs();
+        state
+            .tenants
+            .create(&gyre_domain::Tenant::new(
+                Id::new("default"),
+                "Default",
+                "default",
+                now,
+            ))
+            .await
+            .unwrap();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-pause"),
+            Id::new("default"),
+            "Pause WS",
+            "pause-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent = Agent::new(Id::new("agent-stale-pause"), "stale-pause-agent", now);
+        agent.transition_status(AgentStatus::Active).ok();
+        agent.workspace_id = Id::new("ws-pause");
+        agent.current_task_id = Some(Id::new("task-pause"));
+        agent.last_heartbeat = Some(now - 120);
+        agent.disconnected_behavior = DisconnectedBehavior::Pause;
+        state.agents.create(&agent).await.unwrap();
+
+        let mk = |id: &str, name: &str, scope: SecretScope, scope_id: String| Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id,
+            secret_type: SecretType::Ephemeral,
+            created_by: "system".to_string(),
+            created_at: now,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "default".to_string(),
+        };
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-pause-task",
+                    "EPHEMERAL_DB",
+                    SecretScope::Task,
+                    "task-pause".to_string(),
+                ),
+                b"v1",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-pause-ws",
+                    "SHARED_KEY",
+                    SecretScope::Workspace,
+                    "ws-pause".to_string(),
+                ),
+                b"v2",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-pause-other",
+                    "OTHER_TASK",
+                    SecretScope::Task,
+                    "task-unrelated".to_string(),
+                ),
+                b"v3",
+            )
+            .await
+            .unwrap();
+
+        super::run_once(&state).await.unwrap();
+
+        let stopped = state
+            .agents
+            .find_by_id(&Id::new("agent-stale-pause"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.status, AgentStatus::Stopped);
+
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-pause-task"), "default")
+                .await
+                .unwrap()
+                .is_none(),
+            "pause-behavior stale stop must revoke the task-scoped secret"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-pause-ws"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "workspace-scoped secrets must survive the stale stop"
+        );
+        assert!(
+            state
+                .secrets
+                .find_by_id(&Id::new("sec-pause-other"), "default")
+                .await
+                .unwrap()
+                .is_some(),
+            "other tasks' secrets must survive the stale stop"
+        );
+    }
 }

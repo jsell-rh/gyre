@@ -10,11 +10,14 @@
    * Props:
    *   nodes       — GraphNode[] from GET /api/v1/merge-queue/graph
    *   onNodeClick — (node) => void — navigate to MR detail
+   *   paused      — boolean — the merge queue is paused (platform-model.md
+   *                 §6 UI: "Merge queue shows paused state with reason")
+   *   pauseReason — string | null — human-readable pause reason
    */
 
   import { elkLayout } from '../lib/layout-engines.js';
 
-  let { nodes = [], onNodeClick = () => {} } = $props();
+  let { nodes = [], onNodeClick = () => {}, paused = false, pauseReason = null } = $props();
 
   // ── Layout state ──────────────────────────────────────────────────────────
   let positions = $state({});
@@ -153,6 +156,24 @@
     return text.slice(0, max - 1) + '…';
   }
 
+  // ── Meta-spec drift (meta-spec-reconciliation.md §9) ──────────────────────
+
+  /** Short SHA prefix for the drift badge (full SHAs are 64 hex chars). */
+  function shortSha(sha) {
+    return (sha ?? '').slice(0, 8);
+  }
+
+  /**
+   * Drift warning text for a node, or null when no drift was recorded.
+   * The backend records the §9 warning as a gate result on the MR; the
+   * queue graph surfaces it alongside the other gate-derived signals.
+   */
+  function driftLabel(node) {
+    const d = node?.meta_spec_drift;
+    if (!d) return null;
+    return `Meta-spec drift: produced under v${shortSha(d.produced_set_sha)}, current is v${shortSha(d.current_set_sha)}`;
+  }
+
   // ── Tooltip ───────────────────────────────────────────────────────────────
   let tooltip = $state(null);
 
@@ -176,6 +197,7 @@
       priority: node.priority,
       group: node.atomic_group,
       blockingDeps,
+      drift: driftLabel(node),
     };
   }
 
@@ -307,6 +329,13 @@
   }
 </script>
 
+{#if paused}
+  <div class="mq-paused-banner" data-testid="mq-paused-banner" role="status">
+    <span class="mq-paused-dot" aria-hidden="true"></span>
+    <span>Merge queue paused{pauseReason ? ` — ${pauseReason}` : ''}</span>
+  </div>
+{/if}
+
 {#if !layoutReady}
   <div class="mq-loading" data-testid="mq-loading">Computing layout...</div>
 {:else if nodes.length === 0}
@@ -319,6 +348,7 @@
       <span class="mq-legend-item"><span class="mq-legend-swatch" style="background: #eab308"></span>Pending</span>
       <span class="mq-legend-item"><span class="mq-legend-swatch" style="background: #ef4444"></span>Failed</span>
       <span class="mq-legend-item"><span class="mq-legend-swatch mq-legend-dashed" style="border-color: #a78bfa"></span>Atomic group</span>
+      <span class="mq-legend-item"><span class="mq-legend-drift">⚠</span>Meta-spec drift (warn only)</span>
     </div>
 
     <svg
@@ -421,10 +451,12 @@
         {@const highlighted = isHighlighted(node.mr_id)}
         {@const dimmed = hoveredNodeId && !highlighted}
         {#if pos}
+          {@const drift = driftLabel(node)}
           <g
             class="mq-node"
             data-testid="mq-node-{node.mr_id}"
             data-status={badge}
+            data-drift={drift ? 'true' : 'false'}
             transform="translate({pos.x - NODE_W / 2}, {pos.y - NODE_H / 2})"
             tabindex="0"
             role="button"
@@ -457,6 +489,22 @@
             >
               {truncate(node.title ?? node.mr_id)}
             </text>
+            <!-- §9 meta-spec drift warning badge (warn only, never blocks) -->
+            {#if drift}
+              <text
+                class="mq-node-drift"
+                data-testid="mq-drift-{node.mr_id}"
+                x={NODE_W - 10}
+                y={12}
+                text-anchor="middle"
+                dominant-baseline="central"
+                fill="#eab308"
+                font-size="12"
+                font-weight="700"
+              >
+                ⚠
+              </text>
+            {/if}
             <!-- Status + priority row -->
             <text
               class="mq-node-status"
@@ -489,6 +537,11 @@
         {#if tooltip.group}
           <div class="mq-tooltip-row">Group: {tooltip.group}</div>
         {/if}
+        {#if tooltip.drift}
+          <div class="mq-tooltip-row mq-tooltip-drift" data-testid="mq-tooltip-drift">
+            ⚠ {tooltip.drift}
+          </div>
+        {/if}
         {#if tooltip.blockingDeps.length > 0}
           <div class="mq-tooltip-section">Blocked by:</div>
           {#each tooltip.blockingDeps as dep}
@@ -507,6 +560,28 @@
     flex-direction: column;
     gap: 8px;
     height: 100%;
+  }
+
+  .mq-paused-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: var(--text-sm, 0.875rem);
+    font-weight: 600;
+    color: var(--color-warning, #eab308);
+    background: color-mix(in srgb, var(--color-warning, #eab308) 10%, var(--color-surface, transparent));
+    border: 1px solid color-mix(in srgb, var(--color-warning, #eab308) 45%, var(--color-border, #2a2a3a));
+    border-radius: var(--radius, 6px);
+  }
+
+  .mq-paused-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-warning, #eab308);
+    flex-shrink: 0;
   }
 
   .mq-legend {
@@ -534,6 +609,13 @@
     background: none;
     border-top: 2px dashed;
     height: 0;
+  }
+
+  .mq-legend-drift {
+    display: inline-block;
+    color: var(--color-warning, #eab308);
+    font-size: 12px;
+    line-height: 1;
   }
 
   .mq-svg {
@@ -616,6 +698,11 @@
     color: var(--color-text-muted, #94a3b8);
     padding-left: 4px;
     font-size: 11px;
+  }
+
+  .mq-tooltip-drift {
+    margin-top: 4px;
+    color: var(--color-warning, #eab308);
   }
 
   .mq-loading,

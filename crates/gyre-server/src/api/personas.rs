@@ -123,7 +123,7 @@ impl From<Persona> for PersonaResponse {
 }
 
 pub async fn create_persona(
-    _auth: crate::auth::AuthenticatedAgent,
+    auth: crate::auth::AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePersonaRequest>,
 ) -> Result<(StatusCode, Json<PersonaResponse>), ApiError> {
@@ -142,9 +142,29 @@ pub async fn create_persona(
     persona.temperature = req.temperature;
     persona.max_tokens = req.max_tokens;
     persona.budget = req.budget;
+    // The creator owns the persona (its approval notifications route to the
+    // owner per user-management.md §Who Gets Notified). Use the
+    // authenticated user's id — `auth.agent_id` is only the display name
+    // for JWT/API-key auth (and "system" for the global dev token), which
+    // is not a real user inbox. Callers without a user identity (dev/
+    // agent tokens) leave the owner unset so the approval request routes
+    // to the workspace Admins/Owners (main's task-123 fallback) instead of
+    // a "system" inbox — the request stays visible to real approvers
+    // rather than a token-side inbox nobody reads.
+    persona.owner = auth.user_id.as_ref().map(|id| format!("user:{id}"));
     // Recompute hash now that capabilities are set.
     persona.refresh_content_hash();
     state.personas.create(&persona).await?;
+    // search.md §Searchable Entities: personas indexed by prompt content with
+    // a scope facet.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
+
+    // Persona is created Pending; notify its owner that approval is
+    // requested (user-management.md §Who Gets Notified: "Persona approval
+    // requested" → Persona's `owner`).
+    crate::notification_dispatcher::notify_persona_approval_requested(state.as_ref(), &persona)
+        .await;
+
     Ok((StatusCode::CREATED, Json(PersonaResponse::from(persona))))
 }
 
@@ -220,6 +240,9 @@ pub async fn update_persona(
     persona.updated_at = now_secs();
     persona.refresh_content_hash();
     state.personas.update(&persona).await?;
+    // search.md §Index Updates: write paths re-index so prompt-content searches
+    // never serve stale text.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok(Json(PersonaResponse::from(persona)))
 }
 
@@ -233,7 +256,9 @@ pub async fn delete_persona(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("persona {id} not found")))?;
-    state.personas.delete(&Id::new(id)).await?;
+    state.personas.delete(&Id::new(&id)).await?;
+    // De-index so persona searches never return deleted personas.
+    crate::search_indexer::deindex(&state, "persona", &id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -254,6 +279,8 @@ pub async fn approve_persona(
     persona.approved_at = Some(now);
     persona.updated_at = now;
     state.personas.update(&persona).await?;
+    // search.md §Index Updates: write paths re-index.
+    crate::search_indexer::index(&state, crate::search_indexer::persona_document(&persona)).await;
     Ok(Json(PersonaResponse::from(persona)))
 }
 
@@ -679,5 +706,95 @@ mod tests {
             msg.contains("workspace"),
             "expected workspace-not-found error, got: {msg}"
         );
+    }
+
+    /// user-management.md §Notification Entity: creating a Pending persona
+    /// requests approval from the workspace Admins/Owners when no owner is
+    /// set (PersonaApprovalRequested).
+    #[tokio::test]
+    async fn create_pending_persona_requests_approval_from_workspace_admins() {
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        let ws_id = Id::new("ws-pa");
+        let ws = Workspace::new(ws_id.clone(), Id::new("tenant-1"), "pa-ws", "pa-ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+        let members = [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-owner", WorkspaceRole::Owner),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ];
+        for (uid, role) in members {
+            let m = WorkspaceMembership::new(
+                crate::api::new_id(),
+                Id::new(uid),
+                ws_id.clone(),
+                role,
+                Id::new("inviter"),
+                0,
+            );
+            state.workspace_memberships.create(&m).await.unwrap();
+        }
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({
+            "name": "reviewer",
+            "slug": "reviewer",
+            "scope": { "kind": "Workspace", "id": "ws-pa" },
+            "system_prompt": "You review things.",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/personas")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        for uid in ["user-admin", "user-owner"] {
+            let notifs = gyre_ports::NotificationRepository::list_for_user(
+                state.notifications.as_ref(),
+                &Id::new(uid),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+            assert_eq!(notifs.len(), 1, "{uid} must be asked to approve");
+            let n = &notifs[0];
+            assert_eq!(
+                n.notification_type,
+                gyre_common::NotificationType::PersonaApprovalRequested
+            );
+            assert_eq!(n.source.entity_type, "persona");
+            assert!(n.source.entity_id.starts_with("persona-") || !n.source.entity_id.is_empty());
+        }
+        let viewer_notifs = gyre_ports::NotificationRepository::list_for_user(
+            state.notifications.as_ref(),
+            &Id::new("user-viewer"),
+            Some(&ws_id),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(viewer_notifs.is_empty(), "Viewer is not an approver");
     }
 }
