@@ -120,3 +120,21 @@ class CheckboxRestorationTests(unittest.TestCase):
             self.assertNotEqual(contract.requirement_parts(observed),contract.requirement_parts(self.body))
         truncated='---\ntitle: Task\n'
         self.assertEqual(contract.restore_checkbox_markers(self.body,truncated),truncated)
+
+class AssessmentSchemaRecoveryTests(unittest.TestCase):
+    def test_one_fresh_report_retry_does_not_clear_requirement_conflicts_or_completed_tasks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s=Store(directory);self.addCleanup(s.close)
+            for n in ('task-001','task-002','task-003'):
+                s.put_task(n,'g','body',{'requirements':{'fingerprint':'fp'}})
+                work=s.enqueue('assess',n,'g',{'base':'base','candidate':'source','requirements':'fp'})
+                claim=s.claim('assess','worker',task=n)
+                category='requirements_triage' if n=='task-002' else 'assessment'
+                s.retry(work,claim['token'],{'category':category,'message':'assessment requirement fingerprint does not match assignment'},attention=True)
+            t=s.task('task-003');s.put_task(t['name'],'g','body',t['data']|{'resolved':{'source':'base'}})
+            recovered=reconcile(s)
+            self.assertEqual([r['task'] for r in recovered],['task-001'])
+            self.assertEqual(reconcile(s),[])
+            claim=s.claim('assess','fresh',task='task-001')
+            self.assertTrue(json.loads(claim['result'])['fresh_model'])
+            self.assertIsNotNone(s.setting(s.runtime_hold_key('task-002','assess','g')))

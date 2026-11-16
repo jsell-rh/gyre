@@ -811,3 +811,34 @@ Hosted CI installs the checksum-pinned upstream mold 2.40.4 release instead of
 resolving distro packages for every job. Download retries remain bounded and a
 checksum mismatch fails setup; linker availability and all build/test gates are
 still required.
+
+## Delivery recovery and progress reporting
+
+A task can have a previous-generation merged PR and a new verified candidate.
+Publication detaches that association only when the merged head and commit match
+its recorded previous delivery. The historical receipt remains; a generation-
+scoped delivery branch gets a new PR through normal checks. An unexplained merged
+head/tree mismatch instead becomes a durable attention condition, with observed
+and verified identities, rather than an unbounded execution retry.
+
+Completed source rejected solely for acceptance-checkbox markers can be repaired
+without a model round. The reconciler requires the original successful published
+receipt and exact protected-contract equality after marker restoration. It
+commits the restored task markers and attribution on the saved source, then
+requires fresh independent review, remote verification and CI. Changed requirement
+wording or a failed/incomplete agent receipt never qualifies.
+
+Malformed assessment reports get one fresh automatic report attempt for an exact
+candidate and requirement fingerprint. Repeated schema errors require diagnosis;
+contradictory task/spec requirements require a reviewed authoritative correction.
+A narrowly scoped policy retries legacy malformed reports once without clearing
+semantic conflicts, operator pauses or completed assessments.
+
+Provider cleanup waits for its owned sandbox to disappear before attempting
+provider deletion. Stuck sandbox deletion remains visible and charged according
+to observed compute occupancy; it never silently releases a potentially live pod.
+
+The cockpit distinguishes gateway/controller readiness from delivery progress.
+It reports the last confirmed merge and current task blockers, including named
+unfinished dependencies. A live scheduler with unfinished work and no merge for
+an hour reports delivery as stalled instead of implying healthy throughput.

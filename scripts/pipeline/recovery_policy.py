@@ -37,7 +37,7 @@ def reconcile(store,now=None):
             elif category=='repair_stalled' and stage=='implement':
                 repair=data.get('repair') or {}
                 if repair.get('category')=='contract' and checkbox_delta(repair.get('log_tail')):
-                    policy='restore-assigned-checkboxes-v2'
+                    policy='normalize-retained-checkbox-checkpoint-v3'
                 elif task_document_repair(name,repair):policy='review-task-document-progress-v1'
             if not policy:continue
             receipt=f'hold_recovery:{name}:{stage}:{gen}:{policy}'
@@ -50,7 +50,7 @@ def reconcile(store,now=None):
                 # normal discover/claim predicates select current input/base.
                 store.db.execute("UPDATE work SET state='obsolete',token=token+1,retry_at=0,updated=? WHERE task=? AND generation=? AND stage=? AND state='attention' AND json_extract(result,'$.category')=?",
                                  (now,name,gen,stage,category))
-                if policy=='restore-assigned-checkboxes-v2':
+                if policy=='normalize-retained-checkbox-checkpoint-v3':
                     # Adoption would replay the already-rejected checkbox-only
                     # receipt before the corrected finalizer ever gets to run.
                     # The retained candidate stays the seed for a fresh model.
@@ -61,4 +61,34 @@ def reconcile(store,now=None):
                 store.db.execute('INSERT INTO settings VALUES(?,?)',(receipt,json.dumps(record)))
                 store.event('runtime_hold_recovered',{'stage':stage,**record},name)
                 recovered.append({'task':name,'stage':stage,'policy':policy})
+    recovered.extend(recover_assessment_reports(store, now))
+    return recovered
+
+
+def recover_assessment_reports(store, now):
+    """One schema-policy retry for legacy malformed reports, never spec conflicts.
+
+    Completed/current assessments and operator pauses take precedence. Same
+    immutable assignment is retried with fresh_model so adoption cannot replay
+    the invalid receipt. A new base alone does not buy another policy retry.
+    """
+    recovered=[]
+    for task in store.tasks():
+        if satisfied(task['data']) or store.setting('task_paused:'+task['name'],False):continue
+        for row in store.db.execute("SELECT * FROM work WHERE task=? AND generation=? AND stage='assess' AND state='attention'",(task['name'],task['generation'])).fetchall():
+            reason=json.loads(row['result'] or '{}');message=reason.get('message','')
+            if reason.get('category')!='assessment' or not any(text in message for text in (
+                    'assessment requirement fingerprint does not match assignment',
+                    'assessment needs concrete requirement-to-source evidence', 'Assessment omits requirement evidence')):continue
+            inputs=json.loads(row['input'])
+            if inputs.get('requirements')!=(task['data'].get('requirements') or {}).get('fingerprint'):continue
+            receipt=f"assessment_report_recovery:{task['name']}:{task['generation']}:schema-v1"
+            with store.transaction():
+                if (store.setting(receipt) or store.task(task['name'])['data']!=task['data']
+                    or store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(task['name'],)).fetchone()):continue
+                store.db.execute("UPDATE work SET state='retry',retry_at=0,result=?,updated=? WHERE id=? AND state='attention'",
+                    (json.dumps(reason|{'fresh_model':True}),now,row['id']))
+                store.db.execute('INSERT INTO settings VALUES(?,?)',(receipt,json.dumps({'at':now,'work':row['id'],'previous':reason})))
+                store.event('assessment_report_recovered',{'work':row['id'],'policy':'schema-v1'},task['name'])
+                recovered.append({'task':task['name'],'stage':'assess','policy':'schema-v1'})
     return recovered

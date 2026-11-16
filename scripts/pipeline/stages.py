@@ -72,7 +72,8 @@ def triage(execution, task):
 
 
 def implement(execution, task):
-    result = execution.cloud_step(task, prompt(execution, task))
+    from .contract_recovery import normalize
+    result = normalize(execution, task) or execution.cloud_step(task, prompt(execution, task))
     # A partial source checkpoint survives inference failures. It is never
     # sent to review as though the agent completed its assignment.
     progress = safe_metadata(result['task_body'])['progress']
@@ -303,12 +304,24 @@ def publish(execution, task):
             raise Retry('The associated PR was closed. Await an operator decision before publishing or changing code.')
         if observation['state'] == 'MERGED':
             if observation['headRefOid'] != head:
-                raise RuntimeError('merged PR does not match verified source')
+                from .publication_recovery import superseded, PublicationMismatch
+                updates = superseded(task, observation, verified)
+                if updates:
+                    proof = {'pr': url, 'merged': observation['mergeCommit']['oid'],
+                             'previous_head': observation['headRefOid'], 'pending_head': head}
+                    execution.store.event('historical_publication_detached', proof, task['name'], execution.claim['id'])
+                    return proof, updates, []
+                error = PublicationMismatch('Merged PR head differs from the verified source; inspect the retained publication evidence before retrying')
+                error.diagnostic = {'pr': url, 'observed': observation, 'verified': verified}
+                raise error
             sha = observation['mergeCommit']['oid']
             path = checkout(execution, sha)
             tree = execution.command('git', 'rev-parse', 'HEAD^{tree}', cwd=path).stdout.strip()
             if tree != verified['tree']:
-                raise RuntimeError('upstream merge tree differs from verified tree')
+                from .publication_recovery import PublicationMismatch
+                error = PublicationMismatch('Upstream merge tree differs from the verified tree; inspect before retrying')
+                error.diagnostic = {'pr': url, 'sha': sha, 'observed_tree': tree, 'verified': verified}
+                raise error
             for resource in execution.store.db.execute("SELECT name FROM resources WHERE work=? AND kind='merge'", (execution.claim['id'],)).fetchall():
                 execution.store.resource_state(resource['name'], 'absent')
             return {'merged': sha, 'pr': url}, {'progress': 'complete', 'delivered': {'sha': sha, 'pr': url,
@@ -547,6 +560,15 @@ def cleanup(execution, task):
         return {'merge_observed': observation}, {}, []
     execution.login()
     if record['kind'] == 'provider':
+        # Providers cannot be removed while their owned sandbox is attached.
+        # Wait without a failed CLI delete; cleanup of the sandbox is independent.
+        attached = execution.store.db.execute(
+            "SELECT name FROM resources WHERE work=? AND token=? AND kind='sandbox' AND state<>'absent'",
+            (record['work'], record['token'])).fetchall()
+        if attached:
+            wait = Wait('Waiting for owned sandbox deletion before provider cleanup: ' + ', '.join(row['name'] for row in attached))
+            wait.retry_delay = 900
+            raise wait
         # A paginated list cannot establish this provider's absence.
         observed = execution.os('provider', 'get', resource, timeout=30, check=False)
         if observed.returncode == 0:
