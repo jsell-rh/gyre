@@ -2,7 +2,7 @@
 title: "LLM-Assisted Spec Editing — inline suggestions with Accept/Edit/Dismiss"
 spec_ref: "ui-layout.md §3 LLM-Assisted Spec Editing"
 depends_on: [task-172, task-171]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "ui-layout.md §LLM-Assisted Spec Editing"
 commits: ["bd4ee6903a0dc2d127e5cd1d7e7c1bf6f7342baa", "ee9c6c63d40be526373b24c50dea270a12f1223f"]
