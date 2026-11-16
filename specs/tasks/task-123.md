@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Notification Entity"
-commits: ["90edbb2fb3e9c9aca75cde3aedfbead0cceedea0", "6b3d464140fa60b5b7b33e91f784fd576558cc80", "d6592051175e4ca81cfe2567582c3e5f049759fa", "12f5495f0461154f1da417295ed7527cddc139d1", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
+commits: ["58f0fae8022da2c86459611c41e77bd4649612bf", "90edbb2fb3e9c9aca75cde3aedfbead0cceedea0", "6b3d464140fa60b5b7b33e91f784fd576558cc80", "d6592051175e4ca81cfe2567582c3e5f049759fa", "12f5495f0461154f1da417295ed7527cddc139d1", "f92a4891661d9c6f23b923d8e4f51e1b335fd496", "deec7953a0c6a6d289d99f8239068ba403c43b06", "27bfb2a699f9bd6f22085b497726e0d32f8f688a"]
 ---
 
 ## Spec Excerpt
@@ -117,6 +117,10 @@ Priority-band repair (attempt 5d7e43ea gap): 6b3d4641 on base 1ee52c43.
 bfc36c9c. Rebase repair onto base a4c4c012 (published head c52cd64a
 conflicted with main): merge cd558788, composes the task's type-set band
 filter with main's HSI §12 `exclude_types` preference exclusion.
+Verification-repair round on base 047d6524 (merge b48693f6): the failed
+verification attempt 1d7c318d flagged only changed-line rustfmt on the
+merge-updated `list_for_user` test call site — fixed in 58f0fae8
+(behavior unchanged, whitespace only).
 
 ### Entity model (gyre-common/src/notification.rs)
 
@@ -229,6 +233,18 @@ filter with main's HSI §12 `exclude_types` preference exclusion.
   `check-mem-port-contracts.sh`, `check-task-commit-attribution.sh`,
   and the changed-line rustfmt/clippy gates (vs HEAD^1 = c52cd64a) all
   pass.
+- Verification-repair round (commit 58f0fae8, merged tree b48693f6 on
+  base 047d6524): the failed verification's only finding was
+  `rustfmt: crates/gyre-adapters/src/sqlite/notification.rs: changed
+  lines need formatting: 1105, 1106` — the merge-updated test call site
+  in `list_for_user_type_set_filter_matches_persisted_column` left
+  `.await`/`.unwrap()` over-indented. Reproduced with
+  `check-rustfmt-diff.py` against both the failed verification's base
+  (c3c7a522) and this merge's HEAD^1 (047d6524), fixed, and re-verified
+  clean against both. Post-fix: gyre-adapters notification tests (13)
+  and gyre-common notification tests (12) green; `cargo check -p
+  gyre-server` clean. The web build in that verification log passed
+  (warnings only); no web/dist work was needed or done this round.
 
 ### Rebase resolutions (durable history)
 
@@ -266,3 +282,7 @@ filter with main's HSI §12 `exclude_types` preference exclusion.
   band filter compose in the shared handler: `?priority=` intersects the
   type set, disabled types are excluded by the query, and the MCP inbox
   applies the same exclusion.
+- Onto 047d6524 (merge b48693f6, this round): no content conflicts on
+  crates — the branch never touched the base's only crates/ delta
+  (`analytics.rs`, test-clock fix f00d8848), taken wholesale; the rest of
+  the base delta is pipeline scripts/specs outside this task's surface.
