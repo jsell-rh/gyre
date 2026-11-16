@@ -359,7 +359,7 @@ class Store:
                         continue
                     self.db.execute("UPDATE work SET state='obsolete',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?",(time.time(),victim['id']))
                     self.event('verification_superseded_by_ci',{'observation':ident},row['task'],victim['id'])
-            if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):
+            if row['stage'] == 'review' and ((updates or {}).get('review') or {}).get('approved'):
                 self.db.execute('UPDATE findings SET resolved_by=? WHERE task=? AND generation=? AND resolved_by IS NULL',
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
             if (updates or {}).get('delivered'):

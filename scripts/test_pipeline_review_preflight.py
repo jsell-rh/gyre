@@ -43,3 +43,19 @@ class ReviewPreflightTests(unittest.TestCase):
         self.store.set_setting('observed_main',self.git('rev-parse','HEAD'))
         with patch('pipeline.stages.checkout',return_value=self.repo):
             self.assertIsNone(check(self.execution,self.store.task('task-001')))
+
+    def test_preflight_records_the_handoff_through_the_real_executor(self):
+        from pipeline.catalog import helper
+        cli=helper('dev-pipeline')
+        self.store.finish(self.work,self.execution.claim['token'],{})
+        self.store.put_task('task-001','g','body',{'candidate':self.head,'candidate_base':self.base,'triaged':'g','dependencies':[]})
+        work=self.store.enqueue('review','task-001','g',{'candidate':self.head,'base':self.base})
+        claim=self.store.claim('review','reviewer')
+        with patch('pipeline.stages.checkout',return_value=self.repo),patch('pipeline.execution.Execution.cloud_step',side_effect=AssertionError('no model')):
+            cli.run_claim(self.store,claim)
+        row=self.store.db.execute('SELECT state FROM work WHERE id=?',(work,)).fetchone()
+        self.assertEqual(row['state'],'succeeded')
+        task=self.store.task('task-001')
+        self.assertEqual(task['data']['repair']['category'],'rebase')
+        self.assertIsNone(task['data']['review'])
+        self.assertEqual(len(self.store.findings('task-001')),1)
