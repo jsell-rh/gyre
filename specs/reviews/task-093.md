@@ -82,3 +82,64 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Independent review — task-093 (round 6)
+
+Candidate `57a82173ab1ccd0a21e5c8d763bb4524fa20632c` against assigned base `e5df7847`
+(merge-base `4d6759a0`; the base is a divergent main head, so the round's reviewable delta is
+the four commits after the round-5 checkpoint: `0346b089`, `b90f64ab`, `decfec1b` (web/dist
+only — generated, verifier-owned), `57a82173`). No previous approval was carried forward; the
+core §3 implementation was re-inspected independently this round.
+
+Verdict: **complete** (approved; evidence: `/tmp/stage/review-evidence/task-093-round6.txt`).
+
+What this round checked and found:
+
+- **Base-deletion reconciliation (`0346b089`) is faithful.** The four persona prompt embeds
+  retargeted from the deleted `crates/gyre-cli/src/bootstrap/personas/*.md` to canonical
+  `specs/personas/<slug>.md` are byte-identical to both the deleted copies and the base's
+  canonical files (diff-verified all four). The unrouted legacy `api/agent_messages.rs` /
+  root `messages.rs` removals leave zero dangling references (grep across `crates/`), and
+  the routed inbox handlers in `api/messages.rs` are untouched. `rust-callgraph.sh` removal
+  degrades gracefully per the port contract (`call_graph.rs:58-61` logs and skips Rust
+  Pass 2 when the script is absent).
+- **Core §3 behavior re-verified in source.** OrchestratorType (domain + migration
+  `2026-09-30-000052`), one-live-per-scope 409 on both spawn endpoints, inline tenant
+  containment in both REST wrappers (+ `check_repo_abac` on the repo route), scoped EdDSA
+  JWTs via `mint_orchestrator` (workspace tier: workspace_id only; repo tier: + repo_id)
+  with tests validating claims through the real signing key, fail-closed persona
+  enforcement (missing/unapproved persona blocks spawn with nothing persisted), shared
+  `handle_orchestrator_death` on all three terminal paths (stale abort, `/fail`, `/stop`)
+  with terminal-state guards, `restart_orchestrator`'s own one-live gate + budget gate,
+  escalation messages naming the replacement, MCP tier gates derived from JWT claims with
+  per-task repo/workspace scope checks, and idempotent built-in persona seeding.
+- **Mechanical checks pass:** arch OK, migration versions OK (no duplicates), ABAC route
+  registry OK (both orchestrator routes in the resolver), MCP write-tools OK with an empty
+  exemptions file.
+- **Focused probes pass:** `cargo test -p gyre-domain` 412/412 (incl. orchestrator serde
+  tests), `cargo test -p gyre-cli --bin gyre` 129/129 (incl. persona-embed tests proving
+  the retargeted `include_str!` paths resolve), `SKIP_WEB_BUILD=1 cargo check -p
+  gyre-server --lib` clean (5m29s). Server test compilation exceeds this sandbox's 4 GiB
+  budget; the verifier must run `--lib api::orchestrator`, `--lib api::spawn`, `--lib
+  stale_agents`, `--lib mcp::tests`, `--lib abac_middleware`, the integration suites,
+  full `cargo test --all`, and all-target Clippy.
+
+Non-blocking observations (not findings):
+
+- `spawn_orchestrator`'s explicit-name uniqueness check (`if let Ok(Some(_)) =
+  state.agents.find_by_name(...)`) treats a store read error as "name free", while the
+  default-name path (`unique_default_name`) propagates read errors. Worst case is a
+  duplicate display name on a mid-spawn store failure; agent identity and the
+  one-live-per-scope gate are unaffected. Symmetry with `unique_default_name` would be
+  tidier.
+- `specs/coverage/system/platform-model.md` rows 15-17 carry stale 2026-09-30 audit notes
+  ("no orchestrator/spawn endpoints") while the row status `task-assigned task-093` is
+  accurate for a ready-for-review task; the notes will be refreshed at the next audit
+  cycle. Status-only staleness, not a production-code defect.
+- Two migration files share the sequence label `000056` (`2026-10-08-000056_...` vs
+  `2026-10-10-000056_...`). Both predate this candidate (present in the assigned base and
+  upstream); Diesel derives distinct versions from the date prefix and
+  `check-migration-versions.sh` passes. Owned by whichever upstream task added the second
+  file, not task-093.
+
+— Reviewer, 2026-11-16 (round 6)
