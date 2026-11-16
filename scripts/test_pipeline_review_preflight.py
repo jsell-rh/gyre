@@ -28,6 +28,13 @@ class ReviewPreflightTests(unittest.TestCase):
         self.assertEqual(self.git('rev-parse','HEAD'),self.head)
         self.assertEqual(self.git('status','--porcelain'),'')
 
+    def test_assigned_base_is_not_evidence_the_candidate_includes_it(self):
+        self.execution.claim['input']['base']=self.main
+        with patch('pipeline.stages.checkout',return_value=self.repo):
+            result,updates,_=check(self.execution,self.store.task('task-001'))
+        self.assertEqual(result['preflight'],'source_conflicts')
+        self.assertEqual(updates['repair']['base'],self.main)
+
     def test_generated_only_conflict_stays_with_verifier_and_does_not_request_coding(self):
         self.git('checkout','-q','--detach',self.base)
         p=self.repo/'web/dist/index.html';p.parent.mkdir(parents=True);p.write_text('base\n');self.commit('generated base')
