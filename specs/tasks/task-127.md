@@ -79,17 +79,17 @@ From `user-management.md` §UI Pages:
 
 ## Acceptance Criteria
 
-- [x] User Settings page with profile editing and preferences
-- [x] User Profile page at `/@username` route
-- [x] Tenant User Management page (TenantAdmin only)
-- [x] Workspace Members page with invite, role change, ownership transfer
-- [x] Invitation Accept page at `/invite/{token}`
-- [x] Notification Drawer with unread badge, priority grouping, deep links
-- [x] Team Management within workspace settings
-- [x] All pages consume API endpoints from task-124 and task-125
-- [x] Components use Svelte 5 patterns (runes, $state, $derived)
-- [x] `cd web && npm test` passes
-- [ ] `cargo test --all` passes (deferred to the independent verifier per the 4 GiB build wrapper)
+- [ ] User Settings page with profile editing and preferences
+- [ ] User Profile page at `/@username` route
+- [ ] Tenant User Management page (TenantAdmin only)
+- [ ] Workspace Members page with invite, role change, ownership transfer
+- [ ] Invitation Accept page at `/invite/{token}`
+- [ ] Notification Drawer with unread badge, priority grouping, deep links
+- [ ] Team Management within workspace settings
+- [ ] All pages consume API endpoints from task-124 and task-125
+- [ ] Components use Svelte 5 patterns (runes, $state, $derived)
+- [ ] `cd web && npm test` passes
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -160,3 +160,8 @@ For the independent verifier (deferred per 4 GiB build budget):
   `spec_path_notifications_active_filter_excludes_resolved_and_dismissed`,
   task-114 profile/activity/stats suites
 - `cd web && npm ci && npm test`
+
+
+## Implementation Notes
+
+Operator recovery: moved the acceptance-line annotation here. Cargo tests were deferred to independent verification, not claimed passed. Source is unchanged and requires fresh independent review and remote verification.
