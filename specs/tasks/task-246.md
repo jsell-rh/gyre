@@ -3,6 +3,8 @@ title: "Apply operator decision for task-082: Amend toward a context-dependent c
 spec_ref: "human-system-interface.md §1.3"
 depends_on: []
 progress: ready-for-review
+commits:
+  - 5c749b1f
 ---
 
 ## Approved operator decision
