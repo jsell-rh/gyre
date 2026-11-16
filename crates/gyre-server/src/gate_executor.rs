@@ -553,7 +553,7 @@ async fn spawn_manifest_gate_agent(
     // constraints its review must satisfy.
     state
         .emit_event(
-            Some(mr.workspace_id.clone()),
+            mr.workspace_id.clone(),
             gyre_common::message::Destination::Agent(agent.id.clone()),
             gyre_common::message::MessageKind::ReviewRequest,
             Some(serde_json::json!({
@@ -1030,7 +1030,7 @@ async fn gate_failure_feedback(
         if !gate_result_already_delivered(state, mr_id, &gate.id, author_id, attempt).await {
             state
                 .emit_event(
-                    Some(mr.workspace_id.clone()),
+                    mr.workspace_id.clone(),
                     Destination::Agent(author_id.clone()),
                     MessageKind::GateResult,
                     Some(payload.clone()),
@@ -1120,7 +1120,7 @@ async fn security_gate_escalation(
             for agent in recipients {
                 state
                     .emit_event(
-                        Some(mr.workspace_id.clone()),
+                        mr.workspace_id.clone(),
                         Destination::Agent(agent.id.clone()),
                         MessageKind::GateResult,
                         Some(gate_result_payload.clone()),
@@ -1158,7 +1158,7 @@ async fn escalate_critical_security_finding(
     let title = format!("Critical security finding on MR '{}'", mr.title);
     state
         .emit_event(
-            Some(mr.workspace_id.clone()),
+            mr.workspace_id.clone(),
             Destination::Workspace(mr.workspace_id.clone()),
             MessageKind::Escalation,
             Some(serde_json::json!({
@@ -1291,7 +1291,7 @@ async fn notify_repo_orchestrator_of_streak(
     };
     state
         .emit_event(
-            Some(mr.workspace_id.clone()),
+            mr.workspace_id.clone(),
             destination,
             MessageKind::Escalation,
             Some(serde_json::json!({
@@ -1428,7 +1428,7 @@ Fix the issue and re-push to trigger gate re-evaluation.",
     );
     state
         .emit_event(
-            Some(mr.workspace_id.clone()),
+            mr.workspace_id.clone(),
             Destination::Workspace(mr.workspace_id.clone()),
             MessageKind::TaskCreated,
             Some(serde_json::json!({"task_id": task.id.to_string()})),
@@ -1574,7 +1574,7 @@ the merge queue and this task was created to reassess the approach.",
     );
     state
         .emit_event(
-            Some(mr.workspace_id.clone()),
+            mr.workspace_id.clone(),
             Destination::Workspace(mr.workspace_id.clone()),
             MessageKind::TaskCreated,
             Some(serde_json::json!({"task_id": task.id.to_string()})),
