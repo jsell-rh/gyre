@@ -2272,8 +2272,12 @@ pub async fn predict_graph(
         (
             Some(affected_specs_for(&state, req.spec_path.as_deref().unwrap_or("")).await),
             Some(
-                affected_repos_for(&state, &workspace_id, req.spec_path.as_deref().unwrap_or(""))
-                    .await,
+                affected_repos_for(
+                    &state,
+                    &workspace_id,
+                    req.spec_path.as_deref().unwrap_or(""),
+                )
+                .await,
             ),
             // Deterministic estimate over the prediction count (documented
             // rate; the field is an estimate by spec — actual spend is
@@ -3220,7 +3224,8 @@ mod tests {
                     .header("Authorization", auth())
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&serde_json::json!({"name": "ws-predict-shape"})).unwrap(),
+                        serde_json::to_vec(&serde_json::json!({"name": "ws-predict-shape"}))
+                            .unwrap(),
                     ))
                     .unwrap(),
             )
@@ -3249,7 +3254,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repo_resp.status(), StatusCode::CREATED);
-        let repo_id = body_json(repo_resp).await["id"].as_str().unwrap().to_string();
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // A live graph node governed by the spec → the repo implements it.
         let mut node = _new_node(&repo_id, "SearchQuery", NodeType::Type);
@@ -3257,25 +3265,21 @@ mod tests {
         state.graph_store.create_node(node).await.unwrap();
 
         // A spec link touching the spec → a connected spec.
-        state
-            .spec_links_store
-            .lock()
-            .await
-            .push(SpecLinkEntry {
-                id: "link-1".to_string(),
-                source_path: "specs/system/search.md".to_string(),
-                source_repo_id: Some(repo_id.clone()),
-                source_sha: "sha-1".to_string(),
-                link_type: SpecLinkType::References,
-                target_path: "specs/system/dependency-graph.md".to_string(),
-                target_repo_id: None,
-                target_display: None,
-                target_sha: None,
-                reason: None,
-                status: "active".to_string(),
-                created_at: 1000,
-                stale_since: None,
-            });
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "link-1".to_string(),
+            source_path: "specs/system/search.md".to_string(),
+            source_repo_id: Some(repo_id.clone()),
+            source_sha: "sha-1".to_string(),
+            link_type: SpecLinkType::References,
+            target_path: "specs/system/dependency-graph.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1000,
+            stale_since: None,
+        });
 
         let resp = app
             .oneshot(
@@ -3305,7 +3309,10 @@ mod tests {
         assert_eq!(predictions[0]["action"].as_str().unwrap(), "add");
         assert_eq!(predictions[0]["name"].as_str().unwrap(), "VectorIndex");
         assert!((predictions[0]["confidence"].as_f64().unwrap() - 0.85).abs() < 1e-9);
-        assert!(predictions[0]["reason"].as_str().unwrap().contains("vector"));
+        assert!(predictions[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("vector"));
 
         // Real link-graph context, never fabricated.
         let affected: Vec<&str> = json["affected_specs"]
@@ -3379,7 +3386,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repo_resp.status(), StatusCode::CREATED);
-        let repo_id = body_json(repo_resp).await["id"].as_str().unwrap().to_string();
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let resp = app
             .clone()
@@ -3406,7 +3416,7 @@ mod tests {
         let agent_id = json["agent_id"].as_str().unwrap().to_string();
         let branch = json["branch"].as_str().unwrap().to_string();
         assert!(
-            branch.starts_with("preview/search.md-"),
+            branch.starts_with("preview/search-md-"),
             "throwaway preview branch, got {branch}"
         );
         assert_eq!(json["repo_id"].as_str().unwrap(), repo_id);
@@ -3428,12 +3438,22 @@ mod tests {
         assert_eq!(task_resp.status(), StatusCode::OK);
         let task = body_json(task_resp).await;
         assert_eq!(task["status"].as_str().unwrap(), "in_progress");
-        assert_eq!(task["spec_path"].as_str().unwrap(), "specs/system/search.md");
+        assert_eq!(
+            task["spec_path"].as_str().unwrap(),
+            "specs/system/search.md"
+        );
         assert_eq!(task["branch"].as_str().unwrap(), branch);
         assert_eq!(task["assigned_to"].as_str().unwrap(), agent_id);
-        assert!(task["labels"].as_array().unwrap().iter().any(|l| l == "spec-preview"));
+        assert!(task["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l == "spec-preview"));
         // The draft rides the task the agent reads.
-        assert!(task["description"].as_str().unwrap().contains("Add semantic mode."));
+        assert!(task["description"]
+            .as_str()
+            .unwrap()
+            .contains("Add semantic mode."));
 
         // The agent exists and is bound to the task.
         let agent_resp = app
@@ -3497,7 +3517,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repo_resp.status(), StatusCode::CREATED);
-        let repo_id = body_json(repo_resp).await["id"].as_str().unwrap().to_string();
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Empty draft → 400.
         let resp = app
@@ -3521,7 +3544,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-        // Missing spec_path → 400 (deserialization failure).
+        // Missing spec_path → 422: axum's Json<T> extractor rejects a
+        // body missing a required field before the handler runs (same
+        // contract as the release.rs missing-field case).
         let resp = app
             .oneshot(
                 Request::builder()
@@ -3530,14 +3555,13 @@ mod tests {
                     .header("Authorization", auth())
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&serde_json::json!({"draft_content": "d"}))
-                            .unwrap(),
+                        serde_json::to_vec(&serde_json::json!({"draft_content": "d"})).unwrap(),
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// Compensating rollback: when the spawn fails (here: the repo's
@@ -3571,7 +3595,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repo_resp.status(), StatusCode::CREATED);
-        let repo_id = body_json(repo_resp).await["id"].as_str().unwrap().to_string();
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let resp = app
             .clone()
