@@ -67,7 +67,12 @@
       workspace = await api.workspace(inviteId);
     } catch (e) {
       if (e?.status === 404) { notFound = true; loading = false; return; }
-      workspace = null;
+      // Non-404 failure (e.g. HTTP 500): the preview cannot be rendered —
+      // surface the load-error state instead of an invite card with an
+      // empty workspace name.
+      loadError = e?.message ?? String(e);
+      loading = false;
+      return;
     }
     // Resolve my pending invitation for this workspace through the
     // invitee-facing listing (task-110: a pending invitation is a

@@ -109,4 +109,16 @@ describe('InvitationAccept', () => {
     const { findByText } = render(InvitationAccept, { props: { inviteId: 'ws-x' } });
     expect(await findByText('Workspace not found')).toBeTruthy();
   });
+
+  it('renders the load-error state when the workspace fetch fails (non-404)', async () => {
+    api.workspace.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }));
+    const { findByText, container } = render(InvitationAccept, { props: { inviteId: 'ws-9' } });
+    expect(await findByText('Could not load invitation')).toBeTruthy();
+    // No invite card with an empty workspace name, and no actions offered
+    // for an invitation whose preview could not be loaded.
+    expect(container.querySelector('[data-testid="invite-card"]')).toBeNull();
+    expect(container.querySelector('[data-testid="invite-accept-btn"]')).toBeNull();
+    expect(api.myInvitations).not.toHaveBeenCalled();
+    expect(api.acceptWorkspaceInvitation).not.toHaveBeenCalled();
+  });
 });
