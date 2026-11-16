@@ -57,3 +57,28 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Independent review (controller stage) — candidate b61f637, base 047d6524
+
+**Verdict: needs-revision** (one blocking code finding; evidence under `/tmp/stage/review-evidence/`).
+
+### Verified working (independently reproduced on an isolated copy of the candidate tree)
+
+- **All three scripts exist, are executable, usage-commented, and pass on the candidate**: `check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0 (124 read methods on tenant-column tables, 0 violations, visible non-failing backlog for tenant-less tables); `check-api-auth.sh` exit 0 (middleware chain + 8 non-ABAC handlers + delegated route-registry check).
+- **Kill sensitivity proven by mutation** (each mutation restored before the next): `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming task.rs:60; deleting the field → exit 1 ("missing from the struct"); stripping the tenant predicate from `sqlite/notification.rs::count_unresolved` (the exact prior-round rebase regression) and from `sqlite/task.rs::find_by_id` → tenant-filter exit 1 with file:line; removing `abac_middleware` from the api router layer chain → api-auth exit 1. The scripts are real scanners, not theater.
+- **Prior review round's blocking findings are all repaired**: no merge-conflict markers anywhere in the tree; `count_unresolved` tenant filter restored (sqlite+pg); analytics raw-SQL reads tenant-filtered with correctly ordered binds (pg `$1`-first in count_grouped, `$4`-last in aggregate_by_day); `scope-literal-defaults-exemptions.txt` resolved; CI steps un-advisored (`|| true` removed) and green.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` exit 0; `cargo test -p gyre-adapters --lib` 571 passed / 0 failed; `check-arch.sh`, `check-abac-route-registry.sh`, `check-scope-literal-defaults.sh crates` all exit 0.
+- The rebase-repair source changes are sound: the merge-time attestation ABAC gate keeps fail-closed requeue-on-error semantics AND records each decision exactly once; `approve_spec`'s emit now skips (logs) instead of broadcasting under a fabricated scope — matching the AGENTS.md scope-fabrication invariant.
+
+### Blocking finding
+
+**`crates/gyre-adapters/tests/tenant_isolation.rs` does not compile at b61f637.** `MergeRequest::new` gained a required `workspace_id: Id` parameter (7 args, merge_request.rs:107) in a merged base, but the test still calls it with 6 args (lines 86–92, 234). `cargo test -p gyre-adapters --test tenant_isolation` / `cargo test --all` → exit 101, 5 compile errors. The test file was last touched at checkpoint `ba78ab2a`; no later rebase-repair round recompiled the integration-test target — the round's verification cites only `cargo check -p gyre-server --tests` and `cargo test -p gyre-adapters --lib`. Consequently the acceptance criterion "cargo test --all still passes" is false, and the §14 coverage row's "End-to-end proof: tenant_isolation.rs integration test" claim is hollow at this head (it was true at earlier heads — the in-branch round-4 review ran it green at f515799). Fix is mechanical: pass the workspace id at both `MergeRequest::new` call sites (and drop the now-redundant manual `mr.workspace_id` assignment), then re-run `cargo test -p gyre-adapters --test tenant_isolation` and `cargo test --all`.
+
+### Non-blocking observations (recorded, not blocking)
+
+- `check-tenant-filter.sh` derives tenant-column tables from the migrations; the runtime-created FTS5 `search_index` table (which does carry a `tenant_id` column) is invisible to it, so `search`/`suggest`/`facet_counts` escape the scan. No live violation — `build_scope()` pushes `tenant_id = ?` into every such query — but a future regression there would not be caught by the lint.
+- `check-hierarchy.sh` inverts the spec's literal env gate (default-on, `GYRE_CHECK_HIERARCHY=0` bypasses). Spec §2 documents the `=1` gate as "initially disabled, enabled in M34 Slice 3 after the non-optional migration lands"; the migration has landed, CI still passes `=1` explicitly — this is the spec's intended end state, not a contradiction.
+
+### Verifier must run (remote)
+
+`cargo test --all` (currently red on the gyre-adapters test target — the finding above), the three scripts, `cargo fmt --all -- --check`.
