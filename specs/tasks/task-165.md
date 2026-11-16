@@ -2,7 +2,7 @@
 title: "Supply chain — gyre-stack.lock parsing and attestation level enforcement"
 spec_ref: "supply-chain.md §gyre-stack.lock"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "supply-chain.md §gyre-stack.lock"
   - "supply-chain.md §Attestation Levels"
