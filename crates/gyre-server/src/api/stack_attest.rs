@@ -432,9 +432,11 @@ pub async fn get_stack_drift(
 
     let mut events = stack_drift_events_for_repo(&state, &repo).await?;
     let total = events.len();
-    if let Some(limit) = params.limit {
-        events.truncate(limit.min(500));
-    }
+    // Default 100, cap 500 — matches the documented bounds of the endpoint
+    // (docs/api-reference.md): omitting `?limit` must not silently return
+    // the internal 1000-event query cap.
+    let limit = params.limit.unwrap_or(100).min(500);
+    events.truncate(limit);
 
     Ok(Json(StackDriftListResponse {
         repo_id,

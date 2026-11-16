@@ -431,10 +431,23 @@ pub(crate) async fn git_rev_parse(git_bin: &str, repo_path: &str, r: &str) -> Op
 }
 
 /// List the commit SHAs in a rev range (`git rev-list`), newest-first,
-/// de-duplicated.
-async fn git_rev_list(git_bin: &str, repo_path: &str, range: &str) -> Option<Vec<String>> {
+/// de-duplicated. `pub(crate)` so the SLSA provenance endpoint
+/// (provenance.rs) can scope its commit set to the subject ref's history.
+///
+/// The range is a single argv element and cannot occupy an option
+/// position: callers pass either a SHA resolved by [`git_rev_parse`]
+/// (hex) or a `{from}..{sha}` range whose `from` was validated by
+/// [`is_valid_ref`] (rejects a leading dash and any `--`), so no
+/// `--` end-of-options separator is needed before it — placing one
+/// there makes git treat the range as a pathspec and fail with usage
+/// error 129 for every input.
+pub(crate) async fn git_rev_list(
+    git_bin: &str,
+    repo_path: &str,
+    range: &str,
+) -> Option<Vec<String>> {
     let out = tokio::process::Command::new(git_bin)
-        .args(["-C", repo_path, "rev-list", "--"])
+        .args(["-C", repo_path, "rev-list"])
         .arg(range)
         .output()
         .await
@@ -1029,15 +1042,24 @@ mod tests {
             gyre_domain::stack::StackLockfile::from_stack(&stack, 1_700_000_000);
 
         // main: initial (human) commit → lockfile commit → feature commit.
+        // `commit_files` builds each tree from just the given files (no
+        // parent-tree merge), so the lockfile must be carried into c2:
+        // the release artifact reads `gyre-stack.lock` at the release tip
+        // (`to`/default-branch HEAD = c2), and a tree without it would
+        // report no pinned stack.
+        let lock_toml = lock.to_toml().unwrap();
         let c1 = commit_files(
             &repo_path,
             Some(&head),
-            &[("gyre-stack.lock", lock.to_toml().unwrap())],
+            &[("gyre-stack.lock", lock_toml.clone())],
         );
         let c2 = commit_files(
             &repo_path,
             Some(&c1),
-            &[("src/lib.rs", "pub fn f() {}".to_string())],
+            &[
+                ("gyre-stack.lock", lock_toml),
+                ("src/lib.rs", "pub fn f() {}".to_string()),
+            ],
         );
         run_git(&repo_path, &["update-ref", "refs/heads/main", &c2]);
 

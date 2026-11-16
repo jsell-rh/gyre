@@ -809,8 +809,10 @@ fn gyre_level_to_slsa(gyre_level: u8, lockfile_pinned: bool) -> u8 {
 /// carries the Gyre-specific mapping — per-commit agent attribution with
 /// Gyre attestation levels and their SLSA Build Level equivalents, and the
 /// overall SLSA Build Level of the subject (the weakest link: the minimum
-/// across all agent-attributed commits, since one unattested commit caps
-/// what the artifact can claim).
+/// across all agent-attributed commits reachable from the subject ref,
+/// since one unattested commit caps what the artifact can claim). Commits
+/// on unrelated or deleted branches are not part of the subject's
+/// provenance and are excluded from the attribution and the level.
 pub async fn get_slsa_provenance(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -858,16 +860,34 @@ pub async fn get_slsa_provenance(
             .unwrap_or(false)
     });
 
+    // The statement attests the subject's history, not the repo: scope the
+    // agent-commit attribution to commits reachable from the subject ref
+    // (rev-list of the resolved SHA). A record targeting a SHA on an
+    // unrelated or deleted branch would otherwise appear in the per-commit
+    // attribution and cap the subject's SLSA Build Level.
+    let history = super::aibom::git_rev_list(&git_bin, &repo.path, &sha)
+        .await
+        .ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "cannot enumerate commits reachable from '{sha}' in repo {repo_id}"
+            ))
+        })?;
+    let history_set: std::collections::HashSet<&str> =
+        history.iter().map(String::as_str).collect();
+
     // Per-commit agent attribution with Gyre level → SLSA Build Level.
     let commits = state
         .agent_commits
         .find_by_repo(&repo.id)
         .await
         .map_err(ApiError::Internal)?;
-    let mut per_commit: Vec<serde_json::Value> = Vec::with_capacity(commits.len());
+    let mut per_commit: Vec<serde_json::Value> = Vec::new();
     let mut slsa_build_level: Option<u8> = None;
     let mut earliest_ts: Option<u64> = None;
     for ac in &commits {
+        if !history_set.contains(ac.commit_sha.as_str()) {
+            continue;
+        }
         let gyre_level =
             gyre_domain::stack::attestation_level_from_label(ac.attestation_level.as_deref());
         let commit_slsa = gyre_level_to_slsa(gyre_level, lockfile_pinned);
@@ -887,8 +907,8 @@ pub async fn get_slsa_provenance(
             "slsa_build_level": commit_slsa,
         }));
     }
-    // No agent-attributed commits at all → nothing provenance-bearing to
-    // claim beyond SLSA 0.
+    // No agent-attributed commits in the subject's history → nothing
+    // provenance-bearing to claim beyond SLSA 0.
     let slsa_build_level = slsa_build_level.unwrap_or(0);
 
     let repo_name = repo.name.clone();
@@ -1337,6 +1357,28 @@ mod tests {
         (app, state, repo_id, repo_path, head)
     }
 
+    /// The root (parentless) commit SHA of `refs/heads/main` in a bare repo
+    /// built by `git_repo_with_commits` — a commit genuinely reachable in
+    /// the subject's history.
+    fn root_commit_sha(repo_path: &str) -> String {
+        let out = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo_path,
+                "rev-list",
+                "--max-parents=0",
+                "refs/heads/main",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "rev-list --max-parents=0 failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     fn record_commit(
         state: &std::sync::Arc<crate::AppState>,
         id: &str,
@@ -1363,12 +1405,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn slsa_provenance_statement_shape_and_level_mapping() {
-        // HEAD is agent-attributed at two levels: server-verified (→ SLSA 3)
-        // and unattested (→ SLSA 0). Weakest link caps the subject at 0.
-        let (app, state, repo_id, _repo_path, head) =
+        // HEAD and its root commit are both agent-attributed
+        // server-verified (→ SLSA 3). A third record targets a SHA on no
+        // reachable branch — the statement attests the subject's history
+        // only, so that record must neither appear in the per-commit
+        // attribution nor cap the subject's level.
+        let (app, state, repo_id, repo_path, head) =
             git_repo_with_commits(&[("src/a.rs", "fn a() {}".to_string())]).await;
+        let root = root_commit_sha(&repo_path);
         record_commit(&state, "sc-1", &repo_id, &head, "agent-3", Some("server-verified"));
-        record_commit(&state, "sc-2", &repo_id, "head-parent-unused", "agent-1", None);
+        record_commit(&state, "sc-2", &repo_id, &root, "agent-3", Some("server-verified"));
+        record_commit(&state, "sc-3", &repo_id, "sha-on-deleted-branch", "agent-1", None);
 
         let resp = app
             .oneshot(
@@ -1387,7 +1434,16 @@ mod tests {
         assert_eq!(json["predicateType"], "https://slsa.dev/provenance/v1");
         let subject = &json["subject"][0];
         assert_eq!(subject["digest"]["gitCommit"], head);
-        assert!(subject["name"].as_str().unwrap().contains("test-repo"));
+        // The subject names the attested repo — `git_repo_with_commits`
+        // creates it under a unique `slsa-<uuid>` name.
+        assert!(
+            subject["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("slsa-"),
+            "subject name must be the repo name, got {}",
+            subject["name"]
+        );
 
         // Builder + invocation identity.
         let run_details = &json["predicate"]["runDetails"];
@@ -1400,9 +1456,12 @@ mod tests {
             .unwrap()
             .contains(&head));
 
-        // Gyre mapping: per-commit levels + weakest-link overall level.
+        // Gyre mapping: per-commit levels scoped to the subject's history.
         let gyre = &json["predicate"]["buildDefinition"]["internalParameters"]["gyre"];
-        assert_eq!(gyre["slsaBuildLevel"], 0, "unattested commit caps the claim");
+        assert_eq!(
+            gyre["slsaBuildLevel"], 3,
+            "a record on an unreachable ref must not cap the subject's level"
+        );
         let commits = gyre["commits"].as_array().unwrap();
         let by_sha = |sha: &str| {
             commits
@@ -1414,7 +1473,51 @@ mod tests {
         let verified = by_sha(&head);
         assert_eq!(verified["gyre_attestation_level"], 3);
         assert_eq!(verified["slsa_build_level"], 3);
-        let unattested = by_sha("head-parent-unused");
+        let root_entry = by_sha(&root);
+        assert_eq!(root_entry["gyre_attestation_level"], 3);
+        assert_eq!(root_entry["slsa_build_level"], 3);
+        // The unreachable record is scoped out of the statement entirely.
+        assert!(
+            commits
+                .iter()
+                .all(|c| c["commit_sha"] != "sha-on-deleted-branch"),
+            "agent-commit records outside the subject's history must not appear"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slsa_weakest_link_among_reachable_commits() {
+        // The root commit is reachable from the subject but unattested
+        // (raw push, level 1 → SLSA 0): the weakest link in the subject's
+        // history caps the claim at 0.
+        let (app, state, repo_id, repo_path, head) =
+            git_repo_with_commits(&[("src/d.rs", "fn d() {}".to_string())]).await;
+        let root = root_commit_sha(&repo_path);
+        record_commit(&state, "sc-7", &repo_id, &head, "agent-3", Some("server-verified"));
+        record_commit(&state, "sc-8", &repo_id, &root, "agent-1", None);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/slsa-provenance"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let gyre = &json["predicate"]["buildDefinition"]["internalParameters"]["gyre"];
+        assert_eq!(
+            gyre["slsaBuildLevel"], 0,
+            "an unattested commit in the subject's history caps the claim"
+        );
+        let commits = gyre["commits"].as_array().unwrap();
+        let unattested = commits
+            .iter()
+            .find(|c| c["commit_sha"] == root)
+            .expect("root commit is reachable and must be attributed")
+            .clone();
         assert_eq!(unattested["gyre_attestation_level"], 1);
         assert_eq!(unattested["slsa_build_level"], 0);
     }
