@@ -13,8 +13,8 @@
  * asserts the navigation contract end to end:
  *
  *   1. Declining the invitation calls the invitee self-decline endpoint
- *      (DELETE /workspaces/{id}/invitations/{invitation_id}) and shows
- *      the declined state.
+ *      (POST /workspaces/{id}/invite/decline) and shows the
+ *      declined state.
  *   2. Clicking "Go to all workspaces" then navigates to /all (the
  *      cross-workspace dashboard), not a silent no-op.
  */
@@ -52,11 +52,11 @@ vi.mock('../lib/api.js', () => ({
     agents: vi.fn(),
     mergeRequest: vi.fn(),
     mergeRequests: vi.fn(),
-    // InvitationAccept surface (task-124 endpoints)
+    // InvitationAccept surface (task-110 WorkspaceInvitation model)
     workspace: vi.fn(),
-    userByUsername: vi.fn(),
+    myInvitations: vi.fn(),
     acceptWorkspaceInvitation: vi.fn(),
-    revokeWorkspaceInvitation: vi.fn(),
+    declineWorkspaceInvitation: vi.fn(),
   },
   setAuthToken: vi.fn(),
 }));
@@ -78,10 +78,14 @@ if (typeof Element !== 'undefined' && !Element.prototype.animate) {
 
 const WS = { id: 'ws-9', name: 'Payments', slug: 'payments', description: 'Payment processing' };
 const ME = { id: 'u-1', username: 'jsell' };
-const PROFILE = {
-  id: 'u-1', username: 'jsell',
-  memberships: [
-    { id: 'inv-1', user_id: 'u-1', workspace_id: 'ws-9', role: 'Developer', accepted: false, created_at: 1700000000 },
+const MY_INVITATIONS = {
+  invitations: [
+    {
+      id: 'inv-1', workspace_id: 'ws-9', user_id: 'u-1', invited_by: 'u-owner',
+      role: 'Developer', status: 'Pending',
+      expires_at: Math.floor(Date.now() / 1000) + 6 * 86400,
+      created_at: 1700000000, accepted_at: null,
+    },
   ],
 };
 
@@ -104,8 +108,9 @@ describe('Declined invitation "Go to all workspaces" navigation (user-management
     api.getWorkspaceBriefing.mockResolvedValue({ narrative: '' });
     api.repo.mockResolvedValue(null);
     api.workspace.mockResolvedValue({ ...WS });
-    api.userByUsername.mockResolvedValue(JSON.parse(JSON.stringify(PROFILE)));
-    api.revokeWorkspaceInvitation.mockResolvedValue(null);
+    api.myInvitations.mockResolvedValue(JSON.parse(JSON.stringify(MY_INVITATIONS)));
+    api.acceptWorkspaceInvitation.mockResolvedValue(null);
+    api.declineWorkspaceInvitation.mockResolvedValue(null);
   });
 
   it('declining then clicking "Go to all workspaces" navigates to /all, not a silent no-op', async () => {
@@ -123,7 +128,7 @@ describe('Declined invitation "Go to all workspaces" navigation (user-management
     // declined state (with the go-to-all button) appears.
     await fireEvent.click(declineBtn);
     await waitFor(() => {
-      expect(api.revokeWorkspaceInvitation).toHaveBeenCalledWith('ws-9', 'inv-1');
+      expect(api.declineWorkspaceInvitation).toHaveBeenCalledWith('ws-9');
     }, { timeout: 5000 });
     const goAll = await waitFor(() => {
       const el = container.querySelector('[data-testid="invite-go-all"]');

@@ -1,22 +1,22 @@
 <script>
   /**
    * InvitationAccept.svelte — pending invitation accept page
-   * (`/invite/{id}`, user-management.md §UI Pages).
+   * (`/invite/{workspaceId}`, user-management.md §UI Pages).
    *
    * Shows a workspace preview and Accept / Decline actions for the
-   * caller's own pending workspace invitation. Backed by task-124
-   * endpoints:
+   * caller's own pending workspace invitation. Backed by task-110's
+   * WorkspaceInvitation model:
    *   - GET  /api/v1/workspaces/{id}            (workspace preview)
-   *   - GET  /api/v1/users/{username}           (my pending memberships)
+   *   - GET  /api/v1/users/me/invitations       (my pending invitations)
    *   - POST /api/v1/workspaces/{id}/invite/accept
-   *   - DELETE /api/v1/workspaces/{id}/invitations/{invitation_id}
-   *     (invitee self-decline — §Workspace Invitation Flow step 4)
+   *   - POST /api/v1/workspaces/{id}/invite/decline
    *
-   * The path segment is the workspace id: task-124 models a pending
-   * workspace invitation as a membership row keyed by workspace (there is
-   * no token), and the InvitationReceived notification carries the
-   * workspace id. The `/invite/{token}` magic-link form belongs to the
-   * tenant-invitation flow (task-110).
+   * The path segment is the workspace id: the InvitationReceived
+   * notification carries the workspace id, and the authenticated
+   * accept/decline routes locate the invitation by (workspace, caller)
+   * with no token. The `/invite/{token}` magic-link form belongs to the
+   * tenant-invitation flow (task-110's POST /api/v1/invite/{token}/accept
+   * — no UI surface yet).
    */
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
@@ -31,7 +31,7 @@
   let { inviteId = '', onDone = undefined } = $props();
 
   let workspace = $state(null);
-  let membership = $state(null); // my pending membership row, if any
+  let invitation = $state(null); // my pending WorkspaceInvitation row, if any
   let loading = $state(true);
   let notFound = $state(false);
   let loadError = $state(null);
@@ -44,29 +44,42 @@
     try { return new Date(ts * 1000).toLocaleDateString(); } catch { return '—'; }
   }
 
+  // Expiry countdown label for a pending invitation (spec §UI Pages:
+  // Workspace Invitations carry an expiry). 'Expired' invitations are
+  // not acceptable — the page shows the none state for them.
+  function expiryLabel(inv) {
+    if (!inv?.expires_at) return '';
+    const secs = inv.expires_at - Math.floor(Date.now() / 1000);
+    if (secs <= 0) return 'expired';
+    const days = Math.floor(secs / 86400);
+    if (days >= 1) return `expires in ${days}d`;
+    const hours = Math.floor(secs / 3600);
+    if (hours >= 1) return `expires in ${hours}h`;
+    return `expires in ${secs}m`;
+  }
+
   async function load() {
     loading = true;
     notFound = false;
     loadError = null;
-    membership = null;
+    invitation = null;
     try {
       workspace = await api.workspace(inviteId);
     } catch (e) {
       if (e?.status === 404) { notFound = true; loading = false; return; }
       workspace = null;
     }
-    // Resolve my pending membership for this workspace through my
-    // tenant-public profile (memberships include pending invitations).
+    // Resolve my pending invitation for this workspace through the
+    // invitee-facing listing (task-110: a pending invitation is a
+    // WorkspaceInvitation row with status/expires_at, not an unaccepted
+    // membership row). Only a Pending invitation is acceptable; Expired,
+    // Revoked, Accepted and Declined rows all render the none state.
     try {
-      const me = await api.me();
-      if (me?.username) {
-        const profile = await api.userByUsername(me.username);
-        membership = (profile?.memberships ?? []).find(
-          m => m.workspace_id === inviteId && !m.accepted
-        ) ?? null;
-        // An already-accepted membership is not a pending invitation.
-      }
-    } catch { /* no resolvable identity — leave membership null */ }
+      const raw = await api.myInvitations();
+      invitation = (raw?.invitations ?? []).find(
+        inv => inv.workspace_id === inviteId && inv.status === 'Pending'
+      ) ?? null;
+    } catch { /* no resolvable identity — leave invitation null */ }
     loading = false;
   }
 
@@ -75,9 +88,11 @@
   });
 
   async function accept() {
-    if (accepting || !membership) return;
+    if (accepting || !invitation) return;
     accepting = true;
     try {
+      // 204 No Content on success — the activated membership is visible
+      // through the workspace surface the page navigates to.
       await api.acceptWorkspaceInvitation(inviteId);
       outcome = 'accepted';
       showToast($t('invite_accept.accepted_toast', { values: { name: workspace?.name ?? '' } }), { type: 'success' });
@@ -90,10 +105,10 @@
   }
 
   async function decline() {
-    if (declining || !membership) return;
+    if (declining || !invitation) return;
     declining = true;
     try {
-      await api.revokeWorkspaceInvitation(inviteId, membership.id);
+      await api.declineWorkspaceInvitation(inviteId);
       outcome = 'declined';
       showToast($t('invite_accept.declined_toast'), { type: 'info' });
       onDone?.('declined', workspace);
@@ -133,7 +148,7 @@
         {$t('invite_accept.go_to_all')}
       </button>
     </EmptyState>
-  {:else if !membership}
+  {:else if !invitation}
     <EmptyState
       title={$t('invite_accept.none_title')}
       description={$t('invite_accept.none_desc')}
@@ -146,14 +161,17 @@
       <div class="ws-preview" data-testid="invite-workspace-preview">
         <div class="ws-preview-head">
           <span class="ws-preview-name">{workspace?.name ?? workspace?.id}</span>
-          <Badge variant="info" value={membership.role} />
+          <Badge variant="info" value={invitation.role} />
         </div>
         {#if workspace?.description}
           <p class="ws-preview-desc">{workspace.description}</p>
         {/if}
         <div class="ws-preview-meta">
-          <span>{$t('invite_accept.invited_role')}: <strong>{membership.role}</strong></span>
-          <span>{$t('invite_accept.invited_on')}: {fmtDate(membership.created_at)}</span>
+          <span>{$t('invite_accept.invited_role')}: <strong>{invitation.role}</strong></span>
+          <span>{$t('invite_accept.invited_on')}: {fmtDate(invitation.created_at)}</span>
+          {#if expiryLabel(invitation)}
+            <span data-testid="invite-expiry">{expiryLabel(invitation)}</span>
+          {/if}
         </div>
       </div>
 

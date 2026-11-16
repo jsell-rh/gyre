@@ -621,6 +621,44 @@ describe('WorkspaceSettings', () => {
       expect(api.workspaceInvitations).toHaveBeenCalledWith('ws-1');
     });
 
+    // Merged-tree contract (task-110 WorkspaceInvitation rows): status +
+    // expiry countdown on pending rows, revoke only for Pending (the
+    // endpoint 409s on terminal statuses).
+    it('renders invitation status and expiry, with revoke only for pending rows', async () => {
+      api.workspaceMembers.mockResolvedValue({ members: [] });
+      api.workspaceInvitations.mockResolvedValue({
+        invitations: [
+          {
+            id: 'inv-1', workspace_id: 'ws-1', user_id: 'u-5', invited_by: 'u-1',
+            role: 'Developer', status: 'Pending',
+            expires_at: Math.floor(Date.now() / 1000) + 6 * 86400,
+            created_at: 1700000000, accepted_at: null,
+          },
+          {
+            id: 'inv-2', workspace_id: 'ws-1', user_id: 'u-6', invited_by: 'u-1',
+            role: 'Viewer', status: 'Expired',
+            expires_at: 1690000000,
+            created_at: 1690000000, accepted_at: null,
+          },
+        ],
+      });
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await openMembersTab(container);
+      const table = await waitFor(() => {
+        const el = container.querySelector('[data-testid="invitations-table"]');
+        expect(el).toBeTruthy();
+        return el;
+      });
+      const rows = table.querySelectorAll('[data-testid="invitation-row"]');
+      expect(rows.length).toBe(2);
+      // Pending row: expiry countdown and a revoke action.
+      expect(container.querySelector('[data-testid="invitation-expiry-inv-1"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="revoke-invitation-inv-1"]')).toBeTruthy();
+      // Terminal row: no expiry countdown and no revoke action.
+      expect(container.querySelector('[data-testid="invitation-expiry-inv-2"]')).toBeNull();
+      expect(container.querySelector('[data-testid="revoke-invitation-inv-2"]')).toBeNull();
+    });
+
     it('shows member table with role select and remove action', async () => {
       api.workspaceMembers.mockResolvedValue({
         members: [

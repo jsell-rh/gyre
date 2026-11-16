@@ -50,7 +50,12 @@ async function request(path, options = {}) {
       if (res.status === 401) {
         throw new Error('Session expired — please re-authenticate.');
       }
-      throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
+      const err = new Error(`API ${path}: ${res.status} ${res.statusText}`);
+      // Attach the HTTP status so callers can branch on it (e.g. the
+      // invitation accept page's 404 not-found state) instead of
+      // parsing the message string.
+      err.status = res.status;
+      throw err;
     }
     if (res.status === 204) return null;
     return res.json();
@@ -535,14 +540,22 @@ export const api = {
   removeWorkspaceMember: (id, userId) =>
     request(`/workspaces/${id}/members/${userId}`, { method: 'DELETE' }),
   // Workspace membership management (user-management.md §API > Workspace
-  // Membership, task-124): role change incl. ownership transfer, invitations.
+  // Membership): role change incl. ownership transfer. Invitation paths
+  // are task-110's WorkspaceInvitation model: invite, listing (status +
+  // expiry), authenticated invitee accept/decline, and revoke.
   updateMemberRole: (id, userId, { role, reason } = {}) =>
     request(`/workspaces/${id}/members/${userId}/role`, { method: 'PUT', body: JSON.stringify({ role, reason }) }),
   inviteWorkspaceMember: (id, data) =>
     request(`/workspaces/${id}/invite`, { method: 'POST', body: JSON.stringify(data) }),
   workspaceInvitations: (id) => request(`/workspaces/${id}/invitations`),
+  // Invitee-facing pending workspace invitations (task-110):
+  // { invitations: [{ id, workspace_id, user_id, role, status,
+  // expires_at, created_at, accepted_at }] }
+  myInvitations: () => request('/users/me/invitations'),
   acceptWorkspaceInvitation: (id) =>
     request(`/workspaces/${id}/invite/accept`, { method: 'POST' }),
+  declineWorkspaceInvitation: (id) =>
+    request(`/workspaces/${id}/invite/decline`, { method: 'POST' }),
   revokeWorkspaceInvitation: (id, invitationId) =>
     request(`/workspaces/${id}/invitations/${invitationId}`, { method: 'DELETE' }),
   // Teams (user-management.md §API > Teams, task-122/125)

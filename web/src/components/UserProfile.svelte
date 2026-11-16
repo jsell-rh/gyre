@@ -198,8 +198,8 @@
   }
 
   // ── Pending workspace invitations (user-management.md §UI Pages >
-  // Pending Invitation Accept Page) — my unaccepted memberships, with
-  // accept / decline through the task-124 endpoints. ──────────────────
+  // Pending Invitation Accept Page) — my pending WorkspaceInvitation
+  // rows, with accept / decline through the task-110 invitee endpoints.
   let pendingInvitations = $state([]);
   let invitationsLoading = $state(false);
   let invitationBusyId = $state(null);
@@ -207,10 +207,8 @@
   async function loadInvitations() {
     invitationsLoading = true;
     try {
-      const m = await api.me();
-      if (!m?.username) { pendingInvitations = []; return; }
-      const profile = await api.userByUsername(m.username);
-      pendingInvitations = (profile?.memberships ?? []).filter(inv => !inv.accepted);
+      const raw = await api.myInvitations();
+      pendingInvitations = (raw?.invitations ?? []).filter(inv => inv.status === 'Pending');
     } catch {
       pendingInvitations = [];
     } finally {
@@ -238,7 +236,7 @@
     if (invitationBusyId) return;
     invitationBusyId = inv.id;
     try {
-      await api.revokeWorkspaceInvitation(inv.workspace_id, inv.id);
+      await api.declineWorkspaceInvitation(inv.workspace_id);
       showToast($t('user_profile.invitation_declined'), { type: 'info' });
       await loadInvitations();
     } catch (e) {
@@ -802,9 +800,9 @@
       {/if}
 
     {:else if activeTab === 'invitations'}
-      <!-- Pending workspace invitations: accept / decline (task-124
-           endpoints; the invitee-only decline is §Workspace Invitation
-           Flow step 4). -->
+      <!-- Pending workspace invitations: accept / decline (task-110
+           invitee endpoints; the invitee-only decline is §Workspace
+           Invitation Flow step 4). -->
       {#if invitationsLoading}
         <Skeleton lines={3} />
       {:else if pendingInvitations.length === 0}
