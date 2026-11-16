@@ -854,3 +854,15 @@ cleanup retries and provider tracking remain independent.
 A consumed implementation receipt that already produced the task's current
 repair is a source seed, never that repair's solution. Adoption skips that
 receipt and executes the recorded repair instead of replaying the same outcome.
+
+Before allocating a review sandbox, a Git-only preflight checks the exact saved
+candidate against observed main. Known source conflicts create a structured
+rebase finding and return to implementation without a model review. Clean
+merges and generated-web-only conflicts still require normal independent review;
+the verifier remains responsible for deterministic generated assets and checks
+the final exact merge tree. No existing approval is transferred to rebased code.
+
+Fullsend validation selects the sandbox by both work identity and current fencing
+token. A previous attempt's deleting metadata cannot invalidate or supply a new
+attempt's source receipt. Zero or multiple current-attempt sandboxes still fail
+closed rather than selecting an arbitrary runtime.

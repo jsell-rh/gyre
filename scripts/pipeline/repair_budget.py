@@ -23,7 +23,8 @@ def source_findings(findings):
         # security or source findings are never suppressed by text matching.
         name=name if isinstance(name,str) else ''
         path=PurePosixPath(name.split(':',1)[0])
-        target=generated if re.fullmatch(r'web/dist/[A-Za-z0-9_.@/-]*(?::[0-9]+(?::[0-9]+)?)?',name) and '..' not in path.parts else source
+        target=generated if ((re.fullmatch(r'web/dist/[A-Za-z0-9_.@/-]*(?::[0-9]+(?::[0-9]+)?)?',name) and '..' not in path.parts)
+                             or re.fullmatch(r'specs/coverage/SUMMARY\.md(?::[0-9]+(?::[0-9]+)?)?',name)) else source
         target.append(finding)
     return source,generated
 
