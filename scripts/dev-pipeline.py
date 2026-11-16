@@ -233,6 +233,10 @@ def main():
     commands.add_parser('resume')
     commands.add_parser('slots').add_argument('count', type=int)
     commands.add_parser('reserve-verification').add_argument('count',type=int)
+    commands.add_parser('decisions')
+    command=commands.add_parser('decide')
+    command.add_argument('id');command.add_argument('option')
+    command.add_argument('--source',default='local CLI');command.add_argument('--instruction')
     commands.add_parser('priority-classes')
     command=commands.add_parser('priority-class')
     command.add_argument('name');command.add_argument('value',type=int)
@@ -253,6 +257,15 @@ def main():
         if args.command == 'status':
             from pipeline.cockpit import snapshot
             print(json.dumps(snapshot(store)))
+        elif args.command == 'decisions':
+            from pipeline.decisions import list_decisions
+            print(json.dumps(list_decisions(store)))
+        elif args.command == 'decide':
+            from pipeline.decisions import choose
+            try:
+                print(json.dumps(choose(store,args.id,args.option,source=args.source,instruction=args.instruction)))
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from None
         elif args.command in ('retry', 'retry-all'):
             with store.transaction():
                 query = "UPDATE work SET state='ready',retry_at=0,ready_since=? WHERE state IN ('attention','retry')"

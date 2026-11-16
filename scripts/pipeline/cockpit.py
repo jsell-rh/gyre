@@ -95,7 +95,8 @@ def snapshot(store):
     stages = {stage: {state: sum(item['stage'] == stage and item['state'] == state for item in work)
                       for state in ('ready', 'claimed', 'retry', 'succeeded', 'attention')}
               for stage in STAGES}
-    return {'tasks': tasks, 'attempts': attempts, 'events': events, 'counts': counts,
+    from .decisions import list_decisions
+    return {'decisions': list_decisions(store), 'tasks': tasks, 'attempts': attempts, 'events': events, 'counts': counts,
             'running': sum(bool(task['stage']) for task in tasks), 'eligible': sum(task['state'] == 'ready' for task in tasks),
             'slots': store.setting('slots', 8), 'stages': stages,
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
