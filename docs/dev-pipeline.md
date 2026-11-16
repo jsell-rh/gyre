@@ -861,3 +861,8 @@ rebase finding and return to implementation without a model review. Clean
 merges and generated-web-only conflicts still require normal independent review;
 the verifier remains responsible for deterministic generated assets and checks
 the final exact merge tree. No existing approval is transferred to rebased code.
+
+Fullsend validation selects the sandbox by both work identity and current fencing
+token. A previous attempt's deleting metadata cannot invalidate or supply a new
+attempt's source receipt. Zero or multiple current-attempt sandboxes still fail
+closed rather than selecting an arbitrary runtime.

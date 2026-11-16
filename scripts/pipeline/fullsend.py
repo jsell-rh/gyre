@@ -244,6 +244,17 @@ print('GYRE_ARTIFACT '+base64.b64encode(output.getvalue()).decode())
         execution.store.event('fullsend_evidence_unavailable', {'error': type(exc).__name__}, execution.claim['task'])
 
 
+def owned_sandbox(execution):
+    """Old cleanup debt must neither enter nor invalidate this attempt's receipt."""
+    execution.current()
+    rows = execution.store.db.execute(
+        "SELECT name FROM resources WHERE work=? AND token=? AND kind='sandbox' AND state<>'absent'",
+        (execution.claim['id'], execution.claim['token'])).fetchall()
+    if len(rows) != 1:
+        raise ValueError('Expected exactly one sandbox owned by this fenced attempt')
+    return rows[0]['name']
+
+
 def collect(execution, sandbox, success):
     """Capture a published source receipt before fullsend deletes the sandbox."""
     existing = execution.directory / 'outcome.json'
