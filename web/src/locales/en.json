@@ -1949,6 +1949,8 @@
       "remove_failed": "Failed to remove member: {error}",
       "revoke": "Revoke",
       "revoke_failed": "Failed to revoke invitation: {error}",
+      "invitation_expired": "Expired",
+      "invitation_expires_in": "Expires in {count}{unit}",
       "change_role_for": "Change role for {name}",
       "transfer_reason_prompt": "Reason for the ownership transfer (recorded in the audit trail):"
     }

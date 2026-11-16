@@ -2,11 +2,15 @@
  * InvitationAccept.test.js — pending invitation accept page
  * (`/invite/{workspaceId}`, user-management.md §UI Pages).
  *
- * Covers:
+ * Covers the merged-tree contract (task-110 WorkspaceInvitation model):
  *   - Renders the workspace preview from GET /workspaces/{id}
- *   - Resolves my pending membership through GET /users/{username}
- *   - Accept calls POST /workspaces/{id}/invite/accept
- *   - Decline calls DELETE /workspaces/{id}/invitations/{invitation_id}
+ *   - Resolves my pending invitation through GET /users/me/invitations
+ *     (a pending invitation is a WorkspaceInvitation row with
+ *     status/expires_at, not an unaccepted membership row)
+ *   - Accept calls POST /workspaces/{id}/invite/accept (204)
+ *   - Decline calls POST /workspaces/{id}/invite/decline
+ *   - Only a Pending invitation is acceptable — an Expired row renders
+ *     the none state
  *   - No pending invitation renders the none state
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -15,10 +19,9 @@ import { render, waitFor, fireEvent } from '@testing-library/svelte';
 vi.mock('../lib/api.js', () => ({
   api: {
     workspace: vi.fn(),
-    me: vi.fn(),
-    userByUsername: vi.fn(),
+    myInvitations: vi.fn(),
     acceptWorkspaceInvitation: vi.fn(),
-    revokeWorkspaceInvitation: vi.fn(),
+    declineWorkspaceInvitation: vi.fn(),
   },
   setAuthToken: vi.fn(),
 }));
@@ -27,33 +30,41 @@ import InvitationAccept from '../components/InvitationAccept.svelte';
 import { api } from '../lib/api.js';
 
 const WS = { id: 'ws-9', name: 'Payments', description: 'Payment processing', slug: 'payments' };
-const ME = { id: 'u-1', username: 'jsell' };
-const PROFILE = {
-  id: 'u-1', username: 'jsell',
-  memberships: [
-    { id: 'inv-1', user_id: 'u-1', workspace_id: 'ws-9', role: 'Developer', accepted: false, created_at: 1700000000 },
-  ],
-};
+
+function pendingInvitation(overrides = {}) {
+  return {
+    id: 'inv-1',
+    workspace_id: 'ws-9',
+    user_id: 'u-1',
+    invited_by: 'u-owner',
+    role: 'Developer',
+    status: 'Pending',
+    expires_at: Math.floor(Date.now() / 1000) + 6 * 86400,
+    created_at: 1700000000,
+    accepted_at: null,
+    ...overrides,
+  };
+}
 
 describe('InvitationAccept', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.workspace.mockResolvedValue({ ...WS });
-    api.me.mockResolvedValue({ ...ME });
-    api.userByUsername.mockResolvedValue(JSON.parse(JSON.stringify(PROFILE)));
-    api.acceptWorkspaceInvitation.mockResolvedValue({ accepted: true });
-    api.revokeWorkspaceInvitation.mockResolvedValue(null);
+    api.myInvitations.mockResolvedValue({ invitations: [pendingInvitation()] });
+    api.acceptWorkspaceInvitation.mockResolvedValue(null); // 204 No Content
+    api.declineWorkspaceInvitation.mockResolvedValue(null);
   });
 
-  it('renders the workspace preview with the invited role', async () => {
+  it('renders the workspace preview with the invited role and expiry', async () => {
     const { findByText, container } = render(InvitationAccept, { props: { inviteId: 'ws-9' } });
     expect(await findByText('Workspace invitation')).toBeTruthy();
     expect(await findByText('Payments')).toBeTruthy();
     expect(container.querySelector('[data-testid="invite-workspace-preview"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="invite-accept-btn"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="invite-decline-btn"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="invite-expiry"]')).toBeTruthy();
     expect(api.workspace).toHaveBeenCalledWith('ws-9');
-    expect(api.userByUsername).toHaveBeenCalledWith('jsell');
+    expect(api.myInvitations).toHaveBeenCalledWith();
   });
 
   it('accept calls the accept endpoint and shows the accepted state', async () => {
@@ -66,18 +77,28 @@ describe('InvitationAccept', () => {
     expect(await findByText(/Invitation accepted/i)).toBeTruthy();
   });
 
-  it('decline calls the invitation revoke (self-decline) endpoint', async () => {
+  it('decline calls the invitee decline endpoint', async () => {
     const { container, findByText } = render(InvitationAccept, { props: { inviteId: 'ws-9' } });
     await findByText('Payments');
     await fireEvent.click(container.querySelector('[data-testid="invite-decline-btn"]'));
     await waitFor(() => {
-      expect(api.revokeWorkspaceInvitation).toHaveBeenCalledWith('ws-9', 'inv-1');
+      expect(api.declineWorkspaceInvitation).toHaveBeenCalledWith('ws-9');
     });
     expect(await findByText(/Invitation declined/i)).toBeTruthy();
   });
 
+  it('renders the none state for an expired invitation (not acceptable)', async () => {
+    api.myInvitations.mockResolvedValue({
+      invitations: [pendingInvitation({ status: 'Expired', expires_at: 1690000000 })],
+    });
+    const { findByText, container } = render(InvitationAccept, { props: { inviteId: 'ws-9' } });
+    expect(await findByText('No pending invitation')).toBeTruthy();
+    expect(container.querySelector('[data-testid="invite-accept-btn"]')).toBeNull();
+    expect(api.acceptWorkspaceInvitation).not.toHaveBeenCalled();
+  });
+
   it('renders the no-pending-invitation state when none exists', async () => {
-    api.userByUsername.mockResolvedValue({ id: 'u-1', username: 'jsell', memberships: [] });
+    api.myInvitations.mockResolvedValue({ invitations: [] });
     const { findByText, container } = render(InvitationAccept, { props: { inviteId: 'ws-9' } });
     expect(await findByText('No pending invitation')).toBeTruthy();
     expect(container.querySelector('[data-testid="invite-accept-btn"]')).toBeNull();

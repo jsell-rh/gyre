@@ -163,7 +163,8 @@
   }
 
   // ── Members & invitations (user-management.md §UI Pages > Workspace
-  // Members / Workspace Invitations; task-124 endpoints) ─────────────
+  // Members / Workspace Invitations; task-110 WorkspaceInvitation model
+  // merged with task-124's member management) ─────────────────────────
   const WORKSPACE_ROLES = ['Owner', 'Admin', 'Developer', 'Viewer'];
   // Best-effort user_id → user enrichment. The members listing carries
   // ids only; usernames resolve through the TenantAdmin user listing, so
@@ -182,6 +183,33 @@
   function memberLabel(m) {
     const u = memberUsers[m.user_id];
     return u?.username ? `@${u.username}` : shortId(m.user_id);
+  }
+
+  // Expiry countdown for a pending workspace invitation (spec §UI Pages:
+  // "Pending invitations with expiry countdown, revoke"). Task-110's
+  // WorkspaceInvitation rows carry expires_at (epoch seconds).
+  function invitationExpiry(inv) {
+    if (!inv?.expires_at) return '';
+    const secs = inv.expires_at - Math.floor(Date.now() / 1000);
+    if (secs <= 0) return $t('workspace_settings.members.invitation_expired');
+    const days = Math.floor(secs / 86400);
+    if (days >= 1) return $t('workspace_settings.members.invitation_expires_in', { values: { count: days, unit: 'd' } });
+    const hours = Math.floor(secs / 3600);
+    if (hours >= 1) return $t('workspace_settings.members.invitation_expires_in', { values: { count: hours, unit: 'h' } });
+    return $t('workspace_settings.members.invitation_expires_in', { values: { count: secs, unit: 'm' } });
+  }
+
+  // Only Pending invitations are revocable (the revoke endpoint 409s on
+  // any terminal status); the badge shows every row's lifecycle state.
+  function invitationStatusVariant(status) {
+    switch (status) {
+      case 'Pending': return 'info';
+      case 'Accepted': return 'success';
+      case 'Expired':
+      case 'Revoked':
+      case 'Declined': return 'muted';
+      default: return 'muted';
+    }
   }
 
   async function loadMemberUsers() {
@@ -1363,6 +1391,7 @@
               <tr>
                 <th scope="col">{$t('workspace_settings.members.col_invitee')}</th>
                 <th scope="col">{$t('workspace_settings.teams.col_role')}</th>
+                <th scope="col">{$t('workspace_settings.members.col_status')}</th>
                 <th scope="col">{$t('workspace_settings.members.col_invited')}</th>
                 <th scope="col"><span class="sr-only">{$t('common.actions')}</span></th>
               </tr>
@@ -1372,14 +1401,22 @@
                 <tr data-testid="invitation-row">
                   <td class="member-name" title={inv.user_id}>{memberUsers[inv.user_id]?.username ? '@' + memberUsers[inv.user_id].username : shortId(inv.user_id)}</td>
                   <td class="member-role">{inv.role}</td>
-                  <td>{new Date(inv.created_at * 1000).toLocaleDateString()}</td>
+                  <td><Badge variant={invitationStatusVariant(inv.status)} value={inv.status ?? '—'} /></td>
                   <td>
-                    <button
-                      class="btn-danger-sm"
-                      onclick={() => revokeInvitation(inv)}
-                      disabled={revokeSavingId === inv.id}
-                      data-testid={`revoke-invitation-${inv.id}`}
-                    >{revokeSavingId === inv.id ? '…' : $t('workspace_settings.members.revoke')}</button>
+                    <span class="member-since">{new Date(inv.created_at * 1000).toLocaleDateString()}</span>
+                    {#if inv.status === 'Pending' && invitationExpiry(inv)}
+                      <span class="invite-expiry" data-testid={`invitation-expiry-${inv.id}`}>{invitationExpiry(inv)}</span>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if inv.status === 'Pending'}
+                      <button
+                        class="btn-danger-sm"
+                        onclick={() => revokeInvitation(inv)}
+                        disabled={revokeSavingId === inv.id}
+                        data-testid={`revoke-invitation-${inv.id}`}
+                      >{revokeSavingId === inv.id ? '…' : $t('workspace_settings.members.revoke')}</button>
+                    {/if}
                   </td>
                 </tr>
               {/each}
@@ -2486,6 +2523,12 @@
     color: var(--color-text-muted);
     font-size: var(--text-xs);
     text-transform: capitalize;
+  }
+  .member-since { color: var(--color-text-secondary); }
+  .invite-expiry {
+    display: block;
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
   }
 
   /* ── Budget ───────────────────────────────────────────────────────── */

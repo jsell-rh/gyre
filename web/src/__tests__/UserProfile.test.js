@@ -14,8 +14,9 @@ vi.mock('../lib/api.js', () => ({
     getNotificationPreferences: vi.fn(),
     updateNotificationPreferences: vi.fn(),
     userByUsername: vi.fn(),
+    myInvitations: vi.fn(),
     acceptWorkspaceInvitation: vi.fn(),
-    revokeWorkspaceInvitation: vi.fn(),
+    declineWorkspaceInvitation: vi.fn(),
     listMySessions: vi.fn(),
     revokeMySession: vi.fn(),
     revokeAllMySessions: vi.fn(),
@@ -97,8 +98,11 @@ beforeEach(() => {
   api.getNotificationPreferences.mockResolvedValue({ preferences: [] });
   api.updateNotificationPreferences.mockResolvedValue({});
   api.userByUsername.mockResolvedValue({ id: 'u-1', username: 'jsell', memberships: [] });
-  api.acceptWorkspaceInvitation.mockResolvedValue({ accepted: true });
-  api.revokeWorkspaceInvitation.mockResolvedValue(null);
+  // Real GET /users/me/invitations wire shape (task-110): WorkspaceInvitation
+  // rows with status/expires_at, not unaccepted membership rows.
+  api.myInvitations.mockResolvedValue({ invitations: [] });
+  api.acceptWorkspaceInvitation.mockResolvedValue(null); // 204
+  api.declineWorkspaceInvitation.mockResolvedValue(null);
   api.listMySessions.mockResolvedValue({ sessions: [] });
   api.revokeMySession.mockResolvedValue(null);
   api.revokeAllMySessions.mockResolvedValue(null);
@@ -409,10 +413,9 @@ describe('UserProfile', () => {
   });
 
   it('lists pending invitations and accepts one via the API', async () => {
-    api.userByUsername.mockResolvedValue({
-      id: 'u-1', username: 'jsell',
-      memberships: [
-        { id: 'inv-1', user_id: 'u-1', workspace_id: 'ws-9', role: 'Developer', accepted: false, created_at: 1700000000 },
+    api.myInvitations.mockResolvedValue({
+      invitations: [
+        { id: 'inv-1', workspace_id: 'ws-9', user_id: 'u-1', invited_by: 'u-2', role: 'Developer', status: 'Pending', expires_at: NOW + 6 * 86400, created_at: 1700000000, accepted_at: null },
       ],
     });
     const { container, findByText } = r();
@@ -426,11 +429,10 @@ describe('UserProfile', () => {
     });
   });
 
-  it('declines a pending invitation via the revoke endpoint', async () => {
-    api.userByUsername.mockResolvedValue({
-      id: 'u-1', username: 'jsell',
-      memberships: [
-        { id: 'inv-2', user_id: 'u-1', workspace_id: 'ws-9', role: 'Developer', accepted: false, created_at: 1700000000 },
+  it('declines a pending invitation via the invitee decline endpoint', async () => {
+    api.myInvitations.mockResolvedValue({
+      invitations: [
+        { id: 'inv-2', workspace_id: 'ws-9', user_id: 'u-1', invited_by: 'u-2', role: 'Developer', status: 'Pending', expires_at: NOW + 6 * 86400, created_at: 1700000000, accepted_at: null },
       ],
     });
     const { container, findByText } = r();
@@ -439,8 +441,24 @@ describe('UserProfile', () => {
     const declineBtn = await waitFor(() => container.querySelector('[data-testid="invitation-decline-inv-2"]'));
     await fireEvent.click(declineBtn);
     await waitFor(() => {
-      expect(api.revokeWorkspaceInvitation).toHaveBeenCalledWith('ws-9', 'inv-2');
+      expect(api.declineWorkspaceInvitation).toHaveBeenCalledWith('ws-9');
     });
+  });
+
+  it('filters out non-pending invitation rows (terminal statuses are not actionable)', async () => {
+    api.myInvitations.mockResolvedValue({
+      invitations: [
+        { id: 'inv-3', workspace_id: 'ws-9', user_id: 'u-1', invited_by: 'u-2', role: 'Developer', status: 'Expired', expires_at: NOW - 86400, created_at: 1700000000, accepted_at: null },
+      ],
+    });
+    const { container, findByText } = r();
+    const invitationsTab = await findByText('Invitations');
+    await fireEvent.click(invitationsTab);
+    // The expired row is filtered — the none state renders instead of an
+    // actionable invitation.
+    await findByText('No pending invitations');
+    expect(container.querySelector('[data-testid="invitation-accept-inv-3"]')).toBeNull();
+    expect(container.querySelector('[data-testid="invitation-decline-inv-3"]')).toBeNull();
   });
 
   // ── Sessions tab (user-management.md §UI Pages > Session Management,
