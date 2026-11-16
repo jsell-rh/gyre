@@ -2478,11 +2478,17 @@ pub(crate) struct AgentLaunchParams<'a> {
     pub extra_env: std::collections::HashMap<String, String>,
 }
 
-/// Handles captured by a launch, for workload attestation.
+/// Outcome of a task-less launch: whether a process actually started on
+/// the resolved compute target.
 #[derive(Default)]
 pub(crate) struct LaunchOutcome {
-    pub pid: Option<u32>,
-    pub container_id: Option<String>,
+    /// Whether the dispatch actually started a process on any backend.
+    /// This is the authority on "did it start" — never the handle's
+    /// shape: SshDocker and Kubernetes handles carry `pid: None` by
+    /// design (their id is a remote container / Pod name), so callers
+    /// guessing from `pid`/`container_id` would misreport every
+    /// *successful* remote launch as a failure.
+    pub launched: bool,
 }
 
 /// Launch a task-less agent process (meta-spec preview, reconciliation §5)
@@ -2651,8 +2657,7 @@ pub(crate) async fn launch_taskless_agent_process(
     .await?;
 
     Ok(LaunchOutcome {
-        pid: dispatch.pid,
-        container_id: dispatch.container_id,
+        launched: dispatch.launched,
     })
 }
 

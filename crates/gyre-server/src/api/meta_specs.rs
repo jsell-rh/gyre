@@ -1810,15 +1810,16 @@ async fn launch_preview_agent(
     .await
     .map_err(|e| format!("{e:?}"))?;
 
-    // `launch_taskless_agent_process` treats a failed process spawn as best-effort: it
-    // logs and returns Ok. A preview whose process never started would sit
-    // "running" until the GC sweep, so require the handle.
-    let started = if target_type == "container" {
-        outcome.container_id.is_some()
-    } else {
-        outcome.pid.is_some()
-    };
-    if !started {
+    // `launch_taskless_agent_process` treats a failed process spawn as
+    // best-effort: it logs and returns Ok. A preview whose process never
+    // started would sit "running" until the GC sweep, so require an actual
+    // launch. The dispatch's own `launched` flag is the authority — never
+    // the handle's shape: SshDocker (ssh container_mode, the dispatch
+    // default) and Kubernetes handles carry `pid: None` by design (the id
+    // is a remote container / Pod name), so a pid-based guess reports every
+    // successful remote launch as "never started", kills nothing, and
+    // orphans the running remote process.
+    if !outcome.launched {
         return Err(format!("{target_type} process never started"));
     }
     Ok(())
@@ -1827,6 +1828,15 @@ async fn launch_preview_agent(
 /// Launch failure: terminal agent, revoked token, released slot, worktree gone.
 /// The run record survives so the failed agent is still visible in the status.
 async fn mark_preview_agent_failed(state: &AppState, preview_id: &str, p: &mut Provisioned) {
+    // Defense-in-depth: if anything registered a process for this agent
+    // (a partially-completed dispatch, a stale registry entry), kill it
+    // through the recorded handle/backend pair — the same routing as
+    // DELETE and GC — BEFORE reclaiming the row, token and worktree.
+    // Without this, a failure verdict on a launch that did leave a remote
+    // container/Pod behind would orphan it with no agent pointing at it
+    // — exactly what the pre-fix path did, which performed no kill at
+    // all. No-op when nothing is registered.
+    kill_preview_process(state, &p.agent_ref.agent_id).await;
     if let Ok(Some(mut agent)) = state.agents.find_by_id(&p.agent.id).await {
         if agent.status == AgentStatus::Active {
             // transition_status can only fail on an invalid transition; log
@@ -2105,7 +2115,10 @@ async fn release_preview_slot(state: &AppState, agent_ref: &PreviewAgentRef) {
 
 #[cfg(test)]
 mod tests {
-    use super::kill_preview_process;
+    use super::{
+        kill_preview_process, mark_preview_agent_failed, new_id, now_secs, PreviewAgentRef,
+        Provisioned,
+    };
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use gyre_ports::ComputeTarget as _;
@@ -3322,6 +3335,450 @@ mod tests {
             dead,
             "preview kill must reach the process through the recorded backend (pid {pid})"
         );
+    }
+
+    /// Run `f` with `dir` prepended to PATH, restoring the original value
+    /// afterwards even on panic. PATH is process-global and read at spawn
+    /// time by every `Command::new(<name>)`, so the same ENV_LOCK that
+    /// serializes `GYRE_AGENT_COMMAND` tests serializes PATH shadowing —
+    /// and prepending (rather than replacing) keeps git/sleep/kill
+    /// resolvable for concurrently running tests that hold no lock.
+    async fn with_path_prepend<F, Fut>(dir: &std::path::Path, f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let _env = ENV_LOCK.lock();
+        let orig = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.display(), orig));
+        let result = std::panic::AssertUnwindSafe(f()).catch_unwind().await;
+        std::env::set_var("PATH", orig);
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// A fake `ssh` binary emulating a remote docker host: the remote
+    /// command (`docker <subcmd> ...`, the last argument) is answered the
+    /// way the remote daemon would, and markers are written next to the
+    /// script so the test can observe exactly what the dispatch invoked.
+    /// `docker run` reports a container id (spawn), `docker image inspect`
+    /// a digest, `docker inspect` `true` (alive), `docker rm` the kill.
+    fn fake_ssh_script(dir: &std::path::Path) -> std::path::PathBuf {
+        let script = dir.join("fake-ssh");
+        std::fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n",
+                "cmd=\n",
+                "for arg in \"$@\"; do cmd=$arg; done\n",
+                "case $cmd in\n",
+                "  'docker run '*) echo fakecontainer0123456789; echo run > \"$dir/ssh-saw-run\" ;;\n",
+                "  'docker image inspect'*) echo sha256:fakedigest0000000000000000000000000000000000000000000000000000 ;;\n",
+                "  'docker inspect '*) echo true ;;\n",
+                "  'docker rm '*) echo rm > \"$dir/ssh-saw-rm\" ;;\n",
+                "  *) echo \"fake ssh: unhandled remote command: $cmd\" >&2; exit 1 ;;\n",
+                "esac\n",
+            ),
+        )
+        .unwrap();
+        make_executable(&script);
+        script
+    }
+
+    /// A fake `kubectl` emulating a cluster: `apply` records the Pod
+    /// manifest from stdin (so the test can assert what the agent would
+    /// have run with), `wait` reports the Pod scheduled, `get` reports a
+    /// Running phase / imageID, and `delete` records the kill.
+    fn fake_kubectl_script(dir: &std::path::Path) -> std::path::PathBuf {
+        let script = dir.join("fake-kubectl");
+        std::fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n",
+                "case $1 in\n",
+                "  apply) cat > \"$dir/kubectl-manifest.json\" ;;\n",
+                "  wait)  : ;;\n",
+                "  get)   case \"$*\" in\n",
+                "            *imageID*) echo docker-pullable://gyre-agent@sha256:fakedigest ;;\n",
+                "            *) echo Running ;;\n",
+                "         esac ;;\n",
+                "  delete) echo delete > \"$dir/kubectl-saw-delete\" ;;\n",
+                "  *) echo \"fake kubectl: unhandled: $*\" >&2; exit 1 ;;\n",
+                "esac\n",
+            ),
+        )
+        .unwrap();
+        make_executable(&script);
+        script
+    }
+
+    /// Wire an Ssh/Kubernetes compute target to the preview workspace and
+    /// return its id, so `launch_preview_agent` resolves it instead of the
+    /// local fallback.
+    async fn attach_compute_target(
+        state: &std::sync::Arc<crate::AppState>,
+        repo_id: &str,
+        target_type: gyre_domain::ComputeTargetType,
+        config: serde_json::Value,
+    ) -> gyre_common::Id {
+        let ct = gyre_domain::ComputeTargetEntity::new(
+            new_id(),
+            gyre_common::Id::new("default"),
+            format!("preview-ct-{}", target_type),
+            target_type,
+            now_secs(),
+        );
+        let ct = gyre_domain::ComputeTargetEntity { config, ..ct };
+        state.compute_targets.create(&ct).await.unwrap();
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+        ct.id
+    }
+
+    /// Review-round regression (01195dea): the preview launch's started
+    /// check used to guess from the handle's shape (`pid.is_some()` for
+    /// every non-container target), but SshDocker — ssh container_mode,
+    /// the dispatch default — and Kubernetes handles carry `pid: None` by
+    /// design (the id is a remote container / Pod name). A successful
+    /// remote launch was therefore reported as "process never started":
+    /// the agent transitioned Failed, token revoked, worktree removed,
+    /// the actually-running remote container orphaned, no diff ever
+    /// produced — §5 preview mode broken on two of the five compute
+    /// backends. No remote host exists in tests, so the ssh-docker
+    /// dispatch runs end to end against a fake `ssh` binary on PATH that
+    /// emulates the remote docker daemon; the contract under test is that
+    /// a pid-less remote-container handle is a START, and that the run
+    /// stays killable through the recorded backend.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_launch_on_ssh_docker_target_is_not_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        // container_mode defaults to true in the dispatch — the spec
+        // default ("SSH to remote host, docker run there").
+        attach_compute_target(
+            &state,
+            &repo_id,
+            gyre_domain::ComputeTargetType::Ssh,
+            serde_json::json!({"user": "ci", "host": "fake-remote"}),
+        )
+        .await;
+        let ssh_bin = fake_ssh_script(dir.path());
+        let fake_dir = ssh_bin.parent().unwrap().to_path_buf();
+
+        with_path_prepend(&fake_dir, || async {
+            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::ACCEPTED,
+                "a successful remote-container launch must start the preview"
+            );
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+
+            // The remote docker really was asked to run a container.
+            assert!(
+                fake_dir.join("ssh-saw-run").exists(),
+                "the ssh-docker dispatch must invoke the remote docker run"
+            );
+
+            // The registered handle is the pid-less remote-container shape
+            // (target_type ssh, id = remote container id, no pid) and its
+            // backend was recorded alongside — the exact shapes the
+            // pre-fix check misread as \"never started\".
+            let handle = state
+                .process_registry
+                .lock()
+                .await
+                .get(&agent_id)
+                .cloned()
+                .expect("remote-container handle must be registered");
+            assert_eq!(handle.target_type, "ssh");
+            assert!(
+                handle.pid.is_none(),
+                "SshDocker handles are pid-less by design — the shape the started check must not guess from"
+            );
+            assert!(state.spawned_backends.lock().await.contains_key(&agent_id));
+
+            // THE regression: the agent is Active (pre-fix: Failed from the
+            // first moment, with the remote container still running).
+            let agent = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&agent_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                agent.status,
+                gyre_domain::AgentStatus::Active,
+                "a successfully started remote container must not be reported failed"
+            );
+
+            // Status derives from the real row: running, not failed.
+            let status_resp = get_preview_status(&app, &preview_id).await;
+            assert_eq!(status_resp.status(), StatusCode::OK);
+            let status = body_json(status_resp).await;
+            assert_eq!(status["state"].as_str().unwrap(), "running");
+            assert_eq!(status["agents"][0]["status"].as_str().unwrap(), "running");
+
+            // Teardown kills through the recorded SshDocker backend — the
+            // remote daemon sees the `docker rm` — and purges both
+            // lifecycle registries.
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+            assert!(
+                fake_dir.join("ssh-saw-rm").exists(),
+                "DELETE must kill the remote container through the recorded backend"
+            );
+            assert!(!state.process_registry.lock().await.contains_key(&agent_id));
+            assert!(!state.spawned_backends.lock().await.contains_key(&agent_id));
+        })
+        .await;
+    }
+
+    /// Kubernetes sibling of the ssh-docker regression above: a Pod handle
+    /// (pid-less, id = pod name) is a START. Runs the kubernetes dispatch
+    /// end to end against a fake `kubectl` (wired via the target's
+    /// `kubectl_path` config, no PATH shadowing) — and additionally pins
+    /// that the draft meta-spec reaches the Pod manifest the cluster was
+    /// asked to apply.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_launch_on_kubernetes_target_is_not_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        let kubectl = fake_kubectl_script(dir.path());
+        attach_compute_target(
+            &state,
+            &repo_id,
+            gyre_domain::ComputeTargetType::Kubernetes,
+            serde_json::json!({"kubectl_path": kubectl.to_str().unwrap()}),
+        )
+        .await;
+
+        let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::ACCEPTED,
+            "a successfully scheduled Pod must start the preview"
+        );
+        let json = body_json(resp).await;
+        let preview_id = json["preview_id"].as_str().unwrap().to_string();
+        let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+
+        // The cluster was asked to apply a Pod manifest carrying the draft
+        // meta-spec — the governing context the agent runs under. The
+        // manifest serializes env as {"name","value"} objects, so assert
+        // the name and the value separately.
+        let manifest = std::fs::read_to_string(dir.path().join("kubectl-manifest.json"))
+            .expect("kubectl apply must have received the Pod manifest");
+        assert!(
+            manifest.contains("\"GYRE_META_SPEC_DRAFT_KIND\"") && manifest.contains("meta:persona"),
+            "draft kind must reach the Pod manifest; manifest was:\n{manifest}"
+        );
+        assert!(
+            manifest.contains("DRAFT-PERSONA-BODY: write exhaustive tests"),
+            "draft content must reach the Pod manifest; manifest was:\n{manifest}"
+        );
+        assert!(
+            manifest.contains("\"GYRE_PREVIEW_ID\"") && manifest.contains(&preview_id),
+            "preview id must reach the Pod manifest; manifest was:\n{manifest}"
+        );
+
+        // The registered handle is the pid-less Pod shape.
+        let handle = state
+            .process_registry
+            .lock()
+            .await
+            .get(&agent_id)
+            .cloned()
+            .expect("Pod handle must be registered");
+        assert_eq!(handle.target_type, "kubernetes");
+        assert!(
+            handle.pid.is_none(),
+            "Kubernetes handles are pid-less by design — the shape the started check must not guess from"
+        );
+
+        // THE regression: agent Active, status running (pre-fix: Failed
+        // from the first poll while the Pod kept running).
+        let agent = state
+            .agents
+            .find_by_id(&gyre_common::Id::new(&agent_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            agent.status,
+            gyre_domain::AgentStatus::Active,
+            "a successfully scheduled Pod must not be reported failed"
+        );
+        let status_resp = get_preview_status(&app, &preview_id).await;
+        assert_eq!(status_resp.status(), StatusCode::OK);
+        let status = body_json(status_resp).await;
+        assert_eq!(status["agents"][0]["status"].as_str().unwrap(), "running");
+
+        // Teardown deletes the Pod through the recorded backend.
+        let del = delete_preview(&app, &preview_id).await;
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        assert!(
+            dir.path().join("kubectl-saw-delete").exists(),
+            "DELETE must delete the Pod through the recorded backend"
+        );
+        assert!(!state.process_registry.lock().await.contains_key(&agent_id));
+    }
+
+    /// The launch-failure path must not just reclaim the row, token and
+    /// worktree — it must kill whatever process is registered for the
+    /// agent, through the recorded handle/backend pair. Pinned as a
+    /// regression because the pre-fix path performed no kill at all: a
+    /// wrong \"never started\" verdict on a live remote process orphaned
+    /// it with no agent pointing at it. A real process is registered the
+    /// way a remote-container launch would (handle shape deliberately
+    /// unreconstructable, backend recorded as Local) and must die.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mark_preview_agent_failed_kills_registered_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let workspace = state.workspaces.find_by_id(&ws_id).await.unwrap().unwrap();
+
+        let mut agent = gyre_domain::Agent::new(
+            gyre_common::Id::new("agt-preview-failkill"),
+            "preview-failkill",
+            1000,
+        );
+        agent.workspace_id = repo.workspace_id.clone();
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &agent.id.to_string(), "tok".to_string())
+            .await
+            .unwrap();
+
+        let agent_ref = PreviewAgentRef {
+            preview_id: "preview-failkill".to_string(),
+            agent_id: agent.id.to_string(),
+            repo_id: repo.id.to_string(),
+            workspace_id: repo.workspace_id.to_string(),
+            spec_path: "specs/system/search.md".to_string(),
+            branch: "preview/preview-failkill/search".to_string(),
+            base_sha: "0".repeat(40),
+            worktree_path: dir
+                .path()
+                .join("no-such-worktree")
+                .to_str()
+                .unwrap()
+                .to_string(),
+            released: false,
+        };
+        let mut p = Provisioned {
+            agent_ref: agent_ref.clone(),
+            token: "tok".to_string(),
+            agent: agent.clone(),
+            repo: repo.clone(),
+            workspace,
+        };
+
+        // A real process behind an ssh-shaped handle (id malformed for
+        // reconstruction) whose recorded backend is Local — the kill must
+        // reach the process through that pair.
+        let spawn_cfg = gyre_ports::SpawnConfig {
+            name: "preview-failkill".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            env: std::collections::HashMap::new(),
+            work_dir: "/tmp".to_string(),
+        };
+        let real = gyre_adapters::compute::LocalTarget
+            .spawn_process(&spawn_cfg)
+            .await
+            .expect("spawning sleep should work on linux");
+        let pid = real.pid.expect("local spawn sets pid");
+        state.process_registry.lock().await.insert(
+            agent.id.to_string(),
+            gyre_ports::ProcessHandle {
+                id: "f00f00f00f00remote-container".to_string(),
+                target_type: "ssh".to_string(),
+                pid: Some(pid),
+                options: std::collections::HashMap::new(),
+            },
+        );
+        state.spawned_backends.lock().await.insert(
+            agent.id.to_string(),
+            std::sync::Arc::new(crate::api::spawn::SpawnBackend::Local),
+        );
+
+        mark_preview_agent_failed(&state, "preview-failkill", &mut p).await;
+
+        // The registered process is actually dead.
+        let mut dead = false;
+        for _ in 0..50 {
+            let alive = gyre_ports::ComputeTarget::is_alive(
+                &gyre_adapters::compute::LocalTarget,
+                &gyre_ports::ProcessHandle {
+                    id: pid.to_string(),
+                    target_type: "local".to_string(),
+                    pid: Some(pid),
+                    options: std::collections::HashMap::new(),
+                },
+            )
+            .await
+            .unwrap_or(false);
+            if !alive {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            dead,
+            "mark_preview_agent_failed must kill the registered process (pid {pid})"
+        );
+        // Both lifecycle registries purged, row Failed, token revoked,
+        // budget slot released.
+        assert!(!state
+            .process_registry
+            .lock()
+            .await
+            .contains_key(&agent.id.to_string()));
+        assert!(!state
+            .spawned_backends
+            .lock()
+            .await
+            .contains_key(&agent.id.to_string()));
+        let row = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(row.status, gyre_domain::AgentStatus::Failed);
+        assert!(state
+            .kv_store
+            .kv_get("agent_tokens", &agent.id.to_string())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(p.agent_ref.released, "failure must release the budget slot");
     }
 
     /// kv wrapper whose writes to one namespace fail — forces the
