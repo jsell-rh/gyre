@@ -1683,6 +1683,15 @@ async fn orchestrator_spawn_denied_across_tenants() {
     .await;
     gyre_server::seed_builtin_personas_for_tenant(&ctx.state, &gyre_common::Id::new("default"))
         .await;
+    // Production parity (same repair class as the chain fixtures): startup
+    // seeds the built-in persona meta-specs (main.rs → seed_builtin_meta_specs)
+    // and the spawn core's persona meta-spec layer is fail-closed
+    // (validate_persona), so the own-tenant positive control also needs the
+    // approved "workspace-orchestrator" meta-spec in the spec ledger —
+    // without it the spawn 500s before the persona entity layer is ever
+    // consulted, and the test would only pass by leaning on state another
+    // test binary happened to leave behind.
+    gyre_server::seed_builtin_meta_specs(&ctx.state).await;
 
     let resp = ctx
         .post(
