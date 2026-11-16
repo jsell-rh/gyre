@@ -57,3 +57,59 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — independent review at candidate c9ae73f3 (base 6082be2f)
+
+Verdict: **approved**. Fresh re-verification of the merged-base candidate (the
+prior verification round's E0308s in git_http.rs are repaired in-candidate by
+3b8b0eb6 — a faithful mechanical adaptation to the base's `emit_event(Id, ..)`
+contract; `cargo check -p gyre-server --tests` exits 0 on this tree).
+
+Independently re-probed (all evidence in `/tmp/stage/review-evidence/`):
+
+- `check-hierarchy.sh` exit 0; mutation `Task.workspace_id → Option<Id>` →
+  exit 1 naming `task.rs:60` (tree restored). Field-deletion detection
+  (missing-required-field) read in the awk state machine.
+- `check-tenant-filter.sh` exit 0 (124 read methods on tenant-column tables /
+  0 violations; migration-derived table set incl. `_new` rename handling);
+  mutation removing the tenant predicate from `sqlite/notification.rs::
+  list_recent` → exit 1 with file:line (tree restored). SKIP_LIST rationales
+  spot-checked: `budget_call.rs::list_since` cross-tenant claim verified
+  against its only caller `apply_rolling_24h_window` (recomputes per-workspace
+  sums + storage-wide tenant:global ceiling on the shared base handle — a
+  tenant filter there would zero non-default tenants' counters hourly).
+- `check-api-auth.sh` exit 0; Check 1 mutation (drop `abac_middleware` layer
+  from the api section) → exit 1; Check 3 delegation is real: adding an
+  unregistered route to api/mod.rs → `check-abac-route-registry.sh` fails →
+  exit 1 (tree restored).
+- `cargo test -p gyre-adapters --test tenant_isolation` → 2 passed, exit 0
+  (two handles over one db file, differing only by tenant scope; list +
+  find_by_id cross-tenant invisibility both directions + fabricated-default
+  create-stamp regression). Genuine hard test, not mirrored logic.
+- Wiring: all three scripts blocking in BOTH pre-commit and CI (no `|| true`);
+  executable; usage comments present.
+
+Non-blocking observations (recorded for follow-up, not introduced by this
+diff — both pre-existing at base 6082be2f or inherent to the heuristic):
+
+1. `check-api-auth.sh` Check 2's `grep -A 15 "async fn ${handler}"` window can
+   bleed into the NEXT function's signature: stripping `AuthenticatedAgent`
+   from the 6-line `explorer_ws::issue_ws_ticket` still passes because the
+   following `explorer_ws` fn's extractor lands inside the 16-line window
+   (probe: mutation-api-auth-check2.txt, exit 0). The line is byte-identical
+   at the base; the candidate's diff to this script is only the +24-line
+   Check 3 delegation. The §7 route↔mapping requirement — the specced content
+   of this script — is enforced by the delegated frozen-baseline owner and is
+   kill-verified. Suggested follow-up: bound the signature window at the
+   handler's closing `) ->` or check the parameter list only.
+2. `check-tenant-filter.sh`'s name heuristic does not classify
+   `search.rs::suggest`/`facet_counts` as reads; both are tenant-scoped today
+   via `build_scope` (`tenant_id = ?` raw-SQL boundary, verified in source),
+   and `search_index` is an FTS5 virtual table created at runtime
+   (`ensure_fts_table`), invisible to the migration-derived table set — so it
+   is in neither the checked set nor the backlog. No live leak.
+
+Verifier must run (outside this sandbox's budget): `cargo test --all` (the
+acceptance criterion's full-suite run), plus `cargo test -p gyre-adapters
+--lib`. Focused evidence here: server `--tests` type-check clean,
+tenant_isolation green, all three lints green on the candidate tree.
