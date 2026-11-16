@@ -11,10 +11,13 @@
 //! Event-tier messages:
 //!
 //! - `GateFailure`            → rank-3 `GateFailure` notification for the MR
-//!   author agent's spawning user (HSI §8 p3).
-//! - `BudgetWarning`          → rank-4 `AgentBudgetWarning` notification for the
-//!   workspace's Admin/Developer/Owner members (user-management.md
-//!   §Notification Entity taxonomy, task-123 unification).
+//!   author agent's spawning user (HSI §8 p3). Spec-policy merge
+//!   violations (gate_type `spec_enforcement`) keep their own title via
+//!   `notify_spec_policy_violation`.
+//! - `BudgetWarning`          → NOT notified here: HSI §8 p7 creates
+//!   budget-warning notifications synchronously in the budget check
+//!   path; a bridge fan-out would duplicate them (see the note above
+//!   `on_agent_error` in `NotificationBridge`).
 //! - `AgentError`             → rank-2 `AgentEscalation` notification for the
 //!   failing agent's spawning user (HSI §8 p2).
 //! - `ReconciliationCompleted` → rank-6 `MetaSpecDrift` notification for the
@@ -285,6 +288,29 @@ impl NotificationBridge {
             return;
         };
 
+        // Spec-policy merge violations (merge_processor) reuse the
+        // GateFailure kind with gate_type "spec_enforcement": their inbox
+        // notification has its own title/body shape
+        // (notify_spec_policy_violation — "Spec policy blocked merge…"),
+        // not the GateResult shape. The former synchronous call in
+        // report_spec_policy_violation was removed for this single
+        // creation path (HSI §8 p3).
+        if gate_type == "spec_enforcement" {
+            let Some(tenant_id) = self.tenant_for_workspace(&ws_id).await else {
+                return;
+            };
+            crate::notifications::notify_spec_policy_violation(
+                &self.state,
+                &author_agent_id,
+                &ws_id,
+                mr_id,
+                output,
+                &tenant_id,
+            )
+            .await;
+            return;
+        }
+
         crate::notifications::notify_gate_failure(
             &self.state,
             &author_agent_id,
@@ -300,42 +326,14 @@ impl NotificationBridge {
         .await;
     }
 
-    /// BudgetWarning → rank-4 AgentBudgetWarning notification for workspace
-    /// Admin/Developer/Owner members (user-management.md §Notification
-    /// Entity: at 80% usage the spawner and Admins are warned; the bus bridge
-    /// fans the workspace-targeted event out to the human roles).
-    /// Payload: `{agent_id, workspace_id, usage_pct}`.
-    async fn on_budget_warning(&self, msg: &Message) {
-        let Some(ws_id) = msg.workspace_id.clone() else {
-            return;
-        };
-        let usage_pct = msg
-            .payload
-            .as_ref()
-            .and_then(|p| p.get("usage_pct"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-
-        let Some(tenant_id) = self.tenant_for_workspace(&ws_id).await else {
-            return;
-        };
-
-        let title = format!("Agent budget warning — {usage_pct:.0}% of budget used");
-        for user_id in self.workspace_human_members(&ws_id).await {
-            self.create(NotificationDraft {
-                workspace_id: ws_id.clone(),
-                user_id,
-                notification_type: NotificationType::AgentBudgetWarning,
-                title: title.clone(),
-                tenant_id: tenant_id.clone(),
-                body: msg.payload.as_ref().map(|p| p.to_string()),
-                entity_type: "workspace",
-                entity_ref: None,
-                repo_id: None,
-            })
-            .await;
-        }
-    }
+    // BudgetWarning events are NOT consumed for notification creation:
+    // HSI §8 p7 creates budget-warning notifications synchronously in the
+    // budget check path (api/budget.rs `emit_budget_warn_tier` →
+    // notification_dispatcher::notify_agent_budget_warning — per-period
+    // dedupe, spawning user + workspace Admin per user-management.md
+    // §Who Gets Notified). A bridge fan-out here would duplicate the
+    // Admin notification and deliver to Developers/Owners the spec does
+    // not grant it to (review round-2 regression).
 
     /// AgentError → rank-2 AgentEscalation notification for the failing
     /// agent's spawning user (HSI §8: "an agent has escalated or failed
@@ -468,7 +466,8 @@ impl MessageConsumer for NotificationBridge {
     async fn on_message(&self, message: &Message) {
         match &message.kind {
             MessageKind::GateFailure => self.on_gate_failure(message).await,
-            MessageKind::BudgetWarning => self.on_budget_warning(message).await,
+            // BudgetWarning deliberately has no notification arm — see
+            // the note above `on_agent_error` (HSI §8 p7 synchronous path).
             MessageKind::AgentError => self.on_agent_error(message).await,
             MessageKind::ReconciliationCompleted => self.on_reconciliation_completed(message).await,
             _ => {}
@@ -595,6 +594,61 @@ mod tests {
         assert_eq!(notifs[0].source.entity_id, "mr-1");
     }
 
+    /// Spec-policy merge violations (merge_processor) emit GateFailure
+    /// events with gate_type "spec_enforcement". The bridge must route
+    /// them to `notify_spec_policy_violation` (title "Spec policy blocked
+    /// merge…"), not the GateResult-shaped `notify_gate_failure` — and
+    /// merge_processor no longer notifies directly, so this is the single
+    /// creation path (review round-2 duplicate-notification regression).
+    #[tokio::test]
+    async fn notification_bridge_routes_spec_policy_violation() {
+        let state = crate::mem::test_state();
+        seed_workspace(&state, "ws-1", "tenant-1").await;
+        seed_agent(&state, "agent-1", "ws-1", Some("user-1")).await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-1".to_string()),
+            Id::new("repo-1".to_string()),
+            Id::new("ws-1".to_string()),
+            "Feature",
+            "feature",
+            "main",
+            0,
+        );
+        mr.author_agent_id = Some(Id::new("agent-1".to_string()));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let bridge = NotificationBridge::new(state.clone());
+        // Exactly the payload merge_processor::report_spec_policy_violation
+        // emits — no gate_name (there is no named gate).
+        let msg = test_message(
+            MessageKind::GateFailure,
+            "ws-1",
+            serde_json::json!({
+                "mr_id": "mr-1",
+                "repo_id": "repo-1",
+                "gate_type": "spec_enforcement",
+                "status": "Failed",
+                "output": "MR has no spec_ref (require_spec_ref policy)",
+                "spec_ref": null,
+            }),
+        );
+        bridge.on_message(&msg).await;
+
+        let notifs = list_notifications(&state, "user-1").await;
+        assert_eq!(notifs.len(), 1, "exactly one notification: {notifs:?}");
+        let n = &notifs[0];
+        assert_eq!(n.notification_type, NotificationType::GateFailure);
+        assert_eq!(n.priority_rank, 3);
+        assert_eq!(
+            n.title,
+            "Spec policy blocked merge on MR 'Feature': MR has no spec_ref (require_spec_ref policy)"
+        );
+        let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["policy"], "spec_enforcement");
+        assert_eq!(body["mr_id"], "mr-1");
+    }
+
     /// Review round-1 regression: two production emitters publish GateFailure
     /// for the same failed gate — gate_executor::run_gate (Workspace-targeted
     /// event) and ralph_loop::on_gates_failed (Agent-targeted copy for the
@@ -683,11 +737,23 @@ mod tests {
         assert!(viewer_notifs.is_empty());
     }
 
+    /// HSI §8 p7: budget-warning (`AgentBudgetWarning`) notifications are
+    /// created synchronously in the budget check path (api/budget.rs
+    /// `emit_budget_warn_tier` → notification_dispatcher::
+    /// notify_agent_budget_warning — per-period dedupe, spawning user +
+    /// workspace Admin per user-management.md §Who Gets Notified). The
+    /// bridge must NOT fan out another AgentBudgetWarning from the
+    /// BudgetWarning bus event: that duplicated the notification for
+    /// Admins and delivered it to Developers/Owners the spec's
+    /// Who-Gets-Notified row does not grant it to (review round-2
+    /// regression — this test kills it).
     #[tokio::test]
-    async fn notification_bridge_creates_budget_warning_notification() {
+    async fn notification_bridge_does_not_create_budget_warning_notifications() {
         let state = crate::mem::test_state();
         seed_workspace(&state, "ws-1", "tenant-1").await;
-        seed_member(&state, "ws-1", "user-1", WorkspaceRole::Owner).await;
+        seed_member(&state, "ws-1", "user-admin", WorkspaceRole::Admin).await;
+        seed_member(&state, "ws-1", "user-dev", WorkspaceRole::Developer).await;
+        seed_member(&state, "ws-1", "user-owner", WorkspaceRole::Owner).await;
 
         let bridge = NotificationBridge::new(state.clone());
         let msg = test_message(
@@ -701,13 +767,18 @@ mod tests {
         );
         bridge.on_message(&msg).await;
 
-        let notifs = list_notifications(&state, "user-1").await;
-        assert_eq!(notifs.len(), 1);
-        assert_eq!(
-            notifs[0].notification_type,
-            NotificationType::AgentBudgetWarning
+        assert!(
+            list_notifications(&state, "user-admin").await.is_empty(),
+            "bridge must not duplicate the synchronous budget notification"
         );
-        assert_eq!(notifs[0].priority_rank, 4);
+        assert!(
+            list_notifications(&state, "user-dev").await.is_empty(),
+            "Developers are not in the Agent budget warning audience"
+        );
+        assert!(
+            list_notifications(&state, "user-owner").await.is_empty(),
+            "Owners are not in the Agent budget warning audience"
+        );
     }
 
     #[tokio::test]

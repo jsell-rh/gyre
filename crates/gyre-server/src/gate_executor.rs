@@ -7316,6 +7316,11 @@ specs:
     #[tokio::test]
     async fn failing_gate_notifies_author_with_gate_result_payload() {
         let state = test_state();
+        // p3 GateFailure notifications are created by the notification
+        // bridge from the GateFailure bus event (HSI §8 p3 single creation
+        // path) — spawn the dispatcher so the bus is drained in this test
+        // too, matching production wiring (main.rs).
+        crate::message_dispatcher::spawn_message_consumer(state.clone()).await;
         let (mr_id, repo_id) = seed_mr_with_repo(&state).await;
 
         // Author agent with a spawning user (the notification recipient).
