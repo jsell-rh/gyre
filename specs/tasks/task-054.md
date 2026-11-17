@@ -2,7 +2,7 @@
 title: "Conversations Endpoint Integration Test"
 spec_ref: "human-system-interface.md §5 (Conversation-to-Code Provenance)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-054.md
 coverage_sections: []
 commits: []
