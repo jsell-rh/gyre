@@ -2,13 +2,13 @@
 title: "Supply chain — gyre-stack.lock parsing and attestation level enforcement"
 spec_ref: "supply-chain.md §gyre-stack.lock"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "supply-chain.md §gyre-stack.lock"
   - "supply-chain.md §Attestation Levels"
   - "supply-chain.md §Level 3: Gyre-Managed Runtime (Highest)"
   - "supply-chain.md §Policy per Level"
-commits: []
+commits: ["57bc4ea7e76bb4e95eb76cbd372df54bea510846", "27227f6b640b780e7d3a0720c8cbdb37ab81c82b", "c1ad62f946ea7d2004c043908e83d52c967a22e5", "2f47ec872e0d402e107a5c069dd33612205b5c94", "19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
 ---
 
 ## Spec Excerpt
@@ -57,3 +57,61 @@ Repos can set minimum attestation level requirements. Pushes from agents below t
 ## Agent Instructions
 
 Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels", §"Level 3", §"Policy per Level". The existing stack attestation code is in `crates/gyre-server/src/api/stack_attest.rs` and `crates/gyre-server/src/pre_accept.rs`. Agent JWT claims are in `crates/gyre-server/src/auth.rs` (AgentJwtClaims). The CLI is in `crates/gyre-cli/`.
+
+## Shipped
+
+Supply-chain attestation levels and lockfile, implemented in production
+code across domain/adapters/server/CLI:
+
+- **`gyre-stack.lock` schema** (`gyre-domain/src/stack.rs`):
+  `StackLockfile` capturing agents_md_hash, hooks, mcp_servers, model,
+  cli_version, settings_hash, persona_hash, lock_timestamp — parsed from
+  the repo's git tree during push processing.
+- **`gyre stack lock` CLI command** (`gyre-cli/src/main.rs`
+  `run_stack_lock`): fetches the agent's registered stack from the server
+  and writes `gyre-stack.lock` into the repo.
+- **Attestation level 1/2/3 resolution**: Level 3 when the agent runs in a
+  Gyre-managed container (server-side `wl_compute_target` JWT claim
+  check), Level 2 when a stack attestation was submitted, Level 1 on raw
+  push with no attestation; the resolved level is persisted on the agent
+  record (migration `agent_attestation_level`, sqlite + postgres
+  adapters) and exposed via `GET /api/v1/agents/{id}`.
+- **Per-level policy**: repo stack policy carries `min_attestation_level`;
+  pushes below the minimum are rejected (Block mode) or flagged (Warn
+  mode) during push processing in `git_http.rs`.
+- **Drift detection**: `gyre-stack.lock` in the pushed tree is compared
+  against the submitted stack attestation; mismatches are flagged as
+  stack drift.
+
+### Verification evidence
+
+This round (round 6, merge commit `85981001b`) resolved the rebase onto
+new base `cfeefbda9` (task-091 HSI scoped chat): the single conflict in
+`docs/api-reference.md` unioned both sides' `/api/v1/agents` row
+extensions (base's `orchestrator_type`, task-165's `attestation_level`).
+All other files auto-merged; both sides' fields round-trip through the
+merged `AgentResponse`, adapter rows, and JWT claims.
+
+At `85981001b` (logs under `/tmp/stage/review-evidence/`, prefix
+`task165-r6-`):
+
+- `cargo check -p gyre-server -p gyre-cli` → exit 0 (includes web asset
+  build via build.rs).
+- `cargo test -p gyre-domain stack` → 9 passed, 0 failed.
+- `cargo test -p gyre-adapters sqlite::agent` → 17 passed, 0 failed.
+- Gates: `check-arch.sh`, `check-migration-versions.sh`,
+  `check-migration-sql-portability.sh`, `check-mem-port-contracts.sh`,
+  `check-abac-route-registry.sh`, `check-relative-path-defaults.sh`,
+  `check-inert-enforcement.sh`, `check-mcp-write-tools.sh`,
+  `check-dead-message-kinds.sh`, `check-task-commit-attribution.sh` →
+  all exit 0.
+
+Server test compilation is deferred to the independent verifier per the
+4 GiB budget rule; it must run `cargo test -p gyre-server git_http::`
+(prior round: 62 passed — eight task-165 push-policy/drift tests plus
+base's `push_modifying_spec_revokes_ledger_approvals`) and
+`cargo test -p gyre-server api::stack_attest` (prior round: 14 passed).
+Prior-round functional evidence (rounds 1–5, unchanged by this round's
+merge beyond the unioned fields): those suites plus
+`cargo test -p gyre-domain stack` and
+`cargo test -p gyre-adapters sqlite::agent` all green.

@@ -1,10 +1,10 @@
 use anyhow::Result;
 use gyre_server::{
     abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
-    merge_processor, procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
-    seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
-    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_stale_agent_detector,
-    spawn_stale_peer_detector, telemetry, JwtConfig,
+    merge_processor, message_dispatcher, procfs_monitor, register_default_compute_target,
+    seed_builtin_meta_specs, seed_builtin_personas, siem, signal_chain, spawn_budget_daily_reset,
+    spawn_llm_rate_limiter_cleanup, spawn_presence_eviction, spawn_session_cleanup,
+    spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -79,6 +79,15 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Hourly code-search file reindex (search.md §Index Updates — file
+    // content is eventually consistent; pushes also trigger the job on
+    // demand via the job registry).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "search_code_index".to_string(),
+        Arc::clone(&state),
+    );
+
     // Hourly stale-pin detection: specs pinning old meta-spec versions get
     // priority-6 MetaSpecDrift notifications (agent-runtime.md §2).
     jobs::spawn_job(
@@ -118,6 +127,26 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Trust suggestion check (HSI §2 Trust Suggestions) — daily per
+    // workspace: 0 gate failures + 0 reverted MRs in 30 days suggests the
+    // next trust level to Admin/Owner members via priority-8
+    // TrustSuggestion notifications. Registered alone this job would only
+    // be manually triggerable; spawn_job is the executing daily loop.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "trust_suggestion_check".to_string(),
+        Arc::clone(&state),
+    );
+
+    // Email digest drain (user-management.md §Email Notifications) — every
+    // 60 s, per user's configured digest frequency. Registered in the job
+    // registry (manual trigger + status); spawn_job is the executing loop.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "email_digest".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     // Task-115 (agent-runtime.md §1 Phase 3): detect Delegation/Coordination
     // tasks and run repo orchestrators under per-repo registry locks.
@@ -133,6 +162,14 @@ async fn main() -> Result<()> {
     audit_simulator::spawn_audit_simulator(state.clone());
     spawn_budget_daily_reset(state.clone());
     spawn_llm_rate_limiter_cleanup(state.clone());
+    gyre_server::api::invitations::spawn_invitation_expiry(state.clone());
+    spawn_session_cleanup(state.clone());
+
+    // Message bus: drain the dispatch channel into registered consumers
+    // (notification bridge) and run the hourly Event-TTL expiry job
+    // (message-bus.md §Relationship to Notifications, §Implementation Notes).
+    message_dispatcher::spawn_message_consumer(state.clone()).await;
+    message_dispatcher::spawn_message_expiry(state.clone());
 
     let app = build_router(state);
 

@@ -3,9 +3,11 @@
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
   import PlaybackControls from '../components/PlaybackControls.svelte';
+  import FlowCanvas from './FlowCanvas.svelte';
   import TimelineScrubber from '../components/TimelineScrubber.svelte';
   import Breadcrumb from '../components/Breadcrumb.svelte';
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
+  import RiskMapOverlay from '../components/RiskMapOverlay.svelte';
   import ObservableBanner from '../components/ObservableBanner.svelte';
   import {
     buildAdjacency,
@@ -35,6 +37,28 @@
     governingSpecFor,
     buildTraceSteps,
   } from './causal-trace.js';
+  import {
+    SUCCESS_PARTICLE_COLOR,
+    TRAIL_FADE_MS,
+    rootSpanCases,
+    spanRootMap,
+    testCaseColor,
+    particlesAtTime,
+    nextSpanStart,
+    spansTraversingEdge,
+    nearestParticleToNode,
+    trailSegments,
+  } from './flow-particles.js';
+  import { WEBGL_PARTICLE_THRESHOLD, drawParticles2D, ParticleLayer } from './particle-layer.js';
+  // Filter-panel classification (task-178): tree-group containers are
+  // synthetic nodes whose ids never appear in the parent-computed
+  // hiddenNodeIds set, so the draw loop classifies them directly — the
+  // synthetic package/module groups ARE the boundary boxes the default
+  // zoom shows (system-explorer.md §1 "default zoom shows boundaries").
+  import { nodeCategory } from './filter-categories.js';
+  // Risk Map overlay (system-explorer.md §7, task-181): heat map metric
+  // scale + anomaly detection on the /graph/risks data.
+  import { buildRiskHeatMap, detectRiskAnomalies } from './risk-map.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -44,6 +68,7 @@
     activeQuery = /** @type {import('./types/view-query.ts').ViewQuery | null} */ (null),
     filter = $bindable('all'),
     lens = $bindable('structural'),
+    layout = 'graph', // active ViewSpec layout; 'flow' delegates rendering to FlowCanvas
     gateStatusBySpec = {},   // HSI §3 Evaluative lens: spec path → 'pass' | 'fail' (most recent gate results)
     specApprovals = [],     // HSI §3 Evaluative lens: spec approval ledger records
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
@@ -73,11 +98,62 @@
     onTimelineScrub = (_idx) => {},  // Callback when scrubber changes
     onTimelineMarkerClick = (_delta) => {}, // Callback when key moment clicked
     timelineDeltaStats = null, // { added, removed, modified, byType }
+    timelineReconciliationEvents = [], // workspace reconciliation_completed messages (key moments)
     // HSI §3 Layer 1 gate status — MR gate evaluation records for the current
     // repo: [{ mrId, spec_ref, gates: [{status}] }]. Loaded best-effort by the
     // parent (ExplorerView); only rendered in the Evaluative lens.
     gateRecords = [],
+    // Risk metrics per node id from GET /repos/:id/graph/risks (task-178:
+    // Evaluative lens overlays risk data — churn × complexity heat).
+    riskByNode = {},
+    // Full RiskMetricsResponse entries from GET /repos/:id/graph/risks
+    // (task-181 Risk Map): churn_rate, fan_in, fan_out, complexity,
+    // spec_covered per node — drives the per-metric heat map and anomaly
+    // callouts (system-explorer.md §7).
+    riskEntries = [],
+    // Node ids hidden by the in-view filter panel (filter-categories.js
+    // hiddenNodeIds) — category checkboxes toggle node visibility on the
+    // canvas. Concept selection fades instead (system-explorer.md §4,
+    // task-182) — see the conceptNodeIds prop.
+    hiddenNodeIds = null,
+    // The same panel state BEFORE reduction to node ids: unchecked category
+    // ids and selected concepts. Tree-group containers are synthetic (ids
+    // like '__tree__src.api' are built during layout), so the id set cannot
+    // express them — the draw loop classifies the group's own node
+    // (package/module → Boundaries) and matches its name against the
+    // selected concepts to decide whether the container box is filtered.
+    hiddenCategories = null,
+    filterConcepts = null,
+    // Concept view emphasis set (system-explorer.md §4, task-182): node
+    // ids belonging to the active concept — the manifest concept's
+    // projection unioned with any discovered-concept matches. Concept
+    // nodes keep full opacity and gain a highlighted border; everything
+    // else fades to background (CONCEPT_FADE_ALPHA) instead of being
+    // removed. null when no concept is active.
+    conceptNodeIds = null,
+    // Ad-hoc concept creation (system-explorer.md §4): called with the
+    // multi-selected node ids when the user picks "Create concept" —
+    // the shell (ExplorerView) opens the naming dialog and saves the
+    // grouping as an explorer view.
+    onCreateConcept = null,
   } = $props();
+
+  // Filter-panel state for tree-group containers (see hiddenCategories
+  // above): derived once so every draw-frame read is cheap.
+  let hiddenFilterCategories = $derived(new Set(hiddenCategories ?? []));
+  let activeFilterConcepts = $derived(Array.isArray(filterConcepts) ? filterConcepts : []);
+
+  // ── Concept views (system-explorer.md §4, task-182) ───────────────
+  // Non-concept nodes fade to this opacity — the spec's "everything else
+  // fades to background" (0.1–0.2), never removal.
+  const CONCEPT_FADE_ALPHA = 0.15;
+  // Purple — the concept-creation accent (multi-select, ad-hoc grouping).
+  // Deliberately distinct from every legend edge color (calls #60a5fa,
+  // implements #34d399, …) so the concept emphasis is unambiguous.
+  const CONCEPT_EDGE_COLOR = '#a78bfa';
+  let conceptFilterIds = $derived(
+    conceptNodeIds instanceof Set && conceptNodeIds.size > 0 ? conceptNodeIds : null
+  );
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
   // When a view query uses "$clicked" as scope.node, we store the template
@@ -260,6 +336,29 @@
 
   // ── Canvas state ─────────────────────────────────────────────────────
   let canvasEl = $state(null);
+  // WebGL2 particle overlay host (ui-layout.md §4 "Rendering": >100
+  // concurrent particles switch to WebGL — a canvas element permanently
+  // keeps the first context type it is given, so the WebGL particle pass
+  // needs its own element above this component's 2D canvas).
+  let particleOverlayEl = $state(null);
+  let particleLayer = null; // created/destroyed by the effect below
+
+  // Flow-layout delegation (ui-layout.md §4): when the active layout is
+  // "flow", node/edge/particle rendering is delegated to FlowCanvas (SVG
+  // node/edge layer + Canvas 2D/WebGL2 particle overlay). This component
+  // keeps the chrome — toolbar, lens toggle, breadcrumb, search — and
+  // forwards interaction callbacks.
+  const isFlowLayout = $derived(layout === 'flow');
+
+  $effect(() => {
+    const el = particleOverlayEl;
+    if (!el) return;
+    particleLayer = new ParticleLayer(el, { className: 'particle-overlay-canvas' });
+    return () => {
+      particleLayer?.destroy();
+      particleLayer = null;
+    };
+  });
   let minimapEl = $state(null);
   let containerEl = $state(null);
   let W = $state(900);
@@ -379,6 +478,9 @@
 
   let tooltipNode = $state(null);
   let tooltipPos = $state({ x: 0, y: 0 });
+  // Span id of the hovered trace particle (evaluative lens) — drives the
+  // I/O summary tooltip and the on-hover particle scale-up.
+  let hoveredParticleSpanId = $state(null);
 
   // Context menu state
   let contextMenu = $state(null); // { x, y, node }
@@ -417,8 +519,15 @@
       if (hasTraces && !TRACE_METRICS.has(evaluativeMetric)) {
         evaluativeMetric = 'span_duration';
       }
+      // No trace data but risk metrics are available (GET /repos/:id/graph/risks,
+      // task-178): default the heat to the risk overlay instead of a dead metric.
+      if (!hasTraces && riskEntryCount > 0 && evaluativeMetric !== 'risk') {
+        evaluativeMetric = 'risk';
+      }
     }
   });
+  // Risk entries present in the riskByNode prop (task-178 Evaluative lens).
+  let riskEntryCount = $derived(Object.keys(riskByNode ?? {}).length);
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
 
@@ -459,6 +568,18 @@
     void activeAgentNodeIds.size;
     void recentChanges.size;
     void nodeGateStatus.size;
+    // In-view filter panel (task-178): category/concept visibility changes
+    // and Evaluative-lens risk data arrival must redraw without waiting for
+    // the next user interaction. Tracked by identity, not size — swapping
+    // one unchecked category for another keeps the hidden set's size.
+    void hiddenNodeIds;
+    void hiddenFilterCategories;
+    void activeFilterConcepts;
+    void Object.keys(riskByNode ?? {}).length;
+    // Risk Map (task-181): heat layer rebuilds when the metric selection or
+    // the underlying risk entries change — redraw without waiting for the
+    // next user interaction.
+    void riskHeatMap;
     const t = setTimeout(() => scheduleRedraw(), 0);
     return () => clearTimeout(t);
   });
@@ -543,156 +664,12 @@
   });
 
   // Anomaly detection state — visible in both structural and evaluative lenses
-  // (spec: Risk Map is an overlay on the architecture canvas, not evaluative-only)
+  // (spec: Risk Map is an overlay on the architecture canvas, not evaluative-only).
+  // The patterns live in risk-map.js (detectRiskAnomalies) so they are
+  // unit-testable independently of the render loop (task-181).
   let anomalies = $derived.by(() => {
     if (lens !== 'structural' && lens !== 'evaluative') return [];
-    const results = [];
-    const nodeById = new Map();
-    for (const n of nodes) nodeById.set(n.id, n);
-
-    // Pre-compute trait implementation counts
-    const traitImplCounts = new Map(); // traitId → { total, tested }
-    for (const e of edges) {
-      const src = edgeSrc(e);
-      const tgt = edgeTgt(e);
-      const et = edgeType(e);
-      if (et === 'implements') {
-        const tgtNode = nodeById.get(tgt);
-        if (tgtNode && (tgtNode.node_type === 'interface' || tgtNode.node_type === 'trait')) {
-          if (!traitImplCounts.has(tgt)) traitImplCounts.set(tgt, { total: 0, tested: 0 });
-          const entry = traitImplCounts.get(tgt);
-          entry.total++;
-          const srcNode = nodeById.get(src);
-          if (srcNode?.test_coverage > 0 || srcNode?.test_node) entry.tested++;
-        }
-      }
-    }
-
-    // Compute distribution-relative thresholds (percentile-based, not hardcoded)
-    const complexities = nodes.filter(n => n.complexity != null && !n.deleted_at).map(n => n.complexity);
-    const coverages = nodes.filter(n => n.test_coverage != null && !n.deleted_at).map(n => n.test_coverage);
-    const callCounts = [];
-    for (const n of nodes) {
-      if (!n.deleted_at && n.node_type !== 'tree-group') callCounts.push(incomingCallCounts.get(n.id) ?? 0);
-    }
-    function p90(arr) {
-      if (arr.length === 0) return Infinity;
-      const sorted = [...arr].sort((a, b) => a - b);
-      const idx = Math.min(Math.floor(sorted.length * 0.9), sorted.length - 1);
-      return sorted[idx];
-    }
-    function p10(arr) {
-      if (arr.length === 0) return 0;
-      const sorted = [...arr].sort((a, b) => a - b);
-      const idx = Math.min(Math.floor(sorted.length * 0.1), sorted.length - 1);
-      return sorted[idx];
-    }
-    const complexityThreshold = Math.max(10, p90(complexities));
-    const coverageThreshold = Math.min(0.5, p10(coverages));
-    const callThreshold = Math.max(3, p90(callCounts));
-
-    for (const n of nodes) {
-      if (n.node_type === 'tree-group' || n.deleted_at) continue;
-      const calls = incomingCallCounts.get(n.id) ?? 0;
-
-      // Pattern 1: High complexity + low test coverage (distribution-relative)
-      if ((n.complexity ?? 0) > complexityThreshold && (n.test_coverage ?? 0) < coverageThreshold) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `High complexity (${n.complexity}, p90=${complexityThreshold}) but low test coverage (${Math.round((n.test_coverage ?? 0) * 100)}%)`,
-          severity: 'high',
-        });
-      }
-      // Pattern 2: Heavily depended on with no spec (distribution-relative)
-      if (calls > callThreshold && !n.spec_path) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `Heavily depended on (${calls} callers, p90=${callThreshold}) with no spec`,
-          severity: 'medium',
-        });
-      }
-      // Pattern 3: Trait has N implementations but only M tested
-      if (n.node_type === 'interface' || n.node_type === 'trait') {
-        const entry = traitImplCounts.get(n.id);
-        if (entry && entry.total > 1 && entry.tested < entry.total) {
-          results.push({
-            nodeId: n.id,
-            nodeName: n.name ?? n.qualified_name ?? '?',
-            message: `${entry.total} implementations but only ${entry.tested} tested`,
-            severity: 'medium',
-          });
-        }
-      }
-      // Pattern 4: Type/interface created by agent but has no governing spec
-      if ((n.node_type === 'type' || n.node_type === 'interface') && !n.spec_path && n.last_modified_by) {
-        const hasGovEdge = governedByIndex.has(n.id);
-        if (!hasGovEdge) {
-          results.push({
-            nodeId: n.id,
-            nodeName: n.name ?? n.qualified_name ?? '?',
-            message: `Agent-created ${n.node_type} has no governing spec`,
-            severity: 'medium',
-          });
-        }
-      }
-      // Pattern 5: Orphan function — no callers (possible dead code)
-      if (n.node_type === 'function' && !n.test_node && calls === 0) {
-        results.push({
-          nodeId: n.id,
-          nodeName: n.name ?? n.qualified_name ?? '?',
-          message: 'No callers \u2014 possible dead code',
-          severity: 'low',
-        });
-      }
-    }
-    // Pattern 6: Co-change detection — modules that change together but have no shared spec.
-    // Two heuristics: (a) same commit SHA, (b) modified within the same time window (1 hour).
-    // This catches co-changes in separate commits within the same PR.
-    const coChangeGroups = new Map(); // key → [node]
-    for (const n of nodes) {
-      if (n.deleted_at || n.node_type === 'tree-group') continue;
-      // Group by SHA (exact same commit)
-      if (n.last_modified_sha) {
-        const key = `sha:${n.last_modified_sha}`;
-        if (!coChangeGroups.has(key)) coChangeGroups.set(key, []);
-        coChangeGroups.get(key).push(n);
-      }
-      // Group by time window (same hour, to catch separate commits in same PR)
-      if (n.last_modified_at) {
-        const hourBucket = Math.floor(n.last_modified_at / 3600);
-        const key = `time:${hourBucket}`;
-        if (!coChangeGroups.has(key)) coChangeGroups.set(key, []);
-        coChangeGroups.get(key).push(n);
-      }
-    }
-    // Deduplicate: track which node pairs we've already reported
-    const reportedPairs = new Set();
-    // Find groups of 3+ nodes from different modules that share a change pattern but no shared spec
-    for (const [, group] of coChangeGroups) {
-      if (group.length < 3) continue;
-      const modules = new Set(group.map(n => n.file_path?.split('/').slice(0, -1).join('/') ?? ''));
-      if (modules.size < 2) continue; // Same module, not interesting
-      const specs = new Set(group.filter(n => n.spec_path).map(n => n.spec_path));
-      if (specs.size > 0) continue; // Have shared spec governance
-      // Dedup by first 2 node IDs
-      const pairKey = group.slice(0, 2).map(n => n.id).sort().join(',');
-      if (reportedPairs.has(pairKey)) continue;
-      reportedPairs.add(pairKey);
-      const names = group.slice(0, 3).map(n => n.name ?? '?').join(', ');
-      results.push({
-        nodeId: group[0].id,
-        nodeName: names,
-        message: `${group.length} nodes across ${modules.size} modules change together but have no shared spec`,
-        severity: 'medium',
-      });
-    }
-    // Sort by severity (high first) — show all anomalies, not an arbitrary cap.
-    // The panel scrolls so users can explore the full risk landscape.
-    const order = { high: 0, medium: 1, low: 2 };
-    results.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
-    return results;
+    return detectRiskAnomalies({ nodes, edges, riskEntries });
   });
   // Index anomalies by nodeId for O(1) canvas-spatial rendering
   let anomalyByNodeId = $derived.by(() => {
@@ -894,6 +871,17 @@
     return { metric: evaluativeMetric, palette: 'blue-red' };
   });
 
+  // ── Risk Map overlay (system-explorer.md §7, task-181) ─────────────────
+  // Heat map layer for the selected risk metric (churn / coupling /
+  // complexity / spec coverage / test coverage). Pure metric → color
+  // mapping lives in risk-map.js; the canvas only swaps node fills —
+  // positions and layout are untouched.
+  let riskMapMetric = $state('churn');
+  let riskHeatMap = $derived.by(() => {
+    if (lens !== 'evaluative' || evaluativeMetric !== 'risk') return null;
+    return buildRiskHeatMap(riskEntries, nodes, riskMapMetric);
+  });
+
   // Pre-compute evaluative heat max values
   let evalHeatMaxValues = $derived.by(() => {
     if (!evaluativeHeatConfig) return new Map();
@@ -908,12 +896,16 @@
     return m;
   });
 
-  // Centralized metric value accessor for evaluative lens (trace-based metrics only)
+  // Centralized metric value accessor for evaluative lens (trace metrics +
+  // the risk overlay from GET /repos/:id/graph/risks).
   function getNodeMetricValue(metric, node) {
     if (!node) return 0;
-    // Evaluative lens only supports behavioral/trace metrics per spec.
-    // Structural metrics (complexity, churn, incoming_calls, test_coverage)
-    // belong in the structural lens heat map.
+    // Risk overlay (task-178): risk score per node from the server's
+    // /graph/risks endpoint — churn × complexity. Structural metrics
+    // (complexity, churn alone) belong in the structural lens heat map.
+    if (metric === 'risk') {
+      return riskByNode?.[node.id] ?? 0;
+    }
     if (metric === 'span_duration') {
       const stats = nodeSpanStats.get(node.id);
       return stats ? stats.meanDuration : 0;
@@ -932,6 +924,15 @@
   function evaluativeNodeColor(nodeId, node) {
     if (!evaluativeHeatConfig || !node) return null;
     const metric = evaluativeHeatConfig.metric;
+    // Risk Map heat (task-181): color by the selected risk metric on the
+    // blue → yellow → red scale. Zero is a valid value here (stable /
+    // covered → cool blue), unlike the trace metrics above where 0 means
+    // no data — nodes without data for the metric get no heat fill.
+    // Falls back to the task-178 aggregate (churn × complexity) when only
+    // the reduced riskByNode prop is available.
+    if (metric === 'risk' && riskHeatMap && riskHeatMap.byNodeId.size > 0) {
+      return riskHeatMap.byNodeId.get(nodeId)?.color ?? null;
+    }
     const value = getNodeMetricValue(metric, node);
     if (value === 0) return null;
     const maxVal = evalHeatMaxValues.get(metric) ?? 1;
@@ -972,9 +973,46 @@
 
   // ── Evaluative lens: OTLP trace particle animation ──────────────────────
   let evalPlaying = $state(false);
-  let evalSpeed = $state(1.0); // Clamped to [0.25, 5.0] per spec
+  let evalSpeed = $state(1.0); // Clamped to [0.25, 10.0]: union of
+  //                           // explorer-canvas.md §4 (0.25x–5x) and
+  //                           // human-system-interface.md §3a (1x/10x).
   let evalScrubber = $state(0); // 0..1 normalized time position
-  let evalParticles = $state([]); // [{edgeKey, progress, span, color}]
+  let evalParticles = $state([]); // [{fromId, toId, progress, span, rootSpanId, caseIndex, color, glow}]
+  let evalTestFilter = $state(null); // Test selector (ui-layout.md §4): root
+  //                                 // span id to animate, null = all cases.
+
+  // Root spans are the test cases (ui-layout.md §4 "Multiple test cases"):
+  // each root span is one traced test request. `color` is the hue-shifted
+  // success-palette swatch used by the legend.
+  let evalRootCases = $derived.by(() => {
+    return rootSpanCases(traceData?.spans).map((c) => ({
+      ...c,
+      color: testCaseColor(SUCCESS_PARTICLE_COLOR, c.index),
+    }));
+  });
+  let evalSpanRoots = $derived.by(() => spanRootMap(traceData?.spans));
+  let evalCaseIndexByRoot = $derived.by(() => {
+    const m = new Map();
+    for (const c of evalRootCases) m.set(c.spanId, c.index);
+    return m;
+  });
+
+  // A new trace (different MR) invalidates the selected test case — reset
+  // the filter rather than animate nothing against a stale root span id.
+  $effect(() => {
+    const cases = evalRootCases;
+    if (evalTestFilter && !cases.some((c) => c.spanId === evalTestFilter)) {
+      evalTestFilter = null;
+    }
+  });
+
+  // Particle trail position history (ui-layout.md §4 "Trail": opacity decay
+  // over 200ms, 20px trail length). Keyed by span id; pruned by age inside
+  // trailSegments on every draw.
+  const particleTrails = new Map(); // spanId → [{x, y, t}]
+  function clearParticleTrails() {
+    particleTrails.clear();
+  }
 
   // Pre-compute span-to-graph-node mapping and edge call frequencies
   let traceEdgeFrequency = $derived.by(() => {
@@ -1048,53 +1086,55 @@
 
   function tickParticles(dt) {
     if (!traceSpanTimeline || !evalPlaying) return;
-    const { minTime, totalDuration, spans } = traceSpanTimeline;
-    const spanById = new Map();
-    for (const s of spans) spanById.set(s.span_id, s);
+    const { minTime, totalDuration } = traceSpanTimeline;
 
     // Advance scrubber: playback duration is proportional to actual trace duration.
     // Convert totalDuration (microseconds) to seconds, then clamp to [0.5s, 30s]
     // so very short traces don't flash by and very long traces don't drag.
     const traceSeconds = totalDuration / 1_000_000;
     const normalizedDuration = Math.max(0.5, Math.min(30.0, traceSeconds));
-    const clampedSpeed = Math.max(0.25, Math.min(5.0, evalSpeed));
-    const step = (dt / 1000) * clampedSpeed / normalizedDuration;
-    evalScrubber = Math.min(1, evalScrubber + step);
+    const clampedSpeed = Math.max(0.25, Math.min(10.0, evalSpeed));
+    // dt ≥ 0: a regressing rAF timestamp (jsdom mocks, background-tab
+    // throttling anomalies) must not rewind the scrubber below 0.
+    const step = Math.max(0, dt / 1000) * clampedSpeed / normalizedDuration;
+    evalScrubber = Math.min(1, Math.max(0, evalScrubber + step));
     if (evalScrubber >= 1) {
       evalPlaying = false; // Stop at end (single-play mode)
       evalScrubber = 1;
     }
 
-    const currentTime = minTime + evalScrubber * totalDuration;
-    const newParticles = [];
-
-    for (const span of spans) {
-      if (!span.graph_node_id || !span.parent_span_id) continue;
-      const parent = spanById.get(span.parent_span_id);
-      if (!parent?.graph_node_id) continue;
-
-      // Scope particles to drill level: only show particles where both
-      // endpoints are currently visible (in layoutNodeMap).
-      if (!layoutNodeMap.has(parent.graph_node_id) || !layoutNodeMap.has(span.graph_node_id)) continue;
-
-      const spanStart = span.start_time;
-      const spanEnd = span.start_time + span.duration_us;
-
-      if (currentTime >= spanStart && currentTime <= spanEnd) {
-        const progress = (currentTime - spanStart) / (span.duration_us || 1);
-        const isError = (span.status ?? '').toLowerCase() === 'error';
-        newParticles.push({
-          fromId: parent.graph_node_id,
-          toId: span.graph_node_id,
-          progress: Math.min(1, Math.max(0, progress)),
-          span,
-          color: isError ? '#ef4444' : '#60a5fa',
-          glow: isError ? '#ef4444' : '#3b82f6',
-        });
-      }
-    }
-    evalParticles = newParticles;
+    evalParticles = computeParticlesAtTime(minTime + evalScrubber * totalDuration);
   }
+
+  // Shared particle resolution for live playback, paused scrubbing, and
+  // step-through: the same timestamp must produce the same positions on
+  // every path (ui-layout.md §4 "All particles freeze at their positions at
+  // that timestamp").
+  function computeParticlesAtTime(currentTime) {
+    if (!traceSpanTimeline) return [];
+    return particlesAtTime(traceSpanTimeline.spans, currentTime, {
+      visibleNodeIds: layoutNodeMap,
+      testFilter: evalTestFilter,
+      rootOf: evalSpanRoots,
+      caseIndexByRoot: evalCaseIndexByRoot,
+    });
+  }
+
+  // Paused interaction must still reposition particles: dragging the
+  // scrubber, changing the test filter, or stepping while paused all
+  // resolve particles at the (new) scrubber timestamp. Without this the
+  // particles stay at their last-played positions while the scrubber
+  // moves — the freeze-on-scrub contract broken.
+  $effect(() => {
+    if (lens !== 'evaluative' || evalPlaying) return;
+    const tl = traceSpanTimeline;
+    if (!tl) {
+      if (evalParticles.length > 0) evalParticles = [];
+      return;
+    }
+    evalParticles = computeParticlesAtTime(tl.minTime + evalScrubber * tl.totalDuration);
+    untrack(() => scheduleRedraw());
+  });
 
   // Redraw when highlighted span changes (evaluative tab click)
   $effect(() => {
@@ -1114,6 +1154,23 @@
     onLensChange('evaluative');
     evalScrubber = 0;
     evalPlaying = true;
+    clearParticleTrails();
+    scheduleRedraw();
+  }
+
+  /**
+   * HSI §3a step-through: advance to the next span start (span by span),
+   * pausing playback. Repeated steps walk the trace in execution order;
+   * stepping past the last span pins the scrubber at the end.
+   */
+  function stepTracePlayback() {
+    const tl = traceSpanTimeline;
+    if (!tl) return;
+    evalPlaying = false;
+    const currentTime = tl.minTime + evalScrubber * tl.totalDuration;
+    const next = nextSpanStart(tl.spans, currentTime, evalSpanRoots, evalTestFilter);
+    evalScrubber = next == null ? 1 : (next - tl.minTime) / tl.totalDuration;
+    clearParticleTrails();
     scheduleRedraw();
   }
 
@@ -1127,6 +1184,16 @@
     // for trace-backed flow views, but guard anyway: without spans there is
     // nothing to animate.
     if ((traceData?.spans?.length ?? 0) === 0) return;
+    if (isFlowLayout) {
+      // Flow layout delegates rendering — including playback start — to
+      // FlowCanvas; this component still owns the lens switch the request
+      // implies (trace particles render on the evaluative lens).
+      untrack(() => {
+        lens = 'evaluative';
+        onLensChange('evaluative');
+      });
+      return;
+    }
     untrack(() => startTracePlayback());
   });
 
@@ -1138,6 +1205,7 @@
   $effect(() => {
     const req = focusRequest;
     if (!req?.nodeId) return;
+    if (isFlowLayout) return; // FlowCanvas owns the camera in flow layout
     const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === req.nodeId);
     if (!ln) return; // not laid out yet — retried when layoutNodes changes
     untrack(() => zoomToNode(req.nodeId));
@@ -2239,31 +2307,41 @@
       return matched.size > 0 ? matched : null;
     }
 
-    // Concept scope: start from seed nodes, expand along edges
+    // Concept scope: start from seed nodes, expand along edges.
+    // seed_match 'substring' (the ViewSpec data.concept mechanism,
+    // ui-layout.md §4): every node whose name/qualified_name contains the
+    // seed (case-insensitive) is a seed. Default 'exact': the seed names
+    // one node by name/qualified_name/id (ad-hoc groupings, grammar
+    // examples).
     if (scope.type === 'concept') {
       const seeds = scope.seed_nodes ?? [];
+      const substring = String(scope.seed_match ?? 'exact') === 'substring';
       const expandEdges = new Set((scope.expand_edges ?? ['calls']).map(e => e.toLowerCase()));
       const maxDepth = scope.expand_depth ?? 2;
       const dir = scope.expand_direction ?? 'both';
       const dm = new Map();
 
       for (const seedName of seeds) {
-        const seedNode = nodes.find(n =>
-          n.name === seedName || n.qualified_name === seedName || n.id === seedName
-        );
-        if (!seedNode || dm.has(seedNode.id)) continue;
-        dm.set(seedNode.id, 0);
-        const q = [{ id: seedNode.id, depth: 0 }];
-        while (q.length > 0) {
-          const { id, depth } = q.shift();
-          if (depth >= maxDepth) continue;
-          for (const nb of (adjacency.get(id) ?? [])) {
-            if (dm.has(nb.targetId)) continue;
-            if (!expandEdges.has(nb.edgeType)) continue;
-            if (dir === 'outgoing' && nb.reverse) continue;
-            if (dir === 'incoming' && !nb.reverse) continue;
-            dm.set(nb.targetId, depth + 1);
-            q.push({ id: nb.targetId, depth: depth + 1 });
+        const seedNodes = substring
+          ? nodes.filter(n =>
+              String(n.name ?? '').toLowerCase().includes(seedName.toLowerCase()) ||
+              String(n.qualified_name ?? '').toLowerCase().includes(seedName.toLowerCase()))
+          : [nodes.find(n => n.name === seedName || n.qualified_name === seedName || n.id === seedName)].filter(Boolean);
+        for (const seedNode of seedNodes) {
+          if (dm.has(seedNode.id)) continue;
+          dm.set(seedNode.id, 0);
+          const q = [{ id: seedNode.id, depth: 0 }];
+          while (q.length > 0) {
+            const { id, depth } = q.shift();
+            if (depth >= maxDepth) continue;
+            for (const nb of (adjacency.get(id) ?? [])) {
+              if (dm.has(nb.targetId)) continue;
+              if (!expandEdges.has(nb.edgeType)) continue;
+              if (dir === 'outgoing' && nb.reverse) continue;
+              if (dir === 'incoming' && !nb.reverse) continue;
+              dm.set(nb.targetId, depth + 1);
+              q.push({ id: nb.targetId, depth: depth + 1 });
+            }
           }
         }
       }
@@ -2329,16 +2407,26 @@
     return m;
   });
 
-  // Does a tree-group contain any matched nodes?
-  function treeGroupHasMatch(ln) {
-    if (!queryMatchedIds) return true;
-    if (queryMatchedIds.has(ln.id)) return true;
+  // Does a tree-group contain any matched nodes? Children are matched via
+  // parentTreeGroup IDENTITY OF ID, not object reference: layoutNodes is a
+  // $state array, so the draw loop's `ln` and the raw parentTreeGroup
+  // references are different Svelte proxies of the same node — reference
+  // equality silently never matches (the original query-matching recursion
+  // was dead code for the same reason).
+  function treeGroupHasAny(ln, ids) {
+    if (!ids) return true;
+    if (ids.has(ln.id)) return true;
     // Check children
+    const lnId = ln.id;
     for (const cln of layoutNodes) {
-      if (cln.parentTreeGroup === ln && queryMatchedIds.has(cln.id)) return true;
-      if (cln.parentTreeGroup === ln && cln.kind === 'tree-group' && treeGroupHasMatch(cln)) return true;
+      if (cln.parentTreeGroup?.id === lnId && ids.has(cln.id)) return true;
+      if (cln.parentTreeGroup?.id === lnId && cln.kind === 'tree-group' && treeGroupHasAny(cln, ids)) return true;
     }
     return false;
+  }
+
+  function treeGroupHasMatch(ln) {
+    return treeGroupHasAny(ln, queryMatchedIds);
   }
 
   function queryNodeOpacity(ln) {
@@ -2594,6 +2682,21 @@
   let lastCanvasW = 0;
   let lastCanvasH = 0;
 
+  // Is a tree-group container filtered out by the in-view filter panel?
+  // Containers follow the panel through their OWN node: synthetic groups
+  // carry node_type package/module (→ Boundaries), and real nodes drawn as
+  // containers carry their real node_type. Concept selection no longer
+  // hides containers — concept views fade non-concept elements to
+  // background instead of removing them (system-explorer.md §4), so the
+  // concept branch lives in the draw loop's fade math, not here.
+  function treeGroupFilterHidden(ln) {
+    if (!ln.node) return false;
+    if (hiddenFilterCategories.size > 0 && hiddenFilterCategories.has(nodeCategory(ln.node))) {
+      return true;
+    }
+    return false;
+  }
+
   function drawFrame() {
     const canvas = canvasEl;
     if (!canvas) return;
@@ -2623,9 +2726,19 @@
     // Draw edges first (below nodes)
     drawEdges(ctx);
 
-    // Draw evaluative trace particles (above edges, below nodes)
+    // Draw evaluative trace particles (above edges, below nodes). Above
+    // the spec's >100-concurrent-particle threshold (ui-layout.md §4), the
+    // particle pass moves to the WebGL2 overlay; at or below it particles
+    // composite into this 2D context between edges and nodes.
     if (lens === 'evaluative' && evalParticles.length > 0) {
-      drawTraceParticles(ctx);
+      if (evalParticles.length > WEBGL_PARTICLE_THRESHOLD && particleLayer) {
+        drawTraceParticlesViaLayer();
+      } else {
+        if (particleLayer) particleLayer.clear();
+        drawTraceParticles(ctx);
+      }
+    } else if (particleLayer) {
+      particleLayer.clear();
     }
 
     // Draw view query group boundaries
@@ -2696,6 +2809,24 @@
       if (ss > 0 && ss < 10) return;
       if (!isTreeGroup && op < 0.01) return;
 
+      // In-view filter panel (ui-navigation.md §3): category checkboxes
+      // toggle node visibility — hidden nodes are skipped entirely.
+      // Concept selection fades instead (see the concept fade below), so
+      // it no longer feeds this branch. Tree-group containers are filtered
+      // through their own node (the synthetic package/module groups are
+      // the boundary boxes the default zoom shows): a filtered group skips
+      // its box but keeps drawing children, so zoomed-in content of other
+      // categories stays visible when only the container's category is
+      // unchecked.
+      if (hiddenNodeIds?.size > 0 || hiddenFilterCategories.size > 0) {
+        if (!isTreeGroup) {
+          const filterNid = ln.node?.id ?? ln.id;
+          if (hiddenNodeIds?.has(filterNid)) return;
+        } else if (treeGroupFilterHidden(ln)) {
+          op = 0;
+        }
+      }
+
       // Semantic zoom: deliberate information hierarchy per zoom level
       // The spec's core abstraction: "default zoom shows boundaries and interfaces"
       // with "types, functions visible on drill-down."
@@ -2708,8 +2839,12 @@
       if (!isTreeGroup && ln.node) {
         const nt = ln.node.node_type ?? '';
         const isQueryMatched = activeQuery && queryMatchedIds?.has(ln.node.id);
+        // Concept nodes stay visible regardless of zoom — the concept view
+        // "shows only elements related to the selected concept" even when
+        // the semantic-zoom hierarchy would normally hide the node type.
+        const isConceptNode = conceptFilterIds?.has(ln.node.id) ?? false;
         // Always show query-matched nodes regardless of zoom
-        if (!isQueryMatched) {
+        if (!isQueryMatched && !isConceptNode) {
           if (cam.zoom < 0.3 && !['package', 'module'].includes(nt)) return;
           if (cam.zoom < 0.6 && ['function', 'method', 'endpoint', 'field', 'constant', 'table', 'component', 'class', 'enum_variant'].includes(nt)) return;
           if (cam.zoom < 1.0 && ['function', 'method', 'field', 'constant', 'enum_variant'].includes(nt)) return;
@@ -2720,6 +2855,18 @@
       // Draw this node if it has any opacity
       if (op > 0.01) {
         let drawOp = op * filterOpacity(ln);
+
+        // Concept view fade (system-explorer.md §4): concept elements keep
+        // full opacity; everything else fades to background — NOT removed.
+        // Tree-group containers stay emphasized when they contain concept
+        // nodes (their own node id may itself be a concept member).
+        if (conceptFilterIds) {
+          const inConcept = isTreeGroup
+            ? treeGroupHasAny(ln, conceptFilterIds)
+            : (ln.node?.id ? conceptFilterIds.has(ln.node.id) : conceptFilterIds.has(ln.id));
+
+          if (!inConcept) drawOp *= CONCEPT_FADE_ALPHA;
+        }
 
         if (activeQuery && drawOp > 0.01) {
           const qOp = queryNodeOpacity(ln);
@@ -3301,6 +3448,18 @@
       ctx.lineWidth = ln.id === selectedNodeId ? 2.5 : 1.5;
       ctx.stroke();
 
+      // Concept view emphasis (system-explorer.md §4): containers holding
+      // concept nodes carry the highlighted concept border — the overview-
+      // zoom counterpart of the leaf emphasis border.
+      if (conceptFilterIds && treeGroupHasAny(ln, conceptFilterIds)) {
+        ctx.save();
+        ctx.strokeStyle = CONCEPT_EDGE_COLOR;
+        ctx.lineWidth = 2.5;
+        roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // Label
       const fontSize = Math.max(8, Math.min(22, Math.min(sw, sh) * 0.22));
       ctx.fillStyle = '#e2e8f0';
@@ -3415,6 +3574,18 @@
       roundRect(ctx, s.x - sw / 2 - 2, s.y - sh / 2 - 2, sw + 4, sh + 4, r + 1);
       ctx.stroke();
       ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // ── Concept view emphasis (system-explorer.md §4) ────────────────
+    // Concept nodes render at full opacity with a highlighted border —
+    // the visual counterpart of the fade applied to everything else.
+    if (conceptFilterIds?.has(ln.id)) {
+      ctx.save();
+      ctx.strokeStyle = CONCEPT_EDGE_COLOR;
+      ctx.lineWidth = 2.5;
+      roundRect(ctx, s.x - sw / 2 - 3, s.y - sh / 2 - 3, sw + 6, sh + 6, r + 2);
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -3827,7 +3998,11 @@
     }
   }
 
-  function drawTraceParticles(ctx) {
+  // Particle drawables shared by the in-canvas 2D path and the WebGL2
+  // overlay: screen positions, hover/highlight radii and trail segments.
+  // Trail history is updated here so both paths consume identical state.
+  function particleDrawables(now) {
+    const drawables = [];
     for (const p of evalParticles) {
       const sln = layoutNodeMap.get(p.fromId);
       const tln = layoutNodeMap.get(p.toId);
@@ -3844,40 +4019,62 @@
       if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
 
       const isHighlighted = highlightedSpanId && p.span?.span_id === highlightedSpanId;
-      const radius = isHighlighted ? 8 + cam.zoom * 0.8 : 4 + cam.zoom * 0.5;
+      const isHovered = hoveredParticleSpanId && p.span?.span_id === hoveredParticleSpanId;
+      // ui-layout.md §4: 4px particles scale up on hover (base 4 → 6).
+      const radius = isHighlighted ? 8 + cam.zoom * 0.8
+        : isHovered ? 6 + cam.zoom * 0.5
+        : 4 + cam.zoom * 0.5;
 
-      // Glow
-      ctx.save();
-      ctx.shadowColor = isHighlighted ? '#f59e0b' : p.glow;
-      ctx.shadowBlur = isHighlighted ? 20 : 10;
-      ctx.globalAlpha = isHighlighted ? 1.0 : 0.8;
-      ctx.fillStyle = isHighlighted ? '#f59e0b' : p.color;
-      ctx.beginPath();
-      ctx.arc(px, py, radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-
-      // Highlight ring for selected span
-      if (isHighlighted) {
-        ctx.save();
-        ctx.globalAlpha = 0.6;
-        ctx.strokeStyle = '#fbbf24';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(px, py, radius + 4, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
+      // Trail (ui-layout.md §4: fading — opacity decay over 200ms, 20px
+      // trail length). trailSegments prunes the history in place and caps
+      // the polyline at TRAIL_LENGTH_PX; stationary points emit nothing so
+      // paused/scrub-frozen particles leave no trail.
+      let history = particleTrails.get(p.span.span_id);
+      if (!history) {
+        history = [];
+        particleTrails.set(p.span.span_id, history);
       }
+      history.push({ x: px, y: py, t: now });
+      const trail = trailSegments(history, now);
 
-      // Core
-      ctx.save();
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(px, py, radius * 0.4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+      drawables.push({
+        x: px,
+        y: py,
+        radius,
+        color: isHighlighted ? '#f59e0b' : p.color,
+        alpha: isHighlighted ? 1.0 : 0.8,
+        glowColor: isHighlighted ? '#f59e0b' : p.glow,
+        glowBlur: isHighlighted ? 20 : 10,
+        highlight: isHighlighted,
+        trail,
+      });
     }
+
+    // Drop history for spans no longer animating — a finished span's trail
+    // expires with its last point and must not pin map entries forever.
+    for (const [spanId, hist] of particleTrails) {
+      if (hist.length === 0 || now - hist[hist.length - 1].t > TRAIL_FADE_MS) {
+        particleTrails.delete(spanId);
+      }
+    }
+    return drawables;
+  }
+
+  function drawTraceParticles(ctx) {
+    if (evalParticles.length === 0) {
+      particleTrails.clear();
+      return;
+    }
+    drawParticles2D(ctx, particleDrawables(performance.now()));
+  }
+
+  // >100 concurrent particles (ui-layout.md §4 "Rendering"): the particle
+  // pass moves from this 2D context to the WebGL2 overlay canvas owned by
+  // particle-layer.js (which swaps its canvas element for a WebGL2 one —
+  // a canvas keeps the first context type it is given).
+  function drawTraceParticlesViaLayer() {
+    const drawables = particleDrawables(performance.now());
+    particleLayer.render(drawables, { width: W, height: H, dpr: window.devicePixelRatio || 1 });
   }
 
   function drawEdges(ctx) {
@@ -3899,6 +4096,8 @@
 
       const srcId = edgeSrc(e);
       const tgtId = edgeTgt(e);
+      // In-view filter panel: edges touching a hidden node are hidden too.
+      if (hiddenNodeIds?.size > 0 && (hiddenNodeIds.has(srcId) || hiddenNodeIds.has(tgtId))) continue;
       const sln = layoutNodeMap.get(srcId);
       const tln = layoutNodeMap.get(tgtId);
       if (!sln || !tln) continue;
@@ -3986,6 +4185,19 @@
           lineWidth = 2.5;
         } else {
           edgeAlpha = alpha * 0.15;
+        }
+      }
+
+      // Concept view emphasis (system-explorer.md §4): edges between
+      // concept nodes are highlighted; edges touching faded nodes dim
+      // with them — relationships within the concept stay readable.
+      if (conceptFilterIds) {
+        if (conceptFilterIds.has(srcId) && conceptFilterIds.has(tgtId)) {
+          color = CONCEPT_EDGE_COLOR;
+          edgeAlpha = Math.max(edgeAlpha, 0.8);
+          lineWidth = Math.max(lineWidth, 2);
+        } else {
+          edgeAlpha *= 0.15;
         }
       }
 
@@ -4100,6 +4312,16 @@
       bundles.get(key).count++;
     }
 
+    // Groups containing concept nodes (concept view emphasis — see the
+    // bundle loop below).
+    let conceptGroups = null;
+    if (conceptFilterIds) {
+      conceptGroups = new Set();
+      for (const [nid, gid] of nodeToGroup) {
+        if (conceptFilterIds.has(nid)) conceptGroups.add(gid);
+      }
+    }
+
     for (const [, bundle] of bundles) {
       const sln = layoutNodeMap.get(bundle.sg);
       const tln = layoutNodeMap.get(bundle.tg);
@@ -4114,10 +4336,24 @@
       if (ss.y < -50 && ts.y < -50) continue;
       if (ss.y > H + 50 && ts.y > H + 50) continue;
 
-      const thickness = Math.max(1, Math.min(5, Math.log2(bundle.count + 1)));
-      const alpha = Math.min(0.6, 0.2 + bundle.count / 100);
+      let thickness = Math.max(1, Math.min(5, Math.log2(bundle.count + 1)));
+      let alpha = Math.min(0.6, 0.2 + bundle.count / 100);
+      let color = '#64748b';
 
-      drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, '#64748b', alpha, thickness);
+      // Concept view fade (system-explorer.md §4): bundles between groups
+      // that contain concept nodes are highlighted; the rest dim to
+      // background with their endpoints.
+      if (conceptGroups) {
+        if (conceptGroups.has(bundle.sg) && conceptGroups.has(bundle.tg)) {
+          color = CONCEPT_EDGE_COLOR;
+          alpha = Math.max(alpha, 0.7);
+          thickness += 1;
+        } else {
+          alpha *= 0.15;
+        }
+      }
+
+      drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, color, alpha, thickness);
 
       // Label bundle count
       if (thickness > 1.5) {
@@ -4207,6 +4443,9 @@
 
     for (const ln of layoutNodes) {
       if (ln.treeDepth > 1) continue;
+      // In-view filter panel: containers hidden on the main canvas stay
+      // hidden on the minimap (same treeGroupFilterHidden rule).
+      if (ln.kind === 'tree-group' && treeGroupFilterHidden(ln)) continue;
       const depth = ln.treeDepth || 0;
       const colors = treeGroupColor(depth, 0);
       ctx.globalAlpha = ln.kind === 'tree-group' ? 0.5 : 0.2;
@@ -4472,6 +4711,30 @@
       tooltipPos = { x: e.clientX, y: e.clientY };
     }
 
+    // Particle hover (HSI §3a: hovering a span during playback shows the
+    // input/output summary in a tooltip; ui-layout.md §4: the particle
+    // scales up while hovered). Only when no node is under the cursor.
+    if (!hit && lens === 'evaluative' && !isPanning) {
+      const p = particleHitTest(e.clientX, e.clientY);
+      const newSpanId = p?.span?.span_id ?? null;
+      if (newSpanId !== hoveredParticleSpanId) {
+        hoveredParticleSpanId = newSpanId;
+        if (p) {
+          tooltipNode = spanTooltipNode(p.span);
+          tooltipPos = { x: e.clientX, y: e.clientY };
+          emitCanvasViewEvent(e, 'node', `span-${p.span.span_id}`, p.span);
+        } else {
+          tooltipNode = null;
+        }
+        scheduleRedraw();
+      } else if (p && tooltipNode) {
+        tooltipPos = { x: e.clientX, y: e.clientY };
+      }
+    } else if (hoveredParticleSpanId) {
+      hoveredParticleSpanId = null;
+      scheduleRedraw();
+    }
+
     // Edge hover detection (only when no node is hovered)
     if (!hit && !isPanning) {
       const edgeHover = edgeHitTest(e.clientX, e.clientY);
@@ -4487,7 +4750,7 @@
     }
 
     if (canvasEl) {
-      canvasEl.style.cursor = isPanning ? 'grabbing' : (hit || hoveredEdgeId) ? 'pointer' : 'grab';
+      canvasEl.style.cursor = isPanning ? 'grabbing' : (hit || hoveredEdgeId || hoveredParticleSpanId) ? 'pointer' : 'grab';
     }
 
     if (isPanning) {
@@ -4506,6 +4769,7 @@
   function onMouseLeave() {
     isPanning = false;
     hoveredNodeId = null;
+    hoveredParticleSpanId = null;
     tooltipNode = null;
     scheduleRedraw();
   }
@@ -4586,6 +4850,22 @@
     return null;
   }
 
+  // Span-shaped tooltip payload (HSI §3a: hover on a span shows the
+  // input/output summary). Rendered by the shared tooltip template with a
+  // dedicated span section.
+  function spanTooltipNode(span) {
+    return {
+      id: `span-${span.span_id}`,
+      name: span.operation_name ?? span.span_id,
+      node_type: 'span',
+      span_id: span.span_id,
+      duration_us: span.duration_us,
+      status: span.status,
+      input_summary: span.input_summary,
+      output_summary: span.output_summary,
+    };
+  }
+
   // Edge hit testing: find edge closest to click point within a threshold
   function edgeHitTest(clientX, clientY) {
     const rect = canvasEl?.getBoundingClientRect();
@@ -4636,6 +4916,29 @@
     dispatchViewEvent(canvasEl, ev);
   }
 
+  // FlowCanvas node detail: keeps the canvas path's enrichment contract —
+  // graph nodes (not span/edge pseudo-nodes) update
+  // canvasState.selectedNode (LLM context, deep links) and the interaction
+  // trail before the host's detail callback opens the panel.
+  function onFlowNodeDetail(node) {
+    if (node?.id && node.node_type !== 'span' && node.node_type !== 'edge') {
+      trackInteraction(`click:${node.name ?? node.id}(${node.node_type ?? 'node'})`);
+      canvasState = {
+        ...canvasState,
+        selectedNode: {
+          id: node.id,
+          name: node.name ?? '',
+          node_type: node.node_type ?? '',
+          qualified_name: node.qualified_name ?? '',
+        },
+        zoom: cam.zoom,
+        breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })),
+        recent_interactions: recentInteractions,
+      };
+    }
+    onNodeDetail(node);
+  }
+
   function onClick(e) {
     if (drillTransitioning) return;
     if (Math.abs(e.clientX - panStart.x) > 4 || Math.abs(e.clientY - panStart.y) > 4) return;
@@ -4659,6 +4962,13 @@
             return;
           }
         }
+      }
+      // ui-layout.md §4 flow interaction: clicking a node during animation
+      // pauses playback — the detail panel (opened below) shows the span
+      // data for the particle currently at/nearest this node. The ▶ play
+      // badge above already returned for clicks that start playback.
+      if (lens === 'evaluative' && nodeSpanStats.has(hit.node.id) && evalPlaying) {
+        evalPlaying = false;
       }
       // Shift+Click: multi-select for concept creation
       if (e.shiftKey) {
@@ -4694,6 +5004,22 @@
       };
       // Enrich with trace path data if a trace is active
       const enrichedNode = { ...hit.node };
+      if (lens === 'evaluative') {
+        // Span data for the particle at/nearest the clicked node (the
+        // click-node-during-animation payload from ui-layout.md §4).
+        const np = nearestParticleToNode(evalParticles, hit.node.id);
+        if (np) {
+          enrichedNode._activeSpan = {
+            span_id: np.span.span_id,
+            operation_name: np.span.operation_name,
+            duration_us: np.span.duration_us,
+            status: np.span.status,
+            input_summary: np.span.input_summary,
+            output_summary: np.span.output_summary,
+            progress: np.progress,
+          };
+        }
+      }
       if (tracePathOrder.size > 0) {
         const stepNum = tracePathOrder.get(hit.node.id);
         if (stepNum != null) {
@@ -4722,6 +5048,9 @@
       // No node hit — check for particle click (evaluative lens)
       const particleHit = particleHitTest(e.clientX, e.clientY);
       if (particleHit) {
+        // ui-layout.md §4: clicking a particle pauses playback before the
+        // span detail is shown.
+        if (evalPlaying) evalPlaying = false;
         // Show span detail in the detail panel
         const span = particleHit.span;
         onNodeDetail({
@@ -4755,6 +5084,16 @@
           file_path: edgeHit.source?.file_path,
           doc_comment: `${edgeHit.edgeType.replace('_', ' ')} relationship from ${edgeHit.source?.qualified_name ?? edgeHit.source?.name ?? '?'} to ${edgeHit.target?.qualified_name ?? edgeHit.target?.name ?? '?'}`,
         };
+        // ui-layout.md §4 "Click edge during animation": in the evaluative
+        // lens, list every span that traversed this edge with its timings.
+        if (lens === 'evaluative' && traceData?.spans?.length) {
+          const traversing = spansTraversingEdge(
+            traceData.spans,
+            edgeHit.source?.id,
+            edgeHit.target?.id,
+          );
+          if (traversing.length > 0) edgeInfo.traversing_spans = traversing;
+        }
         onNodeDetail(edgeInfo);
         emitCanvasViewEvent(e, 'edge', `${edgeHit.source?.id ?? '?'}->${edgeHit.target?.id ?? '?'}`, edgeInfo);
         selectedEdgeId = `${edgeSrc(edgeHit.edge)}->${edgeTgt(edgeHit.edge)}`;
@@ -4990,6 +5329,34 @@
     };
   }
 
+  /** Resolve a set of selected layout ids (leaves and/or tree-groups) to
+   *  the real graph node ids they cover. A synthetic tree-group selection
+   *  (its summary box is what the click hits at overview zoom) covers every
+   *  graph node inside it — the ad-hoc concept groups nodes, not layout
+   *  artifacts, so the shell receives node ids that exist in the graph. */
+  function selectionNodeIds(ids) {
+    const out = new Set();
+    const addLayoutNode = (ln) => {
+      if (!ln) return;
+      if (ln.kind === 'leaf') {
+        if (ln.node?.id) out.add(ln.node.id);
+        return;
+      }
+      // Tree-group: its own real node id (real container nodes drawn as
+      // groups), the synthetic path group's direct graph nodes, and every
+      // descendant group/leaf.
+      if (ln.node?.id && !String(ln.node.id).startsWith('__tree__')) out.add(ln.node.id);
+      for (const gn of ln.treeNode?.graphNodes ?? []) out.add(gn.id);
+      for (const child of childrenIndex.get(ln.id) ?? []) addLayoutNode(child);
+    };
+    for (const id of ids) {
+      const ln = layoutNodeMap.get(id);
+      if (ln) addLayoutNode(ln);
+      else out.add(id); // already a raw node id
+    }
+    return [...out];
+  }
+
   function contextMenuAction(action) {
     if (!contextMenu) return;
     const node = contextMenu.node;
@@ -4999,6 +5366,18 @@
     if (action === 'clear_trace') {
       // Exit trace mode (right-click affordance — explorer-canvas.md §6 "Exit trace mode")
       onInteractiveQuery(null);
+    } else if (action === 'create_concept') {
+      // Ad-hoc concept creation (system-explorer.md §4): group the
+      // multi-selected nodes (plus the right-clicked node when it isn't
+      // already among them) into a named concept — the shell opens the
+      // naming dialog and saves the grouping as an explorer view.
+      const ids = new Set(multiSelectedIds);
+      if (node?.id) ids.add(node.id);
+      if (ids.size >= 2 && onCreateConcept) {
+        onCreateConcept(selectionNodeIds(ids));
+        multiSelectedIds = new Set();
+        scheduleRedraw();
+      }
     } else if (action === 'trace') {
       startTraceFromNode(node);
     } else if (action === 'blast') {
@@ -5433,7 +5812,7 @@
 
   // Trigger redraws on reactive state changes (NOT hoveredNodeId — that triggers scheduleRedraw directly)
   $effect(() => {
-    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays, queryResult];
+    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays, queryResult, conceptFilterIds];
     scheduleRedraw();
   });
 
@@ -5680,17 +6059,25 @@
     <div class="concept-creation-bar" role="status">
       <span class="concept-count">{multiSelectedIds.size} nodes selected</span>
       <button class="concept-create-btn" type="button" onclick={() => {
-        const seedNodes = [...multiSelectedIds].map(id => {
-          const n = nodes.find(nd => nd.id === id);
-          return n?.qualified_name ?? n?.name ?? id;
-        });
-        const conceptQuery = {
-          scope: { type: 'concept', seed_nodes: seedNodes, expand_edges: ['calls', 'implements', 'contains'], expand_depth: 1 },
-          emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.12 },
-          zoom: 'fit',
-          annotation: { title: `Concept: ${seedNodes.length} seed nodes`, description: `{{count}} related nodes across {{group_count}} modules` },
-        };
-        onInteractiveQuery(conceptQuery);
+        if (onCreateConcept) {
+          // Ad-hoc concept creation (system-explorer.md §4): the shell
+          // opens the naming dialog and saves the grouping as an explorer
+          // view. The legacy interactive query below stays as the
+          // standalone-canvas fallback (no shell callback wired).
+          onCreateConcept(selectionNodeIds(multiSelectedIds));
+        } else {
+          const seedNodes = [...multiSelectedIds].map(id => {
+            const n = nodes.find(nd => nd.id === id);
+            return n?.qualified_name ?? n?.name ?? id;
+          });
+          const conceptQuery = {
+            scope: { type: 'concept', seed_nodes: seedNodes, expand_edges: ['calls', 'implements', 'contains'], expand_depth: 1 },
+            emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.12 },
+            zoom: 'fit',
+            annotation: { title: `Concept: ${seedNodes.length} seed nodes`, description: `{{count}} related nodes across {{group_count}} modules` },
+          };
+          onInteractiveQuery(conceptQuery);
+        }
         multiSelectedIds = new Set();
       }}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
@@ -5783,12 +6170,53 @@
     </div>
   {/if}
 
-  <!-- Toolbar — lens toggle + filter presets (explorer-implementation.md §25 Phase 1) -->
+  <!-- Toolbar — lens checkbox group + filter presets (explorer-implementation.md §25 Phase 1;
+       ui-navigation.md §3: "Checkbox group (not a dropdown — checkboxes allow multi-select
+       for composition). Structural (always on) + Evaluative (toggle) + Observable (toggle, future).") -->
   <div class="treemap-toolbar">
-    <div class="lens-group" role="group" aria-label="Lens toggle">
-      <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
-      <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" aria-disabled="true" title="Observable lens is disabled — requires production telemetry integration" onclick={() => { observableBannerVisible = true; }}>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></button>
+    <div class="lens-group" role="group" aria-label="Lens selector" data-testid="lens-checkbox-group">
+      <!-- Structural is always the base layer — checked and locked. -->
+      <label class="lens-check" data-testid="lens-checkbox-structural" title="Structural lens — boundaries and dependencies (always on)">
+        <input type="checkbox" checked disabled aria-disabled="true" />
+        <span>Structural</span>
+      </label>
+      <!-- Evaluative is an additive overlay on the structural base. -->
+      <label class="lens-check" data-testid="lens-checkbox-evaluative" title="Overlay test results, gate outcomes, spec coverage, and risk metrics on the structural topology">
+        <input
+          type="checkbox"
+          checked={lens === 'evaluative'}
+          onchange={(e) => {
+            const next = e.currentTarget.checked ? 'evaluative' : 'structural';
+            lens = next;
+            onLensChange(next);
+          }}
+        />
+        <span>Evaluative</span>
+      </label>
+      <!-- Observable is a future toggle — grayed out until production telemetry
+           integration exists (system-explorer.md §1 "Observable (future)"). Clicking
+           it surfaces the notice banner instead of activating. The disabled input
+           is the visual checkbox; the wrapper carries the interaction (a disabled
+           input cannot receive events) as a keyboard-operable role=checkbox. -->
+      <div
+        class="lens-check lens-check-observable"
+        data-testid="lens-checkbox-observable"
+        role="checkbox"
+        aria-checked="false"
+        aria-disabled="true"
+        tabindex="0"
+        title="Observable lens is disabled — requires production telemetry integration"
+        onclick={() => { observableBannerVisible = true; }}
+        onkeydown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            observableBannerVisible = true;
+          }
+        }}
+      >
+        <input type="checkbox" disabled aria-disabled="true" />
+        <span>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></span>
+      </div>
     </div>
 
     <div class="filter-preset-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>
@@ -5808,7 +6236,21 @@
       <EvaluativeOverlay
         {evaluativeMetric}
         {traceData}
+        hasRiskData={riskEntryCount > 0}
         onMetricChange={(key) => { evaluativeMetric = key; userExplicitlySelectedMetric = true; onLensChange('evaluative'); }}
+      />
+      <div class="tb-sep"></div>
+    {/if}
+
+    <!-- Risk Map overlay controls (system-explorer.md §7, task-181): appear
+         when the Evaluative lens runs the Risk metric — metric selector +
+         color scale legend. Toggling the lens (or the metric) off removes
+         the overlay entirely; nodes return to structural coloring. -->
+    {#if lens === 'evaluative' && evaluativeMetric === 'risk' && riskEntries.length > 0}
+      <RiskMapOverlay
+        metric={riskMapMetric}
+        heat={riskHeatMap}
+        onMetricChange={(key) => { riskMapMetric = key; scheduleRedraw(); }}
       />
       <div class="tb-sep"></div>
     {/if}
@@ -5878,6 +6320,22 @@
         title={$t('explorer_treemap.empty_title')}
         description={$t('explorer_treemap.empty_desc')}
       />
+    {:else if isFlowLayout}
+      <!-- ui-layout.md §4 Flow Layout: ExplorerCanvas delegates to
+           FlowCanvas — an SVG node/edge layer (clickable, accessible) with
+           a Canvas 2D / WebGL2 particle overlay on top. -->
+      <FlowCanvas
+        {nodes}
+        {edges}
+        {traceData}
+        {lens}
+        {playbackRequest}
+        {highlightedSpanId}
+        {focusRequest}
+        visibleNodeIds={queryMatchedIds}
+        onNodeDetail={onFlowNodeDetail}
+        onScopeDrill={onScopeDrill}
+      />
     {:else}
       <canvas
         bind:this={canvasEl}
@@ -5899,6 +6357,12 @@
         aria-label="Architecture explorer canvas"
         tabindex="0"
       ></canvas>
+
+      <!-- WebGL2 particle overlay (ui-layout.md §4: >100 concurrent
+           particles switch to WebGL; the overlay element is needed because
+           a canvas keeps the first context type it is given, and the main
+           canvas is 2D). -->
+      <div class="particle-overlay" bind:this={particleOverlayEl} aria-hidden="true"></div>
 
       <!-- Screen reader: announce selected node -->
       <div class="sr-only" aria-live="polite" aria-atomic="true">
@@ -5926,6 +6390,20 @@
           {/if}
           {#if tooltipNode.spec_path}
             <span class="tooltip-spec">spec: {tooltipNode.spec_path}</span>
+          {/if}
+          {#if tooltipNode.node_type === 'span' && tooltipNode.span_id}
+            <div class="tooltip-span-io">
+              <span class="tooltip-span-meta">
+                {tooltipNode.duration_us < 1000 ? `${Math.round(tooltipNode.duration_us)}\u00B5s` : `${(tooltipNode.duration_us / 1000).toFixed(1)}ms`}
+                · {tooltipNode.status ?? 'ok'}
+              </span>
+              {#if tooltipNode.input_summary}
+                <span class="tooltip-span-line"><span class="tooltip-span-k">in</span> {tooltipNode.input_summary}</span>
+              {/if}
+              {#if tooltipNode.output_summary}
+                <span class="tooltip-span-line"><span class="tooltip-span-k">out</span> {tooltipNode.output_summary}</span>
+              {/if}
+            </div>
           {/if}
           <div class="tooltip-eval">
             {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
@@ -6060,6 +6538,15 @@
             </button>
           {/if}
           <div class="ctx-sep"></div>
+          <!-- Ad-hoc concept creation (system-explorer.md §4): visible only
+               while nodes are multi-selected (Shift+Click). Groups the
+               selection into a named concept saved as an explorer view. -->
+          {#if multiSelectedIds.size >= 2}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('create_concept')} data-testid="ctx-create-concept">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+              Create concept ({multiSelectedIds.size} selected)
+            </button>
+          {/if}
           <!-- Secondary actions in collapsible "More..." -->
           <button class="ctx-more-toggle" onclick={() => { ctxMoreOpen = !ctxMoreOpen; }} aria-expanded={ctxMoreOpen}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
@@ -6286,8 +6773,10 @@
     onDismiss={() => { observableBannerVisible = false; }}
   />
 
-  <!-- Evaluative trace playback overlay bar -->
-  {#if lens === 'evaluative'}
+  <!-- Evaluative trace playback overlay bar — hidden in the flow layout,
+       where FlowCanvas renders its own controls (ui-layout.md §4 control
+       bar belongs to the flow renderer). -->
+  {#if lens === 'evaluative' && !isFlowLayout}
     <PlaybackControls
       {evalPlaying}
       {evalScrubber}
@@ -6296,9 +6785,13 @@
       {traceData}
       {traceElapsedDisplay}
       {traceTotalDisplay}
+      rootCases={evalRootCases}
+      testFilter={evalTestFilter}
       onPlayToggle={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }}
-      onScrubberChange={(v) => { evalScrubber = v; scheduleRedraw(); }}
+      onScrubberChange={(v) => { evalScrubber = v; clearParticleTrails(); scheduleRedraw(); }}
       onSpeedChange={(v) => { evalSpeed = v; }}
+      onStep={() => { stepTracePlayback(); }}
+      onTestFilterChange={(id) => { evalTestFilter = id; clearParticleTrails(); scheduleRedraw(); }}
     />
   {/if}
 
@@ -6309,6 +6802,7 @@
       active={timelineActive}
       scrubIndex={timelineScrubIndex}
       {nodes}
+      reconciliationEvents={timelineReconciliationEvents}
       onToggle={onTimelineToggle}
       onScrub={onTimelineScrub}
       onMarkerClick={onTimelineMarkerClick}
@@ -6335,7 +6829,13 @@
           class="anomaly-item anomaly-{anomaly.severity}"
           onclick={() => {
             const n = nodes.find(nd => nd.id === anomaly.nodeId);
-            if (n) { selectedNodeId = n.id; onNodeDetail(n); }
+            if (n) {
+              // Navigate on canvas (spec §7: callouts link to the relevant
+              // nodes): pan/zoom the camera onto the offending node, select
+              // it, and surface its detail panel.
+              zoomToNode(n.id);
+              onNodeDetail(n);
+            }
           }}
           type="button"
         >
@@ -6363,6 +6863,25 @@
   }
 
   .filter-group, .lens-group { display: flex; gap: 2px; }
+  /* Lens checkbox group (ui-navigation.md §3: checkbox group, not a dropdown) */
+  .lens-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #94a3b8;
+    cursor: pointer;
+    user-select: none;
+  }
+  .lens-check:hover { background: rgba(51, 65, 85, 0.5); color: #e2e8f0; }
+  .lens-check input { accent-color: #3b82f6; margin: 0; cursor: pointer; }
+  .lens-check input:disabled { cursor: not-allowed; }
+  .lens-check:has(input:checked) { background: #1e293b; color: #e2e8f0; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); }
+  .lens-check-observable { opacity: 0.45; font-style: italic; cursor: not-allowed; }
+  .lens-check-observable:hover { background: transparent; color: #94a3b8; opacity: 0.6; }
 
   .tb-btn {
     padding: 5px 14px; border: none; border-radius: 7px; font-size: 13px; font-weight: 500;
@@ -6374,9 +6893,6 @@
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
-  .tb-btn-observable { opacity: 0.35; font-style: italic; cursor: not-allowed; }
-  .tb-btn-observable:hover { opacity: 0.5; }
-  .tb-btn-observable::after { content: '🔒'; font-size: 8px; margin-left: 4px; vertical-align: middle; text-decoration: none; display: inline-block; }
   .observable-coming-soon { font-size: 9px; opacity: 0.7; font-style: italic; }
   /* Styles for eval-metric, observable-banner, trace-playback moved to extracted components */
 
@@ -6395,6 +6911,8 @@
   .treemap-stats { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; }
 
   .treemap-canvas-area { flex: 1; position: relative; overflow: hidden; min-height: 200px; }
+  .particle-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+  .treemap-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .treemap-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .treemap-canvas:focus-visible { outline: 2px solid #3b82f6; outline-offset: -2px; }
 
@@ -6423,6 +6941,10 @@
   .tooltip-qname { font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-file { font-size: 10px; color: #475569; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-count, .tooltip-spec { font-size: 10px; color: #64748b; }
+  .tooltip-span-io { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+  .tooltip-span-meta { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
+  .tooltip-span-line { font-size: 10px; color: #cbd5e1; font-family: 'SF Mono', Menlo, monospace; word-break: break-all; }
+  .tooltip-span-k { color: #60a5fa; font-weight: 600; margin-right: 4px; }
   .tooltip-eval { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; border-top: 1px solid #1e293b; padding-top: 4px; }
   .tooltip-eval span { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-test-badge { color: #22c55e !important; font-weight: 600; }

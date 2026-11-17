@@ -2,14 +2,14 @@
 title: "LLM Endpoint Contract — SSE streaming, prompt templates, rate limiting"
 spec_ref: "ui-layout.md §2 LLM Endpoint Contract"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "ui-layout.md §LLM Endpoint Contract"
   - "ui-layout.md §Role"
   - "ui-layout.md §Available Data"
   - "ui-layout.md §Output Format"
   - "ui-layout.md §Constraints"
-commits: []
+commits: ["474d6133c3aaf74cc014ca30fc51ef090f33aacc", "d712b608880a4c617d30e886b6832e6dd47be7a5", "5e9e678024a2b3bf88cf8ea514ef09a27491bd3c", "3025f256e61a9198cd7f060c2b4d5907585cdd8f", "c5eb3911b4d66871de7b3541667565a63272fa6d", "f7219be28b55cfce7a28a913d6a9538f0fdff116", "7fcbf2723c67e4ee7f289965bfa4a1e55f0fc9be", "ed457c45c87bc569a6aabcfd2e1b11d26b33abfa", "8c5468225eda8d28476bb8ff824a23c2c52de23b", "8da4333aaf3c17fd0d8e5068815efc647a16559f", "932ef894d0dfbfd7952d2a2c9babbe9857e13ebd", "93d0f4b995f15a0c00878228dfc080ba54b425fa", "daf00443522544ff1c56bed4ae092fadcd6a8f0b", "046663dbd9f4dc1f45fbbfb792cecdbf2b54f026", "8259c9413c9862d0a49bc6e920a63fadea24d3ba", "dd322e125c3fff0a964387467ee90d8059ea1ce3", "c2d61905b9eebd2bedee4664cf34f3b261d1f0c3", "cd206b555cbf5053060b92c862b3824241e2d011", "4489f0f44e7375d8ce2c0f5fe7e84f6a24636796", "33ead7c1309bfef123974a7135c189931c1d3b31", "f7bf82e9dd77b992d2138e95592b2cd6efc58bf1"]
 ---
 
 ## Spec Excerpt
@@ -75,3 +75,13 @@ Prompt template format uses `{{variable}}` substitution. Templates are committed
 ## Agent Instructions
 
 Read `ui-layout.md` §2 "LLM Endpoint Contract" for the full contract. Check existing endpoint registration in `crates/gyre-server/src/api/mod.rs`. The `explorer-views/generate` endpoint already has a route registered — verify at `mod.rs`. Use the existing budget and ABAC infrastructure. For SSE, use axum's `Sse` response type. The rate limiter should be a simple `HashMap<(UserId, WorkspaceId), VecDeque<Instant>>` behind a `Mutex`, not a complex middleware.
+
+## Shipped
+
+All eight acceptance criteria are implemented and previously independently approved (commit history above): SSE helper emitting `partial`/`complete`/`error` events, git-tree prompt templates with `{{...}}` substitution, per-(user, workspace) sliding-window rate limiter (10 req/min, 429 + `Retry-After`, 60s eviction), `llm_query` budget cost entries with prompt-template git-SHA audit, three registered SSE endpoints with ABAC mappings, and `prompts/save` direct-to-default-branch commits.
+
+### This round: test-build repair (474d6133)
+
+The prior candidate widened `LlmPort::predict_json` to take `max_tokens: Option<u32>` but missed the `RecordingLlmPort` test mock in `crates/gyre-server/src/api/specs_assist.rs`, leaving `cargo check -p gyre-server --tests` broken with error[E0050] so the task-171 suite could not run. Added the missing `_max_tokens: Option<u32>` parameter (one line); no production behavior changed.
+
+Evidence: `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` exits 0 at this commit (log: `/tmp/stage/review-evidence/task171-repair/cargo-check-tests-gyre-server.log`). Full `cargo test -p gyre-server` (linking the server test binary) is deferred to the independent verifier per the runtime memory budget; the suite to execute is the in-module tests in `src/api/specs_assist.rs`, `src/api/graph.rs` (explorer generate SSE), the briefing-ask tests, and `tests/explorer_ws_integration.rs`.

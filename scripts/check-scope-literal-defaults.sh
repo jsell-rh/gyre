@@ -31,11 +31,20 @@
 # flagged site by resolving the real scope (or refusing to create the
 # entity without it); delete the exemption line when fixed and lower
 # FROZEN_EXEMPTION_COUNT — never add entries, never raise it.
-FROZEN_EXEMPTION_COUNT=12
+FROZEN_EXEMPTION_COUNT=0
 #
 # Run by pre-commit and CI.
 
 set -uo pipefail
+
+# No-arg default: scan crates/ — mirrors every sibling check. Without this,
+# the argv-iterating Python body scans zero files and every invocation path
+# (pre-commit pass_filenames:false, CI bare invocation, dev-check.sh) runs
+# the check vacuously, silently un-pinning exemption lines whenever edits
+# shift line numbers.
+if [ $# -eq 0 ]; then
+    set -- crates/
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -45,7 +54,7 @@ import re
 import sys
 from pathlib import Path
 
-FROZEN_EXEMPTION_COUNT = 12
+FROZEN_EXEMPTION_COUNT = 0
 
 TEST_START = re.compile(r'\s*(#\[[^\]]*\]\s*)?(mod tests|#\[cfg\(test\)\])')
 
@@ -83,7 +92,7 @@ def main():
         print("  flagged site by resolving the real scope, then delete the line"
               " and lower FROZEN_EXEMPTION_COUNT; never add entries, never raise it.")
         sys.exit(1)
-    for path in find_files(sys.argv[1:]):
+    for path in find_files(sys.argv[1:] or ['crates/']):
         try:
             text = path.read_text(encoding='utf-8', errors='replace')
         except OSError:

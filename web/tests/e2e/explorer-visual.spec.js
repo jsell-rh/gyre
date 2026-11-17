@@ -855,9 +855,10 @@ test.describe('Explorer toolbar visual regression', () => {
   test('evaluative_lens_toggle_changes_toolbar', async ({ page }) => {
     await navigateToExplorer(page);
 
-    // Click the Evaluative lens button
-    const evalBtn = page.locator('.lens-group').getByRole('button', { name: 'Evaluative' });
-    await evalBtn.click();
+    // Check the Evaluative lens checkbox (ui-navigation.md §3: the lens
+    // selector is a checkbox group, not buttons)
+    const evalCheck = page.locator('[data-testid="lens-checkbox-evaluative"] input');
+    await evalCheck.click();
     await page.waitForTimeout(500);
 
     const toolbar = page.locator('.treemap-toolbar');

@@ -274,33 +274,64 @@ async fn full_ralph_loop_via_gyre() {
         .unwrap();
     assert_eq!(task_review["status"], "review");
 
-    // -- 10. Enqueue MR in merge queue --
-    // The merge processor auto-transitions Open -> Approved -> Merged on success.
-    let queue_entry: serde_json::Value = client
-        .post(format!("{api}/merge-queue/enqueue"))
-        .header("Authorization", &auth_hdr)
-        .json(&serde_json::json!({"merge_request_id": mr_id}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    assert_eq!(queue_entry["status"], "queued");
-    assert_eq!(queue_entry["merge_request_id"].as_str().unwrap(), &mr_id);
-
-    // Verify queue is listed
-    let queue_list: serde_json::Value = client
-        .get(format!("{api}/merge-queue"))
-        .header("Authorization", &auth_hdr)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(queue_list.as_array().unwrap().len(), 1);
+    // -- 10. Completion auto-enqueued the MR (agent-runtime.md §1 Phase 6) --
+    // on_agent_mr_created enqueues the completion MR synchronously during
+    // /complete, so no manual enqueue happens here: a manual enqueue of
+    // what completion already enqueued must not create a duplicate queue
+    // entry. The merge processor (5 s tick) may already have merged the
+    // entry by the time we look, so observing the queued entry OR an
+    // already-merged MR both prove the auto-enqueue — only the absence of
+    // both within the poll window indicates a missing Phase 6 hook.
+    let mut auto_enqueue_proved = false;
+    for _ in 0..40 {
+        let queue_list: serde_json::Value = client
+            .get(format!("{api}/merge-queue"))
+            .header("Authorization", &auth_hdr)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let entries = queue_list.as_array().unwrap();
+        let for_this_mr: Vec<&serde_json::Value> = entries
+            .iter()
+            .filter(|e| e["merge_request_id"].as_str() == Some(mr_id.as_str()))
+            .collect();
+        assert!(
+            for_this_mr.len() <= 1,
+            "duplicate merge-queue entries for one MR: {entries:?}"
+        );
+        if let Some(entry) = for_this_mr.first() {
+            let status = entry["status"].as_str().unwrap_or("");
+            assert!(
+                status == "queued" || status == "processing",
+                "auto-enqueued entry must be queued or processing, got: {status}"
+            );
+            auto_enqueue_proved = true;
+            break;
+        }
+        // Not listed: the entry is terminal — an MR already merged by the
+        // 5 s processor tick proves the auto-enqueued entry was processed.
+        let mr_poll: serde_json::Value = client
+            .get(format!("{api}/merge-requests/{mr_id}"))
+            .header("Authorization", &auth_hdr)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if mr_poll["status"].as_str() == Some("merged") {
+            auto_enqueue_proved = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        auto_enqueue_proved,
+        "agent completion did not auto-enqueue the MR into the merge queue"
+    );
 
     // -- 11. Wait for merge queue processor (runs every 5s, polls up to 20s) --
     let mut final_mr_status = String::from("open");

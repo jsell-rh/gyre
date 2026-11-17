@@ -347,6 +347,9 @@
   let wsMetaSpecs       = $state([]);   // all kinds, not just personas
   let selectedMsId      = $state('');
   let selectedMsContent = $state('');
+  // Published prompt of the selected meta-spec — the baseline the locked
+  // editor diffs pending changes against during a preview (§9 State 2).
+  let selectedMsBaseline = $state('');
 
   let targetSpecs       = $state([]);
 
@@ -368,6 +371,7 @@
       if (wsMetaSpecs.length > 0 && !selectedMsId) {
         selectedMsId = wsMetaSpecs[0].id;
         selectedMsContent = wsMetaSpecs[0].prompt || '';
+        selectedMsBaseline = wsMetaSpecs[0].prompt || '';
       }
       targetSpecs = Array.isArray(sp)
         ? sp.filter(s => !s.kind || !s.kind.startsWith('meta:'))
@@ -382,6 +386,7 @@
     selectedMsId = id;
     const ms = wsMetaSpecs.find(m => m.id === id);
     selectedMsContent = ms?.prompt || '';
+    selectedMsBaseline = ms?.prompt || '';
   }
 
   async function publish() {
@@ -389,6 +394,13 @@
     publishSaving = true;
     try {
       await api.publishPersona(workspaceId, selectedMsId, { content: selectedMsContent });
+      // The draft is now the published registry prompt — refresh the
+      // baseline (and the cached registry entry) so the next preview's
+      // locked diff is computed against the post-publish version, not
+      // the pre-publish one (§9 State 2 after an in-session publish).
+      selectedMsBaseline = selectedMsContent;
+      const published = wsMetaSpecs.find(m => m.id === selectedMsId);
+      if (published) published.prompt = selectedMsContent;
       toastSuccess($t('meta_specs.toast.published'));
     } catch (e) {
       toastError($t('meta_specs.toast.publish_failed', { values: { error: e?.message ?? 'unknown error' } }));
@@ -477,6 +489,7 @@
             context="meta-spec"
             workspaceId={workspaceId}
             targetSpecs={targetSpecs}
+            baselineContent={selectedMsBaseline}
             onpublish={publish}
             onPreviewStateChange={(s) => (msLocked = s === 'preview_running')}
           />

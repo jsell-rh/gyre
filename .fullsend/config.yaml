@@ -5,6 +5,8 @@ agents:
     source: harness/triage.yaml
   - name: implement
     source: harness/implement.yaml
+  - name: assess
+    source: harness/assess.yaml
   - name: review
     source: harness/review.yaml
 inference:

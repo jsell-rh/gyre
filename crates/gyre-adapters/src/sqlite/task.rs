@@ -95,6 +95,7 @@ struct TaskRow {
     task_type: Option<String>,
     order: Option<i32>,
     depends_on: String,
+    generation: i32,
 }
 
 impl TaskRow {
@@ -130,6 +131,7 @@ impl TaskRow {
                 .into_iter()
                 .map(Id::new)
                 .collect(),
+            generation: self.generation.max(1) as u32,
         })
     }
 }
@@ -159,6 +161,7 @@ struct NewTaskRow<'a> {
     task_type: Option<&'a str>,
     order: Option<i32>,
     depends_on: &'a str,
+    generation: i32,
 }
 
 #[async_trait]
@@ -200,6 +203,7 @@ impl TaskRepository for SqliteStorage {
                 task_type: task_type_str,
                 order: t.order.map(|v| v as i32),
                 depends_on: &depends_on_json,
+                generation: t.generation as i32,
             };
             diesel::insert_into(tasks::table)
                 .values(&row)
@@ -225,6 +229,7 @@ impl TaskRepository for SqliteStorage {
                     tasks::task_type.eq(row.task_type),
                     tasks::order.eq(row.order),
                     tasks::depends_on.eq(row.depends_on),
+                    tasks::generation.eq(row.generation),
                 ))
                 .execute(&mut *conn)
                 .context("insert task")?;
@@ -354,6 +359,7 @@ impl TaskRepository for SqliteStorage {
                 tasks::task_type.eq(task_type_str),
                 tasks::order.eq(t.order.map(|v| v as i32)),
                 tasks::depends_on.eq(&depends_on_json),
+                tasks::generation.eq(t.generation as i32),
             ))
             .execute(&mut *conn)
             .context("update task")?;

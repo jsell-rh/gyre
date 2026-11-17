@@ -204,6 +204,7 @@ pub async fn release_prepare(
         let mr = gyre_domain::MergeRequest::new(
             new_id(),
             Id::new(&req.repo_id),
+            repo.workspace_id.clone(),
             title,
             branch.clone(),
             repo.default_branch.clone(),
@@ -289,6 +290,7 @@ mod tests {
 
         let agent_token = sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "rogue-agent",
                 "preferred_username": "rogue-agent",
                 "realm_access": { "roles": ["agent"] }

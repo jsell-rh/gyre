@@ -30,6 +30,13 @@ pub trait WorkspaceRepository: Send + Sync {
     /// Used for both initial creation (seed policies, `delete_trust_policies =
     /// false`) and trust-level updates (`delete_trust_policies = true` for every
     /// non-`Custom` transition; `Custom` preserves existing `trust:` policies).
+    ///
+    /// CACHE CONTRACT: this is the one production path that persists policies
+    /// WITHOUT the `PolicyRepository` port (atomicity requires one transaction).
+    /// Callers MUST invalidate the server's policy-set cache
+    /// (`AppState::policy_cache`) after a successful call — see
+    /// `gyre-server/src/policy_cache.rs`. A new out-of-band policy writer
+    /// must do the same or the ABAC engine will evaluate a stale policy set.
     async fn apply_trust_transition(
         &self,
         workspace: &Workspace,

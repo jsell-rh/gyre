@@ -148,6 +148,7 @@ mod tests {
     fn agent_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "agent-sub",
                 "preferred_username": "agent-user",
                 "realm_access": { "roles": ["agent"] }
@@ -159,6 +160,7 @@ mod tests {
     fn readonly_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
+                "tenant_id": "default",
                 "sub": "ro-sub",
                 "preferred_username": "readonly-user",
                 "realm_access": { "roles": ["readonly"] }
@@ -442,6 +444,17 @@ mod tests {
         //    the supervised trust gate; the guard is a live role check).
         {
             let state = make_test_state_with_jwt();
+            // create_mr resolves the MR's workspace scope from its
+            // repository and refuses unknown repositories (M34 hierarchy
+            // enforcement) — seed the repository the probe MR targets.
+            let repo = gyre_domain::Repository::new(
+                gyre_common::Id::new("repo-1"),
+                gyre_common::Id::new("ws1"),
+                "repo-1",
+                "/repos/repo-1",
+                1000,
+            );
+            state.repos.create(&repo).await.unwrap();
             let app = crate::api::api_router().with_state(state.clone());
             // create_mr has no auth extractor, so seed the MR without a token.
             let resp = app

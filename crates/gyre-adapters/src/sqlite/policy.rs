@@ -74,7 +74,7 @@ impl PolicyRow {
             name: self.name,
             description: self.description,
             scope: str_to_scope(&self.scope)?,
-            scope_id: self.scope_id,
+            scope_id: self.scope_id.map(Id::new),
             priority: self.priority as u32,
             effect: str_to_effect(&self.effect)?,
             conditions,
@@ -83,7 +83,7 @@ impl PolicyRow {
             enabled: self.enabled != 0,
             built_in: self.built_in != 0,
             immutable: self.immutable != 0,
-            created_by: self.created_by,
+            created_by: Id::new(self.created_by),
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
         })
@@ -176,7 +176,7 @@ pub(crate) fn insert_policy_row_txn(
         name: p.name.clone(),
         description: p.description.clone(),
         scope: scope_to_str(&p.scope).to_string(),
-        scope_id: p.scope_id.clone(),
+        scope_id: p.scope_id.as_ref().map(|id| id.as_str().to_string()),
         priority: p.priority as i32,
         effect: effect_to_str(&p.effect).to_string(),
         conditions: serde_json::to_string(&p.conditions)?,
@@ -185,7 +185,7 @@ pub(crate) fn insert_policy_row_txn(
         enabled: p.enabled as i32,
         built_in: p.built_in as i32,
         immutable: p.immutable as i32,
-        created_by: p.created_by.clone(),
+        created_by: p.created_by.as_str().to_string(),
         created_at: p.created_at as i64,
         updated_at: p.updated_at as i64,
     };
@@ -307,7 +307,7 @@ impl PolicyRepository for SqliteStorage {
                     policies::name.eq(&p.name),
                     policies::description.eq(&p.description),
                     policies::scope.eq(scope_to_str(&p.scope)),
-                    policies::scope_id.eq(&p.scope_id),
+                    policies::scope_id.eq(p.scope_id.as_ref().map(|id| id.as_str().to_string())),
                     policies::priority.eq(p.priority as i32),
                     policies::effect.eq(effect_to_str(&p.effect)),
                     policies::conditions.eq(serde_json::to_string(&p.conditions)?),
@@ -328,6 +328,18 @@ impl PolicyRepository for SqliteStorage {
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            // Port contract: "Returns an error if the policy is built-in."
+            // The DB schema cannot express this guard, so it is enforced in
+            // code — same contract the mem adapter enforces (mem.rs).
+            let built_in: Option<i32> = policies::table
+                .find(&id)
+                .select(policies::built_in)
+                .first(&mut *conn)
+                .optional()
+                .context("check policy built_in")?;
+            if built_in == Some(1) {
+                anyhow::bail!("cannot delete built-in policy '{id}'");
+            }
             diesel::delete(policies::table.find(&id))
                 .execute(&mut *conn)
                 .context("delete policy")?;
@@ -432,5 +444,153 @@ impl PolicyRepository for SqliteStorage {
                 .collect()
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gyre_domain::policy::{ConditionOp, ConditionValue};
+    use tempfile::NamedTempFile;
+
+    fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, storage)
+    }
+
+    fn sample_policy(id: &str, built_in: bool) -> Policy {
+        Policy {
+            id: Id::new(id),
+            name: id.to_string(),
+            description: "test policy".to_string(),
+            scope: PolicyScope::Workspace,
+            scope_id: Some(Id::new("ws-1")),
+            priority: 100,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Viewer".to_string()),
+            }],
+            actions: vec!["spawn".to_string()],
+            resource_types: vec!["agent".to_string()],
+            enabled: true,
+            built_in,
+            immutable: false,
+            created_by: Id::new("user:admin"),
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_crud_roundtrip_preserves_fields() {
+        let (_tmp, storage) = tmp_storage();
+        let policy = sample_policy("pol-1", false);
+        storage.create(&policy).await.unwrap();
+
+        let loaded = storage
+            .find_by_id("pol-1")
+            .await
+            .unwrap()
+            .expect("policy must exist after create");
+        assert_eq!(loaded.name, policy.name);
+        assert_eq!(loaded.scope, policy.scope);
+        assert_eq!(loaded.scope_id, Some(Id::new("ws-1")));
+        assert_eq!(loaded.priority, policy.priority);
+        assert_eq!(loaded.effect, policy.effect);
+        assert_eq!(loaded.conditions.len(), 1);
+        assert_eq!(loaded.conditions[0].attribute, "subject.workspace_role");
+        assert_eq!(loaded.conditions[0].operator, ConditionOp::Equals);
+        assert_eq!(
+            loaded.conditions[0].value,
+            ConditionValue::String("Viewer".to_string())
+        );
+        assert_eq!(loaded.actions, policy.actions);
+        assert_eq!(loaded.resource_types, policy.resource_types);
+        assert_eq!(loaded.enabled, policy.enabled);
+        assert!(!loaded.built_in);
+        assert!(!loaded.immutable);
+        assert_eq!(loaded.created_by, Id::new("user:admin"));
+
+        // Delete works for non-built-in policies.
+        storage.delete("pol-1").await.unwrap();
+        assert!(storage.find_by_id("pol-1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_built_in_policy() {
+        let (_tmp, storage) = tmp_storage();
+        let policy = sample_policy("pol-builtin", true);
+        storage.create(&policy).await.unwrap();
+
+        let err = storage
+            .delete("pol-builtin")
+            .await
+            .expect_err("built-in policy delete must fail");
+        assert!(
+            err.to_string().contains("built-in"),
+            "error must name the built-in constraint, got: {err}"
+        );
+        // The policy must still exist — the delete was rejected, not a no-op.
+        assert!(
+            storage.find_by_id("pol-builtin").await.unwrap().is_some(),
+            "built-in policy must survive a rejected delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_by_scope_filters_scope_and_scope_id() {
+        let (_tmp, storage) = tmp_storage();
+        let in_ws = sample_policy("pol-ws", false);
+        let mut other_ws = sample_policy("pol-other", false);
+        other_ws.scope_id = Some(Id::new("ws-2"));
+        let mut tenant_wide = sample_policy("pol-tenant", false);
+        tenant_wide.scope = PolicyScope::Tenant;
+        tenant_wide.scope_id = None;
+        for p in [&in_ws, &other_ws, &tenant_wide] {
+            storage.create(p).await.unwrap();
+        }
+
+        let ws1 = storage
+            .list_by_scope(&PolicyScope::Workspace, Some("ws-1"))
+            .await
+            .unwrap();
+        assert_eq!(ws1.len(), 1);
+        assert_eq!(ws1[0].id, Id::new("pol-ws"));
+
+        let tenant = storage
+            .list_by_scope(&PolicyScope::Tenant, None)
+            .await
+            .unwrap();
+        assert_eq!(tenant.len(), 1);
+        assert_eq!(tenant[0].id, Id::new("pol-tenant"));
+    }
+
+    #[tokio::test]
+    async fn delete_by_name_prefix_and_scope_id_only_touches_matching_scope() {
+        let (_tmp, storage) = tmp_storage();
+        let mine = sample_policy("trust:deny-push", false);
+        let mut other_ws = sample_policy("trust:deny-push-other", false);
+        other_ws.scope_id = Some(Id::new("ws-2"));
+        storage.create(&mine).await.unwrap();
+        storage.create(&other_ws).await.unwrap();
+
+        let n = storage
+            .delete_by_name_prefix_and_scope_id("trust:", "ws-1")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(storage
+            .find_by_id("trust:deny-push")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .find_by_id("trust:deny-push-other")
+            .await
+            .unwrap()
+            .is_some());
     }
 }
