@@ -421,6 +421,30 @@ impl NotificationRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_by_workspace_type_since(
+        &self,
+        workspace_id: &Id,
+        notification_type: &str,
+        since: i64,
+    ) -> Result<Vec<Notification>> {
+        let pool = Arc::clone(&self.pool);
+        let ws_id = workspace_id.clone();
+        let ntype = notification_type.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows: Vec<NotificationRow> = notifications::table
+                .filter(notifications::workspace_id.eq(ws_id.as_str()))
+                .filter(notifications::notification_type.eq(&ntype))
+                .filter(notifications::created_at.ge(since))
+                .order(notifications::created_at.desc())
+                .select(NotificationRow::as_select())
+                .load(&mut *conn)
+                .context("list_by_workspace_type_since")?;
+            rows.into_iter().map(|r| r.into_notification()).collect()
+        })
+        .await?
+    }
+
     async fn has_recent_dismissal(
         &self,
         workspace_id: &Id,
@@ -1173,5 +1197,72 @@ mod tests {
         )
         .await
         .unwrap());
+    }
+
+    /// The HSI §9 briefing exceptions query: workspace + type + since scoped,
+    /// across ALL users (the SpecAssertionFailure fan-out writes one row per
+    /// member), and unbounded by any recency window — 200+ newer rows of other
+    /// types must not push a qualifying row out of the result.
+    #[tokio::test]
+    async fn list_by_workspace_type_since_scopes_and_is_unbounded() {
+        let (_tmp, s) = setup();
+        let ws = Id::new("ws-1");
+
+        // Two per-member fan-out copies of one SpecAssertionFailure event,
+        // plus a same-type row in another workspace and an old row in ws-1.
+        for (id, user, ws, created) in [
+            ("n-saf-1", "user-1", "ws-1", 1000i64),
+            ("n-saf-2", "user-2", "ws-1", 1000), // fan-out copy, distinct user
+            ("n-saf-other-ws", "user-3", "ws-2", 1100),
+            ("n-saf-old", "user-1", "ws-1", 400),
+        ] {
+            let n = Notification::new(
+                Id::new(id),
+                Id::new(ws),
+                Id::new(user),
+                NotificationType::SpecAssertionFailure,
+                format!("saf {id}"),
+                "tenant-1",
+                created,
+            );
+            NotificationRepository::create(&s, &n).await.unwrap();
+        }
+
+        // 250 newer notifications of another type in the same workspace —
+        // beyond any list_recent recency window.
+        for i in 0..250 {
+            NotificationRepository::create(&s, &make(&format!("n-noise-{i}"), 2000 + i, false))
+                .await
+                .unwrap();
+        }
+
+        let rows = NotificationRepository::list_by_workspace_type_since(
+            &s,
+            &ws,
+            "SpecAssertionFailure",
+            500,
+        )
+        .await
+        .unwrap();
+
+        let mut ids: Vec<&str> = rows.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable(); // fan-out copies share created_at; order between them is irrelevant
+        assert_eq!(
+            ids,
+            vec!["n-saf-1", "n-saf-2"],
+            "both fan-out copies (all users) returned; other-workspace \
+             and pre-since rows excluded, 250 newer noise rows irrelevant"
+        );
+
+        // `since` moves past the event → nothing.
+        let rows = NotificationRepository::list_by_workspace_type_since(
+            &s,
+            &ws,
+            "SpecAssertionFailure",
+            1500,
+        )
+        .await
+        .unwrap();
+        assert!(rows.is_empty(), "rows created before `since` are excluded");
     }
 }

@@ -3291,6 +3291,26 @@ impl NotificationRepository for MemNotificationRepository {
         Ok(items)
     }
 
+    async fn list_by_workspace_type_since(
+        &self,
+        workspace_id: &Id,
+        notification_type: &str,
+        since: i64,
+    ) -> Result<Vec<Notification>> {
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store
+            .iter()
+            .filter(|n| {
+                n.workspace_id == *workspace_id
+                    && n.notification_type.as_str() == notification_type
+                    && n.created_at >= since
+            })
+            .cloned()
+            .collect();
+        items.sort_by_key(|n| std::cmp::Reverse(n.created_at));
+        Ok(items)
+    }
+
     async fn has_recent_dismissal(
         &self,
         workspace_id: &Id,
