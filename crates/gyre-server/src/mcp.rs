@@ -1523,7 +1523,8 @@ async fn handle_list_repo_orchestrators(
 }
 
 /// gyre_cross_repo_task (task-093): workspace-orchestrator only. Creates a
-/// coordination task scoped to the caller's workspace.
+/// coordination task scoped to the caller's workspace. Parsing and scope
+/// checks stay here; task construction lives in the shared core (F9).
 async fn handle_cross_repo_task(
     state: &AppState,
     args: &Value,
@@ -1537,22 +1538,22 @@ async fn handle_cross_repo_task(
         Ok(t) => t.to_string(),
         Err(_) => return tool_error("missing required field: title"),
     };
-    let now = now_secs();
-    let mut task = Task::new(new_id(), title, now);
-    task.description = get_str(args, "description").map(|s| s.to_string());
-    if let Some(p) = get_str(args, "priority") {
-        task.priority = parse_priority(p);
-    }
-    if let Some(labels) = args.get("labels").and_then(|v| v.as_array()) {
-        task.labels = labels
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect();
-    }
-    task.task_type = Some(gyre_domain::TaskType::Coordination);
-    task.workspace_id = Id::new(&caller_ws);
-    match state.tasks.create(&task).await {
-        Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
+    let req = crate::api::orchestrator::CrossRepoTaskRequest {
+        title,
+        description: get_str(args, "description").map(|s| s.to_string()),
+        priority: get_str(args, "priority").map(|s| s.to_string()),
+        labels: args
+            .get("labels")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    match crate::api::orchestrator::cross_repo_task_core(state, &caller_ws, req).await {
+        Ok(task) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
         Err(e) => tool_error(format!("Failed to create task: {e}")),
     }
 }
@@ -4887,6 +4888,7 @@ pub async fn mcp_handler(
                     | "gyre_agent_heartbeat"
                     | "gyre_agent_complete"
                     | "conversation_upload"
+                    | "gyre_message_send"
                     | "gyre_message_ack"
                     | "gyre_spawn_repo_orchestrator"
                     | "gyre_cross_repo_task"
@@ -9972,8 +9974,12 @@ concepts:
     // -- TASK-093: orchestrator tier tools -----------------------------------
 
     /// Seed ws-1 (+ repos r-1, r-2, and r-x in ws-2) and return the state.
+    /// Includes the built-in persona meta-specs via the production startup
+    /// seeder — gyre_spawn_repo_orchestrator enforces that the
+    /// repo-orchestrator persona exists and is approved.
     async fn orch_state() -> std::sync::Arc<crate::AppState> {
         let state = test_state();
+        crate::seed_builtin_meta_specs(&state).await;
         for wid in ["ws-1", "ws-2"] {
             let ws = gyre_domain::Workspace::new(
                 gyre_common::Id::new(wid),
@@ -10771,5 +10777,91 @@ concepts:
         )
         .await;
         assert!(json["error"].is_null(), "got: {json}");
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_denies_readonly_api_key() {
+        // task-093 F7: gyre_message_send persists via state.messages.store,
+        // so it is a write tool — a ReadOnly principal must be denied at the
+        // RBAC gate with a JSON-RPC error (not an isError tool result).
+        let state = orch_state().await;
+
+        // ReadOnly user + API key (auth.rs API-key path: roles come from the
+        // user record; User::new defaults to [ReadOnly]). The user is bound
+        // to orch_state's tenant t1: the API-key auth path fails closed for
+        // users without a tenant binding (auth.rs F1 — a plain-text 403,
+        // which would never reach the RBAC gate this test asserts).
+        let mut user =
+            gyre_domain::User::new(gyre_common::Id::new("ro-user"), "ro-ext", "ro-user", 0);
+        user.tenant_id = Some(gyre_common::Id::new("t1"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "ro-test-api-key";
+        let hashed = crate::auth::hash_api_key(raw_key);
+        state
+            .api_keys
+            .create(&hashed, &gyre_common::Id::new("ro-user"), "test")
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_message_send",
+                json!({
+                    "to": { "agent": "orch-ro-target" },
+                    "kind": "Custom",
+                    "payload": { "note": "hi" }
+                }),
+            ),
+            raw_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json["error"]["code"].as_i64(),
+            Some(-32603),
+            "expected PERMISSION_DENIED jsonrpc error, got: {json}"
+        );
+
+        // Nothing was persisted.
+        let msgs = state
+            .messages
+            .list_unacked(&gyre_common::Id::new("orch-ro-target"), 100)
+            .await
+            .unwrap();
+        assert!(
+            msgs.is_empty(),
+            "no message may be stored for a denied send"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_allows_agent_role() {
+        // Positive control: an Agent-role (or higher) caller passes the gate
+        // and reaches the handler.
+        let state = orch_state().await;
+        let (agent_id, token) =
+            register_orchestrator(&state, "sender", "ws-1", None, "workspace_orchestrator").await;
+        let app = crate::build_router(state.clone());
+
+        let (status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_message_send",
+                json!({
+                    "to": { "agent": agent_id },
+                    "kind": "Custom",
+                    "payload": { "note": "self" }
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["error"].is_null(),
+            "Agent-role caller must pass the RBAC gate, got: {json}"
+        );
     }
 }
