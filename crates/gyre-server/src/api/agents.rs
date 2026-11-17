@@ -265,9 +265,22 @@ pub async fn get_agent(
 
 pub async fn update_agent_status(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<UpdateStatusRequest>,
 ) -> Result<Json<AgentResponse>, ApiError> {
+    // Preview agents may not flip agent status (meta-spec reconciliation §5):
+    // a preview agent resetting itself to Idle would defeat the
+    // killed-on-completion semantics finish_preview_agent enforces (the run
+    // ends Stopped, never Idle). Same Agent-role 'write'-on-'*' escape class
+    // as the task/MR guards.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not change agent status — preview runs skip ceremony \
+             and never return to Idle"
+                .to_string(),
+        ));
+    }
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -508,6 +521,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -647,6 +661,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri("/api/v1/agents/agent-status-dead/status")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -663,6 +678,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri("/api/v1/agents/agent-status-idle/status")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -737,6 +753,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -752,6 +769,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -909,6 +927,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/agents/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),

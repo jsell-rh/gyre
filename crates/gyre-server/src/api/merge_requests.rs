@@ -909,6 +909,17 @@ pub async fn transition_mr_status(
     Path(id): Path<String>,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<MrResponse>, ApiError> {
+    // Preview agents may not transition MR status (meta-spec reconciliation
+    // §5 skip-ceremony; same escape class as the create_mr guard above) —
+    // notably not to Approved, which would self-satisfy the human-review
+    // escape below, and not to Merged, which bypasses the merge queue.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not transition merge request status — preview runs \
+             skip MR ceremony; the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mut mr = state
         .merge_requests
         .find_by_id(&Id::new(&id))

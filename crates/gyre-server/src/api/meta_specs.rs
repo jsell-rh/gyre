@@ -5096,6 +5096,345 @@ mod tests {
         .await;
     }
 
+    /// Review-round F1 regression: the §5 skip-ceremony must also hold on the
+    /// status-transition and cancel routes. A preview agent's live JWT passes
+    /// ABAC (Agent role, builtin agent-scoped-access allows `write` on '*'),
+    /// so without per-handler guards it could transition task status — the
+    /// dangerous one: Done/Cancelled on a reconciliation-labeled task fires
+    /// `on_reconciliation_task_terminal` and advances a meta-spec rollout —
+    /// flip agent status (itself back to Idle, defeating the killed-on-
+    /// completion semantics), transition MR status, and cancel merge-queue
+    /// entries: durable production effects from throwaway preview scratch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_agent_rest_status_routes_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+
+            crate::abac_middleware::seed_builtin_policies(&state)
+                .await
+                .expect("seed built-in policies");
+            let prod = crate::build_router(state.clone());
+            let jwt = state
+                .kv_store
+                .kv_get("agent_tokens", &agent_id)
+                .await
+                .unwrap()
+                .expect("preview agent token must be live");
+
+            // Admin-owned task the preview agent attempts to transition.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/tasks")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "title": "admin-owned transition target",
+                                "labels": [crate::reconciliation::RECONCILIATION_LABEL],
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let created = body_json(resp).await;
+            let task_id = created["id"].as_str().unwrap().to_string();
+
+            // PUT /api/v1/tasks/{id}/status → 403. The task carries the
+            // reconciliation label, so a `done` transition would fire
+            // on_reconciliation_task_terminal and advance a rollout —
+            // exactly the durable footprint §5 forbids preview work to
+            // leave.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/tasks/{task_id}/status"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"status": "in_progress"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not transition task status via REST"
+            );
+            let task = state
+                .tasks
+                .find_by_id(&gyre_common::Id::new(&task_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                task.status,
+                gyre_domain::TaskStatus::Backlog,
+                "the refused transition must not have mutated the task"
+            );
+
+            // Positive control: the same transition from an Admin caller is
+            // accepted — the guard scopes to preview agents, not the route.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/tasks/{task_id}/status"))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"status": "in_progress"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "admin task-status transition must still work"
+            );
+
+            // PUT /api/v1/agents/{id}/status → 403. The preview agent tries
+            // to reset itself to Idle — the exact state finish_preview_agent
+            // exists to prevent.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/agents/{agent_id}/status"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"status": "idle"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not change agent status via REST"
+            );
+            let agent = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&agent_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                agent.status,
+                gyre_domain::AgentStatus::Active,
+                "the refused self-transition must not have idled the preview agent"
+            );
+
+            // Positive control: an admin-created agent can still be
+            // transitioned by its operator.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/agents")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"name": "status-route-control"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let created = body_json(resp).await;
+            let control_agent_id = created["id"].as_str().unwrap().to_string();
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/agents/{control_agent_id}/status"))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"status": "active"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "admin agent-status transition must still work"
+            );
+
+            // PUT /api/v1/merge-requests/{id}/status → 403 (not `approved` —
+            // which would self-satisfy the supervised human-review escape —
+            // and not `merged`, which would bypass the merge queue).
+            let branch = json["agents"][0]["branch"].as_str().unwrap().to_string();
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let mr = gyre_domain::MergeRequest::new(
+                gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                gyre_common::Id::new(&repo_id),
+                repo.workspace_id.clone(),
+                "status-route probe".to_string(),
+                branch,
+                "main".to_string(),
+                chrono_now_secs(),
+            );
+            state.merge_requests.create(&mr).await.unwrap();
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!(
+                            "/api/v1/merge-requests/{}/status",
+                            mr.id.to_string()
+                        ))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"status": "closed"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not transition merge request status via REST"
+            );
+            let mr_now = state
+                .merge_requests
+                .find_by_id(&mr.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                mr_now.status,
+                gyre_domain::MrStatus::Open,
+                "the refused transition must not have mutated the MR"
+            );
+
+            // Positive control: an Admin caller transitions the same MR.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!(
+                            "/api/v1/merge-requests/{}/status",
+                            mr.id.to_string()
+                        ))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"status": "approved"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "admin MR-status transition must still work"
+            );
+
+            // DELETE /api/v1/merge-queue/{id} → 403. A queued entry (the
+            // admin's own) must not be cancellable by preview scratch work.
+            let entry = gyre_domain::MergeQueueEntry::new(
+                gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                mr.id.clone(),
+                50,
+                chrono_now_secs(),
+            );
+            state.merge_queue.enqueue(&entry).await.unwrap();
+            let entry_id = entry.id.to_string();
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/v1/merge-queue/{entry_id}"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not cancel merge-queue entries via REST"
+            );
+            let entry_now = state
+                .merge_queue
+                .find_by_id(&gyre_common::Id::new(&entry_id))
+                .await
+                .unwrap()
+                .expect("the refused cancel must leave the queue entry in place");
+            assert!(
+                !entry_now.is_terminal(),
+                "the refused cancel must not have terminated the entry"
+            );
+
+            // Positive control: the operator can still cancel the entry.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/v1/merge-queue/{entry_id}"))
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NO_CONTENT,
+                "admin merge-queue cancel must still work"
+            );
+
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
     /// F3 regression: the default workspace-budget path must reserve every
     /// requested slot up front — a single POST with more targets than the
     /// workspace's max_concurrent_agents is 429, not an over-admitted run.

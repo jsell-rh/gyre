@@ -158,8 +158,20 @@ pub async fn list_queue(
 
 pub async fn cancel_entry(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // Preview agents may not cancel merge-queue entries (meta-spec
+    // reconciliation §5 skip-ceremony; same escape class as the enqueue
+    // guard above) — cancelling another run's entry mutates the merge
+    // pipeline from throwaway preview scratch work.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not cancel merge queue entries — preview runs skip \
+             merge-queue ceremony"
+                .to_string(),
+        ));
+    }
     let entry = state
         .merge_queue
         .find_by_id(&Id::new(&id))
@@ -456,6 +468,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/merge-queue/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -479,6 +492,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/merge-queue/{id}"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -514,6 +528,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/v1/merge-queue/no-such")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

@@ -355,12 +355,26 @@ pub async fn update_task(
     Ok(Json(TaskResponse::from(task)))
 }
 
-#[instrument(skip(state, req), fields(task_id = %id, new_status = %req.status))]
+#[instrument(skip(state, req, auth), fields(task_id = %id, new_status = %req.status))]
 pub async fn transition_task_status(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
+    // Preview agents may not transition task status (meta-spec reconciliation
+    // §5 skip-ceremony; same escape class as the create/update guards above).
+    // This route is the dangerous one: a Done/Cancelled transition of a
+    // reconciliation/drift-labeled task fires on_reconciliation_task_terminal
+    // below, advancing meta-spec rollouts — a durable production effect from
+    // throwaway preview scratch work that §5 requires to leave no footprint.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not transition task status — preview runs skip task \
+             ceremony; the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mut task = state
         .tasks
         .find_by_id(&Id::new(&id))
@@ -517,6 +531,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -540,6 +555,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -622,6 +638,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -672,6 +689,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -724,6 +742,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
