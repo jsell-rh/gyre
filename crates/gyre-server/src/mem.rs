@@ -2607,6 +2607,7 @@ impl MemPersonaRepository {
 
     /// Test hook: make the task half of `apply_approval_reset_with_task`
     /// fail (persona write must roll back).
+    #[cfg(test)]
     pub fn set_fail_task_writes(&self, fail: bool) {
         self.fail_task_writes
             .store(fail, std::sync::atomic::Ordering::Relaxed);
