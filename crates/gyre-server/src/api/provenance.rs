@@ -847,18 +847,14 @@ pub async fn get_slsa_provenance(
     // A committed gyre-stack.lock at the subject ref supplies the
     // version-controlled build process (SLSA 2 requirement) for Level-2
     // (CLI) contributions.
-    let lockfile_pinned = crate::spec_registry::read_git_file(
-        &git_bin,
-        &repo.path,
-        &sha,
-        "gyre-stack.lock",
-    )
-    .await
-    .is_some_and(|content| {
-        gyre_domain::stack::StackLockfile::parse(&content)
-            .map(|l| l.verify_integrity().is_ok())
-            .unwrap_or(false)
-    });
+    let lockfile_pinned =
+        crate::spec_registry::read_git_file(&git_bin, &repo.path, &sha, "gyre-stack.lock")
+            .await
+            .is_some_and(|content| {
+                gyre_domain::stack::StackLockfile::parse(&content)
+                    .map(|l| l.verify_integrity().is_ok())
+                    .unwrap_or(false)
+            });
 
     // The statement attests the subject's history, not the repo: scope the
     // agent-commit attribution to commits reachable from the subject ref
@@ -872,8 +868,7 @@ pub async fn get_slsa_provenance(
                 "cannot enumerate commits reachable from '{sha}' in repo {repo_id}"
             ))
         })?;
-    let history_set: std::collections::HashSet<&str> =
-        history.iter().map(String::as_str).collect();
+    let history_set: std::collections::HashSet<&str> = history.iter().map(String::as_str).collect();
 
     // Per-commit agent attribution with Gyre level → SLSA Build Level.
     let commits = state
@@ -912,7 +907,10 @@ pub async fn get_slsa_provenance(
     let slsa_build_level = slsa_build_level.unwrap_or(0);
 
     let repo_name = repo.name.clone();
-    let workspace_uri = format!("git+gyre://{workspace}/{repo_name}", workspace = repo.workspace_id);
+    let workspace_uri = format!(
+        "git+gyre://{workspace}/{repo_name}",
+        workspace = repo.workspace_id
+    );
 
     let statement = serde_json::json!({
         "_type": "https://in-toto.io/Statement/v1",
@@ -1236,7 +1234,13 @@ mod tests {
     /// same-named repos would collide on the same git dir.
     async fn git_repo_with_commits(
         extra: &[(&str, String)],
-    ) -> (Router, std::sync::Arc<crate::AppState>, String, String, String) {
+    ) -> (
+        Router,
+        std::sync::Arc<crate::AppState>,
+        String,
+        String,
+        String,
+    ) {
         use std::io::Write as _;
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
@@ -1413,9 +1417,30 @@ mod tests {
         let (app, state, repo_id, repo_path, head) =
             git_repo_with_commits(&[("src/a.rs", "fn a() {}".to_string())]).await;
         let root = root_commit_sha(&repo_path);
-        record_commit(&state, "sc-1", &repo_id, &head, "agent-3", Some("server-verified"));
-        record_commit(&state, "sc-2", &repo_id, &root, "agent-3", Some("server-verified"));
-        record_commit(&state, "sc-3", &repo_id, "sha-on-deleted-branch", "agent-1", None);
+        record_commit(
+            &state,
+            "sc-1",
+            &repo_id,
+            &head,
+            "agent-3",
+            Some("server-verified"),
+        );
+        record_commit(
+            &state,
+            "sc-2",
+            &repo_id,
+            &root,
+            "agent-3",
+            Some("server-verified"),
+        );
+        record_commit(
+            &state,
+            "sc-3",
+            &repo_id,
+            "sha-on-deleted-branch",
+            "agent-1",
+            None,
+        );
 
         let resp = app
             .oneshot(
@@ -1437,10 +1462,7 @@ mod tests {
         // The subject names the attested repo — `git_repo_with_commits`
         // creates it under a unique `slsa-<uuid>` name.
         assert!(
-            subject["name"]
-                .as_str()
-                .unwrap()
-                .starts_with("slsa-"),
+            subject["name"].as_str().unwrap().starts_with("slsa-"),
             "subject name must be the repo name, got {}",
             subject["name"]
         );
@@ -1493,7 +1515,14 @@ mod tests {
         let (app, state, repo_id, repo_path, head) =
             git_repo_with_commits(&[("src/d.rs", "fn d() {}".to_string())]).await;
         let root = root_commit_sha(&repo_path);
-        record_commit(&state, "sc-7", &repo_id, &head, "agent-3", Some("server-verified"));
+        record_commit(
+            &state,
+            "sc-7",
+            &repo_id,
+            &head,
+            "agent-3",
+            Some("server-verified"),
+        );
         record_commit(&state, "sc-8", &repo_id, &root, "agent-1", None);
 
         let resp = app
@@ -1527,7 +1556,14 @@ mod tests {
         // Without a lockfile: CLI (self-reported, level 2) → SLSA 1.
         let (app, state, repo_id, _repo_path, head) =
             git_repo_with_commits(&[("src/b.rs", "fn b() {}".to_string())]).await;
-        record_commit(&state, "sc-3", &repo_id, &head, "agent-2", Some("self-reported"));
+        record_commit(
+            &state,
+            "sc-3",
+            &repo_id,
+            &head,
+            "agent-2",
+            Some("self-reported"),
+        );
 
         let resp = app
             .clone()
@@ -1558,12 +1594,16 @@ mod tests {
             persona_hash: None,
         };
         let lock = gyre_domain::stack::StackLockfile::from_stack(&stack, 0);
-        let (app2, state2, repo_id2, _p2, head2) = git_repo_with_commits(&[(
-            "gyre-stack.lock",
-            lock.to_toml().unwrap(),
-        )])
-        .await;
-        record_commit(&state2, "sc-4", &repo_id2, &head2, "agent-2", Some("self-reported"));
+        let (app2, state2, repo_id2, _p2, head2) =
+            git_repo_with_commits(&[("gyre-stack.lock", lock.to_toml().unwrap())]).await;
+        record_commit(
+            &state2,
+            "sc-4",
+            &repo_id2,
+            &head2,
+            "agent-2",
+            Some("self-reported"),
+        );
 
         let resp = app2
             .oneshot(
@@ -1592,7 +1632,9 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/repos/{repo_id}/slsa-provenance?ref=refs/heads/main"))
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/slsa-provenance?ref=refs/heads/main"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )

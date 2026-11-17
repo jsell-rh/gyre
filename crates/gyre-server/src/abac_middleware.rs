@@ -223,11 +223,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/provenance", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/aibom", "repo", None),
-                RouteResourceMapping::api(
-                    "/api/v1/repos/:id/slsa-provenance",
-                    "repo",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/repos/:id/slsa-provenance", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-drift", "repo", None),
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/commits/record",

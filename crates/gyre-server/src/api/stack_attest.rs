@@ -527,7 +527,8 @@ mod tests {
         assert_eq!(fp.len(), 64); // SHA-256 hex
 
         // GET stack
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents/agent-1/stack")
@@ -545,7 +546,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn get_stack_not_found() {
         let (app, _state) = app_with_agent_and_repo();
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents/agent-1/stack")
@@ -585,7 +587,8 @@ mod tests {
         assert_eq!(json["required_level"].as_i64().unwrap(), 2);
 
         // GET returns same policy
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -631,7 +634,8 @@ mod tests {
         assert_eq!(json["required_level"].as_i64().unwrap(), 3);
 
         // GET returns Level 3 policy
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -689,7 +693,8 @@ mod tests {
         assert!(json["required_level"].is_null());
 
         // GET returns null
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -868,7 +873,8 @@ mod tests {
         assert_eq!(json["enforcement"].as_str().unwrap(), "warn");
 
         // GET returns the same policy.
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -912,7 +918,8 @@ mod tests {
             "required_fingerprint": "fp-x",
             "enforcement": "ignore"
         });
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -997,7 +1004,10 @@ mod tests {
             Some("approved hotfix"),
         )
         .await;
-        record_drift_audit_event(&state, "drift-b", "repo-1", "proj-1", "agent-1", "blocked", None).await;
+        record_drift_audit_event(
+            &state, "drift-b", "repo-1", "proj-1", "agent-1", "blocked", None,
+        )
+        .await;
         record_drift_audit_event(
             &state,
             "drift-other",
@@ -1009,7 +1019,8 @@ mod tests {
         )
         .await;
 
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-drift")
@@ -1024,18 +1035,12 @@ mod tests {
         assert_eq!(json["total"], 2);
         let events = json["events"].as_array().unwrap();
         assert_eq!(events.len(), 2);
-        let ids: Vec<&str> = events
-            .iter()
-            .map(|e| e["id"].as_str().unwrap())
-            .collect();
+        let ids: Vec<&str> = events.iter().map(|e| e["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"drift-a") && ids.contains(&"drift-b"));
         assert!(!ids.contains(&"drift-other"), "cross-repo leak");
 
         // Full override context is present for compliance review.
-        let accepted = events
-            .iter()
-            .find(|e| e["id"] == "drift-a")
-            .unwrap();
+        let accepted = events.iter().find(|e| e["id"] == "drift-a").unwrap();
         assert_eq!(accepted["outcome"], "accepted");
         assert_eq!(accepted["override_reason"], "approved hotfix");
         assert_eq!(accepted["lockfile_fingerprint"], "lock-fp");
@@ -1043,7 +1048,8 @@ mod tests {
         assert_eq!(accepted["agent_id"], "agent-1");
 
         // `?limit=1` truncates the list but keeps the honest total.
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-drift?limit=1")
@@ -1063,7 +1069,8 @@ mod tests {
         let (app, _state) = app_with_agent_and_repo();
 
         // No drift events → empty list, not an error.
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-drift")
@@ -1078,7 +1085,8 @@ mod tests {
         assert!(json["events"].as_array().unwrap().is_empty());
 
         // Unknown repo → 404.
-        let resp = app.clone()
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/no-such-repo/stack-drift")

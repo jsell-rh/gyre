@@ -231,8 +231,7 @@ pub async fn get_aibom(
     // stack policy compliance, and drift/violation history.
     if params.format.as_deref() == Some("release") {
         let release = build_release_aibom(&state, &repo, &params).await?;
-        let value = serde_json::to_value(release)
-            .map_err(|e| ApiError::Internal(e.into()))?;
+        let value = serde_json::to_value(release).map_err(|e| ApiError::Internal(e.into()))?;
         return Ok(Json(value));
     }
 
@@ -488,9 +487,11 @@ async fn build_release_aibom(
         .to
         .clone()
         .unwrap_or_else(|| format!("refs/heads/{}", repo.default_branch));
-    let to_sha = git_rev_parse(&git_bin, &repo.path, &to_ref).await.ok_or_else(|| {
-        ApiError::NotFound(format!("cannot resolve ref '{to_ref}' in repo {repo_id}"))
-    })?;
+    let to_sha = git_rev_parse(&git_bin, &repo.path, &to_ref)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("cannot resolve ref '{to_ref}' in repo {repo_id}"))
+        })?;
 
     // The release commit set.
     let range = match &params.from {
@@ -522,15 +523,11 @@ async fn build_release_aibom(
     }
 
     // The repo's committed lockfile pins the expected stack.
-    let lockfile_hash = crate::spec_registry::read_git_file(
-        &git_bin,
-        &repo.path,
-        &to_sha,
-        "gyre-stack.lock",
-    )
-    .await
-    .and_then(|content| gyre_domain::stack::StackLockfile::parse(&content).ok())
-    .map(|lock| lock.fingerprint);
+    let lockfile_hash =
+        crate::spec_registry::read_git_file(&git_bin, &repo.path, &to_sha, "gyre-stack.lock")
+            .await
+            .and_then(|content| gyre_domain::stack::StackLockfile::parse(&content).ok())
+            .map(|lock| lock.fingerprint);
 
     // Repo stack policy (minimum level).
     let policy = state
@@ -586,7 +583,8 @@ async fn build_release_aibom(
                 .unwrap_or(1)
         });
         for ac in commits {
-            if gyre_domain::stack::attestation_level_from_label(ac.attestation_level.as_deref()) >= 2
+            if gyre_domain::stack::attestation_level_from_label(ac.attestation_level.as_deref())
+                >= 2
             {
                 attested_commits += 1;
             } else {
@@ -609,11 +607,7 @@ async fn build_release_aibom(
                     ac.model_context
                         .as_deref()
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                        .and_then(|v| {
-                            v.get("model")
-                                .and_then(|m| m.as_str())
-                                .map(str::to_string)
-                        })
+                        .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
                 })
             });
         if let Some(m) = &model {
@@ -630,14 +624,10 @@ async fn build_release_aibom(
             })
             .unwrap_or_default();
 
-        let spawned_by = commits
-            .iter()
-            .find_map(|ac| ac.spawned_by_user_id.clone());
+        let spawned_by = commits.iter().find_map(|ac| ac.spawned_by_user_id.clone());
 
-        let mut task_ids: Vec<String> = commits
-            .iter()
-            .filter_map(|ac| ac.task_id.clone())
-            .collect();
+        let mut task_ids: Vec<String> =
+            commits.iter().filter_map(|ac| ac.task_id.clone()).collect();
         task_ids.sort();
         task_ids.dedup();
 
@@ -669,7 +659,12 @@ async fn build_release_aibom(
         });
     }
     // Most prolific contributor first for a stable, reviewable artifact.
-    release_agents.sort_by(|a, b| b.commits.len().cmp(&a.commits.len()).then(a.agent_id.cmp(&b.agent_id)));
+    release_agents.sort_by(|a, b| {
+        b.commits
+            .len()
+            .cmp(&a.commits.len())
+            .then(a.agent_id.cmp(&b.agent_id))
+    });
 
     // Stack policy compliance + drift history.
     let drift_events = super::stack_attest::stack_drift_events_for_repo(state, repo).await?;
@@ -679,10 +674,14 @@ async fn build_release_aibom(
         .collect::<Vec<_>>();
 
     let total_commits = release_shas.len();
-    let human_commits = total_commits
-        .saturating_sub(attributed.iter().map(|ac| ac.commit_sha.clone()).collect::<std::collections::HashSet<_>>().len());
-    let all_commits_attested =
-        human_commits == 0 && unattested_commits == 0 && total_commits > 0;
+    let human_commits = total_commits.saturating_sub(
+        attributed
+            .iter()
+            .map(|ac| ac.commit_sha.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+    );
+    let all_commits_attested = human_commits == 0 && unattested_commits == 0 && total_commits > 0;
 
     Ok(AibomReleaseResponse {
         aibom_version: "1.0".to_string(),
@@ -967,16 +966,14 @@ mod tests {
         let tree = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
         let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C")
-            .arg(repo_path)
-            .args([
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.com",
-                "commit-tree",
-                &tree,
-            ]);
+        cmd.arg("-C").arg(repo_path).args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit-tree",
+            &tree,
+        ]);
         if let Some(p) = parent {
             cmd.args(["-p", p]);
         }
@@ -992,8 +989,8 @@ mod tests {
     /// commits on main. The repo name is unique per call — parallel tests in
     /// this binary share `repos_root` (keyed by pid), so same-named repos
     /// would collide on the same git dir.
-    async fn release_repo_with_commits()
-    -> (Router, Arc<crate::AppState>, String, String, String, String) {
+    async fn release_repo_with_commits(
+    ) -> (Router, Arc<crate::AppState>, String, String, String, String) {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let repo_name = format!("rel-{}", uuid::Uuid::new_v4().simple());
@@ -1038,8 +1035,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let lock =
-            gyre_domain::stack::StackLockfile::from_stack(&stack, 1_700_000_000);
+        let lock = gyre_domain::stack::StackLockfile::from_stack(&stack, 1_700_000_000);
 
         // main: initial (human) commit → lockfile commit → feature commit.
         // `commit_files` builds each tree from just the given files (no
@@ -1230,7 +1226,10 @@ mod tests {
         assert_eq!(summary["unattested_commits"], 0);
         assert_eq!(summary["human_commits"], 1);
         assert_eq!(summary["agents_involved"], 1);
-        assert_eq!(summary["models_used"], serde_json::json!(["claude-sonnet-4-6"]));
+        assert_eq!(
+            summary["models_used"],
+            serde_json::json!(["claude-sonnet-4-6"])
+        );
 
         // The drift event really came from the audit store.
         let filter = gyre_ports::AuditQueryFilter {

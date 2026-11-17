@@ -2134,9 +2134,8 @@ async fn enforce_stack_policy(
                     // explicit override reason (supply-chain.md §The Laptop
                     // Problem step 5 — overrides must be logged, attributed,
                     // and visible). No reason → reject.
-                    let Some(override_reason) = stack_override_rationale(
-                        stack_override_reason,
-                    ) else {
+                    let Some(override_reason) = stack_override_rationale(stack_override_reason)
+                    else {
                         record_stack_drift_event(
                             state,
                             &StackDriftEvent {
@@ -8553,7 +8552,12 @@ specs:
 
         let pinned = test_stack("claude-sonnet-4-6");
         let lock = StackLockfile::from_stack(&pinned, 1_700_000_000);
-        seed_agent_and_stack(&state, "agent-warn-noreason", &test_stack("claude-opus-4-6")).await;
+        seed_agent_and_stack(
+            &state,
+            "agent-warn-noreason",
+            &test_stack("claude-opus-4-6"),
+        )
+        .await;
 
         // Warn-mode policy: below-minimum / drift findings are flagged, not
         // blocked — but a drift override still requires a reason.
@@ -8581,7 +8585,10 @@ specs:
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", agent_auth("agent-warn-noreason"))
                     .header("content-type", "application/x-git-receive-pack")
-                    .body(Body::from(receive_pack_body(&sha, "refs/heads/warn-noreason")))
+                    .body(Body::from(receive_pack_body(
+                        &sha,
+                        "refs/heads/warn-noreason",
+                    )))
                     .unwrap(),
             )
             .await
@@ -8643,7 +8650,10 @@ specs:
                         "security hotfix: model upgrade approved on-call",
                     )
                     .header("content-type", "application/x-git-receive-pack")
-                    .body(Body::from(receive_pack_body(&sha, "refs/heads/warn-override")))
+                    .body(Body::from(receive_pack_body(
+                        &sha,
+                        "refs/heads/warn-override",
+                    )))
                     .unwrap(),
             )
             .await
@@ -8662,10 +8672,17 @@ specs:
         assert_eq!(drift.branch, "warn-override");
         assert_eq!(drift.repo_id, "repo-1");
         assert_eq!(drift.workspace_id, "ws-test");
-        assert_eq!(drift.lockfile_fingerprint.as_deref(), Some(lock.fingerprint.as_str()));
+        assert_eq!(
+            drift.lockfile_fingerprint.as_deref(),
+            Some(lock.fingerprint.as_str())
+        );
         assert_eq!(drift.attested_stack_fingerprint, drifted.fingerprint());
         assert!(drift.integrity_verified);
-        assert!(drift.reason.contains("stack drift"), "reason: {}", drift.reason);
+        assert!(
+            drift.reason.contains("stack drift"),
+            "reason: {}",
+            drift.reason
+        );
     }
 
     /// TASK-166: block-mode drift rejections are recorded in the audit trail
@@ -8703,7 +8720,10 @@ specs:
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", agent_auth("agent-block-audit"))
                     .header("content-type", "application/x-git-receive-pack")
-                    .body(Body::from(receive_pack_body(&sha, "refs/heads/block-audit")))
+                    .body(Body::from(receive_pack_body(
+                        &sha,
+                        "refs/heads/block-audit",
+                    )))
                     .unwrap(),
             )
             .await
