@@ -2,7 +2,7 @@
 title: "HSI Trust Gradient — Trust Levels, Enforcement & Mechanical Implementation"
 spec_ref: "human-system-interface.md §9–13"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-077.md
 coverage_sections:
   - "human-system-interface.md §9 2. Trust Gradient"
@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["34c4225083d93e40354afa1fd1be6e45d20aa0d0", "2fea93f03006238a8f85f3e8f0b80cf2fa781603", "71b202e6386a1ee211f9f265e4d531afdf0d411c", "099f08c43f2afdbc53319850d57b6be1445a7ce7", "09d5266952f214c2e38911c4bcd548c4c79c0f68", "f4f32a01a8891b67010600b6af3857c9a4be695d", "accffacfbfd7cab9f6913964c0fe8da7e667748d", "dddcb3a4e4e36417e99cee451670d72ce5e72a45", "4e17ffa5c94b84b1b8c9f2890a94997424932a58", "5b5e7c65957c79b12111ae987d71f7752abac702", "3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0"]
+commits: ["09d5266952f214c2e38911c4bcd548c4c79c0f68", "f4f32a01a8891b67010600b6af3857c9a4be695d", "accffacfbfd7cab9f6913964c0fe8da7e667748d", "dddcb3a4e4e36417e99cee451670d72ce5e72a45", "4e17ffa5c94b84b1b8c9f2890a94997424932a58", "5b5e7c65957c79b12111ae987d71f7752abac702", "3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0"]
 ---
 
 ## Spec Excerpt
@@ -88,16 +88,6 @@ Trust is a **workspace-level setting** (`trust_level: TrustLevel` enum: `Supervi
 Read `specs/system/human-system-interface.md` §9–13 (Trust Gradient) carefully — the mechanical implementation section has precise details about policy naming, priorities, and transaction behavior. Also read `specs/system/abac-policy-engine.md` for the existing ABAC engine design. The key amendment is adding `immutable` flag support to the ABAC evaluation engine. Check `crates/gyre-domain/src/` for existing ABAC evaluation code and `crates/gyre-adapters/migrations/` for migration numbering (currently at 000046+). The workspace entity is in `gyre-common` — grep for `Workspace` struct.
 
 ## Shipped
-
-### Review-repair round — web inbox trust filter unified server-side, docs band bounds corrected (commit `34c42250`)
-
-Review repair (round-24 findings):
-
-- **F24-1 (badge/inbox mismatch):** the web inbox sent a blanket `max_priority=9` on the notification list call at Guided/Autonomous trust, hiding rank-10 action-required types (`InvitationReceived`, `MembershipChanged`) from the web UI while the badge count endpoint (server-side type-set exclusion) still counted them — violating the diff's own invariant that the badge must not count a notification the inbox would hide. The client-side cap is removed from `Inbox.svelte` (along with the now-unneeded `api.workspace` trust lookup): the server-side trust filter — the type-set exclusion applied whenever `max_priority` is absent — is the single enforcement point for every client (web, CLI, API), keeping the inbox list and badge count in lockstep by construction. The divergent web test (`requests max_priority 9 when the workspace trust level is Guided`) is replaced by `sends no client-side priority cap at Guided trust and renders rank-10 invitations`, which asserts no cap is sent AND that an invitation notification renders at Guided trust; the now-vacuous Supervised-cap test was removed. Chatter-type hiding at Guided/Autonomous is unchanged — it was always the server's type-set exclusion (`gyre-domain/src/workspace.rs::inbox_excluded_types`) doing that work.
-- **F24-2 (docs):** the `POST/GET /api/v1/policies` row in `docs/api-reference.md` described the 200-299 user band as "above `builtin:` (≤200) and below `trust:` (≥900)" — both bounds reversed. Corrected to above `trust:` presets (100-199) and below `builtin:` policies (400-1000), matching the enforcing handler's comment in `crates/gyre-server/src/api/policies.rs`.
-- **Frontmatter repair:** the task-body sync had dropped the repair-branch commits (`2fea93f0`, `71b202e6`, `099f08c4`) from this file's `commits:` list while they remain task-labeled product-surface commits in the branch history — `check-task-commit-attribution.sh` failed. All three are restored alongside this round's commit; the check is green again (no exemptions added).
-
-Test evidence (this round): full web vitest suite after `npm ci` — 122 files, 2439 passed, 41 skipped, 0 failed (includes the new invitation-renders-at-Guided-trust test); `bash scripts/check-task-commit-attribution.sh` — exit 0 with the restored frontmatter. No Rust code touched this round (web + docs only), so no cargo probes were needed. Evidence: `/tmp/stage/review-evidence/probe-web-full-suite.log`, `probe-attribution-baseline.log` (the failing pre-repair state).
 
 ### Test-suite repair round - merge-expecting integration tests honor the trust gradient (commit `09d52669`)
 

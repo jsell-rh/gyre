@@ -50,3 +50,60 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+---
+
+## Round: R25 (checkpoint fa3d019a)
+
+**Reviewer:** Independent review agent
+**Candidate:** `ae6492390dc51ddcd13bb7de406bcda806c3e548` (base `9f446d0e`, 15 commits, 25 files +2564/−254)
+**Spec ref:** human-system-interface.md §9–13 (HSI §2 Trust Gradient), abac-policy-engine.md §Policy Composition
+
+### Scope
+
+This round's delta: the prior durable findings' repairs — HSI §2 control-row enforcement
+(commit `71b202e6`: notification volume on every delivery surface, briefing detail, agent
+completion summaries, inbox priority range as a server-side type-set exclusion, Admin
+workspace-role gate on `trust_level` changes, 200-299 user policy band), the F24 web repair
+(`34c42250`: client-side inbox priority cap removed — the server filter is the single
+enforcement point, badge/list lockstep restored), the non-atomic persona-creation fix
+(`PersonaRepository::apply_approval_reset_with_task`, one diesel transaction in SQLite and
+PostgreSQL, code-guarded rollback in mem), and docs/spec-text corrections.
+
+### Verification (independent probes, evidence in review-evidence/INDEX.md)
+
+- All six prior durable findings verified fixed in the diff with real enforcement and
+  end-to-end tests (HTTP-level, real state, assertions that fail if the behavior breaks).
+- `check-non-atomic-creation.sh` exit 0 (was red); `check-arch.sh`,
+  `check-mem-port-contracts.sh`, `check-in-memory-state-stores.sh`,
+  `check-inert-enforcement.sh` all exit 0; `check-task-commit-attribution.sh` exit 0 against
+  the committed candidate (the working tree carries an uncommitted controller sync of the
+  task file that drops the repair commits from `commits:` — checkpoint mechanics, not a
+  candidate defect; the committed frontmatter records all 17 task-labeled commits).
+- `cargo test -p gyre-domain workspace::` 14 passed; `cargo test -p gyre-adapters --lib
+  persona_approval_reset` 1 passed (real temp-file SQLite); web vitest Inbox+Briefing 109
+  passed after `npm ci`; `cargo check -p gyre-server` clean; `cargo fmt -p` clean on all five
+  touched crates. gyre-server lib test compilation deferred to the verifier (4 GiB budget) —
+  required tests listed in the evidence index.
+- Merge commit `74eeecd2` verified clean in both directions (no dropped base changes).
+
+### Non-blocking observations (recorded, not findings)
+
+1. HSI §11's "rename a preserved `trust:` policy to strip its prefix" Custom-flow convenience
+   is blocked by the reserved-prefix stored-name guard in `api/policies.rs` — pre-existing
+   (commit `3471b92b`, task-129 round 6, predates this candidate's base), deliberate
+   (trust_level↔policy-set desync protection), untouched by this diff. Resolve via spec
+   lifecycle if the rename flow is wanted.
+2. Tenant-scope aggregate inbox/badge intersect member workspaces' trust exclusion sets
+   (documented); per-workspace views are exact. Mixed-trust membership can diverge between a
+   workspace-scoped inbox and the tenant-scope badge — documented aggregation semantics of a
+   surface the spec does not pin.
+3. Coverage matrix rows 9–13 still read `task-assigned`; matrix regeneration is verifier-owned.
+
+### Verdict
+
+approved — the candidate's delta closes every carried finding with production enforcement,
+the mechanical invariant suite is green at the candidate, and focused probes (domain,
+adapters, web, type check, fmt) all pass. Server lib/integration test execution is deferred
+to the verifier per the build-budget rules; the required commands are recorded in
+`/tmp/stage/review-evidence/INDEX.md`.
