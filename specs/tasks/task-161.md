@@ -2,7 +2,7 @@
 title: "Hierarchy enforcement integration tests and audit auth hardening"
 spec_ref: "hierarchy-enforcement.md §7"
 depends_on: [task-160]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "hierarchy-enforcement.md §New Integration Tests"
   - "hierarchy-enforcement.md §Audit/Analytics/Cost Recording"
