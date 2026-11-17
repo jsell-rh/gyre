@@ -44,6 +44,11 @@ pub enum AuditEventType {
     AgentHeartbeat,
     AgentTokenRevoked,
     AgentReassigned,
+    // Supply-chain events (supply-chain.md §The Laptop Problem)
+    /// gyre-stack.lock drift detected at push time; the detail carries the
+    /// full `StackDriftEvent` (lockfile vs attested stack fingerprints,
+    /// enforcement mode, override reason, outcome).
+    StackDriftDetected,
     Custom(String),
 }
 
@@ -79,6 +84,7 @@ impl AuditEventType {
             Self::AgentHeartbeat => "agent_heartbeat".to_string(),
             Self::AgentTokenRevoked => "agent_token_revoked".to_string(),
             Self::AgentReassigned => "agent_reassigned".to_string(),
+            Self::StackDriftDetected => "stack_drift_detected".to_string(),
             Self::Custom(s) => s.clone(),
         }
     }
@@ -115,6 +121,7 @@ impl AuditEventType {
             "agent_heartbeat" => Self::AgentHeartbeat,
             "agent_token_revoked" => Self::AgentTokenRevoked,
             "agent_reassigned" => Self::AgentReassigned,
+            "stack_drift_detected" => Self::StackDriftDetected,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -248,6 +255,7 @@ mod tests {
             AuditEventType::AgentHeartbeat,
             AuditEventType::AgentTokenRevoked,
             AuditEventType::AgentReassigned,
+            AuditEventType::StackDriftDetected,
             AuditEventType::Custom("custom_event".to_string()),
         ];
         for t in &types {

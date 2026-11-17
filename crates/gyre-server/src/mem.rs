@@ -1984,6 +1984,40 @@ impl MemAuditRepository {
     }
 }
 
+/// Evaluate an [`AuditQueryFilter`] against one event in code — the mem
+/// adapter has no schema, so the port's filter contract (every dimension,
+/// including `repo_id`) is guarded here. Shared by `query` and
+/// `count_filtered` so the two can never disagree on what matches.
+fn audit_entry_matches(e: &AuditEvent, filter: &AuditQueryFilter) -> bool {
+    filter
+        .agent_id
+        .as_ref()
+        .is_none_or(|a| e.agent_id.as_ref().is_some_and(|id| id.as_str() == a))
+        && filter
+            .event_type
+            .as_ref()
+            .is_none_or(|t| e.event_type.as_str() == *t)
+        && filter
+            .workspace_id
+            .as_ref()
+            .is_none_or(|w| e.workspace_id.as_ref().is_some_and(|id| id.as_str() == w))
+        && filter
+            .user_id
+            .as_ref()
+            .is_none_or(|u| e.user_id.as_ref().is_some_and(|id| id.as_str() == u))
+        && filter
+            .repo_id
+            .as_ref()
+            .is_none_or(|r| e.repo_id.as_ref().is_some_and(|id| id.as_str() == r))
+        && filter
+            .resource_type
+            .as_ref()
+            .is_none_or(|rt| e.resource_type == *rt)
+        && filter.outcome.is_none_or(|o| e.outcome == o)
+        && filter.since.is_none_or(|s| e.timestamp >= s)
+        && filter.until.is_none_or(|u| e.timestamp <= u)
+}
+
 #[async_trait]
 impl AuditRepository for MemAuditRepository {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
@@ -1996,35 +2030,11 @@ impl AuditRepository for MemAuditRepository {
 
     async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
         let store = self.store.lock().await;
-        let mut events: Vec<AuditEvent> =
-            store
-                .iter()
-                .filter(|e| {
-                    filter.agent_id.as_ref().is_none_or(|a| {
-                        e.event.agent_id.as_ref().is_some_and(|id| id.as_str() == a)
-                    }) && filter
-                        .event_type
-                        .as_ref()
-                        .is_none_or(|t| e.event.event_type.as_str() == *t)
-                        && filter.workspace_id.as_ref().is_none_or(|w| {
-                            e.event
-                                .workspace_id
-                                .as_ref()
-                                .is_some_and(|id| id.as_str() == w)
-                        })
-                        && filter.user_id.as_ref().is_none_or(|u| {
-                            e.event.user_id.as_ref().is_some_and(|id| id.as_str() == u)
-                        })
-                        && filter
-                            .resource_type
-                            .as_ref()
-                            .is_none_or(|rt| e.event.resource_type == *rt)
-                        && filter.outcome.is_none_or(|o| e.event.outcome == o)
-                        && filter.since.is_none_or(|s| e.event.timestamp >= s)
-                        && filter.until.is_none_or(|u| e.event.timestamp <= u)
-                })
-                .map(MemAuditEntry::materialize)
-                .collect::<Result<Vec<_>>>()?;
+        let mut events: Vec<AuditEvent> = store
+            .iter()
+            .filter(|e| audit_entry_matches(&e.event, filter))
+            .map(MemAuditEntry::materialize)
+            .collect::<Result<Vec<_>>>()?;
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         events.truncate(filter.limit);
         Ok(events)
@@ -2032,6 +2042,14 @@ impl AuditRepository for MemAuditRepository {
 
     async fn count(&self) -> Result<u64> {
         Ok(self.store.lock().await.len() as u64)
+    }
+
+    async fn count_filtered(&self, filter: &AuditQueryFilter) -> Result<u64> {
+        let store = self.store.lock().await;
+        Ok(store
+            .iter()
+            .filter(|e| audit_entry_matches(&e.event, filter))
+            .count() as u64)
     }
 
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
