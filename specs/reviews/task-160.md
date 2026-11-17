@@ -57,3 +57,70 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — rustfmt-repair round at base `e9ed695` (verdict: complete)
+
+Candidate `f4ef30b8` (assignment base `e9ed695`). This round's surface: the
+rustfmt changed-lines repair `4ad706c8` (format-only split of the over-width
+`create().await.unwrap()` line in the `list_by_workspace_type_since`
+cross-tenant test — diff verified line-for-line, no behavior change), plus the
+branch's merge of base `e9ed695` (task-166 supply-chain lineage) which brought
+the `budget_call.rs`/`invitation.rs` tenant-filter SKIP_LIST entries and more
+adapter reads into the checked set. The three task scripts are byte-identical
+to the round-4 approved versions (`git diff b5349850..HEAD -- scripts/check-*.sh`
+on the three task scripts: empty).
+
+**Clean-HEAD runs (all via exit-code-captured evidence files):**
+`check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0 — **126 read query
+methods on tenant-column tables checked, 0 violations** (up from 111 at round 4:
+the merged upstream base added adapter reads, all now covered);
+`check-api-auth.sh` exit 0; `check-arch.sh` exit 0; `check-abac-route-registry.sh`
+exit 0; `check-abac-exempt-handlers.sh` exit 0; `check-scope-literal-defaults.sh
+crates` exit 0; `check-fabricated-scope-defaults.sh` exit 0;
+`check-task-commit-attribution.sh` exit 0 (all 20 `commits:` frontmatter
+entries verified ancestors of HEAD). `check-rustfmt-diff.py e9ed695` exit 0
+(44 Rust files, changed lines clean — the round's specific repair holds).
+
+**Mutation kill-probes (isolated worktree `/tmp/stage/task160-r5-mut` at the
+candidate, restored clean after each):**
+- Mutant A — tenant filter stripped from sqlite `list_by_workspace_type_since`:
+  `check-tenant-filter.sh` exit 1 with exact file:line, AND the behavior test
+  `list_by_workspace_type_since_scopes_and_is_unbounded` FAILS (the tenant-2
+  row `n-saf-cross-tenant` leaks into tenant-1's result). Both kill paths work;
+  the 9a91f0cd fix is real enforcement with a hard test, not lint-appeasement.
+- Mutant B — `Task.workspace_id → Option<Id>`: `check-hierarchy.sh` exit 1
+  naming `task.rs:60`.
+- Mutant C — `abac_middleware` layer removed from the api router chain in
+  `lib.rs`: `check-api-auth.sh` exit 1 ("Missing layers: abac_middleware").
+
+**Skip-list entries added by the upstream merge, re-audited against code:**
+`budget_call.rs` — `list_since` is genuinely cross-tenant by construction (only
+caller `apply_rolling_24h_window` runs hourly on the BASE handle and recomputes
+per-workspace sums for the whole deployment; a handle-tenant filter would zero
+non-default tenants' counters hourly), and `list_by_workspace` DOES filter
+`.filter(budget_call_records::tenant_id.eq(&tenant_id))` — verified in source.
+`invitation.rs` — rows carry the domain entity's tenant, not the handle's;
+`revoke_tenant_invitation` loads the row then returns `Forbidden` on tenant
+mismatch (api/invitations.rs:487-491) — verified in source.
+
+**Tests via the build wrapper** (clean, isolated `CARGO_TARGET_DIR`):
+`cargo test -p gyre-adapters --lib sqlite::notification` — 10 passed / 0 failed;
+`cargo test -p gyre-adapters --test tenant_isolation` — 2 passed / 0 failed;
+`cargo test -p gyre-adapters --lib` — **577 passed / 0 failed**;
+`cargo check -p gyre-server` — exit 0 (rebase-repaired server compiles).
+Reviewer probe artifact documented in `target-dir-note.txt`: one initial full-suite
+failure was caused by sharing a target dir between the clean tree and the
+mutation worktree (cargo mtime-freshness served the mutant rlib); with an
+isolated target dir the same suite is fully green — not flakiness, not a defect.
+
+**Non-blocking observations:** (a) coverage rows 14/27 still cite the round-4
+figures ("111 read methods", "five skip adapters") at their 2026-10-10 audit
+head; the current merged head checks 126 with 8 skip entries — status
+`implemented` remains accurate and the drift is conservative (more coverage
+now); the verifier regenerates the summary. (b) `cargo test --all`, Clippy and
+the Architecture-lint CI job on the exact head remain deferred to the
+independent verifier (server test compilation exceeds this sandbox's budget).
+
+Evidence: `/tmp/stage/review-evidence/task-160-round5/` — clean-HEAD lint runs,
+mutation outputs (A/B/C), notification/tenant-isolation/adapters-lib test logs,
+cargo-check-server, rustfmt-changed-lines, commit-attribution, target-dir-note.
