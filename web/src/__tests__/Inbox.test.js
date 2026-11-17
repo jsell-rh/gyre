@@ -104,6 +104,7 @@ vi.mock('../lib/api.js', () => ({
     mergeRequests: vi.fn().mockResolvedValue([]),
     mergeRequest: vi.fn().mockResolvedValue(null),
     createTask: vi.fn().mockResolvedValue({ id: 'task-42', title: 'Reconcile' }),
+    workspace: vi.fn().mockResolvedValue({ id: 'ws-1', trust_level: 'Supervised' }),
   },
 }));
 
@@ -122,6 +123,34 @@ describe('Inbox', () => {
 
   it('renders without throwing', () => {
     expect(() => render(Inbox)).not.toThrow();
+  });
+
+  // HSI §2 "Inbox shows" / "Inbox priorities shown" rows: the client sends
+  // NO priority cap — the server-side trust filter (type-set exclusion via
+  // exclude_types) is the single enforcement point for every client. A
+  // client-side max_priority=9 cap would hide rank-10 action-required
+  // types (InvitationReceived, MembershipChanged) that the type-set
+  // deliberately keeps visible, desynchronizing the inbox list from the
+  // badge count endpoint (which applies the same type-set exclusion).
+  it('sends no client-side priority cap at Guided trust and renders rank-10 invitations', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-invite',
+        notification_type: 'InvitationReceived',
+        priority: 10,
+        title: 'Workspace invitation',
+      }),
+    ]);
+    const { findByText } = render(Inbox, { workspaceId: 'ws-1', scope: 'workspace' });
+    await waitFor(() => {
+      expect(api.myNotifications).toHaveBeenCalledWith({ workspace_id: 'ws-1' });
+    });
+    const params = api.myNotifications.mock.calls[0][0];
+    expect(params.max_priority).toBeUndefined();
+    // The rank-10 action-required invitation renders in the inbox — the
+    // server-side type-set exclusion (not a rank cap) is what hides the
+    // chatter types, so invitations stay visible at Guided/Autonomous.
+    expect(await findByText('Workspace invitation')).toBeTruthy();
   });
 
   it('mounts and produces DOM output', () => {
