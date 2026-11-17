@@ -35,3 +35,13 @@ notes rather than appending diagnostic ledgers or new top-level sections.
 An independent reviewer and deterministic gates decide approval. If unfinished,
 leave truthful progress and specific remaining work. The executor checkpoints
 and publishes the source when this single assignment ends.
+
+Large gyre-server builds/test compilation must run in the independent verifier,
+after the model exits, to fit the hard 4 GiB budget. Use cargo check for server
+type checking and focused tests of smaller explicit packages. Record the server
+tests the verifier must execute. Do not bypass the build wrapper.
+
+Acceptance criteria are immutable requirements. Do not tick their checkboxes,
+append test status, or annotate them with deferred-verification notes. Put all
+progress and deferred test details under exactly ## Shipped. The executor may
+restore checkbox markers mechanically; this never asserts a test passed.

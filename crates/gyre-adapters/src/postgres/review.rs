@@ -71,6 +71,8 @@ struct ReviewRow {
     reviewer_agent_id: String,
     decision: String,
     body: Option<String>,
+    reviewer_persona: Option<String>,
+    gate_id: Option<String>,
     created_at: i64,
 }
 
@@ -88,6 +90,8 @@ impl ReviewRow {
             decision,
             body: self.body,
             created_at: self.created_at as u64,
+            reviewer_persona: self.reviewer_persona,
+            gate_id: self.gate_id.map(Id::new),
         })
     }
 }
@@ -100,6 +104,8 @@ struct ReviewRecord<'a> {
     reviewer_agent_id: &'a str,
     decision: &'a str,
     body: Option<&'a str>,
+    reviewer_persona: Option<&'a str>,
+    gate_id: Option<&'a str>,
     created_at: i64,
 }
 
@@ -154,6 +160,8 @@ impl ReviewRepository for PgStorage {
                 reviewer_agent_id: &r.reviewer_agent_id,
                 decision,
                 body: r.body.as_deref(),
+                reviewer_persona: r.reviewer_persona.as_deref(),
+                gate_id: r.gate_id.as_ref().map(|g| g.as_str()),
                 created_at: r.created_at as i64,
             };
             diesel::insert_into(reviews::table)
@@ -175,6 +183,21 @@ impl ReviewRepository for PgStorage {
                 .order(reviews::created_at.asc())
                 .load::<ReviewRow>(&mut *conn)
                 .context("list reviews")?;
+            rows.into_iter().map(|r| r.into_review()).collect()
+        })
+        .await?
+    }
+
+    async fn list_by_reviewer(&self, reviewer_agent_id: &str) -> Result<Vec<Review>> {
+        let pool = Arc::clone(&self.pool);
+        let reviewer = reviewer_agent_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Review>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = reviews::table
+                .filter(reviews::reviewer_agent_id.eq(reviewer))
+                .order(reviews::created_at.desc())
+                .load::<ReviewRow>(&mut *conn)
+                .context("list reviews by reviewer")?;
             rows.into_iter().map(|r| r.into_review()).collect()
         })
         .await?

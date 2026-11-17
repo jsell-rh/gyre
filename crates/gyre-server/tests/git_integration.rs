@@ -730,13 +730,21 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
+    // Seed a real repository: create_mr resolves the MR's workspace scope
+    // from its repository and refuses unknown repositories (M34
+    // scope-fabrication repair), so MR fixtures need an existing repo like
+    // every other test in this file. Autonomous trust keeps the queue
+    // mechanics under test free of the supervised-trust approval hold.
+    let ws_id = uniq("ws-dep-block");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "dep-block-repo").await;
+
     // Create two MRs via the API (no real git operations needed for this test).
     // MR-A: the dependency (open, not yet enqueued)
     let mr_a: serde_json::Value = client
         .post(format!("{api}/merge-requests"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "repository_id": "dep-test-repo",
+            "repository_id": repo_id.clone(),
             "title": "dep-block: MR A (dependency)",
             "source_branch": "feat/dep-a",
             "target_branch": "main",
@@ -755,7 +763,7 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
         .post(format!("{api}/merge-requests"))
         .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "repository_id": "dep-test-repo",
+            "repository_id": repo_id,
             "title": "dep-block: MR B (depends on A)",
             "source_branch": "feat/dep-b",
             "target_branch": "main",
@@ -1298,18 +1306,25 @@ async fn queue_graph_reflects_enqueued_mrs_and_deps() {
     let auth_hdr = format!("Bearer {token}");
     let client = reqwest::Client::new();
 
+    // Seed a real repository: create_mr resolves the MR's workspace scope
+    // from its repository and refuses unknown repositories (M34
+    // scope-fabrication repair), so MR fixtures need an existing repo.
+    let ws_id = uniq("ws-graph");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "graph-repo").await;
+
     // Create 3 MRs: C → B → A (C depends on B, B depends on A).
     let create_mr = |title: &str| {
         let client = client.clone();
         let api = api.clone();
         let auth_hdr = auth_hdr.clone();
+        let repository_id = repo_id.clone();
         let title = title.to_string();
         async move {
             let resp: serde_json::Value = client
                 .post(format!("{api}/merge-requests"))
                 .header("Authorization", auth_hdr)
                 .json(&serde_json::json!({
-                    "repository_id": "graph-repo",
+                    "repository_id": repository_id,
                     "title": title,
                     "source_branch": "feat/x",
                     "target_branch": "main",
@@ -1684,5 +1699,72 @@ async fn mirror_endpoint_with_full_middleware_returns_201() {
         status,
         reqwest::StatusCode::CREATED,
         "Expected 201 CREATED from POST /repos/mirror with full middleware stack, got {status}: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: Archived repos reject pushes (repo-lifecycle.md §4 step 5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn push_to_archived_repo_rejected() {
+    let token = "git-test-archived-push-token";
+    let (_port, base_url) = start_server(token).await;
+    let api = format!("{base_url}/api/v1");
+    let auth_hdr = format!("Bearer {token}");
+    let client = reqwest::Client::new();
+
+    let ws_id = uniq("ws-archived");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "archived-repo").await;
+
+    // Archive the repo via the API.
+    let archive_resp = client
+        .post(format!("{api}/repos/{repo_id}/archive"))
+        .header("Authorization", &auth_hdr)
+        .send()
+        .await
+        .unwrap();
+    assert!(archive_resp.status().is_success());
+
+    // A real `git push` against the archived repo must fail.
+    let base_url_c = base_url.clone();
+    let token_owned = token.to_string();
+    let ws_id_c = ws_id.clone();
+
+    let (push_ok, push_stderr) = tokio::task::spawn_blocking(move || {
+        let work = TempDir::new().unwrap();
+        let dir = work.path().join("repo");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/archived-repo.git");
+
+        // Clone still works — archived repos are read-only, not invisible.
+        let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
+        let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
+        let ok = clone_out.status.success()
+            || stderr.contains("empty repository")
+            || stderr.contains("warning");
+        assert!(ok, "clone failed: {stderr}");
+
+        git_local(&["config", "user.email", "test@gyre.local"], &dir);
+        git_local(&["config", "user.name", "Test Agent"], &dir);
+        std::fs::write(dir.join("readme.md"), "# test\n").unwrap();
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "feat: push to archived repo"], &dir);
+
+        let push_out = git_with_token(&["push", "origin", "HEAD:main"], &dir, &token_owned);
+        (
+            push_out.status.success(),
+            String::from_utf8_lossy(&push_out.stderr).to_string(),
+        )
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !push_ok,
+        "push to archived repo should be rejected, but it succeeded"
+    );
+    assert!(
+        push_stderr.contains("archived"),
+        "push rejection should explain the repo is archived, got: {push_stderr}"
     );
 }

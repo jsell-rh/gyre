@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, screen, waitFor } from '@testing-library/svelte';
+import { render, fireEvent, screen, waitFor, within } from '@testing-library/svelte';
 import EditorSplit from '../lib/EditorSplit.svelte';
 
 // Mock layout-engines so ArchPreviewCanvas renders without ELK
@@ -14,6 +14,7 @@ vi.mock('../lib/api.js', () => ({
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     graphPredict: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     specsAssist: vi.fn(),
+    metaSpecsAssist: vi.fn(),
     specsSave: vi.fn().mockResolvedValue({ mr_id: 42 }),
     workspacePresence: vi.fn().mockResolvedValue([]),
     thoroughPreview: vi.fn(),
@@ -129,12 +130,74 @@ describe('EditorSplit', () => {
 
   it('shows LLM hint warning when no repoId', () => {
     render(EditorSplit, { props: { content: '', repoId: null } });
-    expect(document.body.textContent).toContain('LLM editing requires repo context');
+    expect(document.body.textContent).toContain('LLM editing requires repo or workspace context');
   });
 
   it('shows ctrl+enter hint when repoId is set', () => {
     render(EditorSplit, { props: { content: '', repoId: 'repo-1' } });
     expect(document.body.textContent).toContain('Ctrl+Enter');
+  });
+
+  // ── §9 meta-spec context: workspace-scoped LLM chat ─────────────────────
+
+  it('enables the LLM chat in meta-spec context with a workspace and no repo', () => {
+    render(EditorSplit, {
+      props: { content: '', repoId: null, context: 'meta-spec', workspaceId: 'ws-1', specPath: 'ms-1' },
+    });
+    // Production §9 surface: MetaSpecs mounts EditorSplit with workspaceId
+    // and no repoId — the chat must be usable there (round-1 finding: it was
+    // permanently disabled when the repo-scoped assist was the only route).
+    expect(screen.getByTestId('llm-input').disabled).toBe(false);
+    const input = screen.getByTestId('llm-input');
+    fireEvent.input(input, { target: { value: 'make error handling more defensive' } });
+    expect(screen.getByTestId('llm-send-btn').disabled).toBe(false);
+    expect(document.body.textContent).toContain('Ctrl+Enter');
+  });
+
+  it('keeps the LLM chat disabled in meta-spec context without a workspace', () => {
+    render(EditorSplit, { props: { content: '', repoId: null, context: 'meta-spec' } });
+    expect(screen.getByTestId('llm-input').disabled).toBe(true);
+    expect(screen.getByTestId('llm-send-btn').disabled).toBe(true);
+    expect(document.body.textContent).toContain('LLM editing requires repo or workspace context');
+  });
+
+  it('sends meta-spec chat instructions to the workspace assist endpoint and renders the suggestion', async () => {
+    const { api } = await import('../lib/api.js');
+    api.metaSpecsAssist.mockResolvedValueOnce(
+      sseResponse([
+        ['partial', { text: 'Adding defensive error handling.' }],
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Error Handling\n\nUse Result<T, E> everywhere.' }],
+          explanation: 'Adding defensive error handling.',
+        }],
+      ]),
+    );
+    render(EditorSplit, {
+      props: {
+        content: 'You are a backend developer.\n\n## Existing\nWrite services.\n',
+        repoId: null,
+        context: 'meta-spec',
+        workspaceId: 'ws-9',
+        specPath: 'ms-backend-dev',
+      },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'make error handling more defensive' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+
+    // Routed to the workspace endpoint with the §9 draft, NOT specsAssist.
+    expect(api.metaSpecsAssist).toHaveBeenCalledWith('ws-9', {
+      instruction: 'make error handling more defensive',
+      draft_content: 'You are a backend developer.\n\n## Existing\nWrite services.\n',
+      meta_spec_id: 'ms-backend-dev',
+    });
+    expect(api.specsAssist).not.toHaveBeenCalled();
+
+    const block = await screen.findByTestId('llm-suggestion');
+    expect(block).toBeTruthy();
+    // §9 State 3: Accept applies the suggestion diff to the draft in-memory.
+    await fireEvent.click(screen.getByTestId('accept-suggestion'));
+    await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
+    expect(screen.getByTestId('editor-split-textarea').value).toContain('## Error Handling');
   });
 
   // ── Save button ────────────────────────────────────────────────────────────
@@ -579,6 +642,72 @@ describe('EditorSplit', () => {
     }
   }, 20000);
 
+  it('meta-spec Iterate returns to editing with the selector AND the last preview results still visible (§9)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      // Real PreviewResponse / PreviewStatusResponse shapes (meta_specs.rs).
+      const blast = {
+        affected_workspaces: [{ id: 'ws-1' }],
+        affected_repos: [
+          { id: 'repo-9', workspace_id: 'ws-1', reason: 'specs/payment/retry.md pinned in meta-spec set' },
+        ],
+        affected_workspace_count: 1,
+      };
+      const structural = { scope: 'workspace', affected_spec_count: 1 };
+      api.previewPersona.mockResolvedValueOnce({
+        preview_id: 'pv-iter-1',
+        state: 'running',
+        specs: [{ path: 'specs/payment/retry.md', status: 'running' }],
+        blast_radius: blast,
+        structural_impact: structural,
+      });
+      api.previewPersonaStatus.mockResolvedValue({
+        preview_id: 'pv-iter-1',
+        state: 'complete',
+        specs: [{ path: 'specs/payment/retry.md', status: 'complete' }],
+        blast_radius: blast,
+        structural_impact: structural,
+      });
+      render(EditorSplit, {
+        props: {
+          content: 'You are a backend dev...',
+          context: 'meta-spec',
+          workspaceId: 'ws-1',
+          specPath: 'persona/backend-dev',
+          targetSpecs: [{ path: 'specs/payment/retry.md' }],
+        },
+      });
+      await fireEvent.click(await screen.findByText('Select All'));
+      await fireEvent.click(screen.getByTestId('preview-btn'));
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
+      // State 3: tabs render the server-computed impact; no selector yet.
+      expect(screen.getByTestId('meta-impact').textContent).toContain('workspace');
+      expect(screen.queryByTestId('spec-selector')).toBeNull();
+
+      await fireEvent.click(screen.getByTestId('iterate-btn'));
+
+      // Back to State 1: editor editable, Preview button back, selector
+      // visible again for the next iteration...
+      await waitFor(() => expect(screen.getByTestId('editor-split-textarea')).toBeTruthy());
+      expect(screen.getByTestId('preview-btn')).toBeTruthy();
+      const selector = screen.getByTestId('spec-selector');
+      expect(selector.textContent).toContain('specs/payment/retry.md');
+      // ...AND the last preview results remain visible (§9 Iterate):
+      // Architecture impact + Code Diff tab with the per-spec statuses.
+      expect(screen.getByTestId('tab-architecture')).toBeTruthy();
+      expect(screen.getByTestId('meta-impact').textContent).toContain('workspace');
+      expect(screen.getByTestId('meta-impact').textContent).toContain('repo-9');
+      await fireEvent.click(screen.getByTestId('tab-code-diff'));
+      const statuses = await screen.findByTestId('meta-spec-statuses');
+      expect(statuses.textContent).toContain('specs/payment/retry.md');
+      expect(statuses.textContent).toContain('complete');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
   it('a thoroughPreview rejection (real deployments: 404 — no server route) returns to editing with an error banner, never a fabricated complete state', async () => {
     const { api } = await import('../lib/api.js');
     // POST /repos/:id/graph/thorough-preview has no server route, so every
@@ -672,6 +801,89 @@ describe('EditorSplit', () => {
     });
   });
 
+  // ── Locked-editor pending-changes diff (§9 State 2 "shows diff of changes") ──
+
+  it('locked editor shows the diff of pending changes against the baseline while a preview runs', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-1' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: {
+        content: '# Persona\nHandle all errors with Result<T, E>.\nBe terse.',
+        baselineContent: '# Persona\nBe terse.',
+        repoId: 'repo-1',
+        specPath: 'specs/auth.md',
+      },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    // Diff view — not the verbatim draft
+    const diff = screen.getByTestId('locked-diff');
+    expect(diff).toBeTruthy();
+    // Context line unchanged, added line marked with '+' (§9 State 2 wireframe)
+    expect(diff.querySelector('.locked-diff-context .locked-diff-text').textContent).toBe('# Persona');
+    const addLine = diff.querySelector('.locked-diff-add .locked-diff-text');
+    expect(addLine.textContent).toBe('Handle all errors with Result<T, E>.');
+    expect(diff.querySelector('.locked-diff-add .locked-diff-marker').textContent).toBe('+');
+    // Summary counts the pending additions
+    expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -0');
+    // Locked: no textarea while the preview runs
+    expect(screen.queryByTestId('editor-split-textarea')).toBeNull();
+  });
+
+  it('locked editor marks removed baseline lines with "-"', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-2' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: {
+        content: 'New body.',
+        baselineContent: 'Old body.',
+        repoId: 'repo-1',
+        specPath: 'specs/auth.md',
+      },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('locked-diff')).toBeTruthy());
+    const diff = screen.getByTestId('locked-diff');
+    expect(diff.querySelector('.locked-diff-remove .locked-diff-text').textContent).toBe('Old body.');
+    expect(diff.querySelector('.locked-diff-remove .locked-diff-marker').textContent).toBe('-');
+    expect(diff.querySelector('.locked-diff-add .locked-diff-text').textContent).toBe('New body.');
+    expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -1');
+  });
+
+  it('locked editor falls back to the verbatim draft when no baseline is provided', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-3' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: { content: 'Just a draft.', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    // No baseline → verbatim draft, no diff markers
+    expect(screen.queryByTestId('locked-diff')).toBeNull();
+    expect(screen.getByTestId('editor-locked').textContent).toContain('Just a draft.');
+  });
+
+  it('locked editor shows no diff when the draft equals the baseline', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-4' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: {
+        content: 'Unchanged draft.',
+        baselineContent: 'Unchanged draft.',
+        repoId: 'repo-1',
+        specPath: 'specs/auth.md',
+      },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    expect(screen.queryByTestId('locked-diff')).toBeNull();
+    expect(screen.getByTestId('editor-locked').textContent).toContain('Unchanged draft.');
+  });
+
   // ── LLM suggestion Accept / Edit / Dismiss (§3 steps 4-6) ──────────────────
 
   /** Build an SSE response body from (event, data) pairs, server format. */
@@ -747,5 +959,127 @@ describe('EditorSplit', () => {
     await fireEvent.click(screen.getByTestId('dismiss-suggestion'));
     await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
     expect(screen.getByTestId('editor-split-textarea').value).toBe(before);
+  });
+
+  it('renders the partial explanation progressively while the SSE stream is open (§3 step 2)', async () => {
+    const { api } = await import('../lib/api.js');
+    const enc = (s) => new TextEncoder().encode(s);
+    // Gate the second read so the intermediate streaming state is
+    // observable: the partial event is delivered, the complete event is
+    // held back until the test releases it.
+    let releaseComplete;
+    const gate = new Promise((resolve) => { releaseComplete = resolve; });
+    let reads = 0;
+    api.specsAssist.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: () => {
+            reads += 1;
+            if (reads === 1) {
+              return Promise.resolve({
+                value: enc('event: partial\ndata: {"text":"Adding error handling."}\n\n'),
+                done: false,
+              });
+            }
+            if (reads === 2) {
+              return gate.then(() => ({
+                value: enc('event: complete\ndata: {"diff":[{"op":"add","path":"## Existing","content":"## Error Handling"}],"explanation":"Adding error handling."}\n\n'),
+                done: false,
+              }));
+            }
+            return Promise.resolve({ value: undefined, done: true });
+          },
+        }),
+      },
+    });
+    render(EditorSplit, {
+      props: { content: '# Auth\n\n## Existing\nbody\n', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    // While the stream is open the partial explanation renders progressively
+    // and the input is in its loading (disabled) state.
+    await waitFor(() => {
+      expect(screen.getByTestId('llm-streaming').textContent).toContain('Adding error handling.');
+    });
+    expect(screen.getByTestId('llm-input').disabled).toBe(true);
+    releaseComplete();
+    // The complete event turns the stream into a suggestion block.
+    await screen.findByTestId('llm-suggestion');
+    expect(screen.queryByTestId('llm-streaming')).toBeNull();
+    expect(screen.getByTestId('llm-input').disabled).toBe(false);
+  });
+
+  it('multiple suggestions coexist as separate blocks; dismissing one keeps the others (§3)', async () => {
+    const { api } = await import('../lib/api.js');
+    api.specsAssist
+      .mockResolvedValueOnce(sseResponse([
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Error Handling' }],
+          explanation: 'First suggestion.',
+        }],
+      ]))
+      .mockResolvedValueOnce(sseResponse([
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Timeouts' }],
+          explanation: 'Second suggestion.',
+        }],
+      ]));
+    render(EditorSplit, {
+      props: { content: '# Auth\n\n## Existing\nbody\n', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    await screen.findByTestId('llm-suggestion');
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add timeouts' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    // Two requests → two coexisting inline diff blocks, not one replacing
+    // the other (§3 "Multiple suggestions... Each appears as a separate
+    // inline diff block").
+    await waitFor(() => expect(screen.getAllByTestId('llm-suggestion').length).toBe(2));
+    // Dismiss only the first block — the second survives untouched.
+    const blocks = screen.getAllByTestId('llm-suggestion');
+    await fireEvent.click(within(blocks[0]).getByTestId('dismiss-suggestion'));
+    await waitFor(() => expect(screen.getAllByTestId('llm-suggestion').length).toBe(1));
+    expect(screen.getByTestId('llm-suggestion').textContent).toContain('Timeouts');
+    // Dismiss never touches the editor content.
+    expect(screen.getByTestId('editor-split-textarea').value).toBe('# Auth\n\n## Existing\nbody\n');
+  });
+
+  it('accepting one of several suggestions leaves the others curatable (§3)', async () => {
+    const { api } = await import('../lib/api.js');
+    api.specsAssist
+      .mockResolvedValueOnce(sseResponse([
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Error Handling' }],
+          explanation: 'First suggestion.',
+        }],
+      ]))
+      .mockResolvedValueOnce(sseResponse([
+        ['complete', {
+          diff: [{ op: 'add', path: '## Existing', content: '## Timeouts' }],
+          explanation: 'Second suggestion.',
+        }],
+      ]));
+    render(EditorSplit, {
+      props: { content: '# Auth\n\n## Existing\nbody\n', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    await screen.findByTestId('llm-suggestion');
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add timeouts' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    await waitFor(() => expect(screen.getAllByTestId('llm-suggestion').length).toBe(2));
+    // Accept the first block: its diff is applied in-memory and only that
+    // block is consumed.
+    const blocks = screen.getAllByTestId('llm-suggestion');
+    await fireEvent.click(within(blocks[0]).getByTestId('accept-suggestion'));
+    await waitFor(() => expect(screen.getAllByTestId('llm-suggestion').length).toBe(1));
+    const ta = screen.getByTestId('editor-split-textarea');
+    expect(ta.value).toContain('## Error Handling');
+    expect(ta.value).not.toContain('## Timeouts');
+    expect(api.specsSave).not.toHaveBeenCalled();
   });
 });

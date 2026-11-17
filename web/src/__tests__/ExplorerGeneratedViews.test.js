@@ -50,6 +50,7 @@ vi.mock('../lib/api.js', () => {
       mrTrace: (...args) => mrTrace(...args),
       mergeRequests: vi.fn().mockResolvedValue({ merge_requests: [] }),
       graphQueryDryrun: vi.fn().mockResolvedValue(null),
+      repoGraphRisks: vi.fn().mockResolvedValue([]),
     },
   };
 });
@@ -301,13 +302,11 @@ describe('ExplorerView — HSI §3 Generated Views', () => {
     });
 
     // Playback switches the canvas to the evaluative lens (where trace
-    // particles render) — the lens toggle reflects it.
+    // particles render) — the lens checkbox reflects it.
     await waitFor(() => {
-      const evalBtn = [...container.querySelectorAll('.tb-btn')].find(
-        (b) => b.textContent.trim() === 'Evaluative'
-      );
-      expect(evalBtn).toBeTruthy();
-      expect(evalBtn.classList.contains('active')).toBe(true);
+      const evalCheck = container.querySelector('[data-testid="lens-checkbox-evaluative"] input');
+      expect(evalCheck).toBeTruthy();
+      expect(evalCheck.checked).toBe(true);
     });
     flushRaf(50);
   });

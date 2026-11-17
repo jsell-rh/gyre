@@ -76,7 +76,7 @@ The Explorer canvas is a single interactive surface. The knowledge graph topolog
 - Node badges: span count, error rate, mean duration
 - Edge thickness: proportional to call frequency in traces
 - Failed spans: red glow on nodes, error particles
-- Playback controls: play/pause, scrubber, speed (0.25x–5x)
+- Playback controls: play/pause, step (span-by-span, HSI §3a), scrubber, speed (0.25x–10x — the union of this range and HSI §3a's 1x/10x/step-through), test-case selector (ui-layout.md §4)
 
 **Interaction**:
 - Everything from Structural lens still works (click, double-click, drill-down)
@@ -154,16 +154,26 @@ Replace the current `MoldableView` tabs (Graph, List, Timeline, Flow) with:
 MoldableView
   ├── Explorer tab (merged Graph + Flow)
   │     ├── LensToggle (Structural / Evaluative / Observable)
-  │     ├── ExplorerCanvas (SVG graph layer — always rendered)
-  │     ├── EvaluativeOverlay (Canvas 2D particles — rendered when lens=evaluative)
-  │     │     └── PlaybackControls (play/pause, scrubber, speed)
-  │     ├── NodeBadge (SVG overlay — metrics per node)
+  │     ├── ExplorerCanvas (layout dispatcher — Canvas 2D graph for
+  │     │     graph/timeline views; delegates layout:"flow" views)
+  │     ├── FlowCanvas (flow layout renderer, ui-layout.md §4 — SVG
+  │     │     node/edge layer (clickable, accessible) + particle overlay:
+  │     │     Canvas 2D ≤100 concurrent particles, WebGL2 above)
+  │     │     └── PlaybackControls (play/pause, step, scrubber, speed, test selector)
+  │     ├── EvaluativeOverlay (evaluative metric selector toolbar group)
+  │     ├── NodeBadge (per-node metric chips — SVG in FlowCanvas, canvas-drawn in the 2D graph path)
   │     └── Breadcrumb (drill-down path)
   ├── List tab (unchanged)
   └── Timeline tab (unchanged)
 ```
 
-`FlowRenderer` and `FlowCanvas` merge into `EvaluativeOverlay` — a component that only renders when the evaluative lens is active. It consumes node positions and viewBox from ExplorerCanvas (already wired via bindable props).
+`FlowRenderer` merged into the evaluative lens's particle animation (shared
+pure logic in `flow-particles.js`); `FlowCanvas` is the flow-layout renderer
+mandated by ui-layout.md §4 ("Canvas 2D overlay on top of the SVG node/edge
+layer"). ExplorerCanvas delegates to it when the active ViewSpec layout is
+`"flow"`; trace particles on non-flow views keep rendering through
+ExplorerCanvas's evaluative lens on its Canvas 2D context, switching to a
+WebGL2 overlay above 100 concurrent particles (`particle-layer.js`).
 
 ### Implementation Phases
 

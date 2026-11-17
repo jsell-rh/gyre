@@ -118,3 +118,15 @@ class ArtifactTest(unittest.TestCase):
         self.assertEqual(publication['head'],self.base)
         artifacts.validate(self.repo,identity,publication,'task-001',self.branch)
         self.assertEqual((self.repo/'specs/tasks/task-001.md').read_text(),self.body)
+
+    def test_summary_conflict_is_regenerated_from_clean_merged_matrices(self):
+        root=self.repo/'specs/coverage/system';root.mkdir(parents=True)
+        matrix='| 1 | Feature | required | implemented | task-001 |\n'
+        (root/'feature.md').write_text(matrix)
+        summary=self.repo/'specs/coverage/SUMMARY.md';summary.write_text('base\n');self.commit('coverage base');base=self.git('rev-parse','HEAD')
+        summary.write_text('candidate\n');self.commit('candidate summary');candidate=self.git('rev-parse','HEAD')
+        self.git('checkout','--detach',base);summary.write_text('main\n');self.commit('main summary');main=self.git('rev-parse','HEAD')
+        self.assertNotEqual(self.git('merge','--no-ff',candidate,check=False).returncode,0)
+        generated,remaining=artifacts.resolve_generated_conflicts(self.repo,main)
+        self.assertIn('specs/coverage/SUMMARY.md',generated);self.assertEqual(remaining,[])
+        self.assertIn('**100%**',summary.read_text());self.assertEqual((root/'feature.md').read_text(),matrix)

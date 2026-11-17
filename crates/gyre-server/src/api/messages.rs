@@ -309,8 +309,20 @@ pub async fn send_message(
     // Broadcast to WebSocket clients for real-time delivery.
     let _ = state.message_broadcast_tx.send(msg.clone());
 
-    // Dispatch to consumers (best-effort, non-blocking).
-    let _ = state.message_dispatch_tx.try_send(msg.clone());
+    // Dispatch to consumers (notification bridge, etc.). Non-blocking and
+    // best-effort: consumer drops under backpressure are logged, never
+    // block the send path (message-bus.md §Relationship to Notifications).
+    match state.message_dispatch_tx.try_send(msg.clone()) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                "message dispatch channel full; consumer dropped a message (best-effort tier)"
+            );
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!("message dispatch channel closed; no consumers registered");
+        }
+    }
 
     Ok((StatusCode::CREATED, Json(send_response(msg))))
 }

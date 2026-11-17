@@ -17,10 +17,14 @@ def configuration(store):
         help='0–1000. Zero drains new compute. Running workers and pending deletions keep their reservations.')
     add('admission_paused', 'Pause new model work', store.setting('admission_paused', False), live, 'choice',
         'Pauses triage, implementation, review and verification; cleanup and PR observation continue.', ['false', 'true'])
+    add('stress_watch_enabled','Stress experiment guard',store.setting('stress_watch_enabled',False),live,'choice',
+        'Pauses new compute on overlapping claims or repeated new provisioning faults, lease loss, ledger lock failures or OOMs at 6 GiB. Running workers and desired slots are preserved.',['false','true'])
     add('verification_slots', 'Reserved verification slots', store.setting('verification_slots', 1), live,
         help='0–1000, within total capacity. Effective reserve clamps to capacity minus one; existing workers finish.')
+    add('worker_memory_max_gib', 'Worker memory ceiling (GiB)', store.setting('worker_memory_max_gib',6), 'New admissions', 'choice',
+        '4 GiB default. With ceiling 6, an authoritative OOM permits a 6 GiB retry for the same task stage and requirements generation. One CPU/build job; running allocations are unchanged.', ['4','6'])
     limits = store.setting('limits', {})
-    for stage, label in [('triage', 'Triage'), ('implement', 'Implementation'), ('review', 'Review'), ('verify', 'Verification')]:
+    for stage, label in [('triage', 'Triage'), ('assess', 'Spec assessment'), ('implement', 'Implementation'), ('review', 'Review'), ('verify', 'Verification')]:
         add('limit.' + stage, label + ' concurrency', limits.get(stage, ''), live,
             help='1–1000, or empty to inherit total capacity. Global sandbox admission still applies. Running work is not canceled.')
     add('model_timeout', 'Agent deadline (seconds)', store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT), 'New assignments',
@@ -32,6 +36,8 @@ def configuration(store):
     add('retry_max_seconds', 'Retry ceiling (seconds)', store.setting('retry_max_seconds', 900), 'New retry schedules',
         help='1–86400 seconds, at least the base. Does not alter explicit stage-specific delays.')
     checked = store.setting('dispatcher_health_at', 0)
+    from .capacity import summary
+    admission=summary(store)
     auth_status = datetime.fromtimestamp(checked, timezone.utc).isoformat(timespec='seconds') if checked else 'Not checked yet'
     for key, label, value, help in [
         ('model', 'Pinned model', 'gateway/rits/zai-org/glm-5-3', 'Read-only: model selection must agree with the gateway route and inference admission probe.'),
@@ -39,6 +45,7 @@ def configuration(store):
         ('gateway_auth', 'Last successful gateway check', auth_status, 'Read-only: last successful provider/authentication health check, not a guarantee of current connectivity. Automatic refresh remains enabled.'),
         ('repository', 'Repository', store.setting('repository', 'jsell-rh/gyre'), 'Read-only: changing repository would invalidate the task ledger and source identities.'),
         ('ledger', 'Settings ledger', str(store.directory / 'pipeline.sqlite3'), 'Shared with the browser and CLI; separate from every other dispatcher instance.'),
+        ('namespace_capacity', 'Namespace admission', admission['message'], 'Read-only quota and local-reservation accounting. Desired slots are preserved; stale observations pause new compute only.'),
     ]:
         add(key, label, value, 'Read only', 'readonly', help)
     return rows
@@ -57,12 +64,16 @@ def save_configuration(store, request):
         if 'expected' in request and request['expected'] != row['value']:
             raise ValueError('Setting changed in another controller; refresh and edit again.')
         text = text.strip()
-        if key == 'admission_paused':
+        if key in ('admission_paused','stress_watch_enabled'):
             if text not in ('true', 'false'):
                 raise ValueError('pause must be true or false')
             value = text == 'true'
         elif key.startswith('limit.') and not text:
             value = None
+        elif key == 'worker_memory_max_gib':
+            if text not in ('4','6'):
+                raise ValueError('worker memory ceiling must be 4 or 6 GiB')
+            value = int(text)
         else:
             if not text.isascii() or not text.isdecimal():
                 raise ValueError('enter a whole number')
@@ -96,5 +107,9 @@ def save_configuration(store, request):
             stored = value
         store.db.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                          (storage_key, json.dumps(stored)))
+        if key=='stress_watch_enabled' and value:
+            import time
+            store.db.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',('stress_watch_started_at',json.dumps(time.time())))
+            store.db.execute("DELETE FROM settings WHERE key='stress_watch_alert'")
         store.event('configuration_changed', {'key': key, 'value': value, 'effect': row['effect']})
         return {'settings': configuration(store), 'value': value, 'message': 'Saved in Gyre ledger. ' + row['effect'] + '.'}

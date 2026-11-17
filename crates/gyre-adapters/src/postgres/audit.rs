@@ -13,7 +13,7 @@ use crate::schema::audit_events;
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = audit_events)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-struct AuditEventRow {
+pub(crate) struct AuditEventRow {
     id: String,
     event_type: String,
     agent_id: Option<String>,
@@ -39,7 +39,11 @@ impl AuditEventRow {
     /// the row is compressed. Decompression or JSON parse failure of a
     /// compressed payload is a hard error: a corrupted audit record must
     /// surface, not silently degrade to an empty detail object.
-    fn into_event(self) -> Result<AuditEvent> {
+    ///
+    /// Shared by every audit_events read path in this adapter (AuditRepository
+    /// query/since_timestamp and the JudgmentLedgerRepository source-2 query)
+    /// so compressed rows decompress transparently everywhere.
+    pub(crate) fn into_event(self) -> Result<AuditEvent> {
         let detail = match self.detail_zstd {
             Some(z) if !z.is_empty() => {
                 let raw =

@@ -5,7 +5,7 @@ use gyre_domain::BudgetUsage;
 use gyre_ports::{BudgetUsageRepository, KvJsonStore};
 use std::sync::Arc;
 
-use super::SqliteStorage;
+use super::{DbPool, SqliteStorage};
 use crate::schema::{budget_usages, kv_store};
 
 // ── KV store rows ─────────────────────────────────────────────────────────────
@@ -38,51 +38,69 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Blocking core of `kv_set`, shared by the async trait method and the
+/// synchronous startup accessor `kv_set_sync`.
+fn kv_set_blocking(pool: &DbPool, namespace: &str, key: &str, value: &str) -> Result<()> {
+    let mut conn = pool.get().context("get db connection")?;
+    let now = now_secs();
+    let row = NewKvRow {
+        namespace,
+        key,
+        value_json: value,
+        updated_at: now,
+    };
+    diesel::insert_into(kv_store::table)
+        .values(&row)
+        .on_conflict((kv_store::namespace, kv_store::key))
+        .do_update()
+        .set((kv_store::value_json.eq(value), kv_store::updated_at.eq(now)))
+        .execute(&mut *conn)
+        .context("upsert kv_store")?;
+    Ok(())
+}
+
+/// Blocking core of `kv_get`, shared by the async trait method and the
+/// synchronous startup accessor `kv_get_sync`.
+fn kv_get_blocking(pool: &DbPool, namespace: &str, key: &str) -> Result<Option<String>> {
+    let mut conn = pool.get().context("get db connection")?;
+    let result = kv_store::table
+        .filter(kv_store::namespace.eq(namespace))
+        .filter(kv_store::key.eq(key))
+        .first::<KvRow>(&mut *conn)
+        .optional()
+        .context("get kv_store")?;
+    Ok(result.map(|r| r.value_json))
+}
+
+impl SqliteStorage {
+    /// Synchronous KV read for startup paths that run before the async
+    /// runtime is serving (task-107 F12: `build_state` loads the persisted
+    /// forge signing key). Semantically identical to [`KvJsonStore::kv_get`].
+    pub fn kv_get_sync(&self, namespace: &str, key: &str) -> Result<Option<String>> {
+        kv_get_blocking(&self.pool, namespace, key)
+    }
+
+    /// Synchronous KV write for startup paths. Semantically identical to
+    /// [`KvJsonStore::kv_set`].
+    pub fn kv_set_sync(&self, namespace: &str, key: &str, value: &str) -> Result<()> {
+        kv_set_blocking(&self.pool, namespace, key, value)
+    }
+}
+
 #[async_trait]
 impl KvJsonStore for SqliteStorage {
     async fn kv_set(&self, namespace: &str, key: &str, value: String) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let ns = namespace.to_string();
         let k = key.to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut conn = pool.get().context("get db connection")?;
-            let now = now_secs();
-            let row = NewKvRow {
-                namespace: &ns,
-                key: &k,
-                value_json: &value,
-                updated_at: now,
-            };
-            diesel::insert_into(kv_store::table)
-                .values(&row)
-                .on_conflict((kv_store::namespace, kv_store::key))
-                .do_update()
-                .set((
-                    kv_store::value_json.eq(&value),
-                    kv_store::updated_at.eq(now),
-                ))
-                .execute(&mut *conn)
-                .context("upsert kv_store")?;
-            Ok(())
-        })
-        .await?
+        tokio::task::spawn_blocking(move || kv_set_blocking(&pool, &ns, &k, &value)).await?
     }
 
     async fn kv_get(&self, namespace: &str, key: &str) -> Result<Option<String>> {
         let pool = Arc::clone(&self.pool);
         let ns = namespace.to_string();
         let k = key.to_string();
-        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
-            let mut conn = pool.get().context("get db connection")?;
-            let result = kv_store::table
-                .filter(kv_store::namespace.eq(&ns))
-                .filter(kv_store::key.eq(&k))
-                .first::<KvRow>(&mut *conn)
-                .optional()
-                .context("get kv_store")?;
-            Ok(result.map(|r| r.value_json))
-        })
-        .await?
+        tokio::task::spawn_blocking(move || kv_get_blocking(&pool, &ns, &k)).await?
     }
 
     async fn kv_remove(&self, namespace: &str, key: &str) -> Result<()> {
@@ -146,6 +164,7 @@ struct BudgetUsageRow {
     period_start: i64,
     #[allow(dead_code)]
     updated_at: i64,
+    compute_minutes: i64,
 }
 
 impl BudgetUsageRow {
@@ -157,6 +176,7 @@ impl BudgetUsageRow {
             cost_today: self.cost_today,
             active_agents: self.active_agents as u32,
             period_start: self.period_start as u64,
+            compute_minutes: self.compute_minutes as u64,
         }
     }
 }
@@ -171,6 +191,7 @@ struct NewBudgetUsageRow<'a> {
     cost_today: f64,
     active_agents: i32,
     period_start: i64,
+    compute_minutes: i64,
     updated_at: i64,
 }
 
@@ -192,6 +213,7 @@ impl BudgetUsageRepository for SqliteStorage {
                 cost_today: u.cost_today,
                 active_agents: u.active_agents as i32,
                 period_start: u.period_start as i64,
+                compute_minutes: u.compute_minutes as i64,
                 updated_at: now,
             };
             diesel::insert_into(budget_usages::table)
@@ -205,6 +227,7 @@ impl BudgetUsageRepository for SqliteStorage {
                     budget_usages::cost_today.eq(u.cost_today),
                     budget_usages::active_agents.eq(u.active_agents as i32),
                     budget_usages::period_start.eq(u.period_start as i64),
+                    budget_usages::compute_minutes.eq(u.compute_minutes as i64),
                     budget_usages::updated_at.eq(now),
                 ))
                 .execute(&mut *conn)
@@ -283,6 +306,7 @@ impl BudgetUsageRepository for SqliteStorage {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now as i64,
+                compute_minutes: 0,
                 updated_at: ts,
             };
             diesel::insert_into(budget_usages::table)
@@ -352,6 +376,7 @@ impl BudgetUsageRepository for SqliteStorage {
                 cost_today: 0.0,
                 active_agents: 0,
                 period_start: now as i64,
+                compute_minutes: 0,
                 updated_at: ts,
             };
             diesel::insert_into(budget_usages::table)
@@ -374,22 +399,84 @@ impl BudgetUsageRepository for SqliteStorage {
         .await?
     }
 
-    async fn reset_daily_counters(&self, now: u64) -> Result<()> {
+    async fn add_compute_minutes(
+        &self,
+        entity_key: &str,
+        entity_type: &str,
+        entity_id: &str,
+        now: u64,
+        minutes: u64,
+    ) -> Result<()> {
         let pool = Arc::clone(&self.pool);
+        let key = entity_key.to_string();
+        let etype = entity_type.to_string();
+        let eid = entity_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let ts = now_secs();
-            diesel::update(budget_usages::table)
+            let row = NewBudgetUsageRow {
+                entity_key: &key,
+                entity_type: &etype,
+                entity_id: &eid,
+                tokens_used_today: 0,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: now as i64,
+                compute_minutes: 0,
+                updated_at: ts,
+            };
+            diesel::insert_into(budget_usages::table)
+                .values(&row)
+                .on_conflict(budget_usages::entity_key)
+                .do_nothing()
+                .execute(&mut *conn)
+                .context("ensure budget_usage row")?;
+            diesel::update(budget_usages::table.find(&key))
                 .set((
-                    budget_usages::tokens_used_today.eq(0i64),
-                    budget_usages::cost_today.eq(0.0f64),
-                    budget_usages::period_start.eq(now as i64),
+                    budget_usages::compute_minutes
+                        .eq(budget_usages::compute_minutes + minutes as i64),
                     budget_usages::updated_at.eq(ts),
                 ))
                 .execute(&mut *conn)
-                .context("reset daily counters")?;
+                .context("add compute_minutes")?;
             Ok(())
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use gyre_ports::BudgetUsageRepository;
+    use tempfile::NamedTempFile;
+
+    fn setup() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let s = SqliteStorage::new_for_tenant(tmp.path().to_str().unwrap(), "tenant-1").unwrap();
+        (tmp, s)
+    }
+
+    /// TASK-119 (agent-runtime.md §4 What's Tracked): compute minutes
+    /// accumulate atomically and survive independent of token/cost counters.
+    #[tokio::test]
+    async fn compute_minutes_accumulate() {
+        let (_tmp, s) = setup();
+        s.add_compute_minutes("workspace:ws1", "workspace", "ws1", 100, 2)
+            .await
+            .unwrap();
+        // A token report on the same entry must not clobber the minutes.
+        s.add_tokens_cost("workspace:ws1", "workspace", "ws1", 100, 500, 0.1)
+            .await
+            .unwrap();
+        s.add_compute_minutes("workspace:ws1", "workspace", "ws1", 200, 3)
+            .await
+            .unwrap();
+
+        let usage = s.get_usage("workspace:ws1").await.unwrap().unwrap();
+        assert_eq!(usage.compute_minutes, 5);
+        assert_eq!(usage.tokens_used_today, 500);
+        assert!((usage.cost_today - 0.1).abs() < 1e-9);
+        assert_eq!(usage.active_agents, 0);
     }
 }

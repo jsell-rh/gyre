@@ -139,12 +139,13 @@ pub struct AttestationPath {
 ///
 /// Returns the full `VerificationResult` tree for the attestation chain
 /// associated with the given commit SHA. Implements the complete §6.2
-/// verification algorithm (5 phases):
+/// verification algorithm (6 phases):
 ///   Phase 1: Verify the input chain (structural + crypto)
 ///   Phase 2: Collect all constraints (explicit + strategy-implied + gate)
 ///   Phase 3: Build CEL context from actual output (diff)
 ///   Phase 4: Evaluate all constraints
 ///   Phase 5: Verify output signatures
+///   Phase 6: Verify the jj-squash commit signature (task-107, Layer 3)
 /// ABAC: resource_type = attestation, action = read.
 pub async fn get_verification(
     State(state): State<Arc<AppState>>,
@@ -196,15 +197,11 @@ pub async fn get_verification(
     }
 
     // ── Phase 2: Collect all constraints ──
-    // Find root SignedInput.
-    let signed_input = chain.iter().find_map(|att| match &att.input {
-        gyre_common::AttestationInput::Signed(si) => Some(si),
-        _ => None,
-    });
-
-    // Accumulate constraints from the full chain (explicit + gate).
-    let (_root, explicit_from_chain, gate_from_chain) =
-        crate::git_http::accumulate_chain_constraints(&chain);
+    // Accumulate constraints from the full chain (explicit + gate); the
+    // accumulator also surfaces the root SignedInput (root-first chain
+    // ordering), replacing a separate chain walk here.
+    let chain_constraints = crate::git_http::accumulate_chain_constraints(&chain);
+    let signed_input = chain_constraints.root_input.as_ref();
 
     // Derive strategy-implied constraints from workspace config.
     let workspace = state
@@ -241,9 +238,9 @@ pub async fn get_verification(
 
     // Collect all constraints.
     let all_constraints = gyre_domain::constraint_evaluator::collect_all_constraints(
-        &explicit_from_chain,
+        &chain_constraints.explicit_constraints,
         &strategy_constraints,
-        &gate_from_chain,
+        &chain_constraints.gate_constraints,
     );
 
     // Compute the diff for the commit.
@@ -314,11 +311,52 @@ pub async fn get_verification(
     // DerivedInput); this phase checks OUTPUT signatures.
     let output_sig_result = verify_output_signatures(&chain);
 
+    // ── Phase 6: Commit signature verification (task-107, identity-security.md
+    // §Layer 3) ──
+    // Surface the jj-squash commit signature status in the provenance chain
+    // API. Unsigned commits (e.g. GYRE_SIGNING_MODE=none) are reported as a
+    // neutral node, not a failure; a stored signature that fails to verify
+    // fails the overall result.
+    let commit_sig_node =
+        match crate::sigstore::verify_state_commit_signature(&state, &repo_id, &commit_sha).await {
+            Ok(Some(result)) => gyre_common::VerificationResult {
+                valid: result.valid,
+                label: "commit_signature".to_string(),
+                message: if result.valid {
+                    format!(
+                        "commit signature verified (mode={:?}, signer={}, task={}, spawned_by={})",
+                        result.sigstore_mode, result.signer_id, result.task_id, result.spawned_by
+                    )
+                } else {
+                    format!(
+                        "commit signature verification FAILED (mode={:?}): {}",
+                        result.sigstore_mode,
+                        result.reason.as_deref().unwrap_or("unknown reason")
+                    )
+                },
+                children: vec![],
+            },
+            Ok(None) => gyre_common::VerificationResult {
+                valid: true,
+                label: "commit_signature".to_string(),
+                message: "no commit signature record for this commit (unsigned)".to_string(),
+                children: vec![],
+            },
+            Err(e) => gyre_common::VerificationResult {
+                valid: false,
+                label: "commit_signature".to_string(),
+                message: format!("commit signature lookup failed: {e}"),
+                children: vec![],
+            },
+        };
+
     // Combine Phase 1 (chain structure), Phase 4 (constraint evaluation),
-    // and Phase 5 (output signatures) into the overall verification result.
+    // Phase 5 (output signatures), and Phase 6 (commit signature) into the
+    // overall verification result.
     let overall_valid = chain_result.valid
-        && constraint_result.as_ref().map_or(true, |r| r.valid)
-        && output_sig_result.valid;
+        && constraint_result.as_ref().is_none_or(|r| r.valid)
+        && output_sig_result.valid
+        && commit_sig_node.valid;
     let overall_message = if overall_valid {
         "all verification phases passed".to_string()
     } else if !chain_result.valid {
@@ -327,6 +365,11 @@ pub async fn get_verification(
         format!(
             "output signature verification failed: {}",
             output_sig_result.message
+        )
+    } else if !commit_sig_node.valid {
+        format!(
+            "commit signature verification failed: {}",
+            commit_sig_node.message
         )
     } else {
         constraint_result
@@ -345,6 +388,7 @@ pub async fn get_verification(
                 children.push(cr);
             }
             children.push(output_sig_result);
+            children.push(commit_sig_node);
             children
         },
     };

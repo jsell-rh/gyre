@@ -3,7 +3,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
-  import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { computeTimelineDeltaStats, computeTimelineGhostOverlays, createTimelineHistoryFetcher, resolveScrubTimestamp } from '../lib/timeline-utils.js';
   import { lensFromUrl, lensToUrl } from '../lib/lens-rendering.js';
   import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
   import { traceStepTargetNode } from '../lib/trace-navigation.js';
@@ -21,7 +21,12 @@
   // HSI §3 Generated Views (task-089): LLM-powered on-demand views via the
   // workspace generate endpoint (read-only query translator).
   import GeneratedViewChat from '../lib/GeneratedViewChat.svelte';
-  import { viewSpecToViewQuery } from '../lib/generated-view.js';
+  // Conversational exploration (system-explorer.md §8, task-187):
+  // knowledge-graph-grounded Q&A with clickable entity references and
+  // canvas actions (view specs, ghost-overlay predictions, highlights).
+  import ConversationalExplorer from '../lib/ConversationalExplorer.svelte';
+  import { viewSpecToViewQuery, viewDocumentToQuery } from '../lib/generated-view.js';
+  import { FLOW_TEMPLATES, matchFlowTemplate, flowTemplateQuery, pickTraceMr } from '../lib/flow-templates.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
@@ -34,6 +39,10 @@
   import SpecRealizationView from './explorer/SpecRealizationView.svelte';
   import ChangeView from './explorer/ChangeView.svelte';
   import SystemTraceView from './explorer/SystemTraceView.svelte';
+  // In-view filter panel (ui-navigation.md §3, task-178): category filters +
+  // discovered concepts, toggled by the filter icon in the control bar.
+  import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
+  import { hiddenNodeIds as computeHiddenNodeIds, conceptNodeIds as computeConceptNodeIds, CATEGORY_IDS } from '../lib/filter-categories.js';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
@@ -42,6 +51,10 @@
   // a repo node → scope changes to repo). Wired by App.svelte; absent in
   // standalone/test renders where the in-place drill fallback applies.
   const goToRepoCtx = getContext('goToRepo');
+  // App-level detail panel opener — used for agent provenance links in the
+  // moldable views (system-explorer.md §2: "Every agent reference is
+  // clickable → shows provenance"). Absent in standalone/test renders.
+  const openDetailPanelCtx = getContext('openDetailPanel') ?? null;
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
@@ -130,6 +143,139 @@
   let gateStatusBySpec = $state({});
   let specApprovals = $state([]);
   let explorerSavedViews = $state([]);
+
+  // In-view filter panel (ui-navigation.md §3, task-178): filter icon in
+  // the control bar opens the collapsible 200px left panel inside the
+  // Architecture content area (not the app sidebar). Category checkboxes
+  // toggle node visibility; concept selection fades the canvas to the
+  // concept's elements (task-182, system-explorer.md §4).
+  let filterPanelOpen = $state(false);
+  let activeFilterCategories = $state({ boundaries: true, interfaces: true, data: true, specs: true });
+  let activeFilterConcepts = $state([]);
+
+  // ── Concept views (system-explorer.md §4, task-182) ─────────────
+  // Predefined concepts from the repo's spec manifest (served by
+  // GET /repos/:id/graph/concepts); selecting one fetches its projection
+  // (GET /repos/:id/graph/concept/:name) and fades the canvas to the
+  // concept's nodes. Discovered concepts (activeFilterConcepts above)
+  // use the substring mechanism — both are supported per the spec's data
+  // source distinction.
+  let manifestConcepts = $state([]);
+  let manifestConceptsLoadedFor = $state('');
+  let activeManifestConcept = $state(null); // { name, nodeIds: Set|null }
+
+  // Fetch the manifest concept listing when the filter panel opens at
+  // repo scope (once per repo — the panel is the only consumer).
+  $effect(() => {
+    if (!filterPanelOpen || !selectedRepoId || explorerViewMode !== 'boundary') return;
+    if (manifestConceptsLoadedFor === selectedRepoId) return;
+    const repoId = selectedRepoId;
+    manifestConceptsLoadedFor = repoId;
+    api.repoGraphConcepts(repoId)
+      .then((res) => {
+        if (selectedRepoId !== repoId) return; // stale
+        manifestConcepts = Array.isArray(res?.concepts) ? res.concepts : [];
+      })
+      .catch(() => {
+        // No manifest / endpoint unavailable — no predefined concepts to
+        // list; allow a retry on the next panel open.
+        if (selectedRepoId === repoId) manifestConceptsLoadedFor = '';
+      });
+  });
+
+  /** Toggle a manifest concept view: fetching the projection resolves the
+   *  concept's node set (manifest-based — distinct from the substring
+   *  mechanism); toggling the active concept clears it. */
+  async function toggleManifestConcept(name) {
+    if (activeManifestConcept?.name === name) {
+      activeManifestConcept = null;
+      return;
+    }
+    activeManifestConcept = { name, nodeIds: null }; // projection loading
+    pushInteraction({ action: 'concept', detail: `manifest:${name}` });
+    try {
+      const result = await api.getGraphConcept(selectedRepoId, name);
+      if (activeManifestConcept?.name !== name) return; // stale toggle
+      const ids = new Set((result?.nodes ?? []).map((n) => n?.id).filter(Boolean));
+      activeManifestConcept = { name, nodeIds: ids };
+    } catch (e) {
+      if (activeManifestConcept?.name === name) activeManifestConcept = null;
+      showToast(`Concept "${name}" could not be loaded: ${e.message}`, { type: 'error' });
+    }
+  }
+
+  // ── Ad-hoc concept creation (system-explorer.md §4) ─────────────
+  // Multi-select on the canvas (Shift+Click) + "Create concept" (context
+  // menu or the selection bar) opens a naming dialog; saving persists the
+  // grouping as an explorer view (POST /workspaces/:id/explorer-views)
+  // whose ViewQuery concept scope seeds exactly the selected nodes.
+  let conceptDialog = $state(null); // { name, error, saving, nodes: [...] }
+
+  function openConceptDialog(nodeIds) {
+    const ids = Array.isArray(nodeIds) ? nodeIds : [...(nodeIds ?? [])];
+    const nodes = (effectiveGraph?.nodes ?? []).filter((n) => ids.includes(n.id));
+    if (nodes.length < 2) return;
+    conceptDialog = { name: '', error: '', saving: false, nodes };
+  }
+
+  function closeConceptDialog() {
+    conceptDialog = null;
+  }
+
+  async function saveConceptDialog() {
+    if (!conceptDialog) return;
+    const name = (conceptDialog.name ?? '').trim();
+    if (!name) {
+      conceptDialog = { ...conceptDialog, error: 'Name the concept before saving.' };
+      return;
+    }
+    const workspaceId = scope?.workspaceId;
+    if (!workspaceId) {
+      conceptDialog = { ...conceptDialog, error: 'No workspace scope — cannot save a view here.' };
+      return;
+    }
+    // ViewQuery grammar (view-query-grammar.md): a concept scope seeded
+    // with the selected nodes' qualified names. No edge expansion — the
+    // ad-hoc concept is exactly the grouped nodes.
+    const seedNodes = conceptDialog.nodes.map((n) => n.qualified_name ?? n.name);
+    const spec = {
+      scope: {
+        type: 'concept',
+        seed_nodes: seedNodes,
+        expand_edges: [],
+        expand_depth: 0,
+        expand_direction: 'both',
+      },
+      emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.15 },
+      zoom: 'fit',
+      annotation: {
+        title: `Concept: ${name}`,
+        description: `${seedNodes.length} grouped nodes`,
+      },
+    };
+    conceptDialog = { ...conceptDialog, saving: true, error: '' };
+    try {
+      await api.saveExplorerView(workspaceId, {
+        name,
+        description: `Ad-hoc concept grouping ${seedNodes.length} nodes`,
+        spec,
+      });
+      pushInteraction({ action: 'save_concept', detail: name });
+      showToast(`Concept "${name}" saved as an explorer view`, { type: 'success' });
+      conceptDialog = null;
+    } catch (e) {
+      conceptDialog = { ...conceptDialog, saving: false, error: e.message };
+    }
+  }
+
+  // ── View spec editor (ui-navigation.md §3, task-178) ────────────────
+  // "Edit view spec" opens a collapsible JSON editor for the view spec
+  // grammar (data/layout/encoding/highlight); Apply translates via
+  // viewSpecToViewQuery and re-renders the canvas.
+  let viewSpecEditorOpen = $state(false);
+  let viewSpecText = $state('');
+  let viewSpecError = $state('');
+  let activeViewSpec = $state(null); // generated/edited ViewSpec currently applied
   let detailNode = $state(null);
   let highlightedSpanId = $state(null);
   // Causal trace step focus: clicking a step in the detail panel pans/zooms
@@ -141,7 +287,9 @@
   // ── HSI §3 Generated Views (task-089) ──────────────────────────────────
   // Chat column mode: 'ask' is the repo-scoped Explorer agent (WebSocket);
   // 'generate' is the LLM view generator (workspace generate endpoint) that
-  // translates natural-language questions into ViewSpec documents.
+  // translates natural-language questions into ViewSpec documents;
+  // 'explore' is conversational exploration (system-explorer.md §8) —
+  // knowledge-graph-grounded Q&A with entity references.
   let chatMode = $state('ask');
   // Trace playback request for generated "flow" views: the nonce lets a new
   // flow view re-trigger the canvas particle animation.
@@ -155,8 +303,10 @@
    * registry (ui-layout.md §10 Layout Engines): 'hierarchical'/'layered'
    * render on the SVG canvas positioned by ELK, 'side-by-side' on the
    * CSS-Grid composite, 'diff' on the structural-diff component, 'list' on
-   * the shell's virtualized node list; 'graph'/'flow'/'timeline' stay on
-   * the unified ExplorerCanvas (Canvas 2D + TimelineScrubber).
+   * the shell's virtualized node list; 'graph'/'timeline' stay on the
+   * unified ExplorerCanvas (Canvas 2D + TimelineScrubber), and 'flow'
+   * stays on ExplorerCanvas too, which delegates its rendering to
+   * FlowCanvas (SVG nodes/edges + Canvas/WebGL particle overlay, §4).
    *
    * For the canvas-rendered layouts the ViewSpec is translated to a
    * ViewQuery the canvas renders (concept / node-type filters, callouts,
@@ -169,6 +319,7 @@
    */
   function applyGeneratedViewSpec(spec) {
     if (!spec || typeof spec !== 'object') return;
+    activeViewSpec = spec; // view spec editor prefills the active spec
     const layoutName = typeof spec.layout === 'string' ? spec.layout.trim() : '';
     activeLayout = getLayout(layoutName) ? layoutName : 'graph';
     const query = viewSpecToViewQuery(spec);
@@ -196,6 +347,104 @@
     }
   }
 
+  // ── Conversational exploration (system-explorer.md §8) ────────────
+  // Canvas actions dispatched by ConversationalExplorer entity-reference
+  // clicks and response payloads. Every action lands on the SAME canvas
+  // machinery the rest of the Explorer uses — concept-scope queries for
+  // highlighting, openNodeDetail/openSpecEditor for navigation, and ghost
+  // overlays for structural predictions.
+
+  /** Highlight specific nodes on the canvas (§8: "canvas highlights
+   *  matching nodes"). A concept scope seeded by node ids with no edge
+   *  expansion matches exactly the referenced nodes; emphasis colors them
+   *  and dims the rest — the same visual language as search highlighting. */
+  function conversationHighlightNodes(nodeIds) {
+    if (!Array.isArray(nodeIds) || nodeIds.length === 0) return;
+    explorerViewMode = 'boundary';
+    activeSavedViewName = null;
+    activeViewSpec = null;
+    activeViewQuery = {
+      scope: { type: 'concept', seed_nodes: [...nodeIds], expand_edges: [], expand_depth: 1 },
+      emphasis: { highlight: { matched: { color: '#fbbf24', label: 'mentioned' } }, dim_unmatched: 0.3 },
+    };
+    pushInteraction({ action: 'query', detail: 'conversation:highlight' });
+    showToast($t('conversational_explorer.highlighted_nodes', { values: { count: nodeIds.length } }), { type: 'info' });
+  }
+
+  /** Click a node entity reference → navigate to the entity: open the
+   *  detail panel and pan the canvas camera to the node. */
+  function conversationOpenNode(nodeId) {
+    const node = (graph?.nodes ?? []).find((n) => n.id === nodeId);
+    if (!node) {
+      showToast($t('conversational_explorer.node_not_in_view'), { type: 'warning' });
+      return;
+    }
+    explorerViewMode = 'boundary';
+    openNodeDetail(node);
+    traceFocusNonce += 1;
+    traceFocusRequest = { nodeId, nonce: traceFocusNonce };
+  }
+
+  /** Click a spec entity reference → open the spec inline (§8 spec
+   *  references "open inline"). */
+  function conversationOpenSpec(specPath) {
+    if (!selectedRepoId) {
+      showToast($t('conversational_explorer.spec_needs_repo'), { type: 'warning' });
+      return;
+    }
+    openSpecEditor(specPath);
+  }
+
+  /** Click a commit entity reference → open the commit in git. With a
+   *  configured remote (mirror URL) this opens the commit page; otherwise
+   *  the SHA is copied so the human can look it up in their git tooling. */
+  function conversationOpenCommit(sha) {
+    const repo = (repos ?? []).find((r) => r.id === selectedRepoId);
+    const base = repo?.mirror_url ?? null;
+    if (base) {
+      const url = `${base.replace(/\/+$/, '')}/commit/${encodeURIComponent(sha)}`;
+      try {
+        window.open(url, '_blank', 'noopener');
+        return;
+      } catch { /* popups blocked — fall through to copy */ }
+    }
+    try {
+      navigator.clipboard?.writeText(sha);
+      showToast($t('conversational_explorer.commit_link_copied'), { type: 'info' });
+    } catch {
+      showToast(sha, { type: 'info' });
+    }
+  }
+
+  /** Click an agent entity reference → show provenance: highlight the
+   *  nodes the agent last modified (§8 "agent (show provenance)"). */
+  function conversationShowAgent(agentId) {
+    const nodeIds = (graph?.nodes ?? [])
+      .filter((n) => n.last_modified_by === agentId)
+      .map((n) => n.id);
+    if (nodeIds.length === 0) {
+      showToast($t('conversational_explorer.no_agent_nodes'), { type: 'info' });
+      return;
+    }
+    conversationHighlightNodes(nodeIds);
+  }
+
+  /** "What would happen if…" response → structural prediction as ghost
+   *  overlays (§3 visual language, same mapping as the spec-edit
+   *  prediction flow). */
+  function conversationApplyPrediction(prediction) {
+    const overlays = predictionOverlays(prediction);
+    if (overlays.length === 0) {
+      showToast($t('conversational_explorer.prediction_empty'), { type: 'info' });
+      return;
+    }
+    ghostOverlays = overlays;
+    showToast(
+      $t('conversational_explorer.prediction_applied_toast', { values: { count: overlays.length } }),
+      { type: 'info' }
+    );
+  }
+
   // ── Active generated-view layout (ui-layout.md §10 Layout Engines) ─────
   // The generated ViewSpec's `layout` field (set in applyGeneratedViewSpec)
   // selects the renderer through the layout registry. Layouts rendered by
@@ -210,6 +459,65 @@
    *  annotation UI and can be cleared from the manual query editor). */
   function clearGeneratedLayout() {
     activeLayout = 'graph';
+    // A flow template names the view (activeSavedViewName) — dismissing the
+    // layout clears that name so the selector label returns to the base view.
+    activeSavedViewName = null;
+  }
+
+  // ── Predefined flow templates (system-explorer.md §5 Flow Traces) ────
+  // "Predefined flows for common operations (agent spawn, MR merge, spec
+  // approval)" — curated entry points in the View selector's "Trace flows"
+  // section. Each template's expected call path is matched against the
+  // current graph; the flow layout then renders that path, animated with
+  // the captured gate trace of a matching MR when one exists (particles
+  // only appear for spans that actually traverse the path — never
+  // fabricated). Custom flows remain the canvas's trace-from-node action.
+
+  /** Find a gate trace backing a flow template: reuse the trace already
+   *  loaded for this repo, else the most recent traced MR in the workspace
+   *  matching the template (pickTraceMr), else the MR trace fetch fails —
+   *  all lookups are best-effort, a template without trace data renders as
+   *  a static structural path. */
+  async function resolveFlowTemplateTrace(template) {
+    if (traceData?.spans?.length > 0) return traceData;
+    const wsId = scope?.workspaceId;
+    if (!wsId) return null;
+    const mrs = await api
+      .workspaceMergeRequests(wsId, { has_trace: true, limit: 10 })
+      .catch(() => null);
+    const mr = pickTraceMr(template, Array.isArray(mrs) ? mrs : []);
+    if (!mr) return null;
+    const trace = await api.mrTrace(mr.id).catch(() => null);
+    return trace?.spans?.length > 0 ? trace : null;
+  }
+
+  /** Apply a predefined flow template: match its expected call path against
+   *  the loaded graph, scope the flow layout to the match, and animate the
+   *  backing gate trace when one exists. */
+  async function applyFlowTemplate(template) {
+    viewSelectOpen = false;
+    const match = matchFlowTemplate(template, effectiveGraph?.nodes ?? []);
+    if (match.matchedNodeIds.length === 0) {
+      showToast(`No nodes in this graph match the ${template.label} — select a repo whose graph covers it.`, { type: 'warning' });
+      return;
+    }
+    explorerViewMode = 'boundary';
+    activeSavedViewName = template.label;
+    activeViewSpec = null;
+    activeLayout = 'flow';
+    activeViewQuery = flowTemplateQuery(template, match);
+    pushInteraction({ action: 'query', detail: `flow-template:${template.id}` });
+    const trace = await resolveFlowTemplateTrace(template);
+    if (trace) {
+      traceData = trace;
+      explorerLens = 'evaluative';
+      tracePlaybackRequest = { nonce: ++tracePlaybackNonce };
+    } else {
+      // No captured trace for this flow — the expected path still renders
+      // (structural lens), it just does not animate.
+      explorerLens = 'structural';
+      showToast(`No captured gate trace for the ${template.label} — showing the expected call path without animation.`, { type: 'info' });
+    }
   }
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
@@ -303,6 +611,8 @@
     // ViewEvent actions menu dismisses it.
     if (viewTooltip) viewTooltip = null;
     if (viewMenu && !e.target.closest?.('.viewevent-menu')) viewMenu = null;
+    // Clicking outside the view selector dropdown dismisses it.
+    if (viewSelectOpen && !e.target.closest?.('.explorer-view-select')) viewSelectOpen = false;
   }
 
   function viewMenuAction(action) {
@@ -635,6 +945,35 @@
     };
   });
 
+  /** Map a structural-prediction response (POST /repos/:id/graph/predict
+   *  or the conversational ask endpoint's prediction payload) to ghost
+   *  overlays. Shared by the spec-edit prediction flow and the
+   *  conversational "what would happen if…" flow so both render the same
+   *  visual language (§3 ghost overlays). */
+  function predictionOverlays(result) {
+    const overlays = [];
+    function addOverlay(item, defaultAction) {
+      const name = item?.name ?? item?.qualified_name;
+      if (!name || typeof name !== 'string') return; // Skip malformed items
+      const action = item?.action ?? defaultAction;
+      if (!['add', 'change', 'remove'].includes(action)) return; // Skip unknown actions
+      overlays.push({
+        id: item.id ?? `ghost-${action}-${overlays.length}`,
+        name,
+        type: item.node_type ?? item.type ?? 'unknown',
+        action,
+        confidence: item.confidence,
+        reason: item.reason,
+      });
+    }
+    for (const item of (result?.added ?? [])) addOverlay(item, 'add');
+    for (const item of (result?.changed ?? [])) addOverlay(item, 'change');
+    for (const item of (result?.removed ?? [])) addOverlay(item, 'remove');
+    // Also check for predictions array (alternative response format)
+    for (const item of (result?.predictions ?? [])) addOverlay(item, 'change');
+    return overlays;
+  }
+
   async function runPrediction() {
     if (!selectedRepoId || !specEditorPath || predictLoading) return;
     predictLoading = true;
@@ -654,29 +993,7 @@
       predictEstimatedCost = result?.estimated_agent_cost ?? result?.cost ?? null;
       predictConfidence = result?.confidence ?? null;
 
-      // Build ghost overlays with per-node confidence and reason.
-      // Validate each item has at minimum a name and action.
-      const overlays = [];
-      function addOverlay(item, defaultAction) {
-        const name = item?.name ?? item?.qualified_name;
-        if (!name || typeof name !== 'string') return; // Skip malformed items
-        const action = item?.action ?? defaultAction;
-        if (!['add', 'change', 'remove'].includes(action)) return; // Skip unknown actions
-        overlays.push({
-          id: item.id ?? `ghost-${action}-${overlays.length}`,
-          name,
-          type: item.node_type ?? item.type ?? 'unknown',
-          action,
-          confidence: item.confidence,
-          reason: item.reason,
-        });
-      }
-      for (const item of (result?.added ?? [])) addOverlay(item, 'add');
-      for (const item of (result?.changed ?? [])) addOverlay(item, 'change');
-      for (const item of (result?.removed ?? [])) addOverlay(item, 'remove');
-      // Also check for predictions array (alternative response format)
-      for (const item of (result?.predictions ?? [])) addOverlay(item, 'change');
-      ghostOverlays = overlays;
+      ghostOverlays = predictionOverlays(result);
     } catch (e) {
       predictError = e.message ?? 'Prediction failed';
     } finally {
@@ -1170,7 +1487,149 @@
    *  in explorerCanvasState, so nothing is lost while other views are shown). */
   function setExplorerView(mode) {
     explorerViewMode = mode;
+    activeSavedViewName = null;
     pushInteraction({ action: 'view_switch', detail: mode });
+  }
+
+  // ── View selector dropdown (ui-navigation.md §3, task-178) ───────────
+  // "The view selector is a dropdown listing built-in views, then user's
+  // saved views, then a 'Generate view...' option."
+  let viewSelectOpen = $state(false);
+  let activeSavedViewName = $state(null);
+
+  // Saved views via REST (task-178 repair): the dropdown must list the
+  // workspace's saved views even when the explorer chat socket fails or
+  // the chat column is collapsed before its `views` message arrives — the
+  // socket is one delivery path, not the only one. Fetched when the
+  // dropdown opens; best-effort (a failed fetch keeps the current list).
+  // Both scopes are merged by id, mirroring the socket's ListViews: the
+  // repo-scoped records carry the stored ViewQuery directly, the
+  // workspace-scoped records carry a stored document in EITHER grammar
+  // (ViewSpec — generated views; ViewQuery — ad-hoc concept groupings),
+  // translated via viewDocumentToQuery.
+  let savedViewsRefreshing = false;
+  async function refreshSavedViews() {
+    if (savedViewsRefreshing) return;
+    savedViewsRefreshing = true;
+    try {
+      const wsId = scope?.workspaceId;
+      const repoId = selectedRepoId;
+      const [wsViews, repoViews] = await Promise.all([
+        wsId ? api.explorerViews(wsId).catch(() => null) : null,
+        repoId ? api.savedViews(repoId).catch(() => null) : null,
+      ]);
+      if (!Array.isArray(wsViews) && !Array.isArray(repoViews)) return;
+      const byId = new Map();
+      for (const r of Array.isArray(repoViews) ? repoViews : []) {
+        if (r?.id && !byId.has(r.id)) byId.set(r.id, { ...r, query: r.query ?? null });
+      }
+      for (const r of Array.isArray(wsViews) ? wsViews : []) {
+        if (!r?.id || byId.has(r.id)) continue;
+        byId.set(r.id, {
+          ...r,
+          is_system: r.is_system ?? r.is_builtin ?? false,
+          query: r.query ?? (r.spec ? viewDocumentToQuery(r.spec) : null),
+        });
+      }
+      explorerSavedViews = [...byId.values()];
+    } finally {
+      savedViewsRefreshing = false;
+    }
+  }
+
+  /** Load a saved view: apply its query to the canvas (works with or
+   *  without the chat WebSocket — the query is part of the view record). */
+  function selectSavedView(view) {
+    viewSelectOpen = false;
+    explorerViewMode = 'boundary';
+    activeSavedViewName = view?.name ?? null;
+    if (view?.query && typeof view.query === 'object') {
+      activeViewQuery = JSON.parse(JSON.stringify(view.query));
+      pushInteraction({ action: 'query', preset: view.name ?? null });
+    }
+  }
+
+  /** "Generate view..." — focus the Ask input (natural-language view
+   *  generation via POST /workspaces/:id/explorer-views/generate). */
+  function openGenerateView() {
+    viewSelectOpen = false;
+    chatCollapsed = false;
+    chatMode = 'generate';
+  }
+
+  /** "Ask the graph…" — open the conversational exploration panel
+   *  (system-explorer.md §8) from the control bar's view selector. */
+  function openConversationalExplorer() {
+    viewSelectOpen = false;
+    chatCollapsed = false;
+    chatMode = 'explore';
+  }
+
+  let activeViewLabel = $derived(
+    activeSavedViewName
+    ?? EXPLORER_VIEWS.find((v) => v.id === explorerViewMode)?.label
+    ?? 'Boundary'
+  );
+
+  // ── View spec editor (ui-navigation.md §3, task-178) ──────────────
+  /** The ViewSpec to prefill the JSON editor with: the active generated
+   *  spec when one is applied, else a spec synthesized from the current
+   *  view state (data layer derived from the active view query's scope). */
+  function currentViewSpecForEditor() {
+    if (activeViewSpec) return activeViewSpec;
+    const q = activeViewQuery;
+    const spec = {
+      name: activeViewLabel,
+      layout: activeLayout ?? 'graph',
+      data: {},
+      encoding: { color: 'spec_coverage', size: 'complexity' },
+      highlight: {},
+    };
+    if (q?.scope?.type === 'concept' && Array.isArray(q.scope.seed_nodes) && q.scope.seed_nodes.length > 0) {
+      spec.data.concept = q.scope.seed_nodes[0];
+      spec.data.depth = q.scope.expand_depth ?? 2;
+    } else if (q?.scope?.type === 'filter' && Array.isArray(q.scope.node_types) && q.scope.node_types.length > 0) {
+      spec.data.node_types = [...q.scope.node_types];
+    }
+    return spec;
+  }
+
+  function toggleViewSpecEditor() {
+    viewSpecEditorOpen = !viewSpecEditorOpen;
+    if (viewSpecEditorOpen && !viewSpecText.trim()) {
+      viewSpecText = JSON.stringify(currentViewSpecForEditor(), null, 2);
+      viewSpecError = '';
+    }
+  }
+
+  /** Apply the edited ViewSpec: validate JSON, translate to a ViewQuery
+   *  (viewSpecToViewQuery), and re-render the canvas. Errors are shown
+   *  inline in the editor panel. */
+  function applyViewSpecEditor() {
+    const text = viewSpecText.trim();
+    if (!text) {
+      viewSpecError = 'View spec cannot be empty';
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      viewSpecError = `Invalid JSON: ${e.message}`;
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      viewSpecError = 'View spec must be a JSON object';
+      return;
+    }
+    const query = viewSpecToViewQuery(parsed);
+    if (!query) {
+      viewSpecError = 'View spec must be an object (layers: data, layout, encoding, highlight)';
+      return;
+    }
+    viewSpecError = '';
+    activeViewSpec = parsed;
+    applyGeneratedViewSpec(parsed);
   }
 
   /** Navigate from another view (Change / Spec Realization) to a node's
@@ -1574,9 +2033,12 @@
 
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
+      if (viewSelectOpen) { viewSelectOpen = false; return; }
+      if (conceptDialog) { conceptDialog = null; return; }
       if (viewMenu) { viewMenu = null; return; }
       if (viewTooltip) { viewTooltip = null; return; }
       if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
+      if (viewSpecEditorOpen) { viewSpecEditorOpen = false; return; }
       if (queryEditorOpen) { queryEditorOpen = false; return; }
       if (detailNode) { detailNode = null; return; }
       if (repoDetail) { repoDetail = null; return; }
@@ -1659,10 +2121,68 @@
   let timelineScrubActive = $state(false);
   let timelineScrubIndex = $state(-1); // index into graphTimeline array, -1 = current
 
-  // When timeline scrub is active, compute filtered nodes/edges to show state at that point
+  // The timeline array the scrubber scrubs over: the full insights-panel
+  // timeline once loaded, else the liveness slice loaded at repo selection.
+  let timelineArray = $derived(Array.isArray(graphTimeline) ? graphTimeline : (Array.isArray(livenessTimeline) ? livenessTimeline : []));
+  // Scrub position as unix epoch seconds (null = present / unknown).
+  let timelineScrubTimestamp = $derived(resolveScrubTimestamp(timelineArray, timelineScrubIndex));
+
+  // Server point-in-time graph (GET /repos/:id/graph?at=) for the current
+  // scrub position: { at, graph }. Set by the debounced fetch effect below;
+  // null while pending, on failure, or when time travel is off — the
+  // client-side first_seen_at filter below is the instant fallback.
+  let timelineHistoricalGraph = $state(null);
+  let timelineHistoryFetcher = null;   // debounced ?at= fetcher (per repo)
+  let timelineHistoryFetcherFor = '';  // repoId the current fetcher is bound to
+
+  $effect(() => {
+    // The "Now" position (last index) is the present — no historical fetch.
+    if (
+      !timelineScrubActive ||
+      timelineScrubTimestamp == null ||
+      !selectedRepoId ||
+      timelineScrubIndex >= timelineArray.length - 1
+    ) {
+      timelineHistoricalGraph = null;
+      return;
+    }
+    const repoId = selectedRepoId;
+    const at = timelineScrubTimestamp;
+    if (timelineHistoryFetcherFor !== repoId) {
+      timelineHistoryFetcher?.cancel();
+      timelineHistoryFetcher = createTimelineHistoryFetcher((t) => api.repoGraphAt(repoId, t));
+      timelineHistoryFetcherFor = repoId;
+    }
+    const fetcher = timelineHistoryFetcher;
+    fetcher
+      .request(at)
+      .then((g) => {
+        // null = superseded by a newer position or cancelled — keep fallback.
+        // The position check keeps a late out-of-order response for an
+        // older position from clobbering the newer position's pinned
+        // graph (the fetcher already guarantees `g` is the graph for `at`).
+        if (g?.nodes && selectedRepoId === repoId && timelineScrubActive && at === timelineScrubTimestamp) {
+          timelineHistoricalGraph = { at, graph: g };
+        }
+      })
+      .catch(() => { /* fetch failed — keep the client-side filter */ });
+  });
+
+  // When timeline scrub is active, compute filtered nodes/edges to show state at that point.
+  // The server's ?at= reconstruction (which also resurrects nodes soft-deleted after the
+  // scrub time — invisible to the current graph) replaces the client-side filter once the
+  // debounced fetch lands for this exact position.
   let timelineFilteredGraph = $derived.by(() => {
-    if (!timelineScrubActive || timelineScrubIndex < 0 || !graphTimeline?.length || !graph?.nodes?.length) return null;
-    const delta = graphTimeline[timelineScrubIndex];
+    // The "Now" position (last index) shows the current graph — no ghosts.
+    if (!timelineScrubActive || timelineScrubIndex < 0 || timelineScrubIndex >= timelineArray.length - 1 || !timelineArray.length || !graph?.nodes?.length) return null;
+    if (
+      timelineHistoricalGraph &&
+      timelineHistoricalGraph.at === timelineScrubTimestamp &&
+      timelineHistoricalGraph.graph?.nodes
+    ) {
+      return timelineHistoricalGraph.graph;
+    }
+    const delta = timelineArray[timelineScrubIndex];
     if (!delta?.timestamp) return null;
     const cutoff = typeof delta.timestamp === 'number' ? delta.timestamp : Math.floor(new Date(delta.timestamp).getTime() / 1000);
     // Filter to nodes that existed at or before the cutoff time
@@ -1683,6 +2203,81 @@
 
   // The effective graph passed to canvas: either time-filtered or full
   let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
+
+  // ── In-view filter panel → canvas node visibility (task-178) ──────────
+  // filter-categories.js owns the classification; the panel's category
+  // checkboxes reduce to the set of node ids the canvas hides (concept
+  // selection fades instead — see explorerConceptNodeIds below). null when
+  // no category is unchecked (no filtering cost on the draw loop).
+  let explorerHiddenNodeIds = $derived.by(() => {
+    const hiddenCategories = CATEGORY_IDS.filter((id) => !activeFilterCategories[id]);
+    if (hiddenCategories.length === 0) return null;
+    return computeHiddenNodeIds(effectiveGraph.nodes ?? [], {
+      hiddenCategories,
+    });
+  });
+
+  // ── Concept view emphasis set (task-182, system-explorer.md §4) ──────
+  // Union of the manifest concept's projection node ids and the
+  // discovered-concept substring matches. The canvas fades every node
+  // outside this set to background (0.15) and highlights edges within it.
+  // null when no concept is active.
+  let explorerConceptNodeIds = $derived.by(() => {
+    const sets = [];
+    if (activeManifestConcept?.nodeIds && activeManifestConcept.nodeIds.size > 0) {
+      sets.push(activeManifestConcept.nodeIds);
+    }
+    if (activeFilterConcepts.length > 0) {
+      const discovered = computeConceptNodeIds(effectiveGraph.nodes ?? [], activeFilterConcepts);
+      if (discovered.size > 0) sets.push(discovered);
+    }
+    if (sets.length === 0) return null;
+    const union = new Set();
+    for (const s of sets) for (const id of s) union.add(id);
+    return union.size > 0 ? union : null;
+  });
+
+  // Unchecked category ids + selected concepts, BEFORE reduction to node
+  // ids: the canvas classifies tree-group containers (synthetic boundary
+  // boxes) through their own node, so it needs the panel state itself, not
+  // just the hidden leaf-id set.
+  let explorerHiddenCategories = $derived(CATEGORY_IDS.filter((id) => !activeFilterCategories[id]));
+
+  // ── Evaluative lens risk overlay (task-178 / task-181) ───────────
+  // GET /repos/:id/graph/risks — fetched when the Evaluative lens is active
+  // (best-effort, non-blocking; the lens renders fine without it).
+  // riskEntries keeps the full RiskMetricsResponse records (churn_rate,
+  // fan_in, fan_out, complexity, spec_covered) for the Risk Map heat map
+  // and anomaly callouts (system-explorer.md §7); riskByNode reduces them
+  // to the task-178 churn × complexity aggregate.
+  let riskEntries = $state([]);
+  let riskByNode = $state({});
+  let riskLoadedFor = $state('');
+  $effect(() => {
+    if (explorerLens !== 'evaluative' || explorerViewMode !== 'boundary' || !selectedRepoId) return;
+    if (riskLoadedFor === selectedRepoId) return;
+    const currentRepoId = selectedRepoId;
+    riskLoadedFor = currentRepoId;
+    api.repoGraphRisks(currentRepoId)
+      .then((risks) => {
+        if (selectedRepoId !== currentRepoId) return; // stale
+        const entries = [];
+        const m = {};
+        for (const r of Array.isArray(risks) ? risks : []) {
+          if (!r?.node_id) continue;
+          entries.push(r);
+          const churn = Number(r.churn_rate ?? 0) || 0;
+          const complexity = Number(r.complexity ?? 0) || 0;
+          m[r.node_id] = churn * complexity;
+        }
+        riskEntries = entries;
+        riskByNode = m;
+      })
+      .catch(() => {
+        // Risk endpoint unavailable — allow a retry on the next lens toggle.
+        if (selectedRepoId === currentRepoId) riskLoadedFor = '';
+      });
+  });
 
   // Rendering density policy for the canvas area (ui-layout.md §10):
   // the shell owns the >1000-node list fallback; the public-only filter
@@ -1723,7 +2318,7 @@
     return computeTimelineDeltaStats({
       graph,
       timelineFilteredGraph,
-      timeline: graphTimeline,
+      timeline: timelineArray,
       scrubIndex: timelineScrubIndex,
     });
   });
@@ -1737,7 +2332,7 @@
     return computeTimelineGhostOverlays({
       graph,
       timelineFilteredGraph,
-      timeline: graphTimeline,
+      timeline: timelineArray,
       scrubIndex: timelineScrubIndex,
     });
   });
@@ -1749,6 +2344,33 @@
       : ghostOverlays
   );
 
+  // ── Key moment narrative (system-explorer.md §6) ──────────────────────
+  // Clicking a key moment marker surfaces the delta's grounded narrative
+  // ("what changed and why") in a panel above the canvas.
+  let timelineMomentDetail = $state(null);
+
+  // ── Reconciliation key moments (system-explorer.md §6) ────────────────
+  // Workspace reconciliation_completed messages (persona v3 → v4 events),
+  // lazy-loaded the first time time travel is activated for a workspace
+  // (Vision Principle 2: don't fetch what the user hasn't asked to see).
+  let reconciliationEvents = $state([]);
+  let reconciliationEventsLoadedFor = '';
+  $effect(() => {
+    if (!timelineScrubActive) return;
+    const wsId = scope?.workspaceId;
+    if (!wsId || reconciliationEventsLoadedFor === wsId) return;
+    reconciliationEventsLoadedFor = wsId;
+    api.workspaceMessages(wsId, { kind: 'reconciliation_completed', limit: 100 })
+      .then((msgs) => {
+        if (scope?.workspaceId !== wsId) return; // stale
+        reconciliationEvents = Array.isArray(msgs) ? msgs : [];
+      })
+      .catch(() => {
+        // Endpoint unavailable — allow a retry on the next toggle.
+        if (scope?.workspaceId === wsId) reconciliationEventsLoadedFor = '';
+      });
+  });
+
   // Reset insights on repo change; lazy-load when panel expanded (Vision Principle 2:
   // "Right Context, Not More Context" — don't fetch data the user hasn't asked to see)
   $effect(() => {
@@ -1758,6 +2380,8 @@
     graphTypes = null;
     graphModules = null;
     graphTimeline = null;
+    timelineHistoricalGraph = null;
+    timelineMomentDetail = null;
   });
 
   // Lazy-load insights data only when the panel is expanded
@@ -1842,6 +2466,7 @@
             showScopeToggle={false}
             onNodeClick={showRepoDetail}
             onNodeDblClick={enterRepo}
+            onRefresh={loadWsDepGraph}
           />
         </div>
         {#if repoDetail}
@@ -2013,21 +2638,130 @@
     <!-- Control bar — view selector + concept search + filter toggle, always shown when repo is selected -->
     {#if selectedRepoId}
       <div class="concept-search-bar">
-        <!-- HSI §3 view selector: Boundary | Spec Realization | Change | System Trace -->
-        <div class="explorer-view-tabs" role="tablist" aria-label="Explorer view" data-testid="explorer-view-selector">
-          {#each EXPLORER_VIEWS as v (v.id)}
-            <button
-              type="button"
-              role="tab"
-              class="view-tab"
-              class:active={explorerViewMode === v.id}
-              aria-selected={explorerViewMode === v.id}
-              onclick={() => setExplorerView(v.id)}
-            >{v.label}</button>
-          {/each}
+        <!-- HSI §3 / ui-navigation.md §3 view selector: a dropdown listing
+             built-in views, then the user's saved views, then a "Generate
+             view..." option (task-178). -->
+        <div class="explorer-view-select" data-testid="explorer-view-selector">
+          <button
+            class="view-select-btn"
+            onclick={() => {
+              viewSelectOpen = !viewSelectOpen;
+              // REST refresh on open: the saved-views list must not depend
+              // solely on the chat socket's `views` message.
+              if (viewSelectOpen) void refreshSavedViews();
+            }}
+            aria-haspopup="listbox"
+            aria-expanded={viewSelectOpen}
+            aria-label="View selector"
+            type="button"
+          >
+            <span class="view-select-label">{activeViewLabel}</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          {#if viewSelectOpen}
+            <div class="view-select-menu" role="listbox" aria-label="Explorer views">
+              <div class="view-select-section">Built-in views</div>
+              {#each EXPLORER_VIEWS as v (v.id)}
+                <button
+                  class="view-select-option"
+                  class:active={explorerViewMode === v.id && !activeSavedViewName}
+                  role="option"
+                  aria-selected={explorerViewMode === v.id && !activeSavedViewName}
+                  onclick={() => { viewSelectOpen = false; setExplorerView(v.id); }}
+                  data-testid={`view-option-${v.id}`}
+                  type="button"
+                >{v.label}</button>
+              {/each}
+              {#if explorerSavedViews.length > 0}
+                <div class="view-select-section">Saved views</div>
+                {#each explorerSavedViews as view (view.id)}
+                  <button
+                    class="view-select-option"
+                    class:active={activeSavedViewName === view.name}
+                    role="option"
+                    aria-selected={activeSavedViewName === view.name}
+                    onclick={() => selectSavedView(view)}
+                    data-testid="view-option-saved"
+                    title={view.description ?? view.name}
+                    type="button"
+                  >{view.name}</button>
+                {/each}
+              {/if}
+              <!-- Predefined flow templates (system-explorer.md §5 Flow
+                   Traces): curated traces for common operations, applied via
+                   applyFlowTemplate onto the flow layout. -->
+              <div class="view-select-section">Trace flows</div>
+              {#each FLOW_TEMPLATES as tpl (tpl.id)}
+                <button
+                  class="view-select-option"
+                  class:active={activeSavedViewName === tpl.label && activeLayout === 'flow'}
+                  role="option"
+                  aria-selected={activeSavedViewName === tpl.label && activeLayout === 'flow'}
+                  onclick={() => void applyFlowTemplate(tpl)}
+                  data-testid={`view-option-flow-${tpl.id}`}
+                  title={tpl.description}
+                  type="button"
+                >{tpl.label}</button>
+              {/each}
+              <div class="view-select-divider" role="presentation"></div>
+              <button
+                class="view-select-option view-select-generate"
+                role="option"
+                aria-selected="false"
+                onclick={openGenerateView}
+                data-testid="view-option-generate"
+                title="Describe a view in natural language — the LLM generates it"
+                type="button"
+              >Generate view…</button>
+              <button
+                class="view-select-option view-select-generate"
+                role="option"
+                aria-selected="false"
+                onclick={openConversationalExplorer}
+                data-testid="view-option-ask"
+                title="Ask a question — the answer is grounded in the knowledge graph with clickable references"
+                type="button"
+              >{$t('conversational_explorer.title')}…</button>
+            </div>
+          {/if}
         </div>
 
         {#if explorerViewMode === 'boundary'}
+        <!-- In-view filter panel toggle (ui-navigation.md §3): filter icon in
+             the control bar opens the collapsible 200px left panel inside the
+             Architecture content area (not the app sidebar). -->
+        <button
+          class="ctrl-btn icon-btn"
+          class:active={filterPanelOpen}
+          onclick={() => { filterPanelOpen = !filterPanelOpen; }}
+          title="Toggle filter panel"
+          aria-label="Toggle filter panel"
+          aria-pressed={filterPanelOpen}
+          data-testid="filter-panel-toggle"
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+          </svg>
+        </button>
+
+        <!-- View spec editor toggle (ui-navigation.md §3): "Edit view spec"
+             opens a collapsible JSON editor for the view spec grammar. -->
+        <button
+          class="ctrl-btn icon-btn"
+          class:active={viewSpecEditorOpen}
+          onclick={toggleViewSpecEditor}
+          title="Edit view spec"
+          aria-label="Edit view spec"
+          aria-pressed={viewSpecEditorOpen}
+          data-testid="view-spec-editor-toggle"
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+          </svg>
+        </button>
+
         <!-- Manual query editor toggle -->
         <button
           class="ctrl-btn icon-btn"
@@ -2090,6 +2824,36 @@
             </span>
           {/if}
         {/if}
+        {/if}
+
+        <!-- Active concept filter chips (system-explorer.md §4, task-182):
+             the active concept view (manifest or discovered) shows as a chip
+             in the control bar — click ✕ to clear, restoring the full graph. -->
+        {#if explorerViewMode === 'boundary'}
+          {#if activeManifestConcept}
+            <span class="concept-chip concept-filter-chip" data-testid="concept-filter-chip">
+              Concept: {activeManifestConcept.name}
+              <button
+                class="chip-clear"
+                onclick={() => { activeManifestConcept = null; }}
+                aria-label="Clear concept filter"
+                data-testid="concept-filter-chip-clear"
+                type="button"
+              >✕</button>
+            </span>
+          {/if}
+          {#each activeFilterConcepts as c (c)}
+            <span class="concept-chip concept-filter-chip" data-testid="concept-filter-chip">
+              Concept: {c}
+              <button
+                class="chip-clear"
+                onclick={() => { activeFilterConcepts = activeFilterConcepts.filter((x) => x !== c); }}
+                aria-label="Clear concept filter"
+                data-testid="concept-filter-chip-clear"
+                type="button"
+              >✕</button>
+            </span>
+          {/each}
         {/if}
       </div>
     {/if}
@@ -2157,7 +2921,50 @@
                   {/if}
                 </div>
               {/if}
+              {#if timelineScrubActive && timelineMomentDetail}
+                <!-- Key moment narrative (system-explorer.md §6): click a key
+                     moment → the delta panel shows what changed and why. -->
+                <div class="timeline-moment-narrative" role="status" aria-label="Key moment narrative">
+                  <div class="timeline-moment-header">
+                    <span class="timeline-moment-title">Key moment</span>
+                    {#if timelineMomentDetail.timestamp}
+                      <span class="timeline-moment-date">{new Date(typeof timelineMomentDetail.timestamp === 'number' ? timelineMomentDetail.timestamp * 1000 : timelineMomentDetail.timestamp).toLocaleDateString()}</span>
+                    {/if}
+                    {#if timelineMomentDetail.spec_ref}
+                      <code class="timeline-moment-ref">{timelineMomentDetail.spec_ref}</code>
+                    {/if}
+                    <button
+                      class="timeline-moment-close"
+                      onclick={() => { timelineMomentDetail = null; }}
+                      title="Dismiss"
+                      type="button"
+                      aria-label="Dismiss key moment narrative"
+                    >×</button>
+                  </div>
+                  {#if timelineMomentDetail.narrative}
+                    <p class="timeline-moment-text">{timelineMomentDetail.narrative}</p>
+                  {:else}
+                    <p class="timeline-moment-text timeline-moment-empty">No narrative recorded for this moment.</p>
+                  {/if}
+                </div>
+              {/if}
               {#if explorerViewMode === 'boundary'}
+              <!-- In-view filter panel row (ui-navigation.md §3): collapsible
+                   200px left panel INSIDE the Architecture content area —
+                   category filters + concepts, not the app sidebar. -->
+              <div class="explorer-boundary-row">
+              {#if filterPanelOpen}
+                <ExplorerFilterPanel
+                  nodes={effectiveGraph.nodes ?? []}
+                  bind:activeCategories={activeFilterCategories}
+                  bind:activeConcepts={activeFilterConcepts}
+                  manifestConcepts={manifestConcepts}
+                  activeManifestConcept={activeManifestConcept?.name ?? null}
+                  onToggleManifestConcept={toggleManifestConcept}
+                  onClose={() => { filterPanelOpen = false; }}
+                />
+              {/if}
+              <div class="explorer-boundary-main">
               {#if LayoutRenderer}
                 <!-- Generated-view layout dispatch (ui-layout.md §10 Layout
                      Engines): the ViewSpec `layout` field selects the renderer
@@ -2231,6 +3038,7 @@
               <ExplorerCanvas
                 repoId={selectedRepoId}
                 rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
+                layout={activeLayout}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
@@ -2250,20 +3058,30 @@
                 {highlightedSpanId}
                 focusRequest={traceFocusRequest}
                 windowEscape={false}
-                timeline={graphTimeline ?? livenessTimeline ?? []}
+                timeline={timelineArray}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
+                timelineReconciliationEvents={reconciliationEvents}
                 {gateRecords}
+                riskByNode={explorerLens === 'evaluative' ? riskByNode : {}}
+                riskEntries={explorerLens === 'evaluative' ? riskEntries : []}
+                hiddenNodeIds={explorerHiddenNodeIds}
+                hiddenCategories={explorerHiddenCategories}
+                filterConcepts={activeFilterConcepts}
+                conceptNodeIds={explorerConceptNodeIds}
+                onCreateConcept={openConceptDialog}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
-                  if (!timelineScrubActive) timelineScrubIndex = -1;
-                  else if (graphTimeline?.length) timelineScrubIndex = graphTimeline.length - 1;
+                  if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
+                  else if (timelineArray.length) timelineScrubIndex = timelineArray.length - 1;
                 }}
                 onTimelineScrub={(idx) => { timelineScrubIndex = idx; }}
-                onTimelineMarkerClick={(_delta) => {}}
+                onTimelineMarkerClick={(delta) => { timelineMomentDetail = delta; }}
                 {timelineDeltaStats}
               />
               {/if}
+              </div><!-- /explorer-boundary-main -->
+              </div><!-- /explorer-boundary-row -->
               {:else if explorerViewMode === 'spec-realization'}
                 <!-- HSI §3 Spec Realization View: specs ↔ linked graph nodes -->
                 <SpecRealizationView
@@ -2425,7 +3243,7 @@
                             class:active={timelineScrubActive}
                             onclick={() => {
                               timelineScrubActive = !timelineScrubActive;
-                              if (!timelineScrubActive) timelineScrubIndex = -1;
+                              if (!timelineScrubActive) { timelineScrubIndex = -1; timelineMomentDetail = null; }
                               else timelineScrubIndex = graphTimeline.length - 1;
                             }}
                             type="button"
@@ -2510,6 +3328,14 @@
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
                   onSpanSelect={(span) => { highlightedSpanId = span?.span_id ?? null; }}
+                  repoId={selectedRepoId || null}
+                  onAgentProvenance={(agentId) => {
+                    // Agent references in the moldable views open the agent's
+                    // provenance (full agent detail: conversation SHA, MRs,
+                    // cost, provenance chain).
+                    if (openDetailPanelCtx) openDetailPanelCtx({ type: 'agent', id: agentId });
+                  }}
+                  onEditSpec={(specPath) => openSpecEditor(specPath)}
                 />
                 {#if detailNode.spec_path}
                   <div class="edit-spec-action">
@@ -2808,6 +3634,50 @@
                 </div>
               </div>
             {/if}
+            {#if viewSpecEditorOpen}
+              <!-- View spec editor (ui-navigation.md §3): collapsible JSON editor
+                   for the view spec grammar — data / layout / encoding / highlight
+                   layers. Apply translates the spec to a ViewQuery and re-renders
+                   the canvas live. -->
+              <div class="query-editor-panel" role="complementary" aria-label="View spec editor" data-testid="view-spec-editor">
+                <div class="query-editor-header">
+                  <h3 class="query-editor-title">View Spec Editor</h3>
+                  <button class="query-editor-close" onclick={() => { viewSpecEditorOpen = false; }} aria-label="Close view spec editor" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                      <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                  </button>
+                </div>
+                <div class="query-editor-body">
+                  <textarea
+                    class="query-editor-textarea"
+                    bind:value={viewSpecText}
+                    placeholder={'{\n  "name": "My view",\n  "layout": "graph",\n  "data": { "node_types": ["endpoint"] },\n  "encoding": { "color": "spec_coverage", "size": "complexity" },\n  "highlight": {}\n}'}
+                    spellcheck="false"
+                    aria-label="View spec JSON"
+                    data-testid="view-spec-textarea"
+                  ></textarea>
+                </div>
+                {#if viewSpecError}
+                  <div class="query-editor-error" role="alert">
+                    {viewSpecError}
+                  </div>
+                {/if}
+                <div class="query-editor-actions">
+                  <button
+                    class="query-editor-clear-btn"
+                    onclick={() => { viewSpecText = JSON.stringify(currentViewSpecForEditor(), null, 2); viewSpecError = ''; }}
+                    type="button"
+                  >Reset</button>
+                  <button
+                    class="query-editor-run-btn"
+                    onclick={applyViewSpecEditor}
+                    disabled={!viewSpecText.trim()}
+                    type="button"
+                  >Apply</button>
+                </div>
+              </div>
+            {/if}
             {#if !chatCollapsed}
               <div class="explorer-chat-area">
                 <div class="chat-collapse-bar">
@@ -2830,6 +3700,15 @@
                       onclick={() => { chatMode = 'generate'; }}
                       type="button"
                     >{$t('generated_view.title')}</button>
+                    <button
+                      class="chat-mode-tab"
+                      class:active={chatMode === 'explore'}
+                      role="tab"
+                      aria-selected={chatMode === 'explore'}
+                      data-testid="chat-mode-explore"
+                      onclick={() => { chatMode = 'explore'; }}
+                      type="button"
+                    >{$t('conversational_explorer.title')}</button>
                   </div>
                   <button
                     class="chat-collapse-btn"
@@ -2848,11 +3727,34 @@
                   onViewQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: q?.scope?.type ?? 'query' }); }}
                   onOpenSpec={(path) => openSpecEditor(path)}
                   savedViews={explorerSavedViews}
-                  onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
+                  onSavedViewsUpdate={(views) => {
+                    // The socket's SavedViewSummary carries no query — keep
+                    // the query/spec fields already fetched via REST for ids
+                    // that survive the replace.
+                    const prev = new Map(explorerSavedViews.map((v) => [v.id, v]));
+                    explorerSavedViews = (views ?? []).map((v) =>
+                      prev.has(v.id) ? { ...prev.get(v.id), ...v } : v
+                    );
+                  }}
                   onLoadView={(view) => pushInteraction({ action: 'query', preset: view?.name ?? null })}
                   {graphHints}
                   graphNodes={graph?.nodes ?? []}
                   graphEdges={graph?.edges ?? []}
+                />
+                {:else if chatMode === 'explore'}
+                <!-- Conversational exploration (system-explorer.md §8):
+                     knowledge-graph-grounded Q&A with clickable entity
+                     references and canvas actions. -->
+                <ConversationalExplorer
+                  workspaceId={scope?.workspaceId ?? ''}
+                  repoId={selectedRepoId}
+                  onApplyView={applyGeneratedViewSpec}
+                  onOpenNode={conversationOpenNode}
+                  onOpenSpec={conversationOpenSpec}
+                  onOpenCommit={conversationOpenCommit}
+                  onShowAgent={conversationShowAgent}
+                  onHighlightNodes={conversationHighlightNodes}
+                  onPrediction={conversationApplyPrediction}
                 />
                 {:else}
                 <GeneratedViewChat
@@ -2879,6 +3781,57 @@
         {/if}
       </div>
         <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
+    </div>
+  </div>
+{/if}
+
+<!-- ── Ad-hoc concept creation dialog (system-explorer.md §4, task-182) ──── -->
+{#if conceptDialog}
+  <div
+    class="concept-dialog-backdrop"
+    onclick={closeConceptDialog}
+    oncontextmenu={(e) => { e.preventDefault(); closeConceptDialog(); }}
+    role="presentation"
+  ></div>
+  <div
+    class="concept-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Create concept"
+    data-testid="concept-dialog"
+  >
+    <h3 class="concept-dialog-title">Create concept</h3>
+    <p class="concept-dialog-desc">
+      Group {conceptDialog.nodes.length} selected nodes into a named concept. Saving stores it
+      as an explorer view you can reload from the view selector.
+    </p>
+    <label class="concept-dialog-label" for="concept-dialog-name">Concept name</label>
+    <input
+      id="concept-dialog-name"
+      class="concept-dialog-input"
+      type="text"
+      bind:value={conceptDialog.name}
+      placeholder="e.g. Authentication"
+      data-testid="concept-dialog-name"
+      disabled={conceptDialog.saving}
+    />
+    {#if conceptDialog.error}
+      <p class="concept-dialog-error" role="alert">{conceptDialog.error}</p>
+    {/if}
+    <div class="concept-dialog-actions">
+      <button
+        class="concept-dialog-save"
+        onclick={saveConceptDialog}
+        disabled={conceptDialog.saving}
+        data-testid="concept-dialog-save"
+        type="button"
+      >{conceptDialog.saving ? 'Saving…' : 'Save concept'}</button>
+      <button
+        class="concept-dialog-cancel"
+        onclick={closeConceptDialog}
+        disabled={conceptDialog.saving}
+        type="button"
+      >Cancel</button>
     </div>
   </div>
 {/if}
@@ -3274,6 +4227,42 @@
   .delta-remove { color: #f87171; font-weight: 600; }
   .delta-modify { color: #fbbf24; font-weight: 600; }
 
+  /* ── Key moment narrative panel (system-explorer.md §6) ─────────────── */
+  .timeline-moment-narrative {
+    display: flex; flex-direction: column; gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated, #16161f);
+    border: 1px solid var(--color-border, #334155);
+    border-left: 3px solid #a855f7;
+    border-radius: var(--radius, 8px);
+    margin-bottom: var(--space-2);
+  }
+  .timeline-moment-header {
+    display: flex; align-items: center; gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+  .timeline-moment-title {
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+    color: #a855f7; font-size: var(--text-xs);
+  }
+  .timeline-moment-date {
+    color: var(--color-text-muted); font-family: var(--font-mono);
+  }
+  .timeline-moment-ref {
+    font-family: var(--font-mono); font-size: var(--text-xs);
+    color: var(--color-text-secondary, #94a3b8);
+  }
+  .timeline-moment-close {
+    margin-left: auto; background: transparent; border: none; color: var(--color-text-muted);
+    font-size: 14px; cursor: pointer; padding: 0 var(--space-1); border-radius: var(--radius-sm);
+  }
+  .timeline-moment-close:hover { color: var(--color-text-primary, #e2e8f0); background: var(--color-surface, #1e293b); }
+  .timeline-moment-text {
+    margin: 0; font-size: var(--text-sm); line-height: 1.5;
+    color: var(--color-text-primary, #e2e8f0);
+  }
+  .timeline-moment-empty { color: var(--color-text-muted); font-style: italic; }
+
   /* ── Back to repos button (workspace scope) ───────────────────────── */
   .back-to-repos-btn {
     display: inline-flex;
@@ -3373,39 +4362,97 @@
     flex-wrap: wrap;
   }
 
-  /* HSI §3 view selector tabs (Boundary | Spec Realization | Change | System Trace) */
-  .explorer-view-tabs {
-    display: inline-flex;
-    gap: 2px;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md, 8px);
-    padding: 2px;
+  /* HSI §3 / ui-navigation.md §3 view selector dropdown (task-178):
+     built-in views → saved views → "Generate view..." option. */
+  .explorer-view-select {
+    position: relative;
     flex-shrink: 0;
   }
 
-  .view-tab {
-    border: none;
-    background: none;
-    color: var(--color-text-muted);
+  .view-select-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    color: var(--color-text);
     font-family: var(--font-body);
     font-size: var(--text-xs);
+    font-weight: 600;
     padding: var(--space-1) var(--space-3);
-    border-radius: var(--radius-sm, 6px);
     cursor: pointer;
     white-space: nowrap;
   }
 
-  .view-tab:hover {
-    color: var(--color-text);
+  .view-select-btn:hover { border-color: var(--color-border-strong); }
+  .view-select-btn[aria-expanded='true'] { border-color: var(--color-focus); }
+
+  .view-select-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 60;
+    min-width: 220px;
+    max-height: 320px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
     background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    padding: var(--space-1);
   }
 
-  .view-tab.active {
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-    box-shadow: inset 0 -2px 0 var(--color-focus);
+  .view-select-section {
+    font-size: 10px;
     font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+
+  .view-select-option {
+    border: none;
+    background: none;
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    text-align: left;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm, 6px);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .view-select-option:hover { background: var(--color-surface); }
+  .view-select-option.active { font-weight: 600; box-shadow: inset 2px 0 0 var(--color-focus); }
+  .view-select-generate { color: var(--color-focus, #3b82f6); font-style: italic; }
+
+  .view-select-divider {
+    height: 1px;
+    background: var(--color-border);
+    margin: var(--space-1) 0;
+  }
+
+  /* In-view filter panel row (task-178): filter panel left, canvas right. */
+  .explorer-boundary-row {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    align-items: stretch;
+  }
+
+  .explorer-boundary-main {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
   }
 
   .search-input-wrap {
@@ -3516,6 +4563,107 @@
 
   .chip-clear:hover { opacity: 1; }
   .chip-clear:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* Active concept filter chip (system-explorer.md §4) — distinct accent
+     from the search result chip: the concept view is a filter, not a
+     search result. */
+  .concept-filter-chip {
+    background: color-mix(in srgb, #a78bfa 12%, transparent);
+    border-color: color-mix(in srgb, #a78bfa 40%, transparent);
+    color: #c4b5fd;
+  }
+
+  /* ── Ad-hoc concept creation dialog (system-explorer.md §4) ─────── */
+  .concept-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.6);
+    z-index: 300;
+  }
+
+  .concept-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 301;
+    width: min(400px, calc(100vw - 48px));
+    padding: var(--space-5);
+    background: var(--color-bg-secondary, #0f172a);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius-lg, 10px);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+
+  .concept-dialog-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text-primary, #e2e8f0);
+  }
+
+  .concept-dialog-desc {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted, #94a3b8);
+    line-height: 1.5;
+  }
+
+  .concept-dialog-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted, #94a3b8);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .concept-dialog-input {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-bg-primary, #0f0f1a);
+    border: 1px solid var(--color-border-strong, #334155);
+    border-radius: var(--radius-md, 6px);
+    color: var(--color-text-primary, #e2e8f0);
+    font-size: var(--text-sm);
+  }
+  .concept-dialog-input:focus-visible {
+    outline: 2px solid var(--color-focus, #3b82f6);
+    outline-offset: 1px;
+  }
+
+  .concept-dialog-error {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-danger, #ef4444);
+  }
+
+  .concept-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .concept-dialog-save,
+  .concept-dialog-cancel {
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md, 6px);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .concept-dialog-save {
+    background: var(--color-focus, #3b82f6);
+    color: #fff;
+    border-color: var(--color-focus, #3b82f6);
+  }
+  .concept-dialog-save:disabled { opacity: 0.6; cursor: default; }
+  .concept-dialog-cancel {
+    background: transparent;
+    color: var(--color-text-muted, #94a3b8);
+    border-color: var(--color-border-strong, #334155);
+  }
 
   /* ── Workspace repo error ─────────────────────────────────────────────── */
   .error-banner {
@@ -3939,6 +5087,8 @@
     overflow: hidden;
     min-width: 0;
     position: relative;
+    display: flex;
+    flex-direction: column;
   }
 
   .canvas-warning-stack {
