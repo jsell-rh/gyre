@@ -738,7 +738,7 @@ pub async fn git_receive_pack(
                 // Emit PushRejected event via unified message bus.
                 state
                     .emit_event(
-                        Some(repo_workspace_id.clone()),
+                        repo_workspace_id.clone(),
                         gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                         gyre_common::message::MessageKind::PushRejected,
                         Some(serde_json::json!({
@@ -794,7 +794,7 @@ pub async fn git_receive_pack(
                 undo_ref_updates(&repo_path, &ref_updates).await;
                 state
                     .emit_event(
-                        Some(repo_workspace_id.clone()),
+                        repo_workspace_id.clone(),
                         gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                         gyre_common::message::MessageKind::PushRejected,
                         Some(serde_json::json!({
@@ -846,7 +846,7 @@ pub async fn git_receive_pack(
                 // Emit PushRejected event.
                 state
                     .emit_event(
-                        Some(repo_workspace_id.clone()),
+                        repo_workspace_id.clone(),
                         gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                         gyre_common::message::MessageKind::PushRejected,
                         Some(serde_json::json!({
@@ -903,7 +903,7 @@ pub async fn git_receive_pack(
                 undo_ref_updates(&repo_path, &ref_updates).await;
                 state
                     .emit_event(
-                        Some(repo_workspace_id.clone()),
+                        repo_workspace_id.clone(),
                         gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                         gyre_common::message::MessageKind::PushRejected,
                         Some(serde_json::json!({
@@ -942,7 +942,7 @@ pub async fn git_receive_pack(
                 undo_ref_updates(&repo_path, &ref_updates).await;
                 state
                     .emit_event(
-                        Some(repo_workspace_id.clone()),
+                        repo_workspace_id.clone(),
                         gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                         gyre_common::message::MessageKind::PushRejected,
                         Some(serde_json::json!({
@@ -1052,7 +1052,7 @@ pub async fn git_receive_pack(
         if !applied_updates.is_empty() {
             state_clone
                 .emit_event(
-                    Some(repo_workspace_id_clone.clone()),
+                    repo_workspace_id_clone.clone(),
                     gyre_common::message::Destination::Workspace(repo_workspace_id_clone),
                     gyre_common::message::MessageKind::PushAccepted,
                     Some(serde_json::json!({
@@ -2016,7 +2016,7 @@ async fn enforce_stack_policy(
             warn!(repo_id, agent_id, level, %reason, "stack policy violation (warn mode)");
             state
                 .emit_event(
-                    Some(repo_workspace_id.clone()),
+                    repo_workspace_id.clone(),
                     gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
                     gyre_common::message::MessageKind::ConstraintViolation,
                     Some(serde_json::json!({
@@ -2083,7 +2083,7 @@ async fn enforce_stack_policy(
                           "stack drift detected (warn mode)");
                     state
                         .emit_event(
-                            Some(repo_workspace_id.clone()),
+                            repo_workspace_id.clone(),
                             gyre_common::message::Destination::Workspace(
                                 repo_workspace_id.clone(),
                             ),
@@ -2674,7 +2674,7 @@ async fn process_persona_changes(
                             );
                             state
                                 .emit_event(
-                                    Some(repo.workspace_id.clone()),
+                                    repo.workspace_id.clone(),
                                     gyre_common::message::Destination::Workspace(
                                         repo.workspace_id.clone(),
                                     ),
@@ -3035,7 +3035,7 @@ async fn process_spec_lifecycle(
                     if let Some(ws_id) = ws_id.as_ref() {
                         state
                             .emit_event(
-                                Some(ws_id.clone()),
+                                ws_id.clone(),
                                 gyre_common::message::Destination::Workspace(ws_id.clone()),
                                 gyre_common::message::MessageKind::SpecChanged,
                                 Some(serde_json::json!({
@@ -3048,7 +3048,7 @@ async fn process_spec_lifecycle(
                             .await;
                         state
                             .emit_event(
-                                Some(ws_id.clone()),
+                                ws_id.clone(),
                                 gyre_common::message::Destination::Workspace(ws_id.clone()),
                                 gyre_common::message::MessageKind::TaskCreated,
                                 Some(serde_json::json!({"task_id": task_id.to_string()})),
@@ -3765,7 +3765,7 @@ pub(crate) async fn reconcile_dependencies(
 
                     state
                         .emit_event(
-                            Some(ws_id.clone()),
+                            ws_id.clone(),
                             gyre_common::message::Destination::Workspace(ws_id.clone()),
                             gyre_common::MessageKind::Custom("dependency_detected".to_string()),
                             Some(payload),
@@ -4439,7 +4439,7 @@ pub(crate) async fn process_breaking_changes(
 
             state
                 .emit_event(
-                    Some(dep_workspace_id.clone()),
+                    dep_workspace_id.clone(),
                     gyre_common::message::Destination::Workspace(dep_workspace_id),
                     gyre_common::MessageKind::Custom("breaking_change_detected".to_string()),
                     Some(payload),

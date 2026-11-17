@@ -218,7 +218,7 @@ pub async fn create_task(
     crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
-            Some(task.workspace_id.clone()),
+            task.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
             gyre_common::message::MessageKind::TaskCreated,
             Some(serde_json::json!({"task_id": task.id.to_string()})),
@@ -341,7 +341,7 @@ pub async fn transition_task_status(
     crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
-            Some(task.workspace_id.clone()),
+            task.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
             gyre_common::message::MessageKind::TaskTransitioned,
             Some(serde_json::json!({"task_id": task.id.to_string(), "status": req.status})),

@@ -1068,7 +1068,7 @@ pub async fn enforce_workspace_budget(
         for agent in &agents {
             state
                 .emit_event(
-                    Some(workspace.clone()),
+                    workspace.clone(),
                     gyre_common::Destination::Agent(agent.id.clone()),
                     gyre_common::MessageKind::BudgetExhausted,
                     Some(serde_json::json!({
@@ -1278,7 +1278,7 @@ async fn emit_budget_warn_tier(
         for agent in &agents {
             state
                 .emit_event(
-                    Some(workspace.clone()),
+                    workspace.clone(),
                     gyre_common::Destination::Agent(agent.id.clone()),
                     gyre_common::MessageKind::BudgetWarning,
                     Some(serde_json::json!({
@@ -1303,7 +1303,7 @@ async fn emit_budget_warn_tier(
         }
         state
             .emit_event(
-                Some(workspace.clone()),
+                workspace.clone(),
                 gyre_common::Destination::Workspace(workspace.clone()),
                 gyre_common::MessageKind::BudgetWarning,
                 Some(feed_payload),
@@ -1325,7 +1325,7 @@ async fn emit_budget_exhausted_to_agents(
     for agent in agents {
         state
             .emit_event(
-                Some(workspace.clone()),
+                workspace.clone(),
                 gyre_common::Destination::Agent(agent.id.clone()),
                 gyre_common::MessageKind::BudgetExhausted,
                 Some(serde_json::json!({
@@ -1523,7 +1523,7 @@ async fn create_budget_reassignment_task(state: &AppState, agent: &Agent) {
     }
     state
         .emit_event(
-            Some(agent.workspace_id.clone()),
+            agent.workspace_id.clone(),
             Destination::Workspace(agent.workspace_id.clone()),
             MessageKind::TaskCreated,
             Some(serde_json::json!({
