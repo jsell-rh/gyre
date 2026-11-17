@@ -256,6 +256,43 @@ pub async fn update_workspace(
     if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
         return Err(ApiError::NotFound(format!("workspace {id} not found")));
     }
+    // HSI §2 Trust Levels: "changing trust level … requires Admin workspace
+    // role" — workspace-role granularity, not tenant-role. The ABAC route
+    // mapping (workspace/write) cannot express this: the builtin
+    // developer-write-access policy Allows workspace writes for any tenant
+    // Developer, so without this per-handler check a Developer with no
+    // workspace role could transition a workspace to Autonomous. Mirrors
+    // builtin:workspace-member-management's condition shape
+    // (subject.workspace_role in {Owner, Admin}), resolved from the
+    // caller's real membership. The global system token (no user identity,
+    // Admin role — the operator's root credential) is the one non-membership
+    // principal allowed: it bypasses ABAC by design and operator/tooling
+    // flows (bootstrap, CLI with the dev token) legitimately transition
+    // trust. Agent principals have neither a user identity nor the Admin
+    // role and are always rejected.
+    if req.trust_level.is_some() {
+        let caller_is_system = auth.user_id.is_none() && auth.roles.contains(&UserRole::Admin);
+        if !caller_is_system {
+            let user_id = auth.user_id.clone().ok_or_else(|| {
+                ApiError::Forbidden(
+                    "changing trust_level requires an Admin workspace role".to_string(),
+                )
+            })?;
+            let membership = state
+                .workspace_memberships
+                .find_by_user_and_workspace(&user_id, &ws.id)
+                .await?;
+            let role_ok = membership.as_ref().is_some_and(|m| {
+                // A pending (unaccepted) membership grants nothing.
+                m.accepted && matches!(m.role, WorkspaceRole::Admin | WorkspaceRole::Owner)
+            });
+            if !role_ok {
+                return Err(ApiError::Forbidden(
+                    "changing trust_level requires an Admin workspace role".to_string(),
+                ));
+            }
+        }
+    }
     if let Some(name) = req.name {
         ws.name = name;
     }
@@ -1822,6 +1859,224 @@ mod tests {
         );
     }
 
+    /// HSI §2 Trust Levels: "changing trust level … requires Admin
+    /// workspace role" — enforced at WORKSPACE-role granularity. A
+    /// tenant-level Developer JWT with no membership, a Developer-membership
+    /// holder, and a pending (unaccepted) Admin membership are all rejected
+    /// (403); an accepted Admin membership and the global system token may
+    /// transition. Non-trust workspace updates stay allowed for the
+    /// Developer (the gate is scoped to trust_level changes).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trust_level_change_requires_admin_workspace_role() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace created by the system token (seeds no membership).
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "trust-gate-ws" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let put_trust = |app: &Router, token: String, level: &str| {
+            let update = serde_json::json!({ "trust_level": level });
+            app.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+        };
+
+        // A tenant Developer with NO workspace membership: 403. The JWT
+        // carries the workspace's tenant ("t1") — the doc contract maps an
+        // absent claim to the bootstrapped "default" tenant, and a
+        // cross-tenant caller is contained earlier (404, existence not
+        // confirmed), which would never reach the trust gate this test
+        // exists to exercise.
+        let dev_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "trust-gate-dev",
+                "preferred_username": "trust-gate-dev",
+                "tenant_id": "t1",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        // Provision the user (JWT provisioning happens at first request).
+        let warmup = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {dev_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(warmup.status(), StatusCode::OK);
+        let dev_user = state
+            .users
+            .find_by_external_id("trust-gate-dev")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the developer user");
+
+        let resp = put_trust(&app, dev_jwt.clone(), "Autonomous")
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a Developer with no workspace role must not change trust_level"
+        );
+
+        // A Developer WORKSPACE membership is still not enough.
+        let mut dev_membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("trust-gate-dev-membership"),
+            dev_user.id.clone(),
+            Id::new(&ws_id),
+            gyre_domain::WorkspaceRole::Developer,
+            dev_user.id.clone(),
+            super::now_secs(),
+        );
+        dev_membership.accept(super::now_secs());
+        state
+            .workspace_memberships
+            .create(&dev_membership)
+            .await
+            .unwrap();
+        let resp = put_trust(&app, dev_jwt.clone(), "Autonomous")
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a Developer workspace membership must not change trust_level"
+        );
+
+        // Non-trust workspace updates remain allowed for the Developer
+        // (the gate is scoped to trust_level writes).
+        let rename = serde_json::json!({ "name": "Renamed by dev" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {dev_jwt}"))
+                    .body(Body::from(serde_json::to_vec(&rename).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "non-trust workspace updates are not gated on the workspace Admin role"
+        );
+
+        // A pending (unaccepted) Admin membership grants nothing.
+        let pending_admin = gyre_domain::WorkspaceMembership::new(
+            Id::new("trust-gate-pending-admin"),
+            dev_user.id.clone(),
+            Id::new(&ws_id),
+            gyre_domain::WorkspaceRole::Admin,
+            dev_user.id.clone(),
+            super::now_secs(),
+        );
+        state
+            .workspace_memberships
+            .create(&pending_admin)
+            .await
+            .unwrap();
+        let resp = put_trust(&app, dev_jwt, "Autonomous").await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a pending (unaccepted) Admin membership must not change trust_level"
+        );
+
+        // An accepted Admin membership may transition. Uses a SECOND user —
+        // the developer already holds conflicting memberships above, and
+        // which one `find_by_user_and_workspace` returns must not decide
+        // the assertion.
+        let admin_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "trust-gate-admin-sub",
+                "preferred_username": "trust-gate-admin",
+                "tenant_id": "t1",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let warmup = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(warmup.status(), StatusCode::OK);
+        let admin_user = state
+            .users
+            .find_by_external_id("trust-gate-admin-sub")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the admin user");
+        let mut admin_membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("trust-gate-admin"),
+            admin_user.id.clone(),
+            Id::new(&ws_id),
+            gyre_domain::WorkspaceRole::Admin,
+            admin_user.id.clone(),
+            super::now_secs(),
+        );
+        admin_membership.accept(super::now_secs());
+        state
+            .workspace_memberships
+            .create(&admin_membership)
+            .await
+            .unwrap();
+        let resp = put_trust(&app, admin_jwt, "Autonomous").await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "an accepted workspace Admin membership may change trust_level"
+        );
+
+        // The global system token (operator root credential) may transition.
+        let resp = put_trust(&app, "test-token".to_string(), "Supervised")
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     /// HSI §12 Judgment Ledger: a successful trust transition via
     /// PUT /workspaces/:id must write a `trust_change` audit event attributed
     /// to the acting user, carrying from/to and workspace_id — the event the
@@ -1855,7 +2110,12 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // A human (OIDC JWT, admin role) performs the transition.
+        // A human (OIDC JWT, admin role) performs the transition. HSI §2:
+        // changing trust level requires an Admin WORKSPACE role — the
+        // global token created this workspace (seeding no membership), so
+        // the actor's membership is seeded here as the gate expects. The
+        // JWT user is provisioned at first authenticated request, so a
+        // warm-up call creates the user record before the membership.
         let jwt = sign_test_jwt(
             &serde_json::json!({
                 "sub": "judg-sub-1",
@@ -1864,6 +2124,38 @@ mod tests {
             }),
             3600,
         );
+        let warmup = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(warmup.status(), StatusCode::OK);
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-sub-1")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        let mut membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("judg-membership-1"),
+            acting_user.id.clone(),
+            Id::new(&ws_id),
+            gyre_domain::WorkspaceRole::Admin,
+            acting_user.id.clone(),
+            super::now_secs(),
+        );
+        membership.accept(super::now_secs());
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
 
         let update = serde_json::json!({ "trust_level": "Supervised" });
         let resp = app

@@ -261,7 +261,7 @@ Log decision to audit trail
 Policies at different scopes compose with these rules:
 
 1. **More specific scope takes precedence** when priorities are equal (repo > workspace > tenant)
-2. **Higher priority always wins** regardless of scope
+2. **Higher priority always wins** regardless of scope — *precondition (amended by `human-system-interface.md` §2 Mechanical Implementation): immutable Deny policies are evaluated before all others and cannot be overridden by any Allow policy regardless of priority*
 3. **Deny overrides Allow** at the same priority and scope
 4. **Default deny** at tenant level catches everything not explicitly allowed
 
@@ -269,6 +269,7 @@ This means:
 - A tenant policy can set a baseline that workspaces can't override (by using high priority)
 - A workspace policy can set defaults that repos can customize (by using moderate priority)
 - A repo policy can grant or restrict access within its scope (by using repo-level scope)
+- Immutable Deny policies (e.g. `builtin:require-human-spec-approval`, priority 999) trump even the `system-full-access` Allow at priority 1000: the engine's first evaluation pass scans for immutable Deny matches before any priority-based evaluation (see Evaluation Engine step 1 and `human-system-interface.md` §2)
 
 ### Built-In Policies
 

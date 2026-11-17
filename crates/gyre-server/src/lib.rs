@@ -1339,8 +1339,19 @@ pub fn build_state(
         store!(dyn AgentRepository, mem::MemAgentRepository::default()),
         Arc::clone(&search),
     );
+    // Shared task store: the persona repo's atomic
+    // `apply_approval_reset_with_task` (persona approval reset + approval
+    // task in one write) must land in the same store as every normal task
+    // write. DB-backed modes use one storage object for both ports, so the
+    // share only matters for the mem fallback.
+    let mem_task_store: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, gyre_domain::Task>>,
+    > = Arc::default();
     let tasks: Arc<dyn TaskRepository> = search_sync::wrap_tasks(
-        store!(dyn TaskRepository, mem::MemTaskRepository::default()),
+        store!(
+            dyn TaskRepository,
+            mem::MemTaskRepository::from_store(Arc::clone(&mem_task_store))
+        ),
         Arc::clone(&search),
     );
     let merge_requests: Arc<dyn MergeRequestRepository> = search_sync::wrap_mrs(
@@ -1353,7 +1364,10 @@ pub fn build_state(
         Arc::clone(&search),
     );
     let personas: Arc<dyn PersonaRepository> = search_sync::wrap_personas(
-        store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
+        store!(
+            dyn PersonaRepository,
+            mem::MemPersonaRepository::with_task_store(Arc::default(), Arc::clone(&mem_task_store))
+        ),
         Arc::clone(&search),
     );
     let analytics: Arc<dyn AnalyticsRepository> = search_sync::wrap_analytics(
