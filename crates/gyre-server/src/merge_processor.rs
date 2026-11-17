@@ -1764,9 +1764,10 @@ async fn rollback_atomic_group(
     for author_id in &author_ids {
         // The author is an AGENT; notifications live in HUMAN inboxes. Resolve
         // the agent's spawning user (falling back to the agent id itself when
-        // no human is recorded) — same rule as notify_gate_failure /
-        // notify_mr_merged. Addressing the raw agent id delivers to a user
-        // that does not exist, so no human ever sees the failure notice.
+        // no human is recorded) — same rule as the notification bridge's
+        // GateFailure handling / notify_mr_merged. Addressing the raw agent id
+        // delivers to a user that does not exist, so no human ever sees the
+        // failure notice.
         let author = Id::new(author_id);
         let user_id = match state.agents.find_by_id(&author).await {
             Ok(Some(agent)) => match &agent.spawned_by {
@@ -3091,8 +3092,11 @@ const SPEC_POLICY_COMMENT_AUTHOR: &str = "forge:spec-policy";
 /// Report a spec-policy merge violation to the MR author (agent-gates.md
 /// §Forge Enforcement Policies): the queue entry already carries the failure
 /// reason, but the author must hear it directly — a GateFailure workspace
-/// event plus an inbox notification to the author's spawning user (same
-/// delivery rule as `notify_gate_failure`).
+/// event whose consumption by the notification bridge
+/// (message_dispatcher::NotificationBridge, gate_type "spec_enforcement")
+/// creates the author's inbox notification via
+/// `notify_spec_policy_violation`. Single creation path (HSI §8 p3): a
+/// direct notification here would duplicate the bridge's.
 async fn report_spec_policy_violation(
     state: &AppState,
     mr: &gyre_domain::MergeRequest,
@@ -3114,36 +3118,6 @@ async fn report_spec_policy_violation(
             })),
         )
         .await;
-
-    if let Some(ref author_id) = mr.author_agent_id {
-        // The tenant scope comes from the workspace lookup — when it cannot
-        // be resolved there is no scoperable tenant, so skip the inbox
-        // notification rather than fabricate one
-        // (check-fabricated-scope-defaults.sh). The workspace event above
-        // already reported the violation.
-        match state.workspaces.find_by_id(&mr.workspace_id).await {
-            Ok(Some(ws)) => {
-                crate::notifications::notify_spec_policy_violation(
-                    state,
-                    author_id,
-                    &mr.workspace_id,
-                    mr.id.as_str(),
-                    reason,
-                    ws.tenant_id.as_str(),
-                )
-                .await;
-            }
-            Ok(None) => warn!(
-                mr_id = %mr.id,
-                "spec-policy violation: workspace not found; skipping author notification"
-            ),
-            Err(e) => warn!(
-                mr_id = %mr.id,
-                error = %e,
-                "spec-policy violation: workspace lookup failed; skipping author notification"
-            ),
-        }
-    }
 }
 
 /// `warn_stale_spec` advisory (agent-gates.md): a stale spec_ref warns but
@@ -4431,6 +4405,27 @@ mod tests {
         std::fs::create_dir_all(&format!("/tmp/{name}.git")).ok();
         state.repos.create(&repo).await.unwrap();
         repo
+    }
+
+    /// Poll until `cond` holds, up to 10s. Spec-policy violation
+    /// notifications are created by the notification bridge
+    /// (message_dispatcher) from the GateFailure bus event — a background
+    /// task — so they arrive asynchronously after `run_once` returns.
+    async fn eventually_bridge_notification<F, Fut>(mut cond: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if cond().await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     async fn create_dependency(state: &AppState, source_repo_id: &Id, target_repo_id: &Id) {
@@ -11708,6 +11703,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn require_signed_approval_blocks_unsigned_spec_approval() {
         let state = test_state();
+        // Spec-policy violation notifications are created by the
+        // notification bridge from the GateFailure bus event (HSI §8 p3
+        // single creation path) — spawn the dispatcher so the bus is
+        // drained in this test too, matching production wiring (main.rs).
+        crate::message_dispatcher::spawn_message_consumer(state.clone()).await;
         let repo = create_repo_in_workspace(&state, "signed-spec-repo", "ws-1").await;
 
         // Enable the policy.
@@ -11781,33 +11781,35 @@ mod tests {
             "failure reason must name the missing signature, got: {err}"
         );
 
-        // The author was notified directly (agent-gates.md: enforcement
-        // errors are reported clearly to the author, not just the queue).
-        let author_notifications = state
-            .notifications
-            .list_for_user(
-                &Id::new("author-agent-1"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                &[],
-                50,
-                0,
-            )
-            .await
-            .unwrap();
+        // The author was notified (agent-gates.md: enforcement errors are
+        // reported clearly to the author, not just the queue) — via the
+        // notification bridge consuming the GateFailure bus event, so the
+        // notification arrives asynchronously after run_once returns.
         assert!(
-            author_notifications
-                .iter()
-                .any(|n| n.title.contains("Spec policy blocked merge")
-                    && n.title.contains("no Sigstore signature")),
-            "author must receive a notification naming the violation, got: {:?}",
-            author_notifications
-                .iter()
-                .map(|n| &n.title)
-                .collect::<Vec<_>>()
+            eventually_bridge_notification(|| async {
+                state
+                    .notifications
+                    .list_for_user(
+                        &Id::new("author-agent-1"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        &[],
+                        50,
+                        0,
+                    )
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|n| {
+                        n.title.contains("Spec policy blocked merge")
+                            && n.title.contains("no Sigstore signature")
+                    })
+            })
+            .await,
+            "author must receive a notification naming the violation"
         );
 
         // Control: the same MR with a SIGNED active approval merges.
@@ -11994,6 +11996,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn require_spec_ref_blocks_mr_without_spec_ref() {
         let state = test_state();
+        // Same single-creation-path wiring as the unsigned-approval test
+        // above: the bridge derives the author notification from the
+        // GateFailure bus event.
+        crate::message_dispatcher::spawn_message_consumer(state.clone()).await;
         let repo = create_repo_in_workspace(&state, "spec-ref-repo", "ws-1").await;
 
         // Enable the policy.
@@ -12046,31 +12052,31 @@ mod tests {
             "failure reason must name the missing spec_ref, got: {err}"
         );
 
-        // The author was told why the merge was blocked.
-        let author_notifications = state
-            .notifications
-            .list_for_user(
-                &Id::new("author-agent-specref"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                &[],
-                50,
-                0,
-            )
-            .await
-            .unwrap();
+        // The author was told why the merge was blocked — via the
+        // notification bridge consuming the GateFailure bus event, so the
+        // notification arrives asynchronously after run_once returns.
         assert!(
-            author_notifications
-                .iter()
-                .any(|n| n.title.contains("Spec policy blocked merge")),
-            "author must be notified of the spec_ref violation, got: {:?}",
-            author_notifications
-                .iter()
-                .map(|n| &n.title)
-                .collect::<Vec<_>>()
+            eventually_bridge_notification(|| async {
+                state
+                    .notifications
+                    .list_for_user(
+                        &Id::new("author-agent-specref"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        &[],
+                        50,
+                        0,
+                    )
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|n| n.title.contains("Spec policy blocked merge"))
+            })
+            .await,
+            "author must be notified of the spec_ref violation"
         );
 
         // Control: the same MR WITH a spec_ref merges (no other policy is

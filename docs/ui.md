@@ -2,7 +2,9 @@
 
 The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localhost:3000`.
 
-> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. The permanent sidebar described by `human-system-interface.md` §1.3 is **not shipped** — the canonical navigation is `specs/system/ui-navigation.md` (Principle 5: no persistent sidebar). On narrow viewports a hamburger toggles a drawer that links to the workspace-home sections.
+> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. The permanent sidebar described by `human-system-interface.md` §1.3 is **not shipped** — the canonical navigation is `specs/system/ui-navigation.md` (Principle 5: no *permanent* sidebar). On narrow viewports a hamburger toggles a drawer that links to the workspace-home sections.
+>
+> **Spec amendment (2026-11-16, decision `16871182b1370b61693fc691`):** `ui-navigation.md` §1a now specifies an optional, collapsible, scope-labelled **navigation rail** on navigation-heavy screens (workspace home and repo mode): per-mode item sets mirroring the dashboard sections / repo tab strip, stable ordering within each mode, collapsed (icon-only) by default, and a narrow-viewport drawer. This is **specified but not yet shipped** — the shipped UI remains the two-mode model with no sidebar, and `web/src/__tests__/NoSidebar.test.js` (which asserts the absence of a *permanent* sidebar) remains the guard. Implementation is decomposed after amendment task-246 merges.
 
 ---
 
@@ -10,7 +12,9 @@ The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localho
 
 ### Shell Layout (no persistent sidebar)
 
-There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, notification bell), the workspace-home sections, and the repo-mode horizontal tabs. On narrow viewports, the hamburger (`[≡]`) opens a drawer linking to the workspace-home sections.
+There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5: no *permanent* sidebar). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, notification bell), the workspace-home sections, and the repo-mode horizontal tabs. On narrow viewports, the hamburger (`[≡]`) opens a drawer linking to the workspace-home sections.
+
+`specs/system/ui-navigation.md` §1a (2026-11-16 amendment) specifies an optional, collapsible, scope-labelled navigation rail for workspace home and repo mode — **not yet implemented**; when implemented it will mirror the dashboard sections / repo tab strip per mode, default to collapsed icon-only, and become the narrow-viewport drawer on mobile.
 
 ### Top Bar (always visible)
 
