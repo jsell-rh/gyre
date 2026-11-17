@@ -57,3 +57,68 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — independent review at assigned base 64d0b86 → candidate aa9cfe54 (verdict: approved)
+
+Assignment: base `64d0b86582b0d09c2a689ffff75c0585b6ee9f56`, candidate
+`aa9cfe543f2863ccf853ff383e23e2423445593f` (pipeline/task-160/5daf132b…-1).
+This round re-verified the full task contract on the exact assigned candidate;
+prior rounds' approvals are not carried forward.
+
+**Clean-HEAD runs (all exit 0):** `check-hierarchy.sh`;
+`check-tenant-filter.sh` (128 read methods on tenant-column tables checked /
+0 violations, migration-derived table set, documented SKIP_LIST, visible
+non-failing backlog for tenant-less tables); `check-api-auth.sh` (middleware
+chain + 8 non-ABAC mutating handlers with auth extractors + §7
+route↔resolver cross-reference delegated to the frozen-baseline
+`check-abac-route-registry.sh`); plus every other blocking step of the CI
+Architecture-lint job (`check-arch`, `check-sandbox-sweep-artifacts`,
+`check-abac-route-registry`, `check-migration-versions`,
+`check-byte-slice-truncation`, `check-dead-message-kinds`,
+`check-notification-toggle-coverage`) and `check-scope-literal-defaults.sh
+crates` — all pass. CI wiring is blocking (no `|| true`) for api-auth and
+tenant-filter; hierarchy wired in both pre-commit and CI.
+
+**Mutation kills (temp copies / restored immediately; repo tree clean after):**
+- `Task.workspace_id → Option<Id>` → check-hierarchy exit 1 naming
+  task.rs:60; deleting the field → exit 1 "missing from the struct".
+- Removing the tenant filter from `sqlite/workspace.rs::find_by_slug` →
+  check-tenant-filter exit 1 with file:line (1/128 violations).
+- Removing the `abac_middleware` layer from `lib.rs` build_router →
+  check-api-auth Check 1 exit 1.
+- Removing the tenant filter from `sqlite/notification.rs::
+  list_active_for_user` → `list_active_for_user_excludes_other_tenants`
+  FAILS (cross-tenant row leaks) — the test is mutation-sensitive, not
+  self-confirming.
+
+**Focused builds/tests (this sandbox, /tmp/stage/bin/cargo):**
+`cargo test -p gyre-adapters --test tenant_isolation` → 2 passed, 0 failed
+(two SqliteStorage handles over one db file differing only by tenant scope —
+the §3 end-to-end proof); `cargo test -p gyre-adapters --lib` filtered runs
+(notification 12/12, workspace find_by_id scope test, compute_target 6/6)
+all green; `cargo check -p gyre-server` clean (5m19s).
+
+**Attribution:** the committed candidate's `commits:` frontmatter lists all
+21 branch commits including every task-160-labeled commit flagged by
+`check-task-commit-attribution.sh` when run against the working tree — that
+script's FAIL is an artifact of the controller-restored working-tree task
+file (`commits: []`, matching the assigned contract body), not of the
+candidate commit.
+
+**Non-blocking observation (recorded for the scripts owner, not a contract
+defect):** in `check-api-auth.sh` Check 2, when a handler cannot be found,
+`HANDLER_FILE=$(grep -rl … | head -1)` under `set -e -o pipefail` exits the
+script (fail-closed, exit 1) before the intended "WARNING: Cannot find
+handler" branch, making that branch dead code. Direction of failure is safe
+(unknown handler → lint fails); only the diagnostic is lost.
+
+**Deferred to the independent verifier:** `cargo test --all` (full workspace
+suites — server test compilation exceeds this sandbox's budget) and the CI
+Architecture-lint + Test jobs on the exact PR head. Prior CI failure at
+ancestor b9c7f481 (Architecture lint: `list_active_for_user` missing tenant
+filter, sqlite+pg) is repaired by 41865593, which is in the candidate and
+covered by a mutation-sensitive test.
+
+Evidence: `/tmp/stage/review-evidence/` (check-*-run.txt, mutation probes,
+tenant-isolation-test.txt, cargo-check-gyre-server.txt,
+check-task-commit-attribution.txt).
