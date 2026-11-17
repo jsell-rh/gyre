@@ -1541,7 +1541,11 @@ async fn provision_preview_agent(
     // branch and index entry — and the caller applies the same rollback to
     // every already-provisioned target when a later step (provision or
     // persist_preview) fails. The compensation is proven by the
-    // launch-failure and persist-failure tests.
+    // launch-failure and persist-failure tests. A create failure has no row
+    // to roll back, but the branch already exists — it is deleted inline
+    // below so it cannot orphan outside every GC pass (the orphan sweep
+    // iterates the preview_agents index, which never saw a row that failed
+    // to persist).
     let repo = &target.repo;
 
     // Pin the branch to the default-branch tip so the diff a human reads is
@@ -1577,7 +1581,21 @@ async fn provision_preview_agent(
     agent
         .transition_status(AgentStatus::Active)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("preview agent status: {e}")))?;
-    state.agents.create(&agent).await?;
+    if let Err(e) = state.agents.create(&agent).await {
+        // No agent row exists, so nothing routes through
+        // rollback_preview_agent — but the branch was already created. Delete
+        // it here or it orphans with no record: the GC orphan pass iterates
+        // the preview_agents kv index, which has no entry for a row that
+        // never persisted.
+        if let Err(be) = state.git_ops.delete_branch(&repo.path, branch).await {
+            tracing::warn!(
+                repo_id = %repo.id,
+                branch,
+                "orphaned preview branch cleanup after agent-row create failed: {be:#}"
+            );
+        }
+        return Err(ApiError::Internal(e));
+    }
 
     // Throwaway branch checked out into its own worktree — the branch already
     // exists, so `create_worktree` checks it out instead of branching from HEAD.
@@ -1588,21 +1606,22 @@ async fn provision_preview_agent(
         .create_worktree(&repo.path, &worktree_path, branch)
         .await
     {
-        rollback_preview_agent(
-            state,
-            &PreviewAgentRef {
-                preview_id: preview_id.to_string(),
-                agent_id: agent.id.to_string(),
-                repo_id: repo.id.to_string(),
-                workspace_id: repo.workspace_id.to_string(),
-                spec_path: target.spec_path.clone(),
-                branch: branch.to_string(),
-                base_sha,
-                worktree_path,
-                released: false,
-            },
-        )
-        .await;
+        let mut partial = preview_agent_ref(
+            preview_id,
+            &agent,
+            repo,
+            &target.spec_path,
+            branch,
+            base_sha,
+            worktree_path,
+        );
+        // No slot was taken: increment_active_agents runs only after every
+        // provisioning step succeeded. A false flag here would make the
+        // rollback decrement a workspace/tenant counter that was never
+        // incremented — permanently biasing budget enforcement down and
+        // letting later spawns over-admit past max_concurrent_agents.
+        partial.released = true;
+        rollback_preview_agent(state, &partial).await;
         let msg = e.to_string().to_lowercase();
         if msg.contains("not a valid object") || msg.contains("bad default revision") {
             return Err(ApiError::BadRequest(format!(
@@ -3831,6 +3850,69 @@ mod tests {
         }
     }
 
+    /// agents wrapper whose create fails for preview agents — forces the
+    /// agent-row persistence failure path (before any worktree, token or
+    /// budget slot exists, but after the branch was created).
+    struct CreateFailingAgents {
+        inner: std::sync::Arc<dyn gyre_ports::AgentRepository>,
+    }
+
+    #[axum::async_trait]
+    impl gyre_ports::AgentRepository for CreateFailingAgents {
+        async fn create(&self, agent: &gyre_domain::Agent) -> anyhow::Result<()> {
+            if agent.name.starts_with("preview-") {
+                anyhow::bail!("injected agent create failure for {}", agent.name);
+            }
+            self.inner.create(agent).await
+        }
+        async fn find_by_id(
+            &self,
+            id: &gyre_common::Id,
+        ) -> anyhow::Result<Option<gyre_domain::Agent>> {
+            self.inner.find_by_id(id).await
+        }
+        async fn find_by_name(&self, name: &str) -> anyhow::Result<Option<gyre_domain::Agent>> {
+            self.inner.find_by_name(name).await
+        }
+        async fn list(&self) -> anyhow::Result<Vec<gyre_domain::Agent>> {
+            self.inner.list().await
+        }
+        async fn list_by_status(
+            &self,
+            status: &gyre_domain::AgentStatus,
+        ) -> anyhow::Result<Vec<gyre_domain::Agent>> {
+            self.inner.list_by_status(status).await
+        }
+        async fn update(&self, agent: &gyre_domain::Agent) -> anyhow::Result<()> {
+            self.inner.update(agent).await
+        }
+        async fn delete(&self, id: &gyre_common::Id) -> anyhow::Result<()> {
+            self.inner.delete(id).await
+        }
+        async fn list_by_workspace(
+            &self,
+            workspace_id: &gyre_common::Id,
+        ) -> anyhow::Result<Vec<gyre_domain::Agent>> {
+            self.inner.list_by_workspace(workspace_id).await
+        }
+        async fn list_by_spawner(
+            &self,
+            spawned_by: &str,
+        ) -> anyhow::Result<Vec<gyre_domain::Agent>> {
+            self.inner.list_by_spawner(spawned_by).await
+        }
+        async fn update_status(
+            &self,
+            agent_id: &gyre_common::Id,
+            status: gyre_domain::AgentStatus,
+        ) -> anyhow::Result<()> {
+            self.inner.update_status(agent_id, status).await
+        }
+        async fn record_usage(&self, usage: &gyre_domain::AgentUsage) -> anyhow::Result<()> {
+            self.inner.record_usage(usage).await
+        }
+    }
+
     /// F3 regression: a `persist_preview` failure must roll back every
     /// provisioned agent. Without the rollback, N Active agent rows, live
     /// tokens, held budget slots, branches and worktrees are orphaned with
@@ -3919,6 +4001,137 @@ mod tests {
             active, 0,
             "persist failure must release every held workspace budget slot"
         );
+    }
+
+    /// A worktree-creation failure must roll back without touching the
+    /// budget: the workspace/tenant slots are incremented only after every
+    /// provisioning step succeeded, so the rollback must not decrement
+    /// counters that were never incremented. A phantom decrement permanently
+    /// biases budget enforcement down (one lost slot per occurrence) and
+    /// lets later spawns over-admit past max_concurrent_agents.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_worktree_failure_releases_no_untaken_budget_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+
+        // A concurrent agent already holds one workspace slot — the invariant
+        // under test is that a failed preview spawn leaves that count alone.
+        crate::api::budget::increment_active_agents(&state, ws_id.as_str()).await;
+
+        // Make worktree creation fail: `worktrees` exists as a regular file,
+        // so every `git worktree add` beneath it is refused (ENOTDIR) before
+        // any checkout happens.
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::write(std::path::Path::new(&repo.path).join("worktrees"), b"").unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // The pre-existing slot is untouched — no phantom decrement of a slot
+        // the failed spawn never took (workspace and tenant counters alike).
+        let ws_key = crate::api::budget::workspace_key(ws_id.as_str());
+        let active = state
+            .budget_usages
+            .get_usage(&ws_key)
+            .await
+            .unwrap()
+            .map(|u| u.active_agents)
+            .unwrap_or(0);
+        assert_eq!(
+            active, 1,
+            "worktree failure must not decrement a budget slot it never took"
+        );
+        let tenant_key = crate::api::budget::tenant_key();
+        let tenant_active = state
+            .budget_usages
+            .get_usage(tenant_key)
+            .await
+            .unwrap()
+            .map(|u| u.active_agents)
+            .unwrap_or(0);
+        assert_eq!(
+            tenant_active, 1,
+            "worktree failure must not decrement the tenant-global slot either"
+        );
+
+        // The rollback still removed everything the failed spawn created:
+        // branch, agent row, and nothing persisted.
+        let branches = state.git_ops.list_branches(&repo.path).await.unwrap();
+        assert!(
+            branches.iter().all(|b| !b.name.starts_with("preview/")),
+            "worktree failure must delete the provisioned preview branch"
+        );
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents.iter().all(|a| !a.name.starts_with("preview-")),
+            "worktree failure must roll back the provisioned agent row"
+        );
+        assert!(state
+            .kv_store
+            .kv_list("meta_spec_previews")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// An agent-row persistence failure must not orphan the just-created
+    /// preview branch: no row ever referenced it, so the GC orphan pass
+    /// (which iterates the preview_agents kv index) would never see it and
+    /// the branch would linger forever. The branch is deleted inline before
+    /// the error propagates.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_agent_row_failure_deletes_orphaned_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, _ws_id) = preview_state(dir.path(), 86_400, None).await;
+
+        let mut failing = (*state).clone();
+        failing.agents = std::sync::Arc::new(CreateFailingAgents {
+            inner: state.agents.clone(),
+        });
+        let app = crate::api::api_router().with_state(std::sync::Arc::new(failing));
+
+        let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let branches = state.git_ops.list_branches(&repo.path).await.unwrap();
+        assert!(
+            branches.iter().all(|b| !b.name.starts_with("preview/")),
+            "agent-row create failure must delete the branch it already created"
+        );
+        // No worktree, token, index entry or run record was ever written —
+        // the failure predates all of them.
+        let worktrees = state.git_ops.list_worktrees(&repo.path).await.unwrap();
+        assert!(worktrees.iter().all(|w| !w.contains("preview")));
+        assert!(state
+            .kv_store
+            .kv_list("agent_tokens")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .kv_store
+            .kv_list("preview_agents")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .kv_store
+            .kv_list("meta_spec_previews")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// A preview agent that finishes lands in Stopped (never Idle), its

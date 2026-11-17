@@ -94,7 +94,6 @@ vi.mock('../lib/api.js', () => ({
     deleteMetaSpecPreview: vi.fn().mockResolvedValue(null),
     publishPersona: vi.fn().mockRejectedValue(new Error('Not implemented')),
     specsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
-    specsAssistGlobal: vi.fn().mockRejectedValue(new Error('Not available')),
     metaSpecsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     graphPredict: vi.fn().mockResolvedValue({ predictions: [] }),
@@ -1478,6 +1477,56 @@ describe('MetaSpecs -- repo scope', () => {
   it('shows fallback text when workspaceId is not provided', () => {
     const { getByText } = render(MetaSpecs, { props: { scope: 'repo' } });
     expect(getByText(/Select a workspace to edit meta-specs/)).toBeTruthy();
+  });
+});
+
+// ─── §9 State 1 chat: workspace-scoped LLM assist ────────────────────────────
+
+describe('MetaSpecs -- workspace chat routes to the workspace assist endpoint', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.getSpecs.mockResolvedValue([...mockSpecs]);
+    api.getMetaSpecs.mockResolvedValue([...mockPersonas]);
+  });
+
+  it('sends the in-editor draft to metaSpecsAssist and streams the answer', async () => {
+    // Real Response instance: InlineChat streams only genuine Response
+    // objects (`result instanceof Response`), so a structural mock would
+    // silently exercise nothing.
+    api.metaSpecsAssist.mockResolvedValueOnce(
+      new Response(
+        'data: ' + JSON.stringify({ type: 'partial', text: 'Adding defensive error handling.' }) + '\n\n' +
+        'data: ' + JSON.stringify({ type: 'complete', answer: 'Suggested: harden retry paths.' }) + '\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } }
+      )
+    );
+
+    const { findByLabelText, findByText, queryByText } = render(MetaSpecs, {
+      props: { scope: 'workspace', workspaceId: 'ws-1' },
+    });
+
+    // loadWorkspaceData selects the first meta-spec as the draft.
+    const chatInput = await findByLabelText('Message input');
+    await fireEvent.input(chatInput, { target: { value: 'Add error handling' } });
+    await fireEvent.keyDown(chatInput, { key: 'Enter', ctrlKey: true });
+
+    // The §9 wire call: the workspace-scoped assist with the in-editor draft
+    // and the registry id. Regression guard: this pane previously called a
+    // nonexistent api.specsAssistGlobal, so the TypeError was swallowed and
+    // the chat always fell back to the canned local suggestion.
+    await waitFor(() => {
+      expect(api.metaSpecsAssist).toHaveBeenCalledWith('ws-1', {
+        instruction: 'Add error handling',
+        draft_content: 'You are a backend developer focused on Rust.',
+        meta_spec_id: 'persona-1',
+      });
+    });
+    expect(api.specsAssist).not.toHaveBeenCalled();
+
+    // The streamed answer reached the chat history — the assist response was
+    // really consumed, and the canned fallback suggestion never fired.
+    await findByText('Suggested: harden retry paths.');
+    expect(queryByText('+ Add error handling')).toBeNull();
   });
 });
 

@@ -639,16 +639,21 @@
   }
 
   async function handleWsChatMessage(text) {
-    if (repoId) {
+    // §9 State 1 chat: the workspace-scoped meta-spec assist consumes the
+    // in-editor draft — no repo or spec file is involved, so the target is
+    // the draft itself (plus the registry id for scope checking). Same SSE
+    // {diff, explanation} protocol as the repo-scoped assist, so
+    // InlineChat's streaming consumer works unchanged.
+    if (workspaceId) {
       try {
-        const res = await api.specsAssist(repoId, { message: text, context: selectedMsContent });
+        const res = await api.metaSpecsAssist(workspaceId, {
+          instruction: text,
+          draft_content: selectedMsContent || undefined,
+          meta_spec_id: selectedMsId || undefined,
+        });
         if (res.ok) return res;
       } catch { /* fall through */ }
     }
-    try {
-      const res = await api.specsAssistGlobal({ persona_id: selectedMsId, message: text });
-      if (res.ok) return res;
-    } catch { /* fall through */ }
 
     const id = `ws-suggestion-${wsNextSuggId++}`;
     wsSuggestions = [...wsSuggestions, { id, content: `+ ${text}\n# Suggested addition` }];
