@@ -2523,8 +2523,8 @@ pub(crate) async fn launch_taskless_agent_process(
     // Docker requires an absolute working directory path. Canonicalize the
     // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
     // relative (e.g. the configured repos root prefix).
-    let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
-        std::fs::canonicalize(&worktree_path)
+    let effective_work_dir = if std::path::Path::new(worktree_path).exists() {
+        std::fs::canonicalize(worktree_path)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| worktree_path.to_string())
     } else {

@@ -2851,6 +2851,11 @@ mod tests {
 
     /// Run `f` with `GYRE_AGENT_COMMAND` pointed at `command`. The env var is
     /// process-global and read at launch time, so the lock serializes every
+    /// env-mutating test and MUST stay held across the awaited test body —
+    /// dropping it early would let a concurrent test clobber the variable
+    /// mid-run. Tests run single-threaded (`RUST_TEST_THREADS=1`), so the
+    /// guard is never contended across the await.
+    #[allow(clippy::await_holding_lock)]
     async fn with_agent_command<F, Fut>(command: &str, f: F)
     where
         F: FnOnce() -> Fut,
@@ -3343,6 +3348,10 @@ mod tests {
     /// serializes `GYRE_AGENT_COMMAND` tests serializes PATH shadowing —
     /// and prepending (rather than replacing) keeps git/sleep/kill
     /// resolvable for concurrently running tests that hold no lock.
+    /// Like `with_agent_command`, the lock is intentionally held across
+    /// the awaited body: the PATH mutation must span the whole test run,
+    /// and tests are serialized on this lock process-wide.
+    #[allow(clippy::await_holding_lock)]
     async fn with_path_prepend<F, Fut>(dir: &std::path::Path, f: F)
     where
         F: FnOnce() -> Fut,
@@ -3925,15 +3934,13 @@ mod tests {
         let script_path = dir.path().join("agent-commit.sh");
         std::fs::write(
             &script_path,
-            format!(
-                "#!/bin/sh\n\
-                 cd \"${{GYRE_WORK_DIR:-$PWD}}\" || cd /workspace || exit 0\n\
-                 echo 'search v2 under draft persona' >> specs/system/search.md\n\
-                 git add -A\n\
-                 git -c user.email=agent@gyre -c user.name=agent commit -m 'preview: apply draft' >/dev/null 2>&1\n\
-                 git push origin HEAD:refs/heads/\"$GYRE_BRANCH\" >/dev/null 2>&1\n\
-                 exit 0\n"
-            ),
+            "#!/bin/sh\n\
+             cd \"${GYRE_WORK_DIR:-$PWD}\" || cd /workspace || exit 0\n\
+             echo 'search v2 under draft persona' >> specs/system/search.md\n\
+             git add -A\n\
+             git -c user.email=agent@gyre -c user.name=agent commit -m 'preview: apply draft' >/dev/null 2>&1\n\
+             git push origin HEAD:refs/heads/\"$GYRE_BRANCH\" >/dev/null 2>&1\n\
+             exit 0\n",
         )
         .unwrap();
         make_executable(&script_path);
