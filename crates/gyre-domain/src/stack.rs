@@ -223,6 +223,62 @@ impl StackLockfile {
 }
 
 // ---------------------------------------------------------------------------
+// Stack drift events (supply-chain.md §The Laptop Problem)
+// ---------------------------------------------------------------------------
+
+/// A recorded `gyre-stack.lock` drift event — the audit-trail entry created
+/// when a pushing agent's attested stack differs from the repo's pinned
+/// stack (supply-chain.md §The Laptop Problem step 2 / step 5).
+///
+/// Stored as the `detail` of a `stack_drift_detected` audit event and
+/// queryable via `GET /api/v1/repos/:id/stack-drift` for compliance review.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StackDriftEvent {
+    /// Unique event id (UUID).
+    pub id: String,
+    pub repo_id: String,
+    pub workspace_id: String,
+    /// Agent whose attested stack drifted from the lockfile.
+    pub agent_id: String,
+    /// Branch the drift was detected on (short name, no `refs/heads/`).
+    pub branch: String,
+    /// Fingerprint pinned by the repo's `gyre-stack.lock` (`None` when the
+    /// lockfile failed to parse — itself a drift-class finding).
+    pub lockfile_fingerprint: Option<String>,
+    /// Fingerprint of the pushing agent's attested stack.
+    pub attested_stack_fingerprint: String,
+    /// Whether the lockfile passed internal integrity verification before
+    /// the drift comparison (`false` = tampered or unparsable lockfile).
+    pub integrity_verified: bool,
+    /// Human-readable drift reason (names the differing components).
+    pub reason: String,
+    /// Enforcement mode in effect: `"block"` or `"warn"` (no repo policy →
+    /// `"warn"`: the committed lockfile itself is the drift-verification
+    /// mechanism, so drift is flagged without a policy).
+    pub mode: String,
+    /// Outcome: `"blocked"` (push rejected) or `"accepted"` (warn-mode
+    /// override with a supplied reason).
+    pub outcome: String,
+    /// Override reason supplied by the agent (`X-Gyre-Stack-Override-Reason`
+    /// push header) — required whenever warn-mode drift is accepted.
+    pub override_reason: Option<String>,
+    /// Unix epoch seconds when the drift was detected.
+    pub timestamp: u64,
+}
+
+/// Map a stored commit-provenance attestation label
+/// (`"server-verified"` / `"self-reported"` / `"unattested"`) to the spec's
+/// numeric attestation level (supply-chain.md §Attestation Levels):
+/// 3 = Gyre-managed runtime, 2 = Gyre CLI self-report, 1 = raw push.
+pub fn attestation_level_from_label(label: Option<&str>) -> u8 {
+    match label {
+        Some("server-verified") => 3,
+        Some("self-reported") => 2,
+        _ => 1,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

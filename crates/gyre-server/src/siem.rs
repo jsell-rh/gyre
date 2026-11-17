@@ -190,6 +190,9 @@ pub fn format_cef(event: &AuditEvent) -> String {
         | gyre_domain::AuditEventType::TrustChange
         | gyre_domain::AuditEventType::GateOverride
         | gyre_domain::AuditEventType::MetaSpecPublish => 3,
+        // Supply-chain drift is a policy-compliance finding: more than
+        // informational, below an outright access denial.
+        gyre_domain::AuditEventType::StackDriftDetected => 4,
     };
     let event_type = event.event_type.as_str();
     let mut extensions = format!(
