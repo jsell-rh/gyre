@@ -1,0 +1,40 @@
+# Review — task-206: Meta-spec preview mode (§5)
+
+**Candidate:** `5f5accd22cc478b4adfa4e471d73c860500d9b21`
+**Assigned base:** `2cde97a8c4efdd589ccc4c38cfece39eeaba99c2` (task-160 head; not an ancestor of the candidate — merge-base is `97062a09`. The publication tree is `M(2cde97a8, 5f5accd2)`; this review probes that merge directly.)
+**Reviewer stage:** independent review, `pipeline/task-206/47758f0bdfa6423a8d21f5486e8c67c7-1`
+**Verdict:** **Approved** (findings: none blocking; observations recorded below)
+
+## What was reviewed
+
+The full task-206 surface: `crates/gyre-server/src/api/meta_specs.rs` (preview handlers, provisioning, launch, finish/teardown/GC, ~20 integration tests), `api/spawn.rs` (`launch_taskless_agent_process`, `dispatch_agent_launch` outcome flag, exit-monitor routing, backend recording), `api/mod.rs` route registration, `abac_middleware.rs` resolver entries, `jobs.rs` + `main.rs` GC scheduling, compute adapters (`ssh.rs` `from_handle` + handle options, local/container/docker/kubernetes), `mcp.rs` preview-agent ceremony gate, REST escape-route guards (tasks/agents/MRs/merge-queue/specs/compose/orchestrator/agent-tracking), `docker/gyre-agent/agent-runner.mjs` preview prompt path, web UI (`MetaSpecs.svelte`, `EditorSplit.svelte`, `api.js`) and its tests, docs (`api-reference.md`, `server-config.md`), coverage matrix row 9.
+
+## Independent probes (evidence under /tmp/stage/review-evidence/)
+
+1. **Merged-tree static gates** (`merged-gates.txt`): constructed `M(2cde97a8, 5f5accd2)` = `948a29df` independently; all 21 invariant scripts pass on it — including main's hardened `check-tenant-filter.sh` (128 read methods checked, all tenant-filtered: the candidate's adapter changes introduce no unfiltered reads) and `check-abac-exempt-handlers` (83 handlers OK). `check-task-commit-attribution` passes on the committed tree (the working-tree failure earlier was the stage's uncommitted `commits: []` reset, not the candidate).
+2. **Type check** (`cargo-check-merged.log`): `SKIP_WEB_BUILD=1 cargo check -p gyre-server` on the merged tree — 0 errors (lib `rmeta` produced; second run fresh in 0.37 s).
+3. **Frontend** (`vitest-metaspecs.log`, `vitest-editorsplit.log`): `npm ci` then `vitest run` — MetaSpecs 111/111 pass, EditorSplit 63/63 pass.
+4. **Verification-finding reproduction** (`overlay-repro.txt`): restored main's `scripts/` over the merged tree and ran `check-abac-exempt-handlers` → exit 1 with exactly the two stale-exemption errors for `/api/v1/workspaces/:id/meta-specs/preview[:preview_id]`; restored the merge's own scripts → all gates pass. This independently confirms the candidate's final commit (`5f5accd2`) diagnosis: the failure is the verifier's `scripts/` overlay carrying main's frozen exemption **data** file (which legitimately still lists the workspace-scoped routes main registers) onto a merged tree whose contract-mandated clean cutover removed both the routes and the entries. Not a source defect; resolution is controller-side (scope the overlay to verifier logic, or land the stale-entry removal on main). The candidate correctly refused to mask it.
+
+## Contract verification (acceptance criteria)
+
+- **Real spawns**: POST validates every target up front (repo exists → 404, repo ABAC + tenant containment → 403, spec_path on default branch → 400), then provisions per target a real `Active` agent row, a `preview/{preview_id}/{slug}` branch pinned to the default-branch tip, a real git worktree, and a scoped short-lived JWT. All-or-nothing with rollback on provision/persist failure (compensation proven by dedicated failure-injection tests). 202 body is exactly `{preview_id, agents:[{agent_id, repo_id, spec_path, branch}]}`.
+- **Draft delivery**: `GYRE_PREVIEW_ID`/`GYRE_META_SPEC_DRAFT_KIND`/`GYRE_META_SPEC_DRAFT_CONTENT`/`GYRE_TARGET_SPEC_PATH` injected into the container env (merged before server-owned vars so nothing shadows identity); `GYRE_TASK_ID` deliberately absent. `agent-runner.mjs` preview mode builds the prompt with the draft as governing context over the target spec, withholds task-mutating MCP tools, skips provenance upload and completion. The env-dump test asserts the actual bytes the spawned process received.
+- **Skip-ceremony enforced, not just skipped**: no task assignment (`task_id: None` everywhere), no MR/gates/merge-queue/provenance/`refs/*` writes (asserted by ref counting in tests); MCP dispatch and ~20 REST routes refuse preview-agent callers (identity laundering via agent registration closed); agents land `Stopped`, never `Idle`.
+- **Budget**: workspace budget enforced with N-upfront reservation (`check_spawn_budget_for`); `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` caps preview spawns independently when set (429). Preview agents count toward workspace/tenant occupancy.
+- **Status + diff**: per-agent state derived from the real agent rows; diff computed via the git adapter against the pinned `base_sha` once the branch exists. The completion test drives a real script that commits and pushes, then asserts worktree removal, branch survival, token revocation, `Stopped`, and the diff content in the status response.
+- **Completion semantics**: every compute-target monitor routes exits through `spawn::on_agent_process_exit` → `finish_preview_agent` (cleanup ordered before the terminal status flip).
+- **DELETE + GC**: full teardown (kill via recorded backend — not handle shape — worktree, MR close belt-and-braces, branch, token, slot, kv records), 404 unknown. `meta_spec_preview_gc` is registered in `jobs.rs` **and** spawned in `main.rs` (the executing loop); TTL boundary test proves at/past-TTL deletion, just-under retention, and orphan reclamation.
+- **Clean cutover**: hollow `compute_preview_blast_radius`/`StructuralImpact` and both workspace-scoped routes are gone from the candidate tree; ABAC resolver has the two new global routes; exemption entries for the removed routes correctly dropped (shrinkage, not growth).
+- **Docs**: `api-reference.md` (new routes + a full Preview Mode section), `server-config.md` (TTL/GC-interval/JWT-TTL/budget knobs), `docker/gyre-agent/README.md`.
+- **Tests are hard**: real bare git repos via `Git2OpsAdapter`, real local process spawns through the production router (ABAC middleware + seeded builtin policies), real JWT validation, real filesystem assertions. Read-only 403, cross-tenant 403 (both denial branches + in-tenant positive control), unknown repo 404 — all exercised through the production route chain.
+
+## Non-blocking observations
+
+1. **Budget-slot release TOCTOU (theoretical)**: `release_preview_slot` checks the `released` flag on the caller's loaded copy; a process exit landing exactly inside the DELETE/GC window could double-decrement `active_agents`. Bounded impact (adapters clamp at 0; over-admission by one agent until the next reconcile) and a very narrow window; the flag is persisted to both kv namespaces on every release. Worth a follow-up hardening, not a contract failure.
+2. **Deferred to verifier** (review-stage wrapper blocks gyre-server test builds): `cargo test -p gyre-server --lib preview_` (all preview integration tests), `cargo test -p gyre-server --lib mcp_preview_agent_denied_ceremony_tools`, spawn exit-monitor/kill-routing tests (`cargo test -p gyre-server --lib spawned_backends`), full `cargo test --all`, changed-lines clippy/rustfmt, `npm test` in `web/`, and the script-overlay phase of the gate suite.
+3. **Controller note**: the `check-abac-exempt-handlers` overlay failure (finding f650854) reproduces exactly as diagnosed in commit `5f5accd2`; it must be resolved harness-side (overlay scope or landing the stale exemption-entry removal on main), not by re-adding routes or exemptions to this candidate.
+
+## Verdict
+
+Approved. The preview mode is a real agent run path end to end — spawn, draft delivery, skip-ceremony enforcement, status/diff, completion teardown, manual DELETE, TTL GC — with regression tests that fail when the behavior breaks. Independent probes (merged-tree gates, cargo check, frontend suites, overlay reproduction) support every acceptance criterion.

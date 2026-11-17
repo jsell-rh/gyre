@@ -2,10 +2,10 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["c1a709ba62490cf3661b06b6ea6b72308488ebf4", "a4d8bd712ed166b78311ce648a70c58791082ea1", "2f10e8d134c1911f52b07400d7becabb910dbe21", "7cad12616cd28f691664cac1922337c9f5d72bef", "683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -124,32 +124,3 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
 - Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
-
-## Shipped
-
-Preview mode is a real agent run path (meta-spec-reconciliation.md §5), implemented and review-approved in the prior rounds recorded above: `POST /api/v1/meta-specs/preview` spawns one real `Active` agent per target on `preview/{preview_id}/{slug}` branches with real worktrees and short-lived JWTs (202 response exactly per spec shape); the draft travels in the agent process env and `docker/gyre-agent/agent-runner.mjs` builds the prompt (draft meta-spec as governing context over the target spec); skip-ceremony is enforced (no task assignment, no gates, no MR, no merge queue, no provenance, no `Idle`; MCP and REST surfaces refuse preview-agent mutation escape routes); completion tears down worktree and token, leaving the branch for `GET .../preview/{preview_id}` status + diff; `DELETE` and the `meta_spec_preview_gc` background job (TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) clean up branches, worktrees, agents, and kv records; the hollow structural-impact implementation and the workspace-scoped routes were fully removed (clean cutover); docs updated. Regression tests cover spawn, draft injection, authz, skip-ceremony, DELETE, GC TTL boundary, and diff exposure.
-
-### Verification finding f650854 — root cause (this round)
-
-The failing gate was `check-abac-exempt-handlers` erroring twice: "ABAC-exempt route /api/v1/workspaces/:id/meta-specs/preview[:preview_id] is not registered in api/mod.rs". This round reproduced and fully diagnosed it; it is a verification-harness interaction, not a source defect:
-
-- The verification stage checks out main and merges the candidate into it (`verify(task): reconcile candidate with main`, first parent = main), then `checks.sh` overlays main's entire `scripts/` directory (`verifier-script-overlay.py begin` → `git restore --source=HEAD^1 --worktree -- scripts`) before running the upstream gate suite. The overlay includes the frozen ABAC exemption DATA file, not just verifier logic.
-- Main still registers the old workspace-scoped preview routes, so its exemption file legitimately lists them. The merged tree — per this task's spec-mandated, review-approved clean cutover — removed both the routes and the exemption entries. The overlaid upstream data therefore references routes the merged tree no longer registers, and upstream's `check-abac-exempt-handlers` errors on exactly those two patterns. The second suite phase (merged tree's own scripts) passes everything; `dev-static-gate.py` classifies the failure as a candidate regression because the gate is self-consistent on main.
-- Reproduced locally against current main (2cde97a8): merged `M(2cde97a8, 02f9726b)`, overlaid main's scripts → the exact two ERRORs, exit 1; restored the merge's own scripts → all gates pass (83 handlers OK). Evidence retained at `/tmp/stage/review-evidence/` (analysis, `reproduce.sh`, `abac-overlay-reproduction.log`).
-
-On the merged tree with current main this round also verified: rustfmt changed-lines clean (31 files vs base), `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` clean (7m52s — the candidate's 31 changed files compile together with task-160's 32 hierarchy files, disjoint sets), and all 21 static gates pass in both overlay phases except the artifact above. The web build is unchanged from the prior round's green run (task-160 touched no web files).
-
-### Why this round ships no source change
-
-Every candidate-side "fix" for the artifact violates the task contract or the no-fakery rules: re-adding the workspace-scoped routes (aliases/tombstones included) violates the immutable acceptance criterion "workspace-scoped routes are fully removed (clean cutover)" and regresses the approved review; re-adding the exemption entries is forbidden ("never add new entries"), fails the candidate's own frozen-count gate, and is irrelevant because phase 1 reads main's overlaid copy regardless; masking the checker (test-router fixtures, doc-comment `.route(...)` text, dead-code registrations) is the task-171 "mask a genuinely unregistered route" fakery class; editing `dev-check.sh`/`verifier-script-overlay.py` in the candidate cannot affect verification (the controller copies them from its own ROOT checkout) and would be verifier tampering from inside the task it gates. The candidate and its merge with current main are internally consistent and green under their own gates; there is no source defect to repair.
-
-### Remaining work (controller/author-side)
-
-- Scope the upstream script overlay to verifier logic (`*.sh`/`*.py`) so repo-state data files (`*-exemptions.txt`) follow the merge — exemption shrinkage is self-policing in a consistent tree (an entry removed without resolver registration fails `check-abac-route-registry`; growth is caught by dev-check.sh's "new verification exemptions forbidden" check and the frozen count), or
-- land the two stale exemption entries' removal on main first (e.g. alongside this task's publication or via a process task), after which the overlay phase is clean for this candidate.
-
-Future repair rounds on this finding: do NOT add source changes, exemptions, or checker masks for it — that is fakery or contract violation. Escalate via the repair-stall path if the harness-side resolution has not landed.
-
-### Verifier instructions
-
-Unchanged from prior rounds: `cargo test --all` and `cd web && npm test` on the merged tree (server test compilation was intentionally not run in this sandbox per the 4 GiB budget; `cargo check -p gyre-server --all-targets` passed on the exact merged tree instead).
