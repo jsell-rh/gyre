@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: ["683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f", "7cad12616cd28f691664cac1922337c9f5d72bef"]
 ---
 
 ## Spec Excerpt
@@ -131,32 +131,33 @@ Preview mode is a real agent run path, not an estimate (meta-spec-reconciliation
 
 - **Spawn** — `POST /api/v1/meta-specs/preview` (Admin/Developer; global route, per-spec) validates every target up front (repo exists, caller passes repo ABAC + tenant containment, spec_path exists on the default branch), then provisions per target a real `Active` agent row, a `preview/{preview_id}/{slug}` branch pinned to the default-branch tip, a real git worktree, and a short-lived preview JWT (`GYRE_PREVIEW_JWT_TTL_SECS`, default 1800 s). Response is exactly the spec shape: `202 {preview_id, agents:[{agent_id, repo_id, spec_path, branch}]}`. Provisioning is all-or-nothing per request.
 - **Draft delivery** — the draft travels out-of-band in the agent process environment (`GYRE_PREVIEW_ID`, `GYRE_META_SPEC_DRAFT_KIND`, `GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_TARGET_SPEC_PATH`; `GYRE_TASK_ID` deliberately absent). `docker/gyre-agent/agent-runner.mjs` reads those vars and builds the prompt itself: draft meta-spec as governing "how to build" context over the target spec, task-mutating MCP tools withheld, push to the preview branch as the entire deliverable.
-- **Skip-ceremony enforced, not just skipped** — the MCP dispatch refuses task/MR/provenance mutations for preview agents, and the REST surface does too: `POST /api/v1/agents/{id}/complete`, `POST /api/v1/merge-requests`, and `POST /api/v1/merge-queue/enqueue` return 403 for preview-agent callers. No spec-approval gate, no quality gates, no MR, no merge queue, no provenance, no `refs/agents/*`/`refs/tasks/*` writes, never `Idle`. Budget: workspace budget by default, `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` caps preview spawns independently when set (429 on overflow).
+- **Skip-ceremony enforced, not just skipped** — the MCP dispatch refuses task/MR/provenance mutations for preview agents, and the REST surface does too: `POST /api/v1/agents/{id}/complete`, `POST /api/v1/merge-requests`, `POST /api/v1/merge-queue/enqueue`, `POST`/`PUT /api/v1/tasks`, `PUT /api/v1/tasks/{id}/status`, `PUT /api/v1/agents/{id}/status`, `PUT /api/v1/merge-requests/{id}/status`, and `DELETE /api/v1/merge-queue/{id}` all return 403 for preview-agent callers. No spec-approval gate, no quality gates, no MR, no merge queue, no provenance, no `refs/agents/*`/`refs/tasks/*` writes, never `Idle`. Budget: workspace budget by default, `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` caps preview spawns independently when set (429 on overflow).
 - **Completion** — every compute-target monitor routes exits through `spawn::on_agent_process_exit` → `finish_preview_agent`: token revoked, worktree removed, budget slot released (idempotent), agent row lands `Stopped` — never `Idle`. The branch survives for diffing.
 - **Status + diff** — `GET /api/v1/meta-specs/preview/{preview_id}` reports per-agent state derived from the real agent rows and the produced `diff` (preview branch vs. pinned base sha, same git plumbing as MR diffs) once the branch exists.
 - **Cleanup** — `DELETE /api/v1/meta-specs/preview/{preview_id}` kills agents, force-removes worktrees, closes open MRs on `preview/{id}/*` branches, deletes every preview branch, revokes tokens, drops the kv records; 404 on unknown id. Background job `meta_spec_preview_gc` (interval `GYRE_META_SPEC_PREVIEW_GC_INTERVAL_SECS`, default 1 h; TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) tears down expired runs and reclaims orphaned agent entries. No refs, no provenance, no audit trail.
 - **Clean cutover** — the hollow structural-impact preview and the workspace-scoped routes are gone; docs updated (`docs/api-reference.md`, `docs/server-config.md`, `docker/gyre-agent/README.md`).
 
-### Merge round 00586933 (this checkpoint)
+### Repair round 7cad1261 (review finding F1)
 
-The prior assignment round (f8a6e04) errored out before doing any work (agent exit 75, 0 turns); its checkpoint only reset this task file. The implementation itself was already complete and last probed on merge head `6f26b873`. Since then the pipeline merged base `876c77b7` (task-077 HSI Trust Gradient + task-013 briefing work) as merge `00586933`; this round verified the merged candidate: the preview surface (`api/mod.rs` routes, `api/meta_specs.rs` handlers, `api/spawn.rs` finish path, `mcp.rs` preview guards, `jobs.rs` GC registration, `docker/gyre-agent/agent-runner.mjs` draft handling, docs) is untouched by that merge, and the base-side `mem.rs` additions (persona/task shared-store constructors) are additive and compile cleanly alongside the preview machinery. This round restored the task record (progress, commits attribution, Shipped notes) that the failed round's checkpoint had dropped.
+The independent review found the same preview-agent escape class open on four more REST routes: a live preview-agent JWT (Agent role; builtin agent-scoped-access policy allows `write` on `*`) passed ABAC and reached `PUT /api/v1/tasks/{id}/status` (worst case: a Done/Cancelled transition of a reconciliation/drift-labeled task fires `on_reconciliation_task_terminal` and advances a meta-spec rollout), `PUT /api/v1/agents/{id}/status` (a preview agent could flip itself back to Idle, defeating `finish_preview_agent`), `PUT /api/v1/merge-requests/{id}/status`, and `DELETE /api/v1/merge-queue/{id}`. All four handlers now carry the `caller_is_preview_agent` 403 guard; three gained the `AuthenticatedAgent` extractor (the routes are ABAC-mapped, so production traffic was already authenticated — only middleware-less in-file `api_router()` tests needed `Bearer test-token` added). New hard test `preview_agent_rest_status_routes_are_refused` (meta_specs.rs) drives the preview agent's live JWT through the production router against all four routes: 403, no ledger mutation (task stays Backlog, preview agent stays Active, MR stays Open, queue entry stays non-terminal), with an admin positive control per route.
 
 ### Test evidence
 
-In-sandbox on candidate head `e4d39419` (evidence under `/tmp/stage/review-evidence/task-206-merge-round-e4d39419.txt`):
+In-sandbox on candidate head `7cad1261` (evidence under `/tmp/stage/review-evidence/summary.md`):
 
-- `cargo check -p gyre-server --lib --tests` (SKIP_WEB_BUILD=1) — clean, 0 errors (7m 31s).
+- `cargo check -p gyre-server --lib --tests` (SKIP_WEB_BUILD=1) — clean, 0 errors (7m 45s).
 - `bash scripts/check-arch.sh` — passes.
 - `bash scripts/check-abac-route-registry.sh` — passes (no stale exemptions).
 - `bash scripts/check-abac-exempt-handlers.sh` — OK.
 - `cargo fmt --check -p gyre-server` — clean.
 - `check-mcp-write-tools`, `check-migration-versions`, `check-migration-sql-portability`, `check-dead-message-kinds`, `check-byte-slice-truncation`, `check-relative-path-defaults`, `check-fail-open-ref-resolution`, `check-mem-port-contracts`, `check-fabricated-scope-defaults`, `check-lossy-secret-conversion`, `check-scope-literal-defaults`, `check-inert-enforcement`, `check-forged-scope-fields`, `check-forwarded-header-trust`, `check-in-memory-state-stores`, `check-unbounded-external-http` — all pass.
-- `check-task-commit-attribution.sh` — passes with the commits list restored by this round.
-- Web suite unaffected by this round: the merge round's diff vs `6f26b873` touches no preview web files; the last full run on the §5 surface (`169313da`) was 125 files, 2510 passed, 41 skipped, 0 failed.
+- Web suite unaffected by this round: the repair touches no web files.
 
 The build wrapper blocks gyre-server test codegen in this stage, so server test execution is deferred to the independent verifier. Required probes:
-  - `cargo test -p gyre-server --lib -- preview_` (full preview suite: spawn/draft/authz/skip-ceremony/DELETE/GC-TTL/diff, compute-backend launch regressions, budget cap, persist/worktree/agent-row failure rollbacks, cross-tenant containment)
-  - `cargo test -p gyre-server --lib -- merge_queue` (authorized enqueue probes)
+  - `cargo test -p gyre-server --lib -- preview_` (full preview suite: spawn/draft/authz/skip-ceremony/DELETE/GC-TTL/diff, compute-backend launch regressions, budget cap, persist/worktree/agent-row failure rollbacks, cross-tenant containment — includes `preview_agent_rest_status_routes_are_refused` and the earlier task/MR ceremony regressions)
+  - `cargo test -p gyre-server --lib -- preview_agent_rest` (the focused new/migrated guard regressions)
+  - `cargo test -p gyre-server --lib api::tasks`, `api::agents`, `api::merge_queue`, `api::discover` (in-file suites whose tokenless status/cancel requests now carry `Bearer test-token` after the extractor additions)
+  - `cargo test -p gyre-server --lib -- merge_queue` (authorized enqueue/cancel probes)
   - `cargo test -p gyre-server --lib -- uninstrumented_role_guards` (preview guard + authorized MR seed)
   - `cargo test -p gyre-server --lib -- prompt` (persona-attestation and protocol-prompt single-source tests sharing files with the preview code)
   - `cd web && npm ci && npm test`
