@@ -69,3 +69,34 @@ F1–F5 remain resolved in the current implementation (`064a94fe`) — verified 
 F1–F6 remain resolved at HEAD — verified in code and by test run. Task suites pass: `WorkspaceSidebarSectionNav.test.js` + `WorkspaceHomeSections.test.js` + `WorkspaceHomeArchitecture.test.js` 47 passed / 51 skipped (skips are the pre-existing old-layout suites: Repos/Decisions/Agent Rules/Error handling), `AppShell.test.js` + `Sidebar.test.js` 101/101. Structural verification of the F6 fix (`79323318` + `9561ee86`): `section-briefing`, `section-specs`, and `section-architecture` render unconditionally at workspace scope inside `ws-main-content` (outside any wsTab/conditional guard beyond the `{#if !workspace}` outer guard and the decisions `{:else}` branch); the `archExpandSignal` effect expands the Architecture section and lazily loads the graph without a reactive loop; the ExplorerCanvas is fed `nodes`/`edges` from `api.workspaceGraph`, matching both the component's prop contract and the `KnowledgeGraphResponse` shape; locale keys for all four section headings plus `decisions_empty` (exact docs/ui.md copy) and `show/hide_workspace_graph` are present in `en.json`.
 
 No new findings. Two observations considered and rejected as below the relevance bar: (1) the F6-resolution text attributes the regression tests to `79323318` while the un-skipped test suites actually land in `9561ee86` (both are task-082 commits listed in frontmatter, and the tests do fail against the pre-fix code, so the coverage claim holds); (2) the specs table status cell displays `approval_status ?? status` while the icon lookup keys on `spec.status` alone — the same pattern the tenant-scope twin (`CrossWorkspaceHome.svelte`) uses, so it is consistent with existing code and cosmetic at most.
+## R11 Findings (retargeted requirement — ui-navigation.md §1a, candidate 2110f228)
+
+Review of the retargeted deliverable (base `3cd8f236` → candidate
+`2110f228`: NavRail.svelte + App.svelte integration, tests, docs/spec/
+coverage updates). Prior rounds (R1–R10) reviewed the superseded sidebar
+deliverable and are historical record.
+
+**What is genuine:** the rail component exists and works — collapsed
+icon-only 48px default with a 240px expanded toggle, per-user per-mode
+persistence under `gyre_nav_rail_expanded.<mode>.<user-id>`
+(first use collapsed), scope-labelled header per mode, stable per-mode
+item arrays, active highlight (`aria-current` + `.active`), `display:none`
+below 768px, and the hamburger drawer re-offering the per-mode item set
+(Analytics drawer entry removed; Analytics remains reachable via the
+always-visible topbar `ws-analytics-btn`). Render gating
+(`showNavRail`) covers workspace home with a selected workspace and repo
+mode without an open entity detail; sub-pages, full-page entity detail,
+cross-workspace, and profile never render it. Repo rail mirrors
+RepoMode `TABS` exactly (verified against `RepoMode.svelte:41-51`); rail
+selection reuses `goToRepoTab` / `handleSectionNavigate` (no second
+source of truth). `docs/ui.md` documents the shipped rail. Focused runs:
+`npx vitest run NavRail.test.js NoSidebar.test.js AppShell.test.js`
+→ 94/94 passed (evidence: /tmp/stage/review-evidence/focused-vitest.log).
+Full web suite (123 files, 2449 passed / 41 skipped) reported by the
+implementer; verifier should re-run.
+
+- [ ] **F7 (code, blocking): the Settings item label renders the raw i18n key `common.settings`.** `workspaceRailLabel`/`repoRailLabel` (App.svelte, `$t('common.settings')`) reference a key that does not exist — the `common` object in `web/src/locales/en.json` has no `settings` entry (verified: `python3 -c "import json; d=json.load(open('web/src/locales/en.json')); print('settings' in d['common'])"` → False; grep shows `"settings"` only under `topbar.nav.*`, `repo_mode.tabs`, and two unrelated objects). svelte-i18n falls back to the key string, so the expanded workspace-home rail, the expanded repo rail, and — always, since drawer items always render labels — the narrow-viewport hamburger drawer show the literal text `common.settings` for the Settings item. Probe (temporary test rendering the real App, same mock surface as NavRail.test.js; source retained at /tmp/stage/review-evidence/TmpReviewProbe.test.js, output at /tmp/stage/review-evidence/i18n-probe.log): `RAIL LABELS: ["Decisions","Specs","Architecture","Repos","Briefing","Agent Rules","common.settings"]` and `DRAWER SETTINGS LABEL: "common.settings"` — both probe assertions fail at the candidate. Fix: use existing keys (`topbar.workspace_settings` at workspace scope, `repo_mode.tabs.settings` in repo mode) or add `common.settings` to en.json.
+- [ ] **F8 (code, spec deviation): the Agent Rules rail item navigates away instead of scrolling to the dashboard section.** §1a: "Selecting a section item scrolls to (and, for Architecture, expands) that section on the workspace home; Settings navigates to the workspace settings page" — Settings is the only specced navigation exception. `handleSectionNavigate`'s `case 'agent-rules'` calls `goToAgentRules()` (mode `agent_rules` sub-page), even though `section-agent-rules` exists in WorkspaceHome (`WorkspaceHome.svelte:1678`). Consequence: the item can never show its active highlight on workspace home (`workspaceActiveSection` is never set to `agent-rules`, and the rail is hidden on the sub-page). Fix: mirror the Architecture case (scroll to `section-agent-rules`; the section's own "Manage rules" button already routes to the management page), or amend §1a via spec lifecycle if navigating away is intended.
+- [ ] **F9 (test): the new suites never assert the Settings item's rendered label.** NavRail.test.js and NoSidebar.test.js assert item ids/order and (component-level) hand-written labels, which is exactly why F7 passes the entire suite — a user-visible broken label ships green. A single assertion on the expanded rail's / drawer's settings-item text would have caught it.
+
+Not blocking, recorded for the verifier: the rail renders (collapsed icon-only) on the repo Specs tab beside the ExplorerView canvas; §1a allows "hidden (or stays collapsed to icon-only)" on focused surfaces, so this reading is defensible, but a user can expand it to 240px over the canvas. Server-side suites: none needed (web-only change; no Rust touched).
