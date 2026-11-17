@@ -421,6 +421,30 @@ impl NotificationRepository for PgStorage {
         .await?
     }
 
+    async fn list_by_workspace_type_since(
+        &self,
+        workspace_id: &Id,
+        notification_type: &str,
+        since: i64,
+    ) -> Result<Vec<Notification>> {
+        let pool = Arc::clone(&self.pool);
+        let ws_id = workspace_id.clone();
+        let ntype = notification_type.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows: Vec<NotificationRow> = notifications::table
+                .filter(notifications::workspace_id.eq(ws_id.as_str()))
+                .filter(notifications::notification_type.eq(&ntype))
+                .filter(notifications::created_at.ge(since))
+                .order(notifications::created_at.desc())
+                .select(NotificationRow::as_select())
+                .load(&mut *conn)
+                .context("list_by_workspace_type_since")?;
+            rows.into_iter().map(|r| r.into_notification()).collect()
+        })
+        .await?
+    }
+
     async fn has_recent_dismissal(
         &self,
         workspace_id: &Id,
