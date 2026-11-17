@@ -118,6 +118,31 @@ pub struct ReleaseAgent {
     /// Rekor entry UUIDs for the agent's signed commits (Fulcio-signed
     /// `jj squash` commits recorded via the commit-signature repository).
     pub sigstore_entries: Vec<String>,
+    /// Conversation blob SHAs on record for this agent (the platform's
+    /// prompt reference — supply-chain.md §AIBOM Contents: the AIBOM
+    /// captures "which AI models, prompts, and tools produced each
+    /// commit"). Scoped to the repo workspace's tenant via the
+    /// conversation repository; empty when the workspace (and therefore
+    /// the tenant scope) cannot be resolved.
+    pub conversation_shas: Vec<String>,
+}
+
+/// Per-commit entry in the release artifact: agent attribution plus the
+/// full attestation chain data for the commit (§7.3 / supply-chain.md
+/// §AIBOM Contents) — the same chain block the summary format carries,
+/// so a compliance reviewer can reconstruct and verify the chain offline.
+#[derive(Serialize)]
+pub struct ReleaseCommit {
+    pub sha: String,
+    /// Attributed agent (`null` for human commits).
+    pub agent_id: Option<String>,
+    pub task_id: Option<String>,
+    pub timestamp: Option<u64>,
+    /// Full attestation chain for this commit — `attestation_id`,
+    /// `chain_depth`, and the chain nodes root-to-leaf. Absent when no
+    /// attestation is on record for the commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_attestation: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -155,6 +180,9 @@ pub struct AibomReleaseResponse {
     pub generated_at: String,
     pub repo_id: String,
     pub agents: Vec<ReleaseAgent>,
+    /// Every commit in the release range (newest-first) with its
+    /// attribution and chain attestation data.
+    pub commits: Vec<ReleaseCommit>,
     pub stack_policy: ReleaseStackPolicy,
     pub summary: ReleaseSummary,
 }
@@ -578,11 +606,33 @@ async fn build_release_aibom(
         .await
         .map_err(ApiError::Internal)?;
     let mut attributed: Vec<&gyre_domain::AgentCommit> = Vec::new();
+    let mut attributed_by_sha: std::collections::HashMap<String, &gyre_domain::AgentCommit> =
+        std::collections::HashMap::new();
     let mut seen_shas: std::collections::HashSet<String> = std::collections::HashSet::new();
     for ac in &all_commits {
         if sha_set.contains(&ac.commit_sha) && seen_shas.insert(ac.commit_sha.clone()) {
+            attributed_by_sha.insert(ac.commit_sha.clone(), ac);
             attributed.push(ac);
         }
+    }
+
+    // Tenant scope for conversation provenance. The repo's workspace
+    // carries the tenant; when it cannot be resolved the scope cannot be
+    // determined, so conversation SHAs are omitted and the skip is logged
+    // — never fabricated with a default tenant (which would re-target the
+    // lookup and could leak another tenant's conversations).
+    let tenant_id = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .map(|ws| ws.tenant_id);
+    if tenant_id.is_none() {
+        tracing::warn!(
+            repo = %repo_id,
+            workspace = %repo.workspace_id,
+            "release AIBOM: workspace not found; conversation SHAs omitted (tenant scope cannot be determined)"
+        );
     }
 
     // The repo's committed lockfile pins the expected stack.
@@ -706,6 +756,19 @@ async fn build_release_aibom(
         sigstore_entries.sort();
         sigstore_entries.dedup();
 
+        // Conversation SHAs on record for this agent (prompt provenance,
+        // §AIBOM Contents). A lookup failure is surfaced, not swallowed:
+        // silently dropping provenance from a compliance artifact would
+        // understate the AI involvement in the release.
+        let conversation_shas = match &tenant_id {
+            Some(t) => state
+                .conversations
+                .list_by_agent(&Id::new(agent_id), t)
+                .await
+                .map_err(ApiError::Internal)?,
+            None => Vec::new(),
+        };
+
         release_agents.push(ReleaseAgent {
             agent_id: agent_id.clone(),
             commits: commits.iter().map(|ac| ac.commit_sha.clone()).collect(),
@@ -719,6 +782,7 @@ async fn build_release_aibom(
             spawned_by,
             task_ids,
             sigstore_entries,
+            conversation_shas,
         });
     }
     // Most prolific contributor first for a stable, reviewable artifact.
@@ -728,6 +792,44 @@ async fn build_release_aibom(
             .cmp(&a.commits.len())
             .then(a.agent_id.cmp(&b.agent_id))
     });
+
+    // Per-commit chain attestation data (§7.3 / §AIBOM Contents): every
+    // commit in the release range — agent-attributed and human alike —
+    // with the full attestation chain where one is on record, so the
+    // artifact supports offline chain verification. Lookup failures are
+    // surfaced as errors: a compliance artifact must not silently omit
+    // attestation data because storage errored.
+    let mut release_commits: Vec<ReleaseCommit> = Vec::with_capacity(release_shas.len());
+    for sha in &release_shas {
+        let ac = attributed_by_sha.get(sha.as_str()).copied();
+        let chain_attestation = match state.chain_attestations.find_by_commit(sha).await {
+            Ok(Some(att)) => {
+                let chain = state
+                    .chain_attestations
+                    .load_chain(&att.id)
+                    .await
+                    .map_err(ApiError::Internal)?;
+                if chain.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::json!({
+                        "attestation_id": att.id,
+                        "chain_depth": att.metadata.chain_depth,
+                        "chain": chain,
+                    }))
+                }
+            }
+            Ok(None) => None,
+            Err(e) => return Err(ApiError::Internal(e)),
+        };
+        release_commits.push(ReleaseCommit {
+            sha: sha.clone(),
+            agent_id: ac.map(|a| a.agent_id.to_string()),
+            task_id: ac.and_then(|a| a.task_id.clone()),
+            timestamp: ac.map(|a| a.timestamp),
+            chain_attestation,
+        });
+    }
 
     // Stack policy compliance + drift history.
     let drift_events = super::stack_attest::stack_drift_events_for_repo(state, repo).await?;
@@ -752,6 +854,7 @@ async fn build_release_aibom(
         generated_at: gyre_domain::decisions::format_iso8601_utc(super::now_secs()),
         repo_id,
         agents: release_agents,
+        commits: release_commits,
         stack_policy: ReleaseStackPolicy {
             lockfile_hash,
             all_commits_attested,
@@ -1110,8 +1213,15 @@ mod tests {
     /// commits on main. The repo name is unique per call — parallel tests in
     /// this binary share `repos_root` (keyed by pid), so same-named repos
     /// would collide on the same git dir.
-    async fn release_repo_with_commits(
-    ) -> (Router, Arc<crate::AppState>, String, String, String, String) {
+    async fn release_repo_with_commits() -> (
+        Router,
+        Arc<crate::AppState>,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let repo_name = format!("rel-{}", uuid::Uuid::new_v4().simple());
@@ -1123,6 +1233,20 @@ mod tests {
             .unwrap()
             .expect("repo record");
         let repo_path = repo.path.clone();
+
+        // Workspace record so the release artifact can resolve the repo's
+        // tenant for conversation provenance (no fabricated scope).
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                Id::new("ws-1"),
+                Id::new("tenant-rel"),
+                "Release WS",
+                "ws-1",
+                1_700_000_000,
+            ))
+            .await
+            .unwrap();
 
         // Real bare repo + initial (human) commit on main.
         std::fs::create_dir_all(&repo_path).unwrap();
@@ -1220,6 +1344,27 @@ mod tests {
         };
         state.commit_signatures.save(&sig).await.unwrap();
 
+        // A conversation blob for the agent (zstd-compressed per the
+        // ConversationRepository port contract) → per-agent conversation
+        // SHAs in the release artifact.
+        let conv_payload = br#"{"turns":[{"role":"user","content":"implement the feature"}]}"#;
+        let conv_bytes = zstd::encode_all(&conv_payload[..], 3).unwrap();
+        let conv_sha = state
+            .conversations
+            .store(
+                &Id::new("agent-rel"),
+                &Id::new("ws-1"),
+                &Id::new("tenant-rel"),
+                &conv_bytes,
+            )
+            .await
+            .unwrap();
+
+        // An attestation chain node for c2 → per-commit chain
+        // attestation data in the release artifact.
+        let att = make_attestation_for_commit(&repo_id, &c2);
+        state.chain_attestations.save(&att).await.unwrap();
+
         // Repo stack policy: minimum level 3.
         state
             .kv_store
@@ -1271,12 +1416,70 @@ mod tests {
         );
         state.audit.record(&event).await.unwrap();
 
-        (app, state, repo_id, repo_path, c1, c2)
+        (app, state, repo_id, repo_path, c1, c2, conv_sha)
+    }
+
+    /// Minimal SignedInput-rooted attestation chain node for a commit —
+    /// the same shape the constraint pipeline stores (chain_depth 0, root
+    /// Signed input; `load_chain` then returns the single-node chain).
+    fn make_attestation_for_commit(repo_id: &str, commit_sha: &str) -> gyre_common::Attestation {
+        use gyre_common::{
+            AttestationInput, AttestationMetadata, AttestationOutput, InputContent, KeyBinding,
+            PersonaRef, ScopeConstraint, SignedInput,
+        };
+        let signed_input = SignedInput {
+            content: InputContent {
+                spec_path: "specs/system/payments.md".to_string(),
+                spec_sha: "abc12345".to_string(),
+                workspace_id: "ws-1".to_string(),
+                repo_id: repo_id.to_string(),
+                persona_constraints: vec![PersonaRef {
+                    name: "security".to_string(),
+                }],
+                meta_spec_set_sha: "def456".to_string(),
+                scope: ScopeConstraint {
+                    allowed_paths: vec!["src/**".to_string()],
+                    forbidden_paths: vec![],
+                },
+            },
+            output_constraints: vec![],
+            valid_until: u64::MAX,
+            expected_generation: None,
+            signature: vec![30],
+            key_binding: KeyBinding {
+                public_key: vec![1; 32],
+                user_identity: "user:jsell".to_string(),
+                issuer: "https://keycloak.example.com".to_string(),
+                trust_anchor_id: "tenant-keycloak".to_string(),
+                issued_at: 1_700_000_000,
+                expires_at: u64::MAX,
+                user_signature: vec![10],
+                platform_countersign: vec![20],
+            },
+        };
+        gyre_common::Attestation {
+            id: "att-rel-c2".to_string(),
+            input: AttestationInput::Signed(signed_input),
+            output: AttestationOutput {
+                content_hash: vec![40],
+                commit_sha: commit_sha.to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: AttestationMetadata {
+                created_at: 1_700_000_100,
+                workspace_id: "ws-1".to_string(),
+                repo_id: repo_id.to_string(),
+                task_id: "TASK-1".to_string(),
+                agent_id: "agent-rel".to_string(),
+                chain_depth: 0,
+            },
+        }
     }
 
     #[tokio::test]
     async fn aibom_release_format_full_attribution() {
-        let (app, state, _repo_path, repo_id, c1, c2) = release_repo_with_commits().await;
+        let (app, state, _repo_path, repo_id, c1, c2, conv_sha) = release_repo_with_commits().await;
 
         let resp = app
             .oneshot(
@@ -1324,6 +1527,46 @@ mod tests {
             agent["sigstore_entries"],
             serde_json::json!(["rekor-entry-uuid-1"])
         );
+        // Conversation SHAs: the agent's prompt provenance (§AIBOM
+        // Contents — "which AI models, prompts, and tools produced each
+        // commit"), scoped via the repo workspace's tenant.
+        assert_eq!(
+            agent["conversation_shas"],
+            serde_json::json!([conv_sha]),
+            "per-agent conversation SHAs must be in the release artifact"
+        );
+
+        // Per-commit chain attestation data: every commit in the release
+        // range, with the full chain where one is on record. c2 carries
+        // the attestation stored by the helper; c1 and the human commit
+        // have none (field absent).
+        let commits = json["commits"].as_array().unwrap();
+        assert_eq!(commits.len(), 3, "initial + c1 + c2");
+        let c2_entry = commits
+            .iter()
+            .find(|c| c["sha"] == serde_json::json!(c2))
+            .unwrap();
+        assert_eq!(c2_entry["agent_id"], "agent-rel");
+        assert_eq!(c2_entry["task_id"], "TASK-1");
+        assert_eq!(
+            c2_entry["chain_attestation"]["attestation_id"],
+            "att-rel-c2"
+        );
+        assert_eq!(c2_entry["chain_attestation"]["chain_depth"], 0);
+        let chain_nodes = c2_entry["chain_attestation"]["chain"].as_array().unwrap();
+        assert!(!chain_nodes.is_empty(), "chain nodes must be present");
+        let c1_entry = commits
+            .iter()
+            .find(|c| c["sha"] == serde_json::json!(c1))
+            .unwrap();
+        assert_eq!(c1_entry["agent_id"], "agent-rel");
+        assert!(
+            c1_entry.get("chain_attestation").is_none(),
+            "c1 has no attestation on record — field must be absent"
+        );
+        let human_entries: Vec<_> = commits.iter().filter(|c| c["agent_id"].is_null()).collect();
+        assert_eq!(human_entries.len(), 1, "the initial commit is human");
+        assert!(human_entries[0].get("chain_attestation").is_none());
 
         // Stack policy block: lockfile hash, attestation coverage, minimum
         // level, drift history.
@@ -1362,7 +1605,8 @@ mod tests {
 
     #[tokio::test]
     async fn aibom_release_format_range_and_unknown_format() {
-        let (app, _state, repo_id, _repo_path, c1, _c2) = release_repo_with_commits().await;
+        let (app, _state, repo_id, _repo_path, c1, _c2, _conv_sha) =
+            release_repo_with_commits().await;
 
         // `from` bounds the release range: only commits after c1 (i.e. c2
         // + nothing else) are in the artifact.

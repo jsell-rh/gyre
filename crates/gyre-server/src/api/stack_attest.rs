@@ -376,6 +376,7 @@ pub(crate) async fn stack_drift_events_for_repo(
         event_type: Some("stack_drift_detected".to_string()),
         workspace_id: Some(repo.workspace_id.to_string()),
         resource_type: Some("repo".to_string()),
+        repo_id: Some(repo.id.to_string()),
         limit: 1000,
         ..Default::default()
     };
@@ -386,11 +387,6 @@ pub(crate) async fn stack_drift_events_for_repo(
         .map_err(ApiError::Internal)?;
     Ok(events
         .into_iter()
-        .filter(|e| {
-            e.repo_id
-                .as_ref()
-                .is_some_and(|r| r.as_str() == repo.id.as_str())
-        })
         .filter_map(|e| serde_json::from_value(e.detail).ok())
         .collect())
 }
@@ -404,7 +400,9 @@ pub struct StackDriftQuery {
 #[derive(Serialize)]
 pub struct StackDriftListResponse {
     pub repo_id: String,
-    /// Total drift events on record for the repo (before `limit` truncation).
+    /// Total drift events on record for the repo (before `limit`
+    /// truncation) — computed by a storage-level count query, so it is
+    /// never bounded by the list query's internal cap.
     pub total: usize,
     /// Newest-first drift events with full override context.
     pub events: Vec<StackDriftEvent>,
@@ -430,8 +428,23 @@ pub async fn get_stack_drift(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
+    // Honest total: a storage-level count of the repo's drift events, not
+    // the length of the (capped) list query — a repo with more drift
+    // events than the internal query cap must not report a truncated
+    // total (task-166 review round 3).
+    let total = state
+        .audit
+        .count_filtered(&gyre_ports::AuditQueryFilter {
+            event_type: Some("stack_drift_detected".to_string()),
+            workspace_id: Some(repo.workspace_id.to_string()),
+            resource_type: Some("repo".to_string()),
+            repo_id: Some(repo.id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .map_err(ApiError::Internal)? as usize;
+
     let mut events = stack_drift_events_for_repo(&state, &repo).await?;
-    let total = events.len();
     // Default 100, cap 500 — matches the documented bounds of the endpoint
     // (docs/api-reference.md): omitting `?limit` must not silently return
     // the internal 1000-event query cap.
@@ -1062,6 +1075,46 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["total"], 2);
         assert_eq!(json["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stack_drift_total_exceeds_list_query_cap() {
+        // task-166 review round 3: `total` used to be the length of the
+        // (internally capped at 1000) list query, so a repo with more
+        // drift events than that reported a truncated total. The total is
+        // now a storage-level count — this test fails with total == 1000
+        // against the old implementation.
+        let (app, state) = app_with_agent_and_repo();
+        for i in 0..=1000 {
+            record_drift_audit_event(
+                &state,
+                &format!("drift-{i}"),
+                "repo-1",
+                "proj-1",
+                "agent-1",
+                "accepted",
+                Some("approved"),
+            )
+            .await;
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["total"], 1001,
+            "total must not be bounded by the list query cap"
+        );
+        // Default limit 100 still bounds the returned page.
+        assert_eq!(json["events"].as_array().unwrap().len(), 100);
     }
 
     #[tokio::test(flavor = "multi_thread")]
