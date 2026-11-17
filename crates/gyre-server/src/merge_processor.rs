@@ -9859,6 +9859,7 @@ mod tests {
                 ),
                 workspace_id: None,
                 user_id: None,
+                repo_id: None,
                 resource_type: None,
                 outcome: None,
                 since: None,

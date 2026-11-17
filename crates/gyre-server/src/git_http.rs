@@ -18,7 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use gyre_common::Id;
-use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome};
+use gyre_domain::{stack::StackDriftEvent, AuditEvent, AuditEventType, AuditOutcome};
 use gyre_ports::{GateOutcome, PushContext};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -694,6 +694,24 @@ pub async fn git_receive_pack(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
+    // TASK-166 (supply-chain.md §The Laptop Problem): the agent's override
+    // reason for gyre-stack.lock drift, required whenever a warn-mode drift
+    // finding is accepted. Single line, capped — it is embedded in the audit
+    // record and echoed in logs.
+    let stack_override_reason: Option<String> = req
+        .headers()
+        .get("x-gyre-stack-override-reason")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.chars()
+                // Header values cannot carry raw newlines; flatten any
+                // whitespace runs so the reason stays a single line.
+                .map(|c| if c.is_whitespace() { ' ' } else { c })
+                .take(2000)
+                .collect::<String>()
+        })
+        .filter(|s| !s.trim().is_empty());
+
     // HSI §5: Extract conversation turn header for provenance linking.
     let conversation_turn: Option<u32> = req
         .headers()
@@ -787,6 +805,7 @@ pub async fn git_receive_pack(
             &ref_updates,
             &auth.agent_id,
             auth.jwt_claims.as_ref(),
+            stack_override_reason.as_deref(),
         )
         .await
         {
@@ -1959,6 +1978,7 @@ async fn store_attestation_level(state: &Arc<AppState>, agent_id: &str, level: u
 ///
 /// Returns the resolved attestation level so the caller can store it on the
 /// agent record.
+#[allow(clippy::too_many_arguments)] // push-context parameters, same shape as the gates below
 async fn enforce_stack_policy(
     state: &Arc<AppState>,
     repo_id: &str,
@@ -1967,6 +1987,7 @@ async fn enforce_stack_policy(
     ref_updates: &[RefUpdate],
     agent_id: &str,
     jwt_claims: Option<&serde_json::Value>,
+    stack_override_reason: Option<&str>,
 ) -> Result<u8, String> {
     let raw_policy = state
         .kv_store
@@ -2076,11 +2097,92 @@ async fn enforce_stack_policy(
                     }
                 };
                 if let Err((lockfile_fingerprint, integrity_verified, reason)) = drift_result {
+                    let mode = if mode_block { "block" } else { "warn" };
+                    let branch = update.refname.trim_start_matches("refs/heads/");
+
+                    // TASK-166 (supply-chain.md §The Laptop Problem): every
+                    // drift finding is recorded as a StackDriftEvent in the
+                    // audit log — blocked rejections and accepted overrides
+                    // alike — so the override trail is queryable for
+                    // compliance review (GET /api/v1/repos/:id/stack-drift).
                     if mode_block {
+                        record_stack_drift_event(
+                            state,
+                            &StackDriftEvent {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                repo_id: repo_id.to_string(),
+                                workspace_id: repo_workspace_id.to_string(),
+                                agent_id: agent_id.to_string(),
+                                branch: branch.to_string(),
+                                lockfile_fingerprint: lockfile_fingerprint.clone(),
+                                attested_stack_fingerprint: attested.fingerprint(),
+                                integrity_verified,
+                                reason: reason.clone(),
+                                mode: mode.to_string(),
+                                outcome: "blocked".to_string(),
+                                override_reason: stack_override_reason
+                                    .map(str::to_string)
+                                    .filter(|s| !s.trim().is_empty()),
+                                timestamp: crate::api::now_secs(),
+                            },
+                        )
+                        .await;
                         return Err(format!("push rejected: {reason}"));
                     }
+
+                    // Warn mode: the push MAY be accepted, but only with an
+                    // explicit override reason (supply-chain.md §The Laptop
+                    // Problem step 5 — overrides must be logged, attributed,
+                    // and visible). No reason → reject.
+                    let Some(override_reason) = stack_override_rationale(stack_override_reason)
+                    else {
+                        record_stack_drift_event(
+                            state,
+                            &StackDriftEvent {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                repo_id: repo_id.to_string(),
+                                workspace_id: repo_workspace_id.to_string(),
+                                agent_id: agent_id.to_string(),
+                                branch: branch.to_string(),
+                                lockfile_fingerprint: lockfile_fingerprint.clone(),
+                                attested_stack_fingerprint: attested.fingerprint(),
+                                integrity_verified,
+                                reason: format!(
+                                    "{reason}; warn-mode drift requires an override reason"
+                                ),
+                                mode: mode.to_string(),
+                                outcome: "blocked".to_string(),
+                                override_reason: None,
+                                timestamp: crate::api::now_secs(),
+                            },
+                        )
+                        .await;
+                        return Err(format!(
+                            "push rejected: {reason}; warn-mode stack drift requires an override reason (send the X-Gyre-Stack-Override-Reason header, e.g. `gyre push --stack-override-reason \"...\")"
+                        ));
+                    };
+
                     warn!(repo_id, agent_id, refname = %update.refname, %reason,
-                          "stack drift detected (warn mode)");
+                          "stack drift detected (warn mode, override accepted)");
+                    record_stack_drift_event(
+                        state,
+                        &StackDriftEvent {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            repo_id: repo_id.to_string(),
+                            workspace_id: repo_workspace_id.to_string(),
+                            agent_id: agent_id.to_string(),
+                            branch: branch.to_string(),
+                            lockfile_fingerprint: lockfile_fingerprint.clone(),
+                            attested_stack_fingerprint: attested.fingerprint(),
+                            integrity_verified,
+                            reason: reason.clone(),
+                            mode: mode.to_string(),
+                            outcome: "accepted".to_string(),
+                            override_reason: Some(override_reason.to_string()),
+                            timestamp: crate::api::now_secs(),
+                        },
+                    )
+                    .await;
                     state
                         .emit_event(
                             repo_workspace_id.clone(),
@@ -2117,6 +2219,49 @@ async fn enforce_stack_policy(
     }
 
     Ok(level)
+}
+
+/// Normalize a caller-supplied stack-override reason: `Some(trimmed,
+/// non-empty)` or `None`. A whitespace-only reason is no reason.
+fn stack_override_rationale(reason: Option<&str>) -> Option<&str> {
+    reason.map(str::trim).filter(|r| !r.is_empty())
+}
+
+/// Record a `StackDriftEvent` in the audit log (supply-chain.md §The Laptop
+/// Problem step 5: "that override is logged, attributed, and visible"). The
+/// event is the durable, queryable drift history — `GET
+/// /api/v1/repos/:id/stack-drift` reads it back for compliance review — and
+/// the AIBOM release artifact lists these events as `policy_violations`.
+async fn record_stack_drift_event(state: &AppState, event: &StackDriftEvent) {
+    let audit_event = AuditEvent::new(
+        Id::new(&event.id),
+        AuditEventType::StackDriftDetected,
+        Some(Id::new(&event.agent_id)),
+        None,
+        None,
+        Some(Id::new(&event.workspace_id)),
+        Some(Id::new(&event.repo_id)),
+        "repo".to_string(),
+        Some(event.repo_id.clone()),
+        if event.outcome == "blocked" {
+            AuditOutcome::Blocked
+        } else {
+            AuditOutcome::Success
+        },
+        serde_json::to_value(event).unwrap_or_else(|e| {
+            serde_json::json!({
+                "id": event.id,
+                "repo_id": event.repo_id,
+                "agent_id": event.agent_id,
+                "reason": event.reason,
+                "serialization_error": e.to_string(),
+            })
+        }),
+        None,
+        None,
+        event.timestamp,
+    );
+    crate::api::audit::emit_server_audit_event(state, audit_event).await;
 }
 
 /// Undo ref updates in the repository (e.g., after a gate rejection).
@@ -8320,7 +8465,7 @@ specs:
     /// as the drift-verification mechanism, so drift flagging must not be
     /// gated on a repo stack policy: a repo with a gyre-stack.lock but NO
     /// policy entry still gets warn-mode flagging (ConstraintViolation
-    /// event + accept), never a silent pass.
+    /// event + accept with an override reason), never a silent pass.
     #[tokio::test(flavor = "multi_thread")]
     async fn lockfile_drift_without_policy_warned_and_accepted() {
         let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
@@ -8343,6 +8488,12 @@ specs:
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
                     .header("Authorization", agent_auth("agent-drift-nopolicy"))
+                    // TASK-166: warn-mode drift requires an override reason
+                    // (supply-chain.md §The Laptop Problem step 5).
+                    .header(
+                        "X-Gyre-Stack-Override-Reason",
+                        "approved hotfix stack for security patch",
+                    )
                     .header("content-type", "application/x-git-receive-pack")
                     .body(Body::from(receive_pack_body(
                         &sha,
@@ -8352,7 +8503,8 @@ specs:
             )
             .await
             .unwrap();
-        // No policy → no enforcement mode to escalate to → warn + accept.
+        // No policy → no enforcement mode to escalate to → warn + accept
+        // (with the required override reason).
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Drift was still flagged via a ConstraintViolation event, carrying
@@ -8405,6 +8557,221 @@ specs:
             snapshot.get("integrity_verified").and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    /// TASK-166 (supply-chain.md §The Laptop Problem): warn-mode drift
+    /// without an override reason is rejected — the override must be
+    /// attributed to a stated reason, not silently waved through.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warn_mode_drift_without_override_reason_rejected() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let pinned = test_stack("claude-sonnet-4-6");
+        let lock = StackLockfile::from_stack(&pinned, 1_700_000_000);
+        seed_agent_and_stack(
+            &state,
+            "agent-warn-noreason",
+            &test_stack("claude-opus-4-6"),
+        )
+        .await;
+
+        // Warn-mode policy: below-minimum / drift findings are flagged, not
+        // blocked — but a drift override still requires a reason.
+        let policy = serde_json::json!({
+            "fingerprint": "fp-warn-noreason",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "warn"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sha = make_commit(&repo_path, &[("gyre-stack.lock", lock.to_toml().unwrap())]).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", agent_auth("agent-warn-noreason"))
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(
+                        &sha,
+                        "refs/heads/warn-noreason",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("stack drift") && text.contains("override reason"),
+            "unexpected body: {text}"
+        );
+
+        // The rejected drift is still on the audit trail (blocked outcome,
+        // no override reason).
+        let drift = latest_drift_event(&state, "agent-warn-noreason").await;
+        assert_eq!(drift.outcome, "blocked");
+        assert_eq!(drift.mode, "warn");
+        assert!(drift.override_reason.is_none());
+    }
+
+    /// TASK-166: warn-mode drift WITH an override reason is accepted and the
+    /// full override context is recorded in the audit trail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warn_mode_drift_with_override_reason_accepted_and_audited() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let pinned = test_stack("claude-sonnet-4-6");
+        let lock = StackLockfile::from_stack(&pinned, 1_700_000_000);
+        let drifted = test_stack("claude-opus-4-6");
+        seed_agent_and_stack(&state, "agent-warn-override", &drifted).await;
+
+        let policy = serde_json::json!({
+            "fingerprint": "fp-warn-override",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "warn"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sha = make_commit(&repo_path, &[("gyre-stack.lock", lock.to_toml().unwrap())]).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", agent_auth("agent-warn-override"))
+                    .header(
+                        "X-Gyre-Stack-Override-Reason",
+                        "security hotfix: model upgrade approved on-call",
+                    )
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(
+                        &sha,
+                        "refs/heads/warn-override",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The override is on the audit trail with full context: both
+        // fingerprints, the reason, mode, and outcome.
+        let drift = latest_drift_event(&state, "agent-warn-override").await;
+        assert_eq!(drift.outcome, "accepted");
+        assert_eq!(drift.mode, "warn");
+        assert_eq!(
+            drift.override_reason.as_deref(),
+            Some("security hotfix: model upgrade approved on-call")
+        );
+        assert_eq!(drift.branch, "warn-override");
+        assert_eq!(drift.repo_id, "repo-1");
+        assert_eq!(drift.workspace_id, "ws-test");
+        assert_eq!(
+            drift.lockfile_fingerprint.as_deref(),
+            Some(lock.fingerprint.as_str())
+        );
+        assert_eq!(drift.attested_stack_fingerprint, drifted.fingerprint());
+        assert!(drift.integrity_verified);
+        assert!(
+            drift.reason.contains("stack drift"),
+            "reason: {}",
+            drift.reason
+        );
+    }
+
+    /// TASK-166: block-mode drift rejections are recorded in the audit trail
+    /// too — the drift history must show blocked attempts, not only accepted
+    /// overrides.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn block_mode_drift_rejection_recorded_in_audit_trail() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let pinned = test_stack("claude-sonnet-4-6");
+        let lock = StackLockfile::from_stack(&pinned, 1_700_000_000);
+        seed_agent_and_stack(&state, "agent-block-audit", &test_stack("claude-opus-4-6")).await;
+
+        let policy = serde_json::json!({
+            "fingerprint": "fp-block-audit",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "block"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sha = make_commit(&repo_path, &[("gyre-stack.lock", lock.to_toml().unwrap())]).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", agent_auth("agent-block-audit"))
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(
+                        &sha,
+                        "refs/heads/block-audit",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let drift = latest_drift_event(&state, "agent-block-audit").await;
+        assert_eq!(drift.outcome, "blocked");
+        assert_eq!(drift.mode, "block");
+        assert_eq!(drift.agent_id, "agent-block-audit");
+    }
+
+    /// Read the newest `stack_drift_detected` audit event for `agent_id`
+    /// from the real audit repository (mem adapter in tests) and deserialize
+    /// its detail into the StackDriftEvent schema the stack-drift query
+    /// endpoint returns.
+    async fn latest_drift_event(
+        state: &Arc<crate::AppState>,
+        agent_id: &str,
+    ) -> gyre_domain::stack::StackDriftEvent {
+        let filter = gyre_ports::AuditQueryFilter {
+            event_type: Some("stack_drift_detected".to_string()),
+            agent_id: Some(agent_id.to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+        let events = state.audit.query(&filter).await.unwrap();
+        let event = events
+            .first()
+            .unwrap_or_else(|| panic!("no stack_drift_detected event for {agent_id}"));
+        serde_json::from_value(event.detail.clone())
+            .unwrap_or_else(|e| panic!("drift event detail failed to deserialize: {e}"))
     }
 
     #[tokio::test(flavor = "multi_thread")]
