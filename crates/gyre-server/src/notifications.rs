@@ -882,6 +882,17 @@ impl NotificationRepository for BroadcastingNotificationRepo {
         self.inner.list_recent(limit).await
     }
 
+    async fn list_by_workspace_type_since(
+        &self,
+        workspace_id: &Id,
+        notification_type: &str,
+        since: i64,
+    ) -> anyhow::Result<Vec<Notification>> {
+        self.inner
+            .list_by_workspace_type_since(workspace_id, notification_type, since)
+            .await
+    }
+
     async fn has_recent_dismissal(
         &self,
         workspace_id: &Id,
