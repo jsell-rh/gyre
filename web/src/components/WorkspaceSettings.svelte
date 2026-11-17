@@ -196,7 +196,8 @@
     if (days >= 1) return $t('workspace_settings.members.invitation_expires_in', { values: { count: days, unit: 'd' } });
     const hours = Math.floor(secs / 3600);
     if (hours >= 1) return $t('workspace_settings.members.invitation_expires_in', { values: { count: hours, unit: 'h' } });
-    return $t('workspace_settings.members.invitation_expires_in', { values: { count: secs, unit: 'm' } });
+    const minutes = Math.floor(secs / 60);
+    return $t('workspace_settings.members.invitation_expires_in', { values: { count: minutes, unit: 'm' } });
   }
 
   // Only Pending invitations are revocable (the revoke endpoint 409s on

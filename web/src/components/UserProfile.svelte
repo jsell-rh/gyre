@@ -643,8 +643,8 @@
         </button>
       </fieldset>
       <div class="edit-actions">
-        <button class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>{$t('common.cancel')}</button>
-        <button class="btn-primary" onclick={saveEdit} disabled={saving || !editForm.display_name.trim()} aria-busy={saving}>
+        <button type="button" class="btn-secondary" onclick={() => { editForm = { display_name: me?.display_name ?? '', timezone: me?.timezone ?? '', locale: me?.locale ?? '' }; editing = false; }}>{$t('common.cancel')}</button>
+        <button type="button" class="btn-primary" onclick={saveEdit} disabled={saving || !editForm.display_name.trim()} aria-busy={saving}>
           {saving ? $t('agent_card.saving') : $t('common.save')}
         </button>
       </div>

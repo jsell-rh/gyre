@@ -640,6 +640,12 @@ describe('WorkspaceSettings', () => {
             expires_at: 1690000000,
             created_at: 1690000000, accepted_at: null,
           },
+          {
+            id: 'inv-3', workspace_id: 'ws-1', user_id: 'u-7', invited_by: 'u-1',
+            role: 'Developer', status: 'Pending',
+            expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+            created_at: 1700000000, accepted_at: null,
+          },
         ],
       });
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
@@ -650,10 +656,13 @@ describe('WorkspaceSettings', () => {
         return el;
       });
       const rows = table.querySelectorAll('[data-testid="invitation-row"]');
-      expect(rows.length).toBe(2);
+      expect(rows.length).toBe(3);
       // Pending row: expiry countdown and a revoke action.
       expect(container.querySelector('[data-testid="invitation-expiry-inv-1"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="revoke-invitation-inv-1"]')).toBeTruthy();
+      // Sub-hour pending row: the countdown renders whole minutes, not raw
+      // seconds ("Expires in 30m", never "Expires in 1800m").
+      expect(container.querySelector('[data-testid="invitation-expiry-inv-3"]').textContent).toBe('Expires in 30m');
       // Terminal row: no expiry countdown and no revoke action.
       expect(container.querySelector('[data-testid="invitation-expiry-inv-2"]')).toBeNull();
       expect(container.querySelector('[data-testid="revoke-invitation-inv-2"]')).toBeNull();

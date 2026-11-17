@@ -534,6 +534,26 @@ describe('UserProfile', () => {
     });
   });
 
+  it('edit form saves user profile fields via PUT /users/me exactly once per Save click', async () => {
+    api.updateMe.mockResolvedValue({ ...ME });
+    const { findAllByText, findByText, findByDisplayValue, container } = r();
+    await findAllByText('James Sell');
+    await fireEvent.click(await findByText('Edit'));
+    const nameInput = await findByDisplayValue('James Sell');
+    await fireEvent.input(nameInput, { target: { value: 'James T. Sell' } });
+    await fireEvent.click(container.querySelector('.edit-actions .btn-primary'));
+    await waitFor(() => {
+      expect(api.updateMe).toHaveBeenCalledWith(expect.objectContaining({
+        display_name: 'James T. Sell',
+      }));
+    });
+    // The Save button must be type="button": a default-submit button inside
+    // the edit form fires saveEdit() via onclick AND via the form's onsubmit,
+    // issuing a duplicate PUT /users/me.
+    await new Promise((res) => setTimeout(res, 20));
+    expect(api.updateMe).toHaveBeenCalledTimes(1);
+  });
+
   it('shows notifications in Notifications tab', async () => {
     const { findByText } = r();
     const notifTab = await findByText('Notifications');
