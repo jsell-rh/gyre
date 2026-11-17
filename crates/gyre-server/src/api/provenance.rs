@@ -1241,7 +1241,6 @@ mod tests {
         String,
         String,
     ) {
-        use std::io::Write as _;
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let repo_name = format!("slsa-{}", uuid::Uuid::new_v4().simple());
@@ -1284,10 +1283,16 @@ mod tests {
             .arg("mktree")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let empty_tree = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout)
+        let empty_out = child.wait_with_output().unwrap();
+        assert!(
+            empty_out.status.success(),
+            "mktree (empty tree) failed: {}",
+            String::from_utf8_lossy(&empty_out.stderr)
+        );
+        let empty_tree = String::from_utf8_lossy(&empty_out.stdout)
             .trim()
             .to_string();
         let mut head = run_git(&[
@@ -1297,68 +1302,105 @@ mod tests {
             "user.email=test@example.com",
             "commit-tree",
             &empty_tree,
+            "-m",
+            "chore: init",
         ]);
         for (path, content) in extra {
-            let mut child = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .args(["hash-object", "-w", "--stdin"])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .as_mut()
-                .unwrap()
-                .write_all(content.as_bytes())
-                .unwrap();
-            let blob = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout)
-                .trim()
-                .to_string();
-            let tree_input = format!("100644 blob {blob}\t{path}\n");
-            let mut child = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .arg("mktree")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .as_mut()
-                .unwrap()
-                .write_all(tree_input.as_bytes())
-                .unwrap();
-            let tree = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout)
-                .trim()
-                .to_string();
-            head = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .args([
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.com",
-                    "commit-tree",
-                    &tree,
-                    "-p",
-                    &head,
-                ])
-                .output()
-                .map(|o| {
-                    assert!(o.status.success(), "commit-tree failed");
-                    String::from_utf8_lossy(&o.stdout).trim().to_string()
-                })
-                .unwrap();
+            let blob = write_blob(&repo_path, content);
+            // `mktree` is single-level: nested paths (e.g. `src/a.rs`) need
+            // intermediate trees, and a failure here must never surface as
+            // an opaque bare `commit-tree failed` one step later.
+            let tree = write_tree(&repo_path, &[(path, blob)]);
+            head = run_git(&[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit-tree",
+                &tree,
+                "-p",
+                &head,
+                "-m",
+                "test commit",
+            ]);
         }
         run_git(&["update-ref", "refs/heads/main", &head]);
 
         (app, state, repo_id, repo_path, head)
+    }
+
+    /// Write a blob into the repo's object store, returning its SHA.
+    /// Panics with git's stderr on failure — an unchecked failure here
+    /// otherwise surfaces later as an opaque bare `commit-tree failed`.
+    fn write_blob(repo_path: &str, content: &str) -> String {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "hash-object failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Build a tree object from (path, blob-sha) entries, creating
+    /// intermediate trees for nested paths (`mktree` is single-level and
+    /// rejects paths containing slashes). Panics with git's stderr on
+    /// failure.
+    fn write_tree(repo_path: &str, files: &[(&str, String)]) -> String {
+        use std::io::Write as _;
+        let mut lines: Vec<String> = Vec::new();
+        let mut subdirs: std::collections::BTreeMap<&str, Vec<(&str, String)>> =
+            std::collections::BTreeMap::new();
+        for (path, sha) in files {
+            match path.split_once('/') {
+                None => lines.push(format!("100644 blob {sha}\t{path}")),
+                Some((seg, rest)) => subdirs.entry(seg).or_default().push((rest, sha.clone())),
+            }
+        }
+        for (seg, entries) in subdirs {
+            let subtree = write_tree(repo_path, &entries);
+            lines.push(format!("040000 tree {subtree}\t{seg}"));
+        }
+        lines.sort();
+        let input = lines.join("\n");
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .arg("mktree")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "mktree failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     /// The root (parentless) commit SHA of `refs/heads/main` in a bare repo
