@@ -2827,12 +2827,23 @@ mod tests {
     }
 
     async fn post_preview(app: &Router, body: serde_json::Value) -> axum::response::Response {
+        post_preview_with_token(app, "test-token", body).await
+    }
+
+    /// POST with an explicit bearer token, for the JWT-based authorization
+    /// tests (the default helper authenticates as the global admin token,
+    /// which bypasses exactly the containment branches those tests guard).
+    async fn post_preview_with_token(
+        app: &Router,
+        token: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         app.clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/meta-specs/preview")
-                    .header("authorization", "Bearer test-token")
+                    .header("authorization", format!("Bearer {token}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -2842,11 +2853,19 @@ mod tests {
     }
 
     async fn get_preview_status(app: &Router, preview_id: &str) -> axum::response::Response {
+        get_preview_status_with_token(app, preview_id, "test-token").await
+    }
+
+    async fn get_preview_status_with_token(
+        app: &Router,
+        preview_id: &str,
+        token: &str,
+    ) -> axum::response::Response {
         app.clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/meta-specs/preview/{preview_id}"))
-                    .header("authorization", "Bearer test-token")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2855,12 +2874,20 @@ mod tests {
     }
 
     async fn delete_preview(app: &Router, preview_id: &str) -> axum::response::Response {
+        delete_preview_with_token(app, preview_id, "test-token").await
+    }
+
+    async fn delete_preview_with_token(
+        app: &Router,
+        preview_id: &str,
+        token: &str,
+    ) -> axum::response::Response {
         app.clone()
             .oneshot(
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/meta-specs/preview/{preview_id}"))
-                    .header("authorization", "Bearer test-token")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4328,6 +4355,275 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let resp = delete_preview(&app, "00000000-0000-0000-0000-000000000000").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Cross-tenant and repo-ABAC containment on the global POST route.
+    ///
+    /// The route is id-less (`POST /api/v1/meta-specs/preview` carries the
+    /// targets in the body), so no resolver layer can derive a resource
+    /// tenant for it — the per-target containment in `post_meta_spec_preview`
+    /// (`check_repo_abac` plus the tenant check against the repo's
+    /// workspace) is the only guard between a Developer from tenant A and
+    /// preview compute against tenant B's repos. Both denial branches are
+    /// asserted on their handler-visible error text, so a 403 from any other
+    /// surface cannot satisfy the test, and an in-tenant Developer whose
+    /// claims satisfy the repo's ABAC policy is the positive control proving
+    /// the route works for the authorized caller (the 403s are containment,
+    /// not a broken route).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_post_cross_tenant_and_abac_denial_are_forbidden() {
+        use crate::auth::test_helpers::{make_jwt_config, sign_test_jwt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, _ws_id) = preview_state(dir.path(), 86_400, None).await;
+        // A JWT-enabled twin of the same state: the port stores are
+        // Arc-shared, so both routers see the same repos, agents and kv
+        // records, and the global test-token stays an Admin bypass on it.
+        let mut jwt_state = (*state).clone();
+        jwt_state.jwt_config = Some(make_jwt_config());
+        let jwt_state = std::sync::Arc::new(jwt_state);
+        let app = crate::api::api_router().with_state(jwt_state.clone());
+
+        let dev_tenant_b = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "tenant-b",
+                "sub": "dev-tenant-b",
+                "preferred_username": "dev-tenant-b",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let dev_tenant_default = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "dev-default",
+                "preferred_username": "dev-default",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        // 1. Developer from tenant B targeting tenant-default's repo: the
+        //    tenant-containment branch must refuse before anything is
+        //    provisioned. The repo carries no ABAC policy here, so
+        //    check_repo_abac passes and the tenant check is the denial
+        //    source.
+        let resp = post_preview_with_token(
+            &app,
+            &dev_tenant_b,
+            preview_body(&repo_id, &["specs/system/search.md"]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            format!("repo '{repo_id}' is outside the caller's tenant"),
+            "the denial must come from the handler's tenant containment"
+        );
+
+        // 2. In-tenant Developer whose claims do not satisfy the repo's
+        //    ABAC policy: check_repo_abac must refuse.
+        let policy = serde_json::json!([{
+            "resource_type": "repo",
+            "resource_id": repo_id,
+            "required_claims": { "team": "core" }
+        }]);
+        jwt_state
+            .kv_store
+            .kv_set("abac_policies", &repo_id, policy.to_string())
+            .await
+            .unwrap();
+        let resp = post_preview_with_token(
+            &app,
+            &dev_tenant_default,
+            preview_body(&repo_id, &["specs/system/search.md"]),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["error"].as_str().unwrap(),
+            format!("ABAC denied: no policy satisfied for repo {repo_id}"),
+            "the denial must come from check_repo_abac"
+        );
+
+        // Neither denial provisioned anything: no agent rows, no preview
+        // record, no preview branches.
+        assert!(
+            jwt_state.agents.list().await.unwrap().is_empty(),
+            "a denied preview must not leave agent rows behind"
+        );
+        assert!(
+            jwt_state
+                .kv_store
+                .kv_list("meta_spec_previews")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a denied preview must not leave a record behind"
+        );
+        let repo = jwt_state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let branches = jwt_state.git_ops.list_branches(&repo.path).await.unwrap();
+        assert!(
+            !branches.iter().any(|b| b.name.starts_with("preview/")),
+            "a denied preview must not leave branches behind: {branches:?}"
+        );
+
+        // 3. Positive control: the same in-tenant Developer with claims the
+        //    policy satisfies passes both containment branches and really
+        //    spawns (so the 403s above are containment, not something else).
+        let dev_tenant_default_core = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "dev-default-core",
+                "preferred_username": "dev-default-core",
+                "realm_access": { "roles": ["developer"] },
+                "team": "core"
+            }),
+            3600,
+        );
+        let script = env_dump_script(dir.path(), &dir.path().join("agent-env.txt"));
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp = post_preview_with_token(
+                &app,
+                &dev_tenant_default_core,
+                preview_body(&repo_id, &["specs/system/search.md"]),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::ACCEPTED,
+                "an in-tenant Developer satisfying the repo policy must be able to run a preview"
+            );
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
+    /// Cross-tenant and repo-ABAC containment for GET status and DELETE:
+    /// `require_preview_scope` derives the run's scope from its own repos,
+    /// so a Developer from another tenant must be refused on both routes,
+    /// an in-tenant Developer whose ABAC policy denies the repo must be
+    /// refused too, and the refused DELETEs must tear nothing down — the
+    /// authorized admin can still read and finally delete the run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_status_and_delete_cross_tenant_are_forbidden() {
+        use crate::auth::test_helpers::{make_jwt_config, sign_test_jwt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, _ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let mut jwt_state = (*state).clone();
+        jwt_state.jwt_config = Some(make_jwt_config());
+        let jwt_state = std::sync::Arc::new(jwt_state);
+        let app = crate::api::api_router().with_state(jwt_state.clone());
+
+        let dev_tenant_b = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "tenant-b",
+                "sub": "dev-tenant-b",
+                "preferred_username": "dev-tenant-b",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let dev_tenant_default = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "dev-default",
+                "preferred_username": "dev-default",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let script = env_dump_script(dir.path(), &dir.path().join("agent-env.txt"));
+        with_agent_command(script.to_str().unwrap(), || async {
+            // Admin creates a real run to probe against.
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+
+            // Positive control: the in-tenant Developer can read the status.
+            let resp = get_preview_status_with_token(&app, &preview_id, &dev_tenant_default).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "an in-tenant Developer must be able to read the preview status"
+            );
+
+            // Cross-tenant Developer: GET refused by the tenant branch (the
+            // repo carries no ABAC policy here, so the tenant check is the
+            // denial source).
+            let resp = get_preview_status_with_token(&app, &preview_id, &dev_tenant_b).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            let json = body_json(resp).await;
+            assert_eq!(
+                json["error"].as_str().unwrap(),
+                format!("preview '{preview_id}' is outside the caller's tenant"),
+                "the denial must come from require_preview_scope's tenant containment"
+            );
+            // ... and DELETE refused by the same containment.
+            let resp = delete_preview_with_token(&app, &preview_id, &dev_tenant_b).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+            // ABAC denial inside require_preview_scope: a repo policy the
+            // in-tenant Developer does not satisfy refuses both routes.
+            let policy = serde_json::json!([{
+                "resource_type": "repo",
+                "resource_id": repo_id,
+                "required_claims": { "team": "core" }
+            }]);
+            jwt_state
+                .kv_store
+                .kv_set("abac_policies", &repo_id, policy.to_string())
+                .await
+                .unwrap();
+            let resp = get_preview_status_with_token(&app, &preview_id, &dev_tenant_default).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            let json = body_json(resp).await;
+            assert_eq!(
+                json["error"].as_str().unwrap(),
+                format!("ABAC denied: no policy satisfied for repo {repo_id}"),
+                "the denial must come from require_preview_scope's repo ABAC check"
+            );
+            let resp = delete_preview_with_token(&app, &preview_id, &dev_tenant_default).await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            jwt_state
+                .kv_store
+                .kv_remove("abac_policies", &repo_id)
+                .await
+                .unwrap();
+
+            // The refused DELETEs tore nothing down: the record and the
+            // status are still there for the authorized caller.
+            let resp = get_preview_status(&app, &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(
+                jwt_state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &preview_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "a refused DELETE must not remove the preview record"
+            );
+
+            // Admin cleanup (also kills the spawned process).
+            let resp = delete_preview(&app, &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
     }
 
     /// The separate preview budget cap: with `max_concurrent=1` pinned, a
