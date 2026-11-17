@@ -57,3 +57,67 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — independent review at candidate b5349850 (verdict: approved)
+
+Assignment base `876c77b`, candidate `b5349850` (includes the round-4 rebase repair
+`0029b3f4` onto the task-077 HSI base). All probes re-run from scratch on this exact
+tree; no prior approval carried forward. Evidence: `/tmp/stage/review-evidence/`.
+
+**Scripts (task contract).** All three exist, executable, usage-commented, wired
+blocking in BOTH pre-commit and CI (no `|| true`; `.github/workflows/ci.yml` diff
+confirms the un-advisoring). Clean runs: check-hierarchy exit 0;
+check-tenant-filter exit 0 (126 read methods on tenant-column tables, 0 violations);
+check-api-auth exit 0 (8 non-ABAC handlers checked; registry delegation green).
+
+**Mutation kills (all in an isolated sandbox copy; production tree untouched).**
+- check-hierarchy: `Task.workspace_id → Option<Id>` → exit 1 naming task.rs:60;
+  deleting `Task.repo_id` → exit 1 "missing from the struct"; `Option<Id>` on a
+  non-hierarchy struct correctly ignored (negative control).
+- check-tenant-filter: stripping `.filter(repositories::tenant_id.eq(...))` from
+  `Repository::find_by_id` → exit 1 with file:line in BOTH `src/sqlite` and
+  `src/postgres` (the pg-dir is genuinely scanned).
+- check-api-auth: removing the whole `abac_middleware` layer block → Check 1 exit 1;
+  deleting `AuthenticatedAgent` from `git_http::git_upload_pack` → AUTH VIOLATION
+  exit 1; a failing check-abac-route-registry.sh folds into check-api-auth exit 1
+  (delegation is load-bearing, not decorative).
+
+**Integration test.** `cargo test -p gyre-adapters --test tenant_isolation` → 2
+passed. Mutation: removing the sqlite `Repository::find_by_id` tenant filter makes
+BOTH tests fail with exact leak diagnostics — the test kills the defect class it
+claims to (cross-tenant `find_by_id` leak + fabricated-tenant create stamp).
+
+**Build/compile.** `cargo check -p gyre-server` clean at the candidate. The full
+`cargo test --all` is deferred to the verifier (4 GiB budget); recorded in
+verdict.json as a must-run.
+
+**Mechanical invariants on the candidate worktree.** check-arch, check-tenant-filter,
+check-api-auth, check-hierarchy, check-abac-exempt-handlers, check-abac-context-parity,
+check-message-delivery, check-mcp-write-tools, check-dead-message-kinds,
+check-mem-port-contracts, check-inert-enforcement, check-unbounded-external-http,
+check-lossy-secret-conversion, check-forged-scope-fields, check-fabricated-scope-defaults,
+check-byte-slice-truncation, check-relative-path-defaults, check-forwarded-header-trust,
+check-migration-sql-portability, check-in-memory-state-stores, check-scope-literal-defaults
+(crates) — all PASS. check-task-commit-attribution PASSES against the committed
+candidate tree (an initial FAIL traced to the controller's working-tree reset of
+specs/tasks/task-160.md to `commits: []`, not to the candidate).
+
+**Diff hygiene.** Net base→candidate diff touches only scripts/, crates/,
+.github/workflows/ci.yml, .pre-commit-config.yaml, specs/{coverage,reviews,tasks}.
+No specs/system changes (no spec reinterpreted), no web/src changes, no web/dist
+drift (restored to base per the rebase directive; bundle is verifier-owned).
+Domain/server changes are the documented rebase repairs (deduplicated
+`bootstrap_workspace` moved to `crate::` scope; `emit_event(Id)` scoped-emitter
+signature per the round's rebase instruction) and the tenant-filter adapter fixes.
+
+**Non-findings.** (a) check-hierarchy is default-on with `GYRE_CHECK_HIERARCHY=0`
+opt-out rather than the spec's literal `=1` gate — the spec's own text gates it
+"initially disabled, enabled in M34 Slice 3 after the non-optional migration lands";
+the migration has landed (all five fields are `Id`), CI passes `=1` explicitly, so
+default-on is the intended end-state, not a contradiction. (b) The 43-table
+tenant-less backlog reported non-failing by check-tenant-filter matches spec §3's
+documented KvJsonStore/backlog treatment. (c) The earlier CI "Architecture lint"
+failure (run 44086888872, head 15fe9a5b) is resolved at the candidate: check-arch
+passes and the rebase repair 0029b3f4 landed after it.
+
+Verdict: **approved** — `/tmp/stage/verdict.json` (`approved: true`, no findings).
