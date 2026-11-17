@@ -1206,6 +1206,26 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Named fixture carrier — a positional tuple whose tail is five
+    /// same-typed `String`s is a field-swap hazard (the same class
+    /// get_aibom's AgentSummary comment warns about): verification rounds
+    /// 2-3 failed `aibom_release_format_full_attribution` with a bare 404
+    /// because the test bound `repo_path` (a `/tmp/...` filesystem path)
+    /// where it named `repo_id`, building
+    /// `/api/v1/repos//tmp/.../rel-*.git/aibom`, which matches no route and
+    /// falls through to axum's empty-body 404 fallback while the
+    /// identically-set-up sibling test passed. Named fields make that swap
+    /// impossible.
+    struct ReleaseRepoFixture {
+        app: Router,
+        state: Arc<crate::AppState>,
+        repo_id: String,
+        repo_path: String,
+        c1: String,
+        c2: String,
+        conv_sha: String,
+    }
+
     /// Real-git setup for release-artifact tests: an API-created repo (record
     /// via the API; `test_state` wires NoopGitOps so the bare git dir +
     /// initial commit are created here), an agent with a registered stack, a
@@ -1213,15 +1233,7 @@ mod tests {
     /// commits on main. The repo name is unique per call — parallel tests in
     /// this binary share `repos_root` (keyed by pid), so same-named repos
     /// would collide on the same git dir.
-    async fn release_repo_with_commits() -> (
-        Router,
-        Arc<crate::AppState>,
-        String,
-        String,
-        String,
-        String,
-        String,
-    ) {
+    async fn release_repo_with_commits() -> ReleaseRepoFixture {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let repo_name = format!("rel-{}", uuid::Uuid::new_v4().simple());
@@ -1416,7 +1428,15 @@ mod tests {
         );
         state.audit.record(&event).await.unwrap();
 
-        (app, state, repo_id, repo_path, c1, c2, conv_sha)
+        ReleaseRepoFixture {
+            app,
+            state,
+            repo_id,
+            repo_path,
+            c1,
+            c2,
+            conv_sha,
+        }
     }
 
     /// Minimal SignedInput-rooted attestation chain node for a commit —
@@ -1479,7 +1499,15 @@ mod tests {
 
     #[tokio::test]
     async fn aibom_release_format_full_attribution() {
-        let (app, state, _repo_path, repo_id, c1, c2, conv_sha) = release_repo_with_commits().await;
+        let ReleaseRepoFixture {
+            app,
+            state,
+            repo_id,
+            repo_path: _repo_path,
+            c1,
+            c2,
+            conv_sha,
+        } = release_repo_with_commits().await;
 
         let resp = app
             .oneshot(
@@ -1605,8 +1633,15 @@ mod tests {
 
     #[tokio::test]
     async fn aibom_release_format_range_and_unknown_format() {
-        let (app, _state, repo_id, _repo_path, c1, _c2, _conv_sha) =
-            release_repo_with_commits().await;
+        let ReleaseRepoFixture {
+            app,
+            state: _state,
+            repo_id,
+            repo_path: _repo_path,
+            c1,
+            c2: _c2,
+            conv_sha: _conv_sha,
+        } = release_repo_with_commits().await;
 
         // `from` bounds the release range: only commits after c1 (i.e. c2
         // + nothing else) are in the artifact.
