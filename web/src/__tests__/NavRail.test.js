@@ -91,6 +91,7 @@ vi.mock('../components/UserProfile.svelte', () => ({ default: function UserProfi
 vi.mock('../lib/DetailPanel.svelte', () => ({ default: function DetailPanelStub() {} }));
 
 import { api } from '../lib/api.js';
+import { REPO_TAB_IDS } from '../lib/repoTabs.js';
 import NavRail from '../components/NavRail.svelte';
 import App from '../App.svelte';
 
@@ -348,8 +349,12 @@ describe('Navigation rail in the app shell (ui-navigation.md §1a)', () => {
     const ids = Array.from(container.querySelectorAll('.nav-rail-item')).map(
       (el) => el.getAttribute('data-testid').replace('nav-rail-item-', '')
     );
-    // RepoMode TABS order — the tab strip is the source of truth.
-    expect(ids).toEqual(['specs', 'tasks', 'mrs', 'agents', 'architecture', 'dependencies', 'decisions', 'code', 'settings']);
+    // RepoMode TABS order — the tab strip is the source of truth. The
+    // expectation is derived from the same shared list (lib/repoTabs.js)
+    // RepoMode renders its tab bar from, so a tab added/removed/reordered
+    // there automatically updates this assertion; a hand-maintained copy in
+    // App.svelte would fail against it (mirrored-logic guard).
+    expect(ids).toEqual(REPO_TAB_IDS);
     // Active item is the current tab (Code).
     expect(container.querySelector('[data-testid="nav-rail-item-code"]').getAttribute('aria-current')).toBe('page');
     // Selecting a rail item activates the corresponding tab.

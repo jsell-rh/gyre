@@ -21,8 +21,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 // ── Pure function tests (parseUrl + urlFor replicated from App.svelte) ──
+// The tab list is NOT replicated: it is derived from lib/repoTabs.js, the
+// same single source of truth App.svelte and RepoMode.svelte use, so the
+// replica cannot drift from the real parser's tab set.
+import { REPO_TAB_IDS } from '../lib/repoTabs.js';
 
-const REPO_TABS = ['specs', 'architecture', 'decisions', 'code', 'settings'];
+const REPO_TABS = REPO_TAB_IDS;
 
 function parseUrl(pathname) {
   const raw = pathname.split('/').filter(Boolean).map(p => {
@@ -160,6 +164,25 @@ describe('parseUrl', () => {
     expect(parseUrl('/workspaces/payments/r/payment-api/settings')).toEqual({
       mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'settings',
     });
+  });
+
+  it('parses repo mode with dependencies tab (drift regression)', () => {
+    // The App.svelte route-parse list once drifted from the tab strip and
+    // lost 'dependencies', misparsing this deep link to the Specs tab. The
+    // tab set is now derived from lib/repoTabs.js, so every tab on the
+    // strip — including any added later — must parse.
+    expect(parseUrl('/workspaces/payments/r/payment-api/dependencies')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'dependencies',
+    });
+  });
+
+  it('parses every tab on the repo tab strip', () => {
+    // Completeness guard: the parser accepts exactly the strip's tab set.
+    for (const id of REPO_TAB_IDS) {
+      expect(parseUrl(`/workspaces/payments/r/payment-api/${id}`)).toEqual({
+        mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: id,
+      });
+    }
   });
 
   it('falls back to specs for unknown repo tab', () => {
@@ -391,10 +414,9 @@ describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
     const itemIds = Array.from(drawer.querySelectorAll('.drawer-link')).map(
       (el) => el.getAttribute('data-testid').replace('drawer-item-', '')
     );
-    // Canonical tab order (RepoMode TABS / App REPO_RAIL_TAB_IDS).
-    expect(itemIds).toEqual([
-      'specs', 'tasks', 'mrs', 'agents', 'architecture', 'dependencies', 'decisions', 'code', 'settings',
-    ]);
+    // Canonical tab order — derived from the same shared list
+    // (lib/repoTabs.js) RepoMode's tab strip and App's rail render from.
+    expect(itemIds).toEqual(REPO_TAB_IDS);
     // Briefing is an Architecture sub-tab, never a drawer/tab item.
     expect(container.querySelector('[data-testid="drawer-item-briefing"]')).toBeNull();
     // Selecting Architecture activates the Architecture tab (same route as

@@ -14,6 +14,7 @@
   import PublicUserProfile from './components/PublicUserProfile.svelte';
   import NotificationBell from './components/NotificationBell.svelte';
   import NavRail from './components/NavRail.svelte';
+  import { REPO_TAB_IDS } from './lib/repoTabs.js';
   import NotificationSettings from './components/NotificationSettings.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
@@ -235,7 +236,10 @@
   // /workspaces/:slug/r/:repo/specs/*path      → spec detail page
   // /profile                                   → user profile
 
-  const REPO_TABS = ['specs', 'tasks', 'mrs', 'agents', 'architecture', 'decisions', 'code', 'settings'];
+  // Repo tab ids for URL parsing — derived from the repo tab strip
+  // (web/src/lib/repoTabs.js, the single source of truth shared with
+  // RepoMode's tab bar, the navigation rail, and the mobile drawer), so a
+  // tab added to the strip is deep-linkable the moment it ships.
   const ENTITY_TABS = ['mrs', 'tasks', 'agents'];
 
   // ── Entity detail state ─────────────────────────────────────────────
@@ -310,7 +314,7 @@
           return { mode: 'repo', slug, repoName, tab: 'specs', entityType: 'spec', entityId: specPath };
         }
 
-        const tab = tabOrType && REPO_TABS.includes(tabOrType) ? tabOrType : 'specs';
+        const tab = tabOrType && REPO_TAB_IDS.includes(tabOrType) ? tabOrType : 'specs';
         return { mode: 'repo', slug, repoName, tab, entityType: null, entityId: null };
       }
 
@@ -684,7 +688,7 @@
     // (HSI §1.5 Meta-specs row — meta-specs are workspace-scoped).
     if (view === 'meta-specs') { goToAgentRules(); return; }
     // In repo mode, tab names switch the active tab instead of navigating away
-    if (mode === 'repo' && REPO_TABS.includes(view)) { goToRepoTab(view); return; }
+    if (mode === 'repo' && REPO_TAB_IDS.includes(view)) { goToRepoTab(view); return; }
     // Everything else lands on workspace home
     goToWorkspaceHome(currentWorkspace);
   });
@@ -980,7 +984,7 @@
       if (repoTab === 'architecture' || repoTab === 'dependencies' || repoTab === 'code' || repoTab === 'mrs' || repoTab === 'agents') return 'repos';
       if (repoTab === 'decisions') return 'decisions';
       if (repoTab === 'settings') return 'settings';
-      return 'repos'; // exhaustive-state:ok — all REPO_TABS enumerated above; defensive fallback
+      return 'repos'; // exhaustive-state:ok — all REPO_TAB_IDS enumerated above; defensive fallback
     }
     return 'decisions';
   });
@@ -1087,10 +1091,11 @@
     'decisions', 'specs', 'architecture', 'repos', 'briefing', 'agent-rules', 'settings',
   ];
   // Repo-mode rail item set: the repo tab strip exactly (§3), in canonical
-  // tab order — the tab strip is the source of truth; the rail mirrors it.
-  const REPO_RAIL_TAB_IDS = [
-    'specs', 'tasks', 'mrs', 'agents', 'architecture', 'dependencies', 'decisions', 'code', 'settings',
-  ];
+  // tab order. The tab strip is the source of truth, so this is a
+  // derivation from web/src/lib/repoTabs.js (the same list RepoMode
+  // renders its tab bar from) — never a hand-maintained copy that could
+  // drift from the strip.
+  const REPO_RAIL_TAB_IDS = REPO_TAB_IDS;
 
   function workspaceRailLabel(id) {
     switch (id) {
