@@ -104,6 +104,7 @@ vi.mock('../lib/api.js', () => ({
     mergeRequests: vi.fn().mockResolvedValue([]),
     mergeRequest: vi.fn().mockResolvedValue(null),
     createTask: vi.fn().mockResolvedValue({ id: 'task-42', title: 'Reconcile' }),
+    workspace: vi.fn().mockResolvedValue({ id: 'ws-1', trust_level: 'Supervised' }),
   },
 }));
 
@@ -122,6 +123,31 @@ describe('Inbox', () => {
 
   it('renders without throwing', () => {
     expect(() => render(Inbox)).not.toThrow();
+  });
+
+  // HSI §2 "Inbox filtering by trust level": the UI reads the workspace's
+  // trust_level and maps it to the priority range before calling the
+  // endpoint — Priorities 1-9 (max_priority 9) at Guided/Autonomous,
+  // everything at Supervised/Custom.
+  it('requests max_priority 9 when the workspace trust level is Guided', async () => {
+    api.workspace.mockResolvedValue({ id: 'ws-1', trust_level: 'Guided' });
+    render(Inbox, { workspaceId: 'ws-1', scope: 'workspace' });
+    await waitFor(() => {
+      expect(api.myNotifications).toHaveBeenCalled();
+    });
+    const params = api.myNotifications.mock.calls[0][0];
+    expect(params.max_priority).toBe(9);
+    expect(params.workspace_id).toBe('ws-1');
+  });
+
+  it('requests no priority cap when the workspace trust level is Supervised', async () => {
+    api.workspace.mockResolvedValue({ id: 'ws-1', trust_level: 'Supervised' });
+    render(Inbox, { workspaceId: 'ws-1', scope: 'workspace' });
+    await waitFor(() => {
+      expect(api.myNotifications).toHaveBeenCalled();
+    });
+    const params = api.myNotifications.mock.calls[0][0];
+    expect(params.max_priority).toBeUndefined();
   });
 
   it('mounts and produces DOM output', () => {

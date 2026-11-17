@@ -29,7 +29,7 @@ use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
     Id,
 };
-use gyre_domain::{MrStatus, TaskStatus};
+use gyre_domain::{MrStatus, TaskStatus, TrustLevel};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1263,43 +1263,154 @@ pub async fn assemble_briefing(
         .filter(|t| repo_match(&t.repo_id, repo_filter))
         .collect();
 
-    // Section: completed — MRs with status Merged updated since `since`.
-    let completed: Vec<BriefingItem> = mrs
-        .iter()
-        .filter(|mr| mr.status == MrStatus::Merged && mr.updated_at >= since)
-        .map(|mr| BriefingItem {
-            title: mr.title.clone(),
-            description: format!("{} → {}", mr.source_branch, mr.target_branch),
-            entity_type: "mr".to_string(),
-            entity_id: Some(mr.id.to_string()),
-            spec_path: mr
-                .spec_ref
-                .as_ref()
-                .map(|s| s.split('@').next().unwrap_or(s).to_string()),
-            timestamp: mr.updated_at,
-            actions: Vec::new(),
-            source_workspace_slug: None,
-        })
-        .collect();
+    // HSI §2 "Briefing detail" row: the briefing's granularity follows the
+    // workspace's trust level — Supervised shows per-agent activity and
+    // per-MR status; Guided shows per-spec progress plus exceptions;
+    // Autonomous shows spec-level summaries and exceptions only. Unknown
+    // workspace (should not happen — the route validated it) falls back to
+    // the Supervised default, the most detailed (fail-open on detail).
+    let trust_level = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.trust_level)
+        .unwrap_or_default();
+    let spec_level_briefing = matches!(trust_level, TrustLevel::Guided | TrustLevel::Autonomous);
 
-    // Section: in_progress — tasks with status InProgress or Review updated since `since`.
-    let in_progress: Vec<BriefingItem> = tasks
-        .iter()
-        .filter(|t| {
-            (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
-                && t.updated_at >= since
-        })
-        .map(|t| BriefingItem {
-            title: t.title.clone(),
-            description: t.description.clone().unwrap_or_default(),
-            entity_type: "task".to_string(),
-            entity_id: Some(t.id.to_string()),
-            spec_path: t.spec_path.clone(),
-            timestamp: t.updated_at,
-            actions: Vec::new(),
-            source_workspace_slug: None,
-        })
-        .collect();
+    // Section: completed — MRs with status Merged updated since `since`.
+    // At Guided/Autonomous the section is rolled up per spec (HSI §2
+    // "Briefing detail": "Per-spec progress" / "Spec-level summaries").
+    let completed: Vec<BriefingItem> = {
+        let per_mr: Vec<BriefingItem> = mrs
+            .iter()
+            .filter(|mr| mr.status == MrStatus::Merged && mr.updated_at >= since)
+            .map(|mr| BriefingItem {
+                title: mr.title.clone(),
+                description: format!("{} → {}", mr.source_branch, mr.target_branch),
+                entity_type: "mr".to_string(),
+                entity_id: Some(mr.id.to_string()),
+                spec_path: mr
+                    .spec_ref
+                    .as_ref()
+                    .map(|s| s.split('@').next().unwrap_or(s).to_string()),
+                timestamp: mr.updated_at,
+                actions: Vec::new(),
+                source_workspace_slug: None,
+            })
+            .collect();
+        if !spec_level_briefing {
+            per_mr
+        } else {
+            // Roll up per spec: one item per spec path with the merged-MR
+            // count. MRs without a spec_ref group under their own title
+            // (a spec-less MR stays visible rather than vanishing).
+            let mut groups: std::collections::BTreeMap<String, Vec<&BriefingItem>> =
+                std::collections::BTreeMap::new();
+            for item in &per_mr {
+                let key = item.spec_path.clone().unwrap_or_else(|| item.title.clone());
+                groups.entry(key).or_default().push(item);
+            }
+            groups
+                .into_iter()
+                .map(|(spec, items)| {
+                    let count = items.len();
+                    let mr_word = if count == 1 { "MR" } else { "MRs" };
+                    let (latest, spec_path) = items
+                        .iter()
+                        .max_by_key(|i| i.timestamp)
+                        .map(|i| (i.timestamp, i.spec_path.clone()))
+                        .unwrap_or((since, None));
+                    BriefingItem {
+                        title: spec.clone(),
+                        description: format!("{count} {mr_word} merged"),
+                        entity_type: "spec".to_string(),
+                        entity_id: None,
+                        spec_path: spec_path.or(Some(spec)),
+                        timestamp: latest,
+                        actions: Vec::new(),
+                        source_workspace_slug: None,
+                    }
+                })
+                .collect()
+        }
+    };
+
+    // Section: in_progress — tasks with status InProgress or Review updated
+    // since `since`. At Guided this rolls up per spec with progress
+    // ("x of y tasks done, z active"); at Autonomous it is a terse
+    // spec-level summary (HSI §2 "Briefing detail").
+    let in_progress: Vec<BriefingItem> = {
+        let per_task: Vec<BriefingItem> = tasks
+            .iter()
+            .filter(|t| {
+                (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
+                    && t.updated_at >= since
+            })
+            .map(|t| BriefingItem {
+                title: t.title.clone(),
+                description: t.description.clone().unwrap_or_default(),
+                entity_type: "task".to_string(),
+                entity_id: Some(t.id.to_string()),
+                spec_path: t.spec_path.clone(),
+                timestamp: t.updated_at,
+                actions: Vec::new(),
+                source_workspace_slug: None,
+            })
+            .collect();
+        if !spec_level_briefing {
+            per_task
+        } else {
+            let autonomous = matches!(trust_level, TrustLevel::Autonomous);
+            let spec_of =
+                |t: &gyre_domain::Task| t.spec_path.clone().unwrap_or_else(|| t.title.clone());
+            let mut groups: std::collections::BTreeMap<String, Vec<&gyre_domain::Task>> =
+                std::collections::BTreeMap::new();
+            for t in tasks.iter().filter(|t| {
+                (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
+                    && t.updated_at >= since
+            }) {
+                groups.entry(spec_of(t)).or_default().push(t);
+            }
+            groups
+                .into_iter()
+                .map(|(spec, in_flight)| {
+                    let done = tasks
+                        .iter()
+                        .filter(|t| {
+                            t.spec_path.as_deref() == Some(spec.as_str())
+                                && t.status == TaskStatus::Done
+                        })
+                        .count();
+                    let active = in_flight.len();
+                    let description = if autonomous {
+                        format!("{active} task(s) in progress")
+                    } else {
+                        format!(
+                            "{done} of {} tasks complete, {active} active",
+                            done + active
+                        )
+                    };
+                    let latest = in_flight
+                        .iter()
+                        .map(|t| t.updated_at)
+                        .max()
+                        .unwrap_or(since);
+                    BriefingItem {
+                        title: spec.clone(),
+                        description,
+                        entity_type: "spec".to_string(),
+                        entity_id: None,
+                        spec_path: Some(spec),
+                        timestamp: latest,
+                        actions: Vec::new(),
+                        source_workspace_slug: None,
+                    }
+                })
+                .collect()
+        }
+    };
 
     // Section: cross_workspace — inbound spec links from other workspaces.
     let cross_workspace: Vec<BriefingItem> = {
@@ -1527,11 +1638,19 @@ pub async fn assemble_briefing(
                 .get("spec_ref")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let decisions = payload
+            let mut decisions = payload
                 .get("decisions")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            // HSI §2 "Agent completion summaries" row: at Autonomous only
+            // low-confidence decisions are surfaced — the full decision log
+            // is Supervised's view, Guided keeps the log and highlights
+            // uncertainties (rendering). The stored message is untouched;
+            // this is payload shaping for the trust level, not data loss.
+            if matches!(trust_level, TrustLevel::Autonomous) {
+                decisions.retain(|d| d.get("confidence").and_then(|c| c.as_str()) == Some("low"));
+            }
             let uncertainties = payload
                 .get("uncertainties")
                 .and_then(|v| v.as_array())
@@ -4980,5 +5099,140 @@ concepts:
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
         assert_eq!(ball.completed_agents.len(), 3);
+    }
+
+    /// HSI §2 "Briefing detail" + "Agent completion summaries" rows: the
+    /// briefing payload VARIES with the workspace's trust level —
+    /// Supervised shows per-MR status and the full decision log; Guided
+    /// rolls up per spec (progress) keeping the full log; Autonomous shows
+    /// spec-level summaries and surfaces only low-confidence decisions.
+    #[tokio::test]
+    async fn briefing_detail_and_completion_summaries_vary_by_trust_level() {
+        let state = test_state();
+        let (ws_id, _repo1) = setup_workspace_and_repo(&state).await;
+
+        // Two merged MRs implementing the SAME spec.
+        for (mr_id, branch) in [("mr-trust-a", "feat/a"), ("mr-trust-b", "feat/b")] {
+            let mut mr = gyre_domain::MergeRequest::new(
+                Id::new(mr_id),
+                Id::new("repo-1"),
+                Id::new("ws-briefing"),
+                "Implement payment retry",
+                branch,
+                "main",
+                2000,
+            );
+            mr.spec_ref = Some("specs/system/payment-retry.md@sha-1".to_string());
+            mr.updated_at = 2000;
+            mr.status = gyre_domain::MrStatus::Merged;
+            state.merge_requests.create(&mr).await.unwrap();
+        }
+
+        // In-progress task on the same spec.
+        let mut t1 = gyre_domain::Task::new(Id::new("task-trust-1"), "Retry logic", 2000);
+        t1.workspace_id = Id::new("ws-briefing");
+        t1.repo_id = Id::new("repo-1");
+        t1.spec_path = Some("specs/system/payment-retry.md".to_string());
+        t1.status = gyre_domain::TaskStatus::InProgress;
+        t1.updated_at = 2000;
+        state.tasks.create(&t1).await.unwrap();
+
+        // Completed agent with a mixed-confidence decision log.
+        let msg = gyre_common::Message {
+            id: Id::new("msg-trust-agent"),
+            tenant_id: Id::new("tenant-1"),
+            from: gyre_common::MessageOrigin::Agent(Id::new("agent-trust")),
+            workspace_id: Some(Id::new("ws-briefing")),
+            to: gyre_common::Destination::Broadcast,
+            kind: gyre_common::MessageKind::AgentCompleted,
+            payload: Some(serde_json::json!({
+                "agent_id": "agent-trust",
+                "spec_ref": "specs/system/payment-retry.md",
+                "decisions": [
+                    { "what": "used exponential backoff", "why": "idempotency", "confidence": "high" },
+                    { "what": "capped retries at 3", "why": "spec silent", "confidence": "low" }
+                ],
+                "uncertainties": ["timeout behavior undefined"]
+            })),
+            created_at: 2_000_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let set_trust = |level: gyre_domain::TrustLevel| {
+            let state = state.clone();
+            let ws_id = ws_id.clone();
+            async move {
+                let mut ws = state
+                    .workspaces
+                    .find_by_id(&Id::new(&ws_id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                ws.trust_level = level;
+                state.workspaces.update(&ws).await.unwrap();
+            }
+        };
+
+        // Supervised (default): per-MR completed items, full decision log.
+        let b = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b.completed.len(), 2, "Supervised: per-MR status");
+        assert_eq!(b.in_progress.len(), 1, "Supervised: per-task activity");
+        assert_eq!(
+            b.completed_agents[0].decisions.len(),
+            2,
+            "Supervised: full decision log visible"
+        );
+
+        // Guided: per-spec rollup with progress, full log kept.
+        set_trust(gyre_domain::TrustLevel::Guided).await;
+        let b = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(
+            b.completed.len(),
+            1,
+            "Guided: per-spec progress, not per-MR"
+        );
+        assert!(b.completed[0].description.contains("2 MRs merged"));
+        assert_eq!(b.in_progress.len(), 1, "Guided: per-spec in-progress");
+        assert!(b.in_progress[0].description.contains("active"));
+        assert_eq!(
+            b.completed_agents[0].decisions.len(),
+            2,
+            "Guided: decision log kept (uncertainties highlighted in the UI)"
+        );
+        assert_eq!(b.completed_agents[0].uncertainties.len(), 1);
+
+        // Autonomous: terse spec-level summaries, only low-confidence
+        // decisions surfaced.
+        set_trust(gyre_domain::TrustLevel::Autonomous).await;
+        let b = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b.completed.len(), 1, "Autonomous: spec-level summaries");
+        assert_eq!(
+            b.in_progress.len(),
+            1,
+            "Autonomous: in-progress stays spec-level"
+        );
+        assert_eq!(
+            b.completed_agents[0].decisions.len(),
+            1,
+            "Autonomous: only low-confidence decisions surfaced"
+        );
+        assert_eq!(
+            b.completed_agents[0].decisions[0]["confidence"], "low",
+            "the surfaced decision must be the low-confidence one"
+        );
+        // Uncertainties are exception-tier: still surfaced at Autonomous.
+        assert_eq!(b.completed_agents[0].uncertainties.len(), 1);
     }
 }

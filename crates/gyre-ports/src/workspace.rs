@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
-use gyre_domain::{Persona, PersonaScope, Policy, Workspace};
+use gyre_domain::{Persona, PersonaScope, Policy, Task, Workspace};
 
 #[async_trait]
 #[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
@@ -58,4 +58,26 @@ pub trait PersonaRepository: Send + Sync {
     async fn list_by_scope(&self, scope: &PersonaScope) -> Result<Vec<Persona>>;
     async fn update(&self, persona: &Persona) -> Result<()>;
     async fn delete(&self, id: &Id) -> Result<()>;
+
+    /// Atomically apply a persona-file push approval reset: write the
+    /// persona (insert-or-update — the caller has already reset its
+    /// approval to `Pending`) AND create its human-approval task in a
+    /// single transaction.
+    ///
+    /// WHY THIS EXISTS (platform-model.md §2 Repo-Defined Personas): a
+    /// persona push resets the persona's approval to Pending, which is only
+    /// safe while the matching human-approval task exists — a persona
+    /// written without its task leaves an approval flow with no visible
+    /// gate. Writing both through the separate `create`/`update` + task
+    /// `create` calls is non-atomic: a failure between them strands the
+    /// reset persona. On any failure the whole transaction rolls back —
+    /// neither the persona write nor the task is persisted.
+    ///
+    /// The task is written through the persona port (not
+    /// `TaskRepository::create`) because atomicity requires one transaction
+    /// — the same cross-entity precedent as
+    /// [`WorkspaceRepository::apply_trust_transition`] writing policies.
+    /// Storage adapters that cannot fail the second write must still honor
+    /// the rollback contract in code (see the mem adapter).
+    async fn apply_approval_reset_with_task(&self, persona: &Persona, task: &Task) -> Result<()>;
 }
