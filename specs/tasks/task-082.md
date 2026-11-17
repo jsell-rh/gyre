@@ -2,7 +2,7 @@
 title: "Navigation: context-dependent collapsible rail (retargeted from HSI stable sidebar)"
 spec_ref: "ui-navigation.md §1a"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 review: specs/reviews/task-082.md
 coverage_sections:
   - "ui-navigation.md §1a Collapsible Navigation Rail (Optional)"
@@ -12,7 +12,88 @@ commits:
   - 72bd5823
   - 9561ee86
   - 79323318
+  - 42e12c08
+  - fa9cc057
 ---
+
+## Shipped
+
+Implementation of the retargeted requirement (ui-navigation.md §1a), landed
+as commit `42e12c08` (code + tests) and `fa9cc057` (docs/spec/coverage
+updates) on top of the base retarget merge `29ed796e`.
+
+### Behavior
+
+- **Rail component** (`web/src/components/NavRail.svelte`): icon-only
+  48px collapsed by default, toggle expands to labelled 240px; preference
+  persisted per user per mode under
+  `gyre_nav_rail_expanded.<mode>.<user-id>` (first use = collapsed);
+  scope-labelled header; stable per-mode item order; active item
+  highlighted via `.active` + `aria-current="page"`; `display: none`
+  below 768px so there is no persistent rail on mobile.
+- **Where it renders** (App.svelte `showNavRail`): workspace home (with a
+  selected workspace) and repo mode without an open entity detail. Never
+  on focused surfaces: full-page entity detail (popped-out detail panel),
+  workspace settings / agent rules / analytics / profile sub-pages,
+  cross-workspace view, notification settings. Every destination remains
+  reachable without the rail (dashboard sections, repo tab strip, ⌘K,
+  g-shortcuts all unchanged).
+- **Item sets**: workspace-home rail = Decisions, Specs, Architecture,
+  Repos, Briefing, Agent Rules, Settings (§2 canonical order + Settings;
+  Settings navigates to workspace settings; Architecture expands the
+  collapsed dashboard section via `archExpandSignal` then scrolls). Repo
+  rail mirrors the RepoMode `TABS` strip exactly, including Dependencies,
+  each keeping its shipped tab position; selection calls `goToRepoTab`
+  (same route as clicking the tab).
+- **Scope labels**: workspace name at workspace home; `workspace / repo`
+  path in repo mode. No global menu shared across modes.
+- **Narrow viewports**: the hamburger drawer now offers the rail's
+  per-mode item set (workspace sections in canonical order + Settings at
+  workspace scope; the repo tab strip exactly in repo mode); the
+  tenant-scope `/all` drawer keeps its §10 section semantics; the
+  Analytics drawer entry was removed (still reachable via the topbar
+  gear).
+
+### Test evidence
+
+- `web/src/__tests__/NavRail.test.js` (new, 12 tests): collapse default,
+  expand toggle + persistence per user per mode, restore on mount,
+  collapse persistence, active highlight + onSelect, app-level workspace
+  rail item set/order/scope label, Architecture scroll+expand+active,
+  Settings navigation + rail absence on the sub-page, repo rail tab-strip
+  mirror + tab switching + scope label, rail absence on full-page entity
+  detail and with no workspace selected, per-mode localStorage keys.
+- `web/src/__tests__/NoSidebar.test.js` (updated): adds an explicit
+  rail-vs-permanent-sidebar distinction test (rail present but collapsed
+  on workspace home; absent on workspace settings; old `.sidebar`
+  selectors still asserted null); drawer test strengthened to assert the
+  full §1a canonical item set and order.
+- `web/src/__tests__/AppShell.test.js` (updated): the repo-mode drawer
+  test was retargeted from the superseded `drawer-item-briefing` behavior
+  to the §1a tab-strip mirror (exact item ids and order, no Briefing
+  item, Architecture click activates the tab). Briefing sub-tab deep-link
+  coverage remains in ExplorerViewScope.test.js.
+- Focused runs (exit 0): `npx vitest run src/__tests__/NavRail.test.js
+  NoSidebar.test.js AppShell.test.js WorkspaceDrawerSectionNav.test.js`
+  (97 passed), plus RepoMode/RepoModeHeader/RepoModeHealth/
+  BidirectionalNav/ScopeTransitions/CrossWorkspaceEntry/
+  CrossWorkspaceHome/WorkspaceHomeSections/SearchBar (179 passed,
+  41 skipped).
+- Full `web` unit suite at the implementation commit: 123 files,
+  2449 passed / 41 skipped, 0 failures (no pre-existing failures
+  observed in this run). Frontend deps installed with `npm ci` (locked
+  versions). Evidence retained under /tmp/stage/review-evidence.
+- Not run here (owned by independent verification): cargo gates, arch
+  checks, Playwright e2e/visual suites, exact-head GitHub CI. The change
+  touches no Rust code and no visual-snapshot target (rail never renders
+  on ExplorerView/canvas surfaces; e2e `no_sidebar_present` targets
+  `[data-testid="sidebar"]`, unaffected).
+
+### Deferred to verification
+
+- Server-side suites: none required (no Rust changes; `cargo check`
+  not needed for a web-only change, but the verifier may confirm).
+- GitHub CI on the branch head.
 
 ## Supersession and retarget (2026-11-16)
 
