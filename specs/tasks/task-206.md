@@ -2,10 +2,10 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["a4d8bd712ed166b78311ce648a70c58791082ea1", "2f10e8d134c1911f52b07400d7becabb910dbe21", "7cad12616cd28f691664cac1922337c9f5d72bef", "683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -124,38 +124,3 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
 - Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
-
-## Shipped
-
-Preview mode is a real agent run path, not an estimate (meta-spec-reconciliation.md §5):
-
-- **Spawn** — `POST /api/v1/meta-specs/preview` (Admin/Developer; global route per spec) validates every target up front (repo exists, caller passes repo ABAC + tenant containment, spec_path exists on the default branch), then provisions per target a real `Active` agent row, a `preview/{preview_id}/{slug}` branch pinned to the default-branch tip, a real git worktree, and a short-lived preview JWT (`GYRE_PREVIEW_JWT_TTL_SECS`, default 1800 s). Response is exactly the spec shape: `202 {preview_id, agents:[{agent_id, repo_id, spec_path, branch}]}`. Provisioning is all-or-nothing per request.
-- **Draft delivery** — the draft travels out-of-band in the agent process environment (`GYRE_PREVIEW_ID`, `GYRE_META_SPEC_DRAFT_KIND`, `GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_TARGET_SPEC_PATH`; `GYRE_TASK_ID` deliberately absent). `docker/gyre-agent/agent-runner.mjs` reads those vars and builds the prompt itself: draft meta-spec as governing "how to build" context over the target spec, task-mutating MCP tools withheld, push to the preview branch as the entire deliverable.
-- **Skip-ceremony enforced, not just skipped** — the MCP dispatch refuses task/MR/provenance mutations for preview agents, and the REST surface refuses preview-agent callers on agent complete/stop/fail/status/usage, task create/update/status, MR create/status, merge-queue enqueue/cancel, spec approve, compose apply/teardown, and workspace-orchestrator spawn (403; the registry-exempt stop/fail/usage routes additionally enforce per-handler tenant containment, and stop/fail require Admin or the victim's in-tenant authorization). No spec-approval gate, no quality gates, no MR, no merge queue, no provenance, no `refs/agents/*`/`refs/tasks/*` writes, never `Idle`. Budget: workspace budget by default, `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` caps preview spawns independently when set (429 on overflow).
-- **Completion** — every compute-target monitor routes exits through `spawn::on_agent_process_exit` → `finish_preview_agent`: token revoked, worktree removed, budget slot released (idempotent), agent row lands `Stopped` — never `Idle`. The branch survives for diffing.
-- **Status + diff** — `GET /api/v1/meta-specs/preview/{preview_id}` reports per-agent state derived from the real agent rows and the produced `diff` (preview branch vs. pinned base sha, same git plumbing as MR diffs) once the branch exists.
-- **Cleanup** — `DELETE /api/v1/meta-specs/preview/{preview_id}` kills agents, force-removes worktrees, closes open MRs on `preview/{id}/*` branches, deletes every preview branch, revokes tokens, drops the kv records; 404 on unknown id. Background job `meta_spec_preview_gc` (interval `GYRE_META_SPEC_PREVIEW_GC_INTERVAL_SECS`, default 1 h; TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) tears down expired runs and reclaims orphaned agent entries. No refs, no provenance, no audit trail.
-- **Clean cutover** — the hollow structural-impact preview and the workspace-scoped routes (and their ABAC exemption entries) are gone; docs updated (`docs/api-reference.md`, `docs/server-config.md`, `docker/gyre-agent/README.md`).
-
-### Verification repair (round a4d8bd71)
-
-The independent verification run failed `check-clippy-diff.py` on two `clippy::to_string_in_format_args` warnings on changed test lines in `meta_specs.rs` (`mr.id.to_string()` inside the MR-status guard-test `format!` URIs). Fixed by passing `Id` directly (it implements `Display`); rustfmt collapsed the calls; the changed-lines clippy gate now passes in-sandbox. The run's other failure (stale ABAC route-registry exemption lines for the removed workspace-scoped preview routes) does not reproduce on this head: the branch removes both the routes and their exemption entries, replaying the base merge in a scratch clone preserves the removal, and both ABAC check scripts pass on this tree (the finding log's own second suite run also passed).
-
-### Test evidence
-
-In-sandbox on this head (evidence under `/tmp/stage/review-evidence/summary.md`):
-
-- `cargo check -p gyre-server --lib --tests` (SKIP_WEB_BUILD=1) — clean, 0 errors.
-- `python3 scripts/check-clippy-diff.py 64d0b865` — changed lines clean (29 files; 750 pre-existing warnings outside changes ignored).
-- `python3 scripts/check-rustfmt-diff.py 64d0b865` — changed lines clean.
-- `bash scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh` (83 handlers), `check-mcp-write-tools.sh`, `check-migration-versions.sh`, `check-dead-message-kinds.sh`, `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`, `check-fail-open-ref-resolution.sh`, `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-scope-literal-defaults.sh`, `check-inert-enforcement.sh`, `check-forged-scope-fields.sh`, `check-forwarded-header-trust.sh`, `check-in-memory-state-stores.sh`, `check-unbounded-external-http.sh`, `check-migration-sql-portability.sh`, `check-task-commit-attribution.sh` — all pass.
-
-The build wrapper blocks gyre-server test codegen in this stage, so server test execution is deferred to the independent verifier. Required probes:
-
-- `cargo test -p gyre-server --lib -- preview_` (full preview suite: spawn/draft/authz/skip-ceremony/DELETE/GC-TTL/diff, budget cap, rollback, cross-tenant containment, REST/MCP escape-class guards)
-- `cargo test -p gyre-server --lib api::spawn` / `api::orchestrator` / `api::compose` / `api::specs` (in-file suites touched by the escape-class guards)
-- `cargo test -p gyre-server --lib -- uninstrumented_role_guards`
-- `cargo test -p gyre-server --test api_integration orchestrator_spawn_denied_across_tenants`
-- `cd web && npm ci && npm test`
-
-Sandbox limitation: this stage's probes ran source checks and type checking only; exact-head GitHub checks remain mandatory after independent review.
