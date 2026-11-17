@@ -1,0 +1,38 @@
+-- Renumber note (rebase onto main head f764bc00): this migration held
+-- version 20261108000060 (itself a renumber from 20261009000057); no
+-- upstream migration owns that version, but the sibling task-110
+-- migrations were renumbered into the 2026-11-13 sequence, so this one
+-- moved to 000065 to keep the task's additions contiguous and
+-- collision-free. The index targets a column owned by 20261008000058,
+-- which still sorts first. Databases that already ran a pre-renumber
+-- version are unaffected: Diesel records versions, not file contents.
+
+-- TASK-110 repair F1 (user-management.md §User Entity, §Workspace
+-- Invitation Flow): the domain User carries tenant_id and global_role,
+-- but the users table has no columns for them — the DB adapters
+-- silently dropped both on every create/read, so in GYRE_DATABASE_URL
+-- deployments (the documented production mode) the workspace invitation
+-- flow rejected every invitee with 403 "user has no tenant scope" and
+-- the invited GlobalRole was lost.
+--
+-- Rebase note (merge of c5deca801, task-105/task-120 lineage): the
+-- tenant_id and global_role columns are now created by
+-- 2026-10-08-000058_user_entity_profile_fields, whose Diesel version
+-- (20261008000058) sorts BEFORE this migration's, so it always runs
+-- first on a fresh database — re-adding the columns here would abort
+-- with "duplicate column name" and prevent startup. This migration
+-- keeps only the tenant-scope index it uniquely contributes.
+--
+-- Renumber note (rebase onto 774737638, upstream landed
+-- 2026-10-09-000057_agent_persona_id under the same version
+-- 20261009000057 this migration originally held): Diesel runs only one
+-- migration per version (alphabetically first wins), which would have
+-- silently dropped this index on fresh databases. The upstream version
+-- string is immutable (published lineage), so this migration was
+-- renumbered to the next unused sequence, 000060; the index targets a
+-- column owned by 20261008000058, which still sorts first. Databases
+-- that already ran the pre-renumber version of this migration are
+-- unaffected: Diesel records versions, not file contents, and their
+-- index already exists.
+
+CREATE INDEX idx_users_tenant ON users (tenant_id);

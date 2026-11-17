@@ -112,10 +112,38 @@ pub trait GitOpsPort: Send + Sync {
         file_path: &str,
     ) -> Result<Option<Vec<u8>>>;
 
+    /// Read a file's content at a specific commit SHA (not a branch tip).
+    ///
+    /// Returns `Ok(None)` if the file does not exist at the given path in
+    /// that commit's tree. Used by the gate executor to hand a review agent
+    /// the spec content at the exact SHA pinned in the MR's `spec_ref`
+    /// (`path@sha`), so the reviewer judges the change against the spec the
+    /// MR was authored under, not whatever the branch tip holds now.
+    ///
+    /// The SHA may also name a **blob** directly — the production spec_ref
+    /// shape: MR spec_refs carry the spec ledger's blob SHA
+    /// (`spec_ledger.current_sha`), whose ledger path (`system/foo.md`) is
+    /// not a repo tree path. A blob pin resolves to the blob's own content;
+    /// the path is informational for that shape. A SHA that is neither a
+    /// commit nor a blob is an error (fail-closed pin resolution).
+    async fn read_file_at_commit(
+        &self,
+        repo_path: &str,
+        sha: &str,
+        file_path: &str,
+    ) -> Result<Option<Vec<u8>>>;
+
     /// Create a revert commit on `branch` that undoes `sha_to_revert`
     /// with `git revert -m 1` semantics: a three-way merge of the
     /// reverted commit's first-parent tree against the current branch
     /// tip, with the reverted commit's own tree as the merge base.
+    ///
+    /// Reverting a non-tip merge therefore undoes only that merge's
+    /// changes — every later merge on the branch is preserved (task-095
+    /// R4-F1: snapshot semantics would wipe them). Returns
+    /// [`RevertResult::Conflict`] when the inverse patch conflicts with
+    /// later changes (branch untouched); other failures are `Err`.
+    /// Used by the post-merge recovery protocol (platform-model.md §6).
     ///
     /// Reverting a non-tip merge therefore undoes only that merge's
     /// changes — every later merge on the branch is preserved (task-095

@@ -52,8 +52,12 @@ impl NotificationRow {
             id: Id::new(self.id),
             workspace_id: source.workspace_id.clone(),
             user_id: Id::new(self.user_id),
-            notification_type: ntype,
-            priority: gyre_common::NotificationPriority::from_rank(priority_rank),
+            notification_type: ntype.clone(),
+            // Band derives from the persisted notification TYPE per the
+            // amended §Notification Entity membership table — never from
+            // the numeric rank (only the rank is persisted, and no numeric
+            // threshold reproduces the specced membership).
+            priority: gyre_common::NotificationPriority::for_notification_type(&ntype),
             priority_rank,
             title: self.title,
             body: self.body,
@@ -153,14 +157,22 @@ impl NotificationRepository for PgStorage {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
-        notification_type: Option<&str>,
+        notification_types: Option<&[&str]>,
+        repo_id: Option<&Id>,
+        exclude_types: &[&str],
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
-        let ntype = notification_type.map(|s| s.to_string());
+        // Owned copy for the spawn_blocking closure; empty set matches
+        // nothing (port contract), handled explicitly below so the SQL
+        // never depends on `IN ()` semantics.
+        let ntypes: Option<Vec<String>> =
+            notification_types.map(|ts| ts.iter().map(|s| s.to_string()).collect());
+        let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
+        let rid = repo_id.cloned();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
@@ -168,7 +180,7 @@ impl NotificationRepository for PgStorage {
                 .order(notifications::priority.asc())
                 .then_order_by(notifications::created_at.desc())
                 .into_boxed();
-            if let Some(ref ws) = ws_id {
+            if let Some(ws) = &ws_id {
                 query = query.filter(notifications::workspace_id.eq(ws.as_str()));
             }
             if let Some(min_p) = min_priority {
@@ -177,8 +189,20 @@ impl NotificationRepository for PgStorage {
             if let Some(max_p) = max_priority {
                 query = query.filter(notifications::priority.le(max_p as i32));
             }
-            if let Some(ref nt) = ntype {
-                query = query.filter(notifications::notification_type.eq(nt));
+            if let Some(ref ts) = ntypes {
+                if ts.is_empty() {
+                    return Ok(Vec::new());
+                }
+                query = query
+                    .filter(notifications::notification_type.eq_any(ts.iter().map(String::as_str)));
+            }
+            if let Some(ref r) = rid {
+                query = query.filter(notifications::repo_id.eq(r.as_str()));
+            }
+            // NOT IN — applied before limit/offset so paging counts filtered rows.
+            // Empty list means "exclude nothing" (NOT IN () is invalid SQL).
+            if !excl.is_empty() {
+                query = query.filter(notifications::notification_type.ne_all(excl));
             }
             let rows = query
                 .limit(limit as i64)
@@ -188,6 +212,33 @@ impl NotificationRepository for PgStorage {
             rows.into_iter()
                 .map(NotificationRow::into_notification)
                 .collect()
+        })
+        .await?
+    }
+
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let entity_ref = entity_ref.to_string();
+        let ntype = notification_type.to_string();
+        let body = body.to_string();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let updated = diesel::update(
+                notifications::table
+                    .filter(notifications::entity_ref.eq(entity_ref.as_str()))
+                    .filter(notifications::notification_type.eq(ntype.as_str()))
+                    .filter(notifications::resolved_at.is_null())
+                    .filter(notifications::dismissed_at.is_null()),
+            )
+            .set(notifications::body.eq(body))
+            .execute(&mut *conn)
+            .context("update notification body by entity_ref")?;
+            Ok(updated as u64)
         })
         .await?
     }
@@ -268,7 +319,39 @@ impl NotificationRepository for PgStorage {
         .await?
     }
 
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let ws_id = workspace_id.cloned();
+        let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let mut query = notifications::table
+                .filter(notifications::user_id.eq(uid.as_str()))
+                .filter(notifications::resolved_at.is_null())
+                .filter(notifications::dismissed_at.is_null())
+                .into_boxed();
+            if let Some(ws) = &ws_id {
+                query = query.filter(notifications::workspace_id.eq(ws.as_str()));
+            }
+            if !excl.is_empty() {
+                query = query.filter(notifications::notification_type.ne_all(excl));
+            }
+            let count = query
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .context("count unresolved notifications")?;
+            Ok(count as u64)
+        })
+        .await?
+    }
+
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
@@ -276,6 +359,7 @@ impl NotificationRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
                 .filter(notifications::user_id.eq(uid.as_str()))
+                .filter(notifications::read.eq(0))
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())
                 .into_boxed();
@@ -285,8 +369,39 @@ impl NotificationRepository for PgStorage {
             let count = query
                 .count()
                 .get_result::<i64>(&mut *conn)
-                .context("count unresolved notifications")?;
+                .context("count unread notifications")?;
             Ok(count as u64)
+        })
+        .await?
+    }
+
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let ws_id = workspace_id.cloned();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let set = (notifications::read.eq(1), notifications::read_at.eq(now));
+            let updated = match ws_id.as_ref() {
+                Some(ws) => diesel::update(notifications::table)
+                    .filter(notifications::user_id.eq(uid.as_str()))
+                    .filter(notifications::read.eq(0))
+                    .filter(notifications::workspace_id.eq(ws.as_str()))
+                    .set(set)
+                    .execute(&mut *conn)
+                    .context("mark all notifications read")?,
+                None => diesel::update(notifications::table)
+                    .filter(notifications::user_id.eq(uid.as_str()))
+                    .filter(notifications::read.eq(0))
+                    .set(set)
+                    .execute(&mut *conn)
+                    .context("mark all notifications read")?,
+            };
+            Ok(updated as u64)
         })
         .await?
     }

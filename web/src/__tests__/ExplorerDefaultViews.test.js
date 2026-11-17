@@ -137,33 +137,50 @@ function renderWorkspaceScope() {
 }
 
 // The repo-scope header also carries the Graph|Briefing arch sub-tabs
-// (ui-navigation.md §2, task-083) — a second tablist. Scope tab queries to
-// the HSI §3 view selector so both tablists can coexist.
-async function viewTabs() {
+// (ui-navigation.md §2, task-083) — a second tablist. The view selector is
+// a dropdown (ui-navigation.md §3: built-in views → saved views →
+// "Generate view..."), so tests open it first.
+async function openViewMenu() {
   const selector = await screen.findByTestId('explorer-view-selector');
-  return within(selector).getAllByRole('tab');
+  await fireEvent.click(within(selector).getByRole('button', { name: /view selector/i }));
+  const menu = selector.querySelector('.view-select-menu');
+  expect(menu).toBeTruthy();
+  return { selector, menu };
+}
+
+async function viewOptions() {
+  const { menu } = await openViewMenu();
+  return within(menu).getAllByRole('option');
 }
 
 describe('Explorer default views selector (HSI §3)', () => {
-  it('shows the four view tabs with Boundary active by default', async () => {
+  it('shows the four built-in views in the dropdown with Boundary active by default', async () => {
     renderRepoScope();
-    const tabs = await viewTabs();
-    expect(tabs.map((t) => t.textContent)).toEqual([
+    const options = await viewOptions();
+    expect(options.map((t) => t.textContent.trim())).toEqual([
       'Boundary', 'Spec Realization', 'Change', 'System Trace',
+      // Trace flows section (system-explorer.md §5 predefined flows)
+      'Agent spawn flow', 'MR merge flow', 'Spec approval flow',
+      'Generate view…',
+      // Conversational exploration entry (system-explorer.md §8)
+      'Ask the graph…',
     ]);
-    const boundary = tabs.find((t) => t.textContent === 'Boundary');
+    const boundary = options.find((t) => t.textContent === 'Boundary');
     expect(boundary.getAttribute('aria-selected')).toBe('true');
     // Boundary = the canvas renders.
     await waitFor(() => {
       expect(document.querySelector('.explorer-canvas-area canvas')).toBeTruthy();
     });
+    // The collapsed selector button shows the active view's label.
+    const btn = document.querySelector('.view-select-btn');
+    expect(btn.textContent).toContain('Boundary');
   });
 
   it('switches to the Change View and queries the timeline since last visit', async () => {
     localStorage.setItem('gyre_last_seen', JSON.stringify({ value: 1700000000, updated_at: 1 }));
     renderRepoScope();
-    await viewTabs();
-    await fireEvent.click(screen.getByRole('tab', { name: 'Change' }));
+    const { menu } = await openViewMenu();
+    await fireEvent.click(within(menu).getByText('Change'));
 
     await waitFor(() => {
       expect(document.querySelector('[data-testid="change-view"]')).toBeTruthy();
@@ -180,8 +197,8 @@ describe('Explorer default views selector (HSI §3)', () => {
 
   it('switches to the Spec Realization View with linked nodes', async () => {
     renderRepoScope();
-    await viewTabs();
-    await fireEvent.click(screen.getByRole('tab', { name: 'Spec Realization' }));
+    const { menu } = await openViewMenu();
+    await fireEvent.click(within(menu).getByText('Spec Realization'));
 
     await waitFor(() => {
       expect(document.querySelector('[data-testid="spec-realization-view"]')).toBeTruthy();
@@ -198,8 +215,8 @@ describe('Explorer default views selector (HSI §3)', () => {
       { id: 'mr-1', title: 'Payment retry endpoint', status: 'merged' },
     ]);
     renderRepoScope();
-    await viewTabs();
-    await fireEvent.click(screen.getByRole('tab', { name: 'System Trace' }));
+    const { menu } = await openViewMenu();
+    await fireEvent.click(within(menu).getByText('System Trace'));
 
     await waitFor(() => {
       expect(document.querySelector('[data-testid="system-trace-view"]')).toBeTruthy();
@@ -210,12 +227,14 @@ describe('Explorer default views selector (HSI §3)', () => {
 
   it('returns to the Boundary canvas when Boundary is re-selected', async () => {
     renderRepoScope();
-    await viewTabs();
-    await fireEvent.click(screen.getByRole('tab', { name: 'Change' }));
+    let menu;
+    ({ menu } = await openViewMenu());
+    await fireEvent.click(within(menu).getByText('Change'));
     await waitFor(() => {
       expect(document.querySelector('[data-testid="change-view"]')).toBeTruthy();
     });
-    await fireEvent.click(screen.getByRole('tab', { name: 'Boundary' }));
+    ({ menu } = await openViewMenu());
+    await fireEvent.click(within(menu).getByText('Boundary'));
     await waitFor(() => {
       expect(document.querySelector('.explorer-canvas-area canvas')).toBeTruthy();
     });

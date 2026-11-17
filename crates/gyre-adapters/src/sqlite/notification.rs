@@ -52,8 +52,12 @@ impl NotificationRow {
             id: Id::new(self.id),
             workspace_id: source.workspace_id.clone(),
             user_id: Id::new(self.user_id),
-            notification_type: ntype,
-            priority: gyre_common::NotificationPriority::from_rank(priority_rank),
+            notification_type: ntype.clone(),
+            // Band derives from the persisted notification TYPE per the
+            // amended §Notification Entity membership table — never from
+            // the numeric rank (only the rank is persisted, and no numeric
+            // threshold reproduces the specced membership).
+            priority: gyre_common::NotificationPriority::for_notification_type(&ntype),
             priority_rank,
             title: self.title,
             body: self.body,
@@ -153,14 +157,22 @@ impl NotificationRepository for SqliteStorage {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
-        notification_type: Option<&str>,
+        notification_types: Option<&[&str]>,
+        repo_id: Option<&Id>,
+        exclude_types: &[&str],
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
-        let ntype = notification_type.map(|s| s.to_string());
+        // Owned copy for the spawn_blocking closure; empty set matches
+        // nothing (port contract), handled explicitly below so the SQL
+        // never depends on `IN ()` semantics.
+        let ntypes: Option<Vec<String>> =
+            notification_types.map(|ts| ts.iter().map(|s| s.to_string()).collect());
+        let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
+        let rid = repo_id.cloned();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
@@ -168,7 +180,7 @@ impl NotificationRepository for SqliteStorage {
                 .order(notifications::priority.asc())
                 .then_order_by(notifications::created_at.desc())
                 .into_boxed();
-            if let Some(ref ws) = ws_id {
+            if let Some(ws) = &ws_id {
                 query = query.filter(notifications::workspace_id.eq(ws.as_str()));
             }
             if let Some(min_p) = min_priority {
@@ -177,8 +189,20 @@ impl NotificationRepository for SqliteStorage {
             if let Some(max_p) = max_priority {
                 query = query.filter(notifications::priority.le(max_p as i32));
             }
-            if let Some(ref nt) = ntype {
-                query = query.filter(notifications::notification_type.eq(nt));
+            if let Some(ref ts) = ntypes {
+                if ts.is_empty() {
+                    return Ok(Vec::new());
+                }
+                query = query
+                    .filter(notifications::notification_type.eq_any(ts.iter().map(String::as_str)));
+            }
+            if let Some(ref r) = rid {
+                query = query.filter(notifications::repo_id.eq(r.as_str()));
+            }
+            // NOT IN — applied before limit/offset so paging counts filtered rows.
+            // Empty list means "exclude nothing" (NOT IN () is invalid SQL).
+            if !excl.is_empty() {
+                query = query.filter(notifications::notification_type.ne_all(excl));
             }
             let rows = query
                 .limit(limit as i64)
@@ -188,6 +212,33 @@ impl NotificationRepository for SqliteStorage {
             rows.into_iter()
                 .map(NotificationRow::into_notification)
                 .collect()
+        })
+        .await?
+    }
+
+    async fn update_body_by_entity_ref(
+        &self,
+        entity_ref: &str,
+        notification_type: &str,
+        body: &str,
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let entity_ref = entity_ref.to_string();
+        let ntype = notification_type.to_string();
+        let body = body.to_string();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let updated = diesel::update(
+                notifications::table
+                    .filter(notifications::entity_ref.eq(entity_ref.as_str()))
+                    .filter(notifications::notification_type.eq(ntype.as_str()))
+                    .filter(notifications::resolved_at.is_null())
+                    .filter(notifications::dismissed_at.is_null()),
+            )
+            .set(notifications::body.eq(body))
+            .execute(&mut *conn)
+            .context("update notification body by entity_ref")?;
+            Ok(updated as u64)
         })
         .await?
     }
@@ -268,7 +319,39 @@ impl NotificationRepository for SqliteStorage {
         .await?
     }
 
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let ws_id = workspace_id.cloned();
+        let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let mut query = notifications::table
+                .filter(notifications::user_id.eq(uid.as_str()))
+                .filter(notifications::resolved_at.is_null())
+                .filter(notifications::dismissed_at.is_null())
+                .into_boxed();
+            if let Some(ws) = &ws_id {
+                query = query.filter(notifications::workspace_id.eq(ws.as_str()));
+            }
+            if !excl.is_empty() {
+                query = query.filter(notifications::notification_type.ne_all(excl));
+            }
+            let count = query
+                .count()
+                .get_result::<i64>(&mut *conn)
+                .context("count unresolved notifications")?;
+            Ok(count as u64)
+        })
+        .await?
+    }
+
+    async fn count_unread(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
@@ -276,6 +359,7 @@ impl NotificationRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
                 .filter(notifications::user_id.eq(uid.as_str()))
+                .filter(notifications::read.eq(0))
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())
                 .into_boxed();
@@ -285,8 +369,39 @@ impl NotificationRepository for SqliteStorage {
             let count = query
                 .count()
                 .get_result::<i64>(&mut *conn)
-                .context("count unresolved notifications")?;
+                .context("count unread notifications")?;
             Ok(count as u64)
+        })
+        .await?
+    }
+
+    async fn mark_all_read(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let ws_id = workspace_id.cloned();
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let set = (notifications::read.eq(1), notifications::read_at.eq(now));
+            let updated = match ws_id.as_ref() {
+                Some(ws) => diesel::update(notifications::table)
+                    .filter(notifications::user_id.eq(uid.as_str()))
+                    .filter(notifications::read.eq(0))
+                    .filter(notifications::workspace_id.eq(ws.as_str()))
+                    .set(set)
+                    .execute(&mut *conn)
+                    .context("mark all notifications read")?,
+                None => diesel::update(notifications::table)
+                    .filter(notifications::user_id.eq(uid.as_str()))
+                    .filter(notifications::read.eq(0))
+                    .set(set)
+                    .execute(&mut *conn)
+                    .context("mark all notifications read")?,
+            };
+            Ok(updated as u64)
         })
         .await?
     }
@@ -428,6 +543,66 @@ mod tests {
         n
     }
 
+    /// Read-path band derivation (task-123 repair): only the numeric rank is
+    /// persisted; the four-level band must be reconstructed from the
+    /// persisted notification TYPE per the amended §Notification Entity
+    /// membership table — never threshold-mapped from the rank. Pins the
+    /// types whose rank and band deliberately disagree: rank 2 → High (not
+    /// Urgent), rank 4 → Low (not High), rank 7 → High (not Medium).
+    #[tokio::test]
+    async fn read_path_reconstructs_band_from_type_not_rank() {
+        let (_tmp, s) = setup();
+        let cases = [
+            (
+                "n-band-1",
+                NotificationType::SpecApprovalRequested,
+                2u8,
+                gyre_common::NotificationPriority::High,
+            ),
+            (
+                "n-band-2",
+                NotificationType::CascadeTestTriggered,
+                4,
+                gyre_common::NotificationPriority::Low,
+            ),
+            (
+                "n-band-3",
+                NotificationType::SecretExpiring,
+                7,
+                gyre_common::NotificationPriority::High,
+            ),
+            (
+                "n-band-4",
+                NotificationType::SpecAssertionFailure,
+                9,
+                gyre_common::NotificationPriority::Medium,
+            ),
+        ];
+        for (id, ntype, rank, band) in cases {
+            let n = Notification::new(
+                Id::new(id),
+                Id::new("ws-1"),
+                Id::new("user-1"),
+                ntype.clone(),
+                format!("band probe {id}"),
+                "tenant-1",
+                1000,
+            );
+            assert_eq!(n.priority_rank, rank, "{ntype:?} rank");
+            assert_eq!(n.priority, band, "{ntype:?} band at creation");
+            NotificationRepository::create(&s, &n).await.unwrap();
+            let loaded = NotificationRepository::get(&s, &Id::new(id), &Id::new("user-1"))
+                .await
+                .unwrap()
+                .expect("notification must load");
+            assert_eq!(loaded.priority_rank, rank, "{ntype:?} rank round-trips");
+            assert_eq!(
+                loaded.priority, band,
+                "{ntype:?} band must reconstruct from the type, not from_rank({rank})"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn delete_older_than_read_unread_split() {
         let (_tmp, s) = setup();
@@ -480,6 +655,88 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"mid-unread"));
         assert!(ids.contains(&"new-read"));
+    }
+
+    #[tokio::test]
+    async fn update_body_by_entity_ref_updates_only_unresolved_matches() {
+        // task-175 review F1: save_spec's append path refreshes the
+        // SpecApprovalRequested card bodies in place. The update must touch
+        // every unresolved card referencing the entity (the fan-out creates
+        // one per recipient) and skip resolved/dismissed cards — their body
+        // is the audit record of what was actually acted on — and skip other
+        // entities/types entirely.
+        let (_tmp, s) = setup();
+        let mut base = make("card-1", 100, false);
+        base.notification_type = NotificationType::SpecApprovalRequested;
+        base.source.entity_type = "mr".to_string();
+        base.source.entity_id = "mr-1".to_string();
+        base.body = Some("{\"spec_sha\":\"old\"}".to_string());
+        let mut card2 = base.clone();
+        card2.id = Id::new("card-2"); // second recipient of the same MR
+        let mut resolved = base.clone();
+        resolved.id = Id::new("card-resolved");
+        resolved.resolved_at = Some(110);
+        let mut dismissed = base.clone();
+        dismissed.id = Id::new("card-dismissed");
+        dismissed.dismissed_at = Some(110);
+        let mut other_mr = base.clone();
+        other_mr.id = Id::new("card-other-mr");
+        other_mr.source.entity_id = "mr-2".to_string();
+        let mut other_type = base.clone();
+        other_type.id = Id::new("card-other-type");
+        other_type.notification_type = NotificationType::GateFailure;
+        for n in [&base, &card2, &resolved, &dismissed, &other_mr, &other_type] {
+            NotificationRepository::create(&s, n).await.unwrap();
+        }
+
+        let updated = NotificationRepository::update_body_by_entity_ref(
+            &s,
+            "mr-1",
+            "SpecApprovalRequested",
+            "{\"spec_sha\":\"new\"}",
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated, 2, "card-1 + card-2 only");
+
+        let all = NotificationRepository::list_recent(&s, 100).await.unwrap();
+        let by_id = |id: &str| all.iter().find(|n| n.id.as_str() == id).unwrap();
+        assert_eq!(
+            by_id("card-1").body.as_deref(),
+            Some("{\"spec_sha\":\"new\"}")
+        );
+        assert_eq!(
+            by_id("card-2").body.as_deref(),
+            Some("{\"spec_sha\":\"new\"}")
+        );
+        // Resolved/dismissed/other-entity/other-type bodies untouched.
+        assert_eq!(
+            by_id("card-resolved").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-dismissed").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-other-mr").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+        assert_eq!(
+            by_id("card-other-type").body.as_deref(),
+            Some("{\"spec_sha\":\"old\"}")
+        );
+
+        // Nonexistent entity updates nothing, succeeds.
+        let updated = NotificationRepository::update_body_by_entity_ref(
+            &s,
+            "mr-nope",
+            "SpecApprovalRequested",
+            "x",
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated, 0);
     }
 
     #[tokio::test]
@@ -561,6 +818,293 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!n.read, "cross-user mark_read must not mutate");
+    }
+
+    /// user-management.md §API > Notifications: unread-count counts active
+    /// (unresolved, undismissed) rows the user has not read; mark-all-read
+    /// flips every unread row (stamping read_at) and is user- and
+    /// workspace-scoped.
+    #[tokio::test]
+    async fn count_unread_and_mark_all_read_scope_semantics() {
+        let (_tmp, s) = setup();
+        let ws1 = Id::new("ws-1");
+        let ws2 = Id::new("ws-2");
+        let user1 = Id::new("user-1");
+        let user2 = Id::new("user-2");
+
+        // user-1: unread, read, dismissed (all ws-1) + one unread in ws-2.
+        NotificationRepository::create(&s, &make("n-unread", 1000, false))
+            .await
+            .unwrap();
+        NotificationRepository::create(&s, &make("n-read", 1001, false))
+            .await
+            .unwrap();
+        NotificationRepository::mark_read(&s, &Id::new("n-read"), &user1, true)
+            .await
+            .unwrap();
+        NotificationRepository::create(&s, &make("n-dismissed", 1002, false))
+            .await
+            .unwrap();
+        NotificationRepository::dismiss(&s, &Id::new("n-dismissed"), &user1)
+            .await
+            .unwrap();
+        let mut other_ws = make("n-ws2", 1003, false);
+        other_ws.workspace_id = ws2.clone();
+        NotificationRepository::create(&s, &other_ws).await.unwrap();
+        // user-2: unread in ws-1 — must not count for user-1.
+        let mut other_user = make("n-user2", 1004, false);
+        other_user.user_id = user2.clone();
+        NotificationRepository::create(&s, &other_user)
+            .await
+            .unwrap();
+
+        // All workspaces: the unread + the ws-2 unread.
+        assert_eq!(
+            NotificationRepository::count_unread(&s, &user1, None)
+                .await
+                .unwrap(),
+            2
+        );
+        // Workspace-scoped: only the ws-1 unread.
+        assert_eq!(
+            NotificationRepository::count_unread(&s, &user1, Some(&ws1))
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Workspace-scoped mark-all-read: ws-1's unread rows flip — the
+        // already-read row and the other workspace/user rows do not.
+        let marked = NotificationRepository::mark_all_read(&s, &user1, Some(&ws1))
+            .await
+            .unwrap();
+        assert_eq!(marked, 2, "the unread and dismissed-unread rows flip");
+        let n = NotificationRepository::get(&s, &Id::new("n-unread"), &user1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n.read);
+        assert!(n.read_at.is_some());
+        let ws2_row = NotificationRepository::get(&s, &Id::new("n-ws2"), &user1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !ws2_row.read,
+            "workspace-scoped sweep must not touch other workspaces"
+        );
+        let user2_row = NotificationRepository::get(&s, &Id::new("n-user2"), &user2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!user2_row.read, "mark-all-read must not touch other users");
+
+        // Unscoped sweep flips the remaining ws-2 row; count reaches zero.
+        let marked = NotificationRepository::mark_all_read(&s, &user1, None)
+            .await
+            .unwrap();
+        assert_eq!(marked, 1);
+        assert_eq!(
+            NotificationRepository::count_unread(&s, &user1, None)
+                .await
+                .unwrap(),
+            0,
+            "after mark-all-read the badge count must be zero"
+        );
+    }
+
+    /// user-management.md §In-App Notification UI: the listing filter surface
+    /// includes repo — list_for_user's repo_id filter must push down to the
+    /// stored source repo column.
+    #[tokio::test]
+    async fn list_for_user_filters_by_repo() {
+        let (_tmp, s) = setup();
+        let user1 = Id::new("user-1");
+        let mut with_repo = make("n-repo-a", 1000, false);
+        with_repo.source.repo_id = Some(Id::new("repo-a"));
+        NotificationRepository::create(&s, &with_repo)
+            .await
+            .unwrap();
+        NotificationRepository::create(&s, &make("n-no-repo", 1001, false))
+            .await
+            .unwrap();
+
+        let repo_a = Id::new("repo-a");
+        let hit = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            None,
+            Some(&repo_a),
+            &[],
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].id.as_str(), "n-repo-a");
+
+        let repo_b = Id::new("repo-b");
+        let miss = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            None,
+            Some(&repo_b),
+            &[],
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            miss.len(),
+            0,
+            "a repo with no notifications filters everything out"
+        );
+
+        let all = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 2, "no repo filter returns both");
+    }
+
+    /// The four-level `?priority=` filter pushes down as a type-string set
+    /// on the persisted `notification_type` column (amended §Notification
+    /// Entity membership table — the band derives from the type, never the
+    /// numeric rank). The set must match pre-unification rows persisted
+    /// under legacy type names, and an empty set is a filter that matches
+    /// nothing, not a no-op.
+    #[tokio::test]
+    async fn list_for_user_type_set_filter_matches_persisted_column() {
+        let (_tmp, s) = setup();
+        let user1 = Id::new("user-1");
+        // SpecApprovalRequested: rank 2 yet High — the rank/band divergence
+        // that makes a rank-range query wrong for level filtering.
+        let mut approval = make("n-set-1", 1000, false);
+        approval.notification_type = NotificationType::SpecApprovalRequested;
+        NotificationRepository::create(&s, &approval).await.unwrap();
+        // make() seeds GateFailure: rank 3, High.
+        NotificationRepository::create(&s, &make("n-set-2", 1001, false))
+            .await
+            .unwrap();
+        // A pre-unification row persisted under the legacy type name — only
+        // the raw column carries it.
+        let legacy = NewNotificationRow {
+            id: "n-set-legacy",
+            workspace_id: "ws-1",
+            user_id: "user-1",
+            notification_type: "SpecPendingApproval",
+            priority: 2,
+            title: "legacy row",
+            body: None,
+            entity_ref: None,
+            repo_id: None,
+            entity_type: None,
+            action_url: None,
+            read: 0,
+            read_at: None,
+            resolved_at: None,
+            dismissed_at: None,
+            created_at: 1002,
+            tenant_id: "tenant-1",
+        };
+        {
+            let mut conn = s.pool.get().unwrap();
+            diesel::insert_into(notifications::table)
+                .values(&legacy)
+                .execute(&mut conn)
+                .unwrap();
+        }
+
+        let high = gyre_common::NotificationPriority::High.notification_type_strings();
+        assert!(high.contains(&"SpecPendingApproval"));
+        let hits = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            Some(&high),
+            None,
+            &[],
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        let mut ids: Vec<&str> = hits.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["n-set-1", "n-set-2", "n-set-legacy"],
+            "the High band set must match the rank-2 type and the legacy-named row"
+        );
+
+        let urgent = gyre_common::NotificationPriority::Urgent.notification_type_strings();
+        let none = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            Some(&urgent),
+            None,
+            &[],
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(none.len(), 0, "no seeded type is in the Urgent band");
+
+        let empty = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            Some(&[]),
+            None,
+            &[],
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty.len(), 0, "an empty type set matches nothing");
+
+        let all = NotificationRepository::list_for_user(
+            &s,
+            &user1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            50,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 3, "no type filter returns everything");
     }
 
     #[tokio::test]

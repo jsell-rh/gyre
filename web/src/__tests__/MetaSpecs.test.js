@@ -100,7 +100,7 @@ vi.mock('../lib/api.js', () => ({
     previewPersonaStatus: vi.fn().mockRejectedValue(new Error('Not implemented')),
     publishPersona: vi.fn().mockRejectedValue(new Error('Not implemented')),
     specsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
-    specsAssistGlobal: vi.fn().mockRejectedValue(new Error('Not available')),
+    metaSpecsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     graphPredict: vi.fn().mockResolvedValue({ predictions: [] }),
     specsSave: vi.fn().mockResolvedValue({ mr_id: 1 }),
@@ -1193,6 +1193,145 @@ describe('MetaSpecs -- workspace scope', () => {
 
     const select = await findByLabelText('Persona');
     expect(select.disabled).toBe(true);
+  });
+
+  it('locked editor shows the diff of pending changes vs the published prompt (§9 State 2)', async () => {
+    vi.useFakeTimers();
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+
+    const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+
+    // Edit the draft beyond the published registry prompt (persona-1).
+    const textarea = await findByTestId('editor-split-textarea');
+    await fireEvent.input(textarea, {
+      target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
+    });
+
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    // Editor locked, showing the pending change marked with '+' — the §9
+    // State 2 wireframe's "+ Handle all errors..." line.
+    const locked = await findByTestId('editor-locked');
+    expect(locked).toBeTruthy();
+    expect(queryByTestId('editor-split-textarea')).toBeNull();
+    const diff = await findByTestId('locked-diff');
+    const addLine = diff.querySelector('.locked-diff-add .locked-diff-text');
+    expect(addLine.textContent).toBe('Handle all errors with Result<T, E>.');
+    expect(diff.querySelector('.locked-diff-add .locked-diff-marker').textContent).toBe('+');
+    // The unchanged published prompt stays as context
+    const ctxLine = diff.querySelector('.locked-diff-context .locked-diff-text');
+    expect(ctxLine.textContent).toBe('You are a backend developer focused on Rust.');
+    expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -0');
+  });
+
+  it('locked editor falls back to the verbatim draft when the meta-spec has no stored prompt', async () => {
+    vi.useFakeTimers();
+    api.getMetaSpecs.mockResolvedValue([
+      { ...mockPersonas[0], prompt: '' },
+    ]);
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+
+    const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.input(await findByTestId('editor-split-textarea'), {
+      target: { value: 'Draft with no baseline.' },
+    });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    const locked = await findByTestId('editor-locked');
+    expect(locked).toBeTruthy();
+    // Empty baseline → no diff markers, verbatim draft
+    expect(queryByTestId('locked-diff')).toBeNull();
+    expect(locked.textContent).toContain('Draft with no baseline.');
+  });
+
+  it('refreshes the diff baseline after an in-session publish — no pending diff without further edits (§9 publish → preview)', async () => {
+    vi.useFakeTimers();
+    api.publishPersona.mockResolvedValue({});
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+
+    const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+
+    // Edit the draft beyond the published registry prompt (persona-1).
+    const textarea = await findByTestId('editor-split-textarea');
+    await fireEvent.input(textarea, {
+      target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
+    });
+
+    // Publish the draft — it becomes the new published registry prompt.
+    await fireEvent.click(await findByText('Publish'));
+    await waitFor(() => {
+      expect(api.publishPersona).toHaveBeenCalledWith(
+        'ws-1',
+        'persona-1',
+        { content: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
+      );
+    });
+
+    // Preview with no further edits: the draft equals the just-published
+    // baseline, so the locked pane must show the verbatim draft with NO
+    // pending-changes markers (regression: stale pre-publish baseline
+    // rendered the already-published line as pending '+1 -0').
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    const locked = await findByTestId('editor-locked');
+    expect(locked).toBeTruthy();
+    expect(queryByTestId('locked-diff')).toBeNull();
+    expect(locked.textContent).toContain('Handle all errors with Result<T, E>.');
+  });
+
+  it('diffs post-publish edits against the new baseline — only the newly added line is pending', async () => {
+    vi.useFakeTimers();
+    api.publishPersona.mockResolvedValue({});
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+
+    const textarea = await findByTestId('editor-split-textarea');
+    await fireEvent.input(textarea, {
+      target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
+    });
+
+    // Publish, then keep editing beyond the just-published version.
+    await fireEvent.click(await findByText('Publish'));
+    await waitFor(() => expect(api.publishPersona).toHaveBeenCalled());
+    await fireEvent.input(await findByTestId('editor-split-textarea'), {
+      target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.\nPrefer explicit types in public APIs.' },
+    });
+
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    // Only the post-publish line is pending; both just-published lines are
+    // context (regression: stale baseline marked them pending too).
+    const diff = await findByTestId('locked-diff');
+    expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -0');
+    const addLine = diff.querySelector('.locked-diff-add .locked-diff-text');
+    expect(addLine.textContent).toBe('Prefer explicit types in public APIs.');
+    expect(diff.querySelectorAll('.locked-diff-add')).toHaveLength(1);
+    expect(diff.querySelectorAll('.locked-diff-remove')).toHaveLength(0);
   });
 });
 

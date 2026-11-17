@@ -482,7 +482,9 @@ async fn notify_workspace_admins(
                 Some(&workspace_id),
                 None,
                 None,
-                Some(NotificationType::SecretExpiring.as_str()),
+                Some(&[NotificationType::SecretExpiring.as_str()]),
+                None,
+                &[],
                 50,
                 0,
             )
@@ -539,13 +541,15 @@ async fn notify_workspace_admins(
             notif.source.repo_id = Some(Id::new(secret.scope_id.clone()));
         }
 
-        if let Err(e) = state.notifications.create(&notif).await {
+        if let Err(e) = state.create_notification(&notif).await {
             warn!(
                 workspace_id = %workspace_id,
                 user_id = %member.user_id,
                 "secret_rotation: notification create failed: {e:#}"
             );
         } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
             info!(
                 workspace_id = %workspace_id,
                 user_id = %member.user_id,
@@ -686,6 +690,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expiry_notification_fans_out_to_configured_channels() {
+        // Emitter-path guard: the secret-expiry scan's notification creation
+        // must go through the channel dispatcher — a configured email
+        // channel queues an outbox entry for the notified Admin.
+        let now = now_secs();
+        let state = seed(now).await;
+        state
+            .user_channel_prefs
+            .upsert(
+                &Id::new("user-admin"),
+                &gyre_domain::NotificationChannels {
+                    in_app: true,
+                    email: gyre_domain::EmailConfig {
+                        enabled: true,
+                        digest: gyre_domain::DigestFrequency::Immediate,
+                        min_priority: gyre_domain::NotificationPriority::Low,
+                        type_overrides: Default::default(),
+                    },
+                    webhook: None,
+                    slack: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let admin_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            admin_notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::SecretExpiring),
+            "expected in-app SecretExpiring notification"
+        );
+        let outbox = state
+            .kv_store
+            .kv_list(crate::notification_dispatcher::EMAIL_OUTBOX_NS)
+            .await
+            .unwrap();
+        assert!(
+            outbox.iter().any(|(k, _)| k.starts_with("user-admin:")),
+            "secret-expiry notification must reach the configured email channel"
+        );
+    }
+
+    #[tokio::test]
     async fn detects_expiring_secrets_and_notifies_admins_only() {
         // Fixed "now" so the seeded expiries are deterministic. run_once uses
         // real wall-clock now, so seed relative to real now instead.
@@ -695,7 +759,17 @@ mod tests {
 
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("user-admin"), None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         let secret_notifs: Vec<&Notification> = admin_notifs
@@ -721,7 +795,17 @@ mod tests {
         // Developer member gets nothing.
         let dev_notifs = state
             .notifications
-            .list_for_user(&Id::new("user-dev"), None, None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("user-dev"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(dev_notifs
@@ -743,7 +827,9 @@ mod tests {
                 None,
                 None,
                 None,
-                Some("SecretExpiring"),
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
                 50,
                 0,
             )
@@ -801,7 +887,9 @@ mod tests {
                 None,
                 None,
                 None,
-                Some("SecretExpiring"),
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
                 50,
                 0,
             )
@@ -965,7 +1053,9 @@ mod tests {
                 None,
                 None,
                 None,
-                Some("SecretExpiring"),
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
                 50,
                 0,
             )
@@ -1013,7 +1103,9 @@ mod tests {
                 None,
                 None,
                 None,
-                Some("SecretExpiring"),
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
                 50,
                 0,
             )
@@ -1043,7 +1135,9 @@ mod tests {
                 None,
                 None,
                 None,
-                Some("SecretExpiring"),
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
                 50,
                 0,
             )

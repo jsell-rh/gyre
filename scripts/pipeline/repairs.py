@@ -8,7 +8,8 @@ from .execution import Wait
 
 
 def satisfied(data):
-    return bool(data.get('delivered') or data.get('resolved'))
+    return (not data.get('assessment_pending') and not (data.get('requirements') or {}).get('errors')
+            and bool(data.get('delivered') or data.get('resolved')))
 
 
 def probe(task):

@@ -311,6 +311,16 @@ pub async fn scim_create_user(
     }
 
     let display_name = req.display_name.unwrap_or_else(|| req.user_name.clone());
+    // Task-129 review round 3 (privilege escalation): display_name becomes
+    // the user's ABAC subject.id under API-key/JWT auth, and
+    // `system-full-access` (priority 1000) matches the reserved system
+    // identity — it must not be provisionable.
+    if display_name == gyre_domain::SYSTEM_ABAC_IDENTITY {
+        return Err(ApiError::InvalidInput(format!(
+            "displayName '{}' is reserved for the system principal",
+            gyre_domain::SYSTEM_ABAC_IDENTITY
+        )));
+    }
     let mut user = User::new_sso(new_id(), ext_id, username, display_name, now);
     if let Some(email) = req.emails.into_iter().find(|e| e.primary).map(|e| e.value) {
         user.email = Some(email);
@@ -361,6 +371,15 @@ pub async fn scim_update_user(
 
     // username and external_id stay untouched: immutable after creation.
     if let Some(dn) = req.display_name {
+        // Task-129 review round 3: the reserved system ABAC identity must
+        // not be assignable as a display_name (it is matched by
+        // `system-full-access` at priority 1000).
+        if dn == gyre_domain::SYSTEM_ABAC_IDENTITY {
+            return Err(ApiError::InvalidInput(format!(
+                "displayName '{}' is reserved for the system principal",
+                gyre_domain::SYSTEM_ABAC_IDENTITY
+            )));
+        }
         user.display_name = dn;
     }
     if let Some(email) = req.emails.into_iter().find(|e| e.primary).map(|e| e.value) {
@@ -389,6 +408,13 @@ pub async fn scim_delete_user(
     // SCIM DELETE = deactivate, not hard delete. We delete from store here;
     // production deployments with SSO should soft-delete via `active=false`.
     state.users.delete(&user.id).await?;
+
+    // user-management.md §Ownership Transfer & Reclamation: when a workspace
+    // Owner leaves (account deactivated/removed), TenantAdmins are notified
+    // and the workspace is tracked as ownerless. Runs inline for immediacy;
+    // the daily orphaned_workspace_check job is the backstop.
+    crate::workspace_ownership::on_user_removed(&state, &user.id).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -565,6 +591,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scim_rejects_reserved_system_identity() {
+        // Task-129 review round 3 (privilege escalation): SCIM displayName
+        // becomes the user's ABAC subject.id under API-key/JWT auth, and
+        // `system-full-access` (priority 1000) matches the reserved system
+        // identity — neither create nor update may assign it.
+        let app = api_router().with_state(make_state());
+
+        // Create with the reserved displayName (and, when displayName is
+        // absent, the raw userName fallback) is rejected.
+        let payload = serde_json::json!({
+            "userName": "spoof",
+            "displayName": gyre_domain::SYSTEM_ABAC_IDENTITY
+        });
+        let resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(payload)))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "SCIM create must reject the reserved system ABAC identity as displayName"
+        );
+
+        let payload = serde_json::json!({ "userName": gyre_domain::SYSTEM_ABAC_IDENTITY });
+        let resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(payload)))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "SCIM create must reject the reserved identity when it arrives as userName \
+             (displayName defaults to it)"
+        );
+
+        // Update of an existing user to the reserved displayName is
+        // rejected and does not apply.
+        let payload = serde_json::json!({ "userName": "Bob", "displayName": "Bob" });
+        let create_resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(payload)))
+            .await
+            .unwrap();
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let update = serde_json::json!({
+            "userName": "bob",
+            "displayName": gyre_domain::SYSTEM_ABAC_IDENTITY
+        });
+        let resp = app
+            .clone()
+            .oneshot(scim_request(
+                "PUT",
+                &format!("/scim/v2/Users/{id}"),
+                Some(update),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "SCIM update must reject the reserved system ABAC identity as displayName"
+        );
+
+        let get_resp = app
+            .oneshot(scim_request("GET", &format!("/scim/v2/Users/{id}"), None))
+            .await
+            .unwrap();
+        let got = body_json(get_resp).await;
+        assert_eq!(
+            got["displayName"], "Bob",
+            "rejected reserved-identity update must not apply"
+        );
+    }
+
+    #[tokio::test]
     async fn scim_create_sanitizes_user_name() {
         // The provisioning path must derive the same URL-safe handle the
         // SSO path derives; "Bad Handle!" has URL-safe characters so it
@@ -737,7 +842,15 @@ mod tests {
 
     #[tokio::test]
     async fn scim_unauthorized_without_token() {
-        std::env::set_var("GYRE_SCIM_TOKEN", "secret");
+        // Configure the SAME token value every other SCIM test writes:
+        // GYRE_SCIM_TOKEN is process-global and the lib tests run in parallel,
+        // so pointing it at a divergent value here races the in-flight
+        // handlers of the other SCIM tests (their bearer token no longer
+        // matches the configured one, their creates turn into 403s, and
+        // scim_delete_user panics on the missing "id"). The rejection under
+        // test comes from the missing Authorization header, which fails
+        // against any configured token value.
+        std::env::set_var("GYRE_SCIM_TOKEN", "test-scim-token");
         let resp = app()
             .oneshot(
                 Request::builder()

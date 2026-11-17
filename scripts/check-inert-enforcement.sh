@@ -63,6 +63,18 @@ METH_CALL = re.compile(r'^\s*[\w.\[\]()]+\.((evaluate_|enforce_|verify_|validate
 # still inert (task-099 F2: validate_persona(...).await;).
 VALIDATE_CONSUMED = re.compile(r'\?|\.map_err\(|\.map\(|\.ok_|&mut')
 
+# Same-line markers that make a statement-position METHOD call non-inert:
+# the result is propagated (`?`), unwrapped/converted, or otherwise
+# consumed by a chain on the same line. Note `.await` alone is NOT in
+# this set — an awaited-but-discarded result is still inert (same rule
+# as VALIDATE_CONSUMED above, task-099 F2). This regex was referenced by
+# the METH_CALL check below since the script's introduction but never
+# defined — any statement-position consumed `.verify_*/.evaluate_*/...`
+# method call crashed the script with NameError instead of being
+# evaluated (found by task-143: `self.verify_gate_signature(g).await
+# .unwrap_or(false)` as a match-arm tail).
+BOUND = re.compile(r'\?|\.unwrap|\.expect\(|\.map\(|\.map_err\(|\.ok\(\)|\.is_ok\(\)|\.is_err\(|\.unwrap_or\(|\.then\(|\.and_then\(|\.or_else\(|==|!=')
+
 def find_files(paths):
     for p in paths:
         path = Path(p)

@@ -46,6 +46,22 @@ pub struct UpdateRepoRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub default_branch: Option<String>,
+    /// Max concurrent worker agents in this repo (repo-lifecycle.md §3).
+    /// Cannot exceed the workspace's `max_agents_per_repo` (400 on violation).
+    pub max_agents: Option<u32>,
+    /// Ralph-loop iteration ceiling for agents working this repo
+    /// (agent-runtime.md §1 Phase 7). `None` clears the override (server
+    /// default 10 applies).
+    pub max_agent_iterations: Option<u32>,
+    /// Repo-level budget override (agent-runtime.md §4 Cascade,
+    /// repo-lifecycle.md §3). When present, REPLACES the whole override;
+    /// a field left `null` inside the object means no limit for that
+    /// dimension. `{}` (all null) clears the override — the repo then
+    /// inherits the workspace limit. Every set field is validated against
+    /// the EFFECTIVE workspace limit (min of the workspace config and the
+    /// tenant absolute ceiling; a dimension the workspace leaves unset is
+    /// inherited from the tenant) — 400 on violation.
+    pub budget: Option<gyre_domain::BudgetConfig>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +92,15 @@ pub struct RepoResponse {
     pub mirror_url: Option<String>,
     pub mirror_interval_secs: Option<u64>,
     pub last_mirror_sync: Option<u64>,
+    /// Max concurrent worker agents (repo-lifecycle.md §3); None inherits
+    /// the workspace limit.
+    pub max_agents: Option<u32>,
+    /// Ralph-loop iteration ceiling (agent-runtime.md §1 Phase 7); None
+    /// means the server default (10).
+    pub max_agent_iterations: Option<u32>,
+    /// Repo-level budget override (agent-runtime.md §4 Cascade); None
+    /// inherits the workspace limit.
+    pub budget: Option<gyre_domain::BudgetConfig>,
     /// Git Smart HTTP clone URL: {base_url}/git/{workspace_slug}/{repo_name}
     pub clone_url: String,
 }
@@ -95,6 +120,9 @@ impl From<Repository> for RepoResponse {
             mirror_url: r.mirror_url.map(redact_url_credentials),
             mirror_interval_secs: r.mirror_interval_secs,
             last_mirror_sync: r.last_mirror_sync,
+            max_agents: r.max_agents,
+            max_agent_iterations: r.max_agent_iterations,
+            budget: r.budget,
             clone_url: String::new(),
         }
     }
@@ -238,6 +266,87 @@ pub async fn update_repo(
     if let Some(branch) = req.default_branch {
         repo.default_branch = branch;
     }
+    // repo-lifecycle.md §3 "Max concurrent agents": repo-level override of
+    // the workspace limit. The server validates on PUT that a repo's
+    // max_agents can never exceed the workspace's max_agents_per_repo —
+    // a repo cannot grant itself more parallelism than its workspace
+    // allows (agent-runtime.md §4 Cascade).
+    if let Some(max_agents) = req.max_agents {
+        if let Ok(Some(ws)) = state.workspaces.find_by_id(&repo.workspace_id).await {
+            if let Some(ws_max) = ws.max_agents_per_repo {
+                if max_agents > ws_max {
+                    return Err(ApiError::InvalidInput(format!(
+                        "max_agents {max_agents} exceeds the workspace limit of {ws_max}"
+                    )));
+                }
+            }
+        }
+        repo.max_agents = Some(max_agents);
+    }
+    // agent-runtime.md §1 Phase 7: per-repo Ralph-loop iteration ceiling.
+    // A zero ceiling would block every iteration, so require >= 1.
+    if let Some(max_iter) = req.max_agent_iterations {
+        if max_iter == 0 {
+            return Err(ApiError::InvalidInput(
+                "max_agent_iterations must be at least 1".to_string(),
+            ));
+        }
+        repo.max_agent_iterations = Some(max_iter);
+    }
+    // agent-runtime.md §4 Cascade / repo-lifecycle.md §3: repo-level budget
+    // override. "Repo budget (cannot exceed workspace)" — every set field
+    // is validated against the EFFECTIVE workspace limit (min of the
+    // workspace config and the tenant absolute ceiling): a dimension the
+    // workspace leaves unset is inherited from the tenant
+    // (platform-model.md §1), not unlimited. Only when both the workspace
+    // and the tenant leave a dimension unset is there no ceiling; a
+    // violation is a 400.
+    if let Some(budget) = req.budget {
+        let ws_budget = crate::api::budget::effective_workspace_config(
+            state.as_ref(),
+            &crate::api::budget::workspace_key(&repo.workspace_id.to_string()),
+        )
+        .await;
+        if let (Some(repo_max), Some(ws_max)) =
+            (budget.max_tokens_per_day, ws_budget.max_tokens_per_day)
+        {
+            if repo_max > ws_max {
+                return Err(ApiError::InvalidInput(format!(
+                    "repo max_tokens_per_day ({repo_max}) exceeds the workspace limit ({ws_max})"
+                )));
+            }
+        }
+        if let (Some(repo_max), Some(ws_max)) =
+            (budget.max_cost_per_day, ws_budget.max_cost_per_day)
+        {
+            if repo_max > ws_max {
+                return Err(ApiError::InvalidInput(format!(
+                    "repo max_cost_per_day ({repo_max:.4}) exceeds the workspace limit ({ws_max:.4})"
+                )));
+            }
+        }
+        if let (Some(repo_max), Some(ws_max)) = (
+            budget.max_concurrent_agents,
+            ws_budget.max_concurrent_agents,
+        ) {
+            if repo_max > ws_max {
+                return Err(ApiError::InvalidInput(format!(
+                    "repo max_concurrent_agents ({repo_max}) exceeds the workspace limit ({ws_max})"
+                )));
+            }
+        }
+        if let (Some(repo_max), Some(ws_max)) = (
+            budget.max_agent_lifetime_secs,
+            ws_budget.max_agent_lifetime_secs,
+        ) {
+            if repo_max > ws_max {
+                return Err(ApiError::InvalidInput(format!(
+                    "repo max_agent_lifetime_secs ({repo_max}) exceeds the workspace limit ({ws_max})"
+                )));
+            }
+        }
+        repo.budget = Some(budget);
+    }
     repo.updated_at = now_secs();
 
     state.repos.update(&repo).await?;
@@ -275,11 +384,23 @@ pub async fn archive_repo(
             TaskStatus::Backlog | TaskStatus::InProgress | TaskStatus::Review | TaskStatus::Blocked
         );
         if cancellable {
+            let pre_cancel_status = task.status.clone();
             task.status = TaskStatus::Cancelled;
             task.cancelled_at = Some(now);
             task.cancelled_reason = Some("Repository archived".to_string());
             task.updated_at = now;
             state.tasks.update(&task).await?;
+            // task.status_changed analytics event (analytics.md §Auto-Emitted
+            // Events: "Task transitions status") — the repo-archive
+            // cancellation is a production transition.
+            if task.status != pre_cancel_status {
+                crate::api::analytics::record_task_status_changed(
+                    &state,
+                    &task,
+                    &pre_cancel_status,
+                )
+                .await;
+            }
             // meta-spec-reconciliation.md §11: cancellation of the last open
             // reconciliation / drift-review task completes the wave. The
             // shared hook also advances a §7 rolling rollout (next batch)
@@ -308,6 +429,27 @@ pub async fn archive_repo(
             // not heartbeat expiration (agent-runtime.md §1 AgentStatus enum).
             let _ = agent.transition_status(AgentStatus::Stopped);
             state.agents.update(&agent).await?;
+            // agent.failed analytics event (analytics.md §Auto-Emitted Events:
+            // "Agent fails or is killed") — the repo-archive stop is a kill
+            // path, like stop_agent/admin kill/stale abort.
+            let ev = gyre_domain::AnalyticsEvent::new(
+                new_id(),
+                "agent.failed",
+                Some(agent.id.to_string()),
+                serde_json::json!({
+                    "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                    "reason": "killed (repo archived)",
+                    "duration_secs": now.saturating_sub(agent.spawned_at),
+                }),
+                now,
+            )
+            .with_scope(
+                None,
+                None,
+                Some(&agent.workspace_id),
+                agent.repo_id.as_ref(),
+            );
+            let _ = state.analytics.record(&ev).await;
 
             // Platform Model §7: the agent's task was just cancelled — its
             // one-time task-scoped secrets must not outlive the task.
@@ -328,6 +470,22 @@ pub async fn archive_repo(
             if let Err(e) = state.traces.delete_by_mr(&mr.id).await {
                 tracing::warn!(mr_id = %mr.id, error = %e, "failed to delete gate trace on MR close");
             }
+            // mr.closed analytics event (analytics.md §Auto-Emitted Events:
+            // "MR closed without merge") — repo archival is one of the close
+            // paths; the HTTP transition endpoint and spec-reject are others.
+            let ev = gyre_domain::AnalyticsEvent::new(
+                new_id(),
+                "mr.closed",
+                mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                serde_json::json!({
+                    "mr_id": mr.id.to_string(),
+                    "repo_id": mr.repository_id.to_string(),
+                    "reason": "repo_archived",
+                }),
+                now,
+            )
+            .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+            let _ = state.analytics.record(&ev).await;
         }
     }
 
@@ -376,6 +534,21 @@ pub async fn delete_repo(
     }
 
     state.repos.delete(&repo.id).await?;
+
+    // Clean up the spec-link graph rows sourced from this repo (spec-links.md
+    // §Forge-Maintained Spec Graph): durable table first, then the hot cache.
+    if let Err(e) = state
+        .spec_link_repo
+        .delete_by_source_repo(&repo.id.to_string())
+        .await
+    {
+        tracing::warn!(repo_id = %repo.id, "Failed to delete spec links for repo: {e}");
+    }
+    state
+        .spec_links_store
+        .lock()
+        .await
+        .retain(|l| l.source_repo_id.as_deref() != Some(&repo.id.to_string()));
 
     // Remove persisted spec assertion results so a deleted repo leaves no
     // orphaned rows behind.
@@ -481,6 +654,9 @@ pub async fn create_mirror_repo(
         description: None,
         status: RepoStatus::Active,
         updated_at: now,
+        max_agents: None,
+        max_agent_iterations: None,
+        budget: None,
     };
     state.repos.create(&repo).await?;
 
@@ -529,9 +705,25 @@ pub async fn create_mirror_repo(
             {
                 if output.status.success() {
                     let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    // §API > Notifications: broadcasting wrapper so import
+                    // notifications reach live SSE stream subscribers, plus
+                    // channel fan-out after in-app create (user-management.md
+                    // §Delivery Channels) — initial mirror-clone extraction
+                    // notifications deliver to configured channels too.
+                    let divergence_notifications = state_for_extract.broadcasting_notifications();
+                    let fanout_state = std::sync::Arc::clone(&state_for_extract);
+                    let on_created = move |notif: &gyre_common::Notification| {
+                        let state = std::sync::Arc::clone(&fanout_state);
+                        let notif = notif.clone();
+                        futures_util::FutureExt::boxed(async move {
+                            crate::notification_dispatcher::dispatch_to_channels(&state, &notif)
+                                .await;
+                        })
+                    };
                     let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                        notification_repo: state_for_extract.notifications.as_ref(),
+                        notification_repo: &divergence_notifications,
                         membership_repo: state_for_extract.workspace_memberships.as_ref(),
+                        on_created: Some(Box::new(on_created)),
                     });
                     crate::graph_extraction::extract_and_store_graph(
                         &extract_path,
@@ -604,6 +796,7 @@ pub async fn sync_mirror(
             crate::spec_registry::sync_spec_ledger(
                 &state.spec_ledger,
                 &state.spec_links_store,
+                &state.spec_link_repo,
                 &repo.path,
                 &new_sha,
                 now,
@@ -624,9 +817,24 @@ pub async fn sync_mirror(
                     tenant_id: tenant_id.to_string(),
                 }
             });
+            // §API > Notifications: broadcasting wrapper so mirror-push
+            // notifications reach live SSE stream subscribers, plus channel
+            // fan-out after in-app create (user-management.md §Delivery
+            // Channels) — manual mirror-sync notifications deliver to
+            // configured channels too.
+            let divergence_notifications = state.broadcasting_notifications();
+            let fanout_state = std::sync::Arc::clone(&state);
+            let on_created = move |notif: &gyre_common::Notification| {
+                let state = std::sync::Arc::clone(&fanout_state);
+                let notif = notif.clone();
+                futures_util::FutureExt::boxed(async move {
+                    crate::notification_dispatcher::dispatch_to_channels(&state, &notif).await;
+                })
+            };
             let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-                notification_repo: state.notifications.as_ref(),
+                notification_repo: &divergence_notifications,
                 membership_repo: state.workspace_memberships.as_ref(),
+                on_created: Some(Box::new(on_created)),
             });
             crate::graph_extraction::extract_and_store_graph(
                 &repo.path,
@@ -729,6 +937,7 @@ pub async fn sync_specs(
     crate::spec_registry::sync_spec_ledger(
         &state.spec_ledger,
         &state.spec_links_store,
+        &state.spec_link_repo,
         &repo.path,
         &head_sha,
         now,
@@ -1182,6 +1391,276 @@ mod tests {
         assert_eq!(updated["default_branch"], "develop");
     }
 
+    /// TASK-118 (repo-lifecycle §3 / agent-runtime §4 Cascade): a repo's
+    /// max_agents cannot exceed the workspace's max_agents_per_repo (400),
+    /// and max_agent_iterations must be >= 1. Valid settings persist.
+    #[tokio::test]
+    async fn update_repo_agent_limits_validated() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace with a per-repo agent limit of 2.
+        let mut ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-1"),
+            gyre_common::Id::new("t1"),
+            "Ws",
+            "ws",
+            0,
+        );
+        ws.max_agents_per_repo = Some(2);
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("r-max"),
+            gyre_common::Id::new("ws-1"),
+            "max-repo",
+            "/tmp/gyre-test-r-max",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let put = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/repos/r-max")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Exceeding the workspace limit: 400, nothing persisted.
+        let resp = put(serde_json::json!({"max_agents": 5})).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(found.max_agents, None);
+
+        // Within the limit + iteration ceiling: persisted and returned.
+        let resp = put(serde_json::json!({"max_agents": 2, "max_agent_iterations": 3})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["max_agents"], 2);
+        assert_eq!(updated["max_agent_iterations"], 3);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(found.max_agents, Some(2));
+        assert_eq!(found.max_agent_iterations, Some(3));
+
+        // A zero iteration ceiling would block every iteration: 400.
+        let resp = put(serde_json::json!({"max_agent_iterations": 0})).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_repo_budget_cascade_validated() {
+        // agent-runtime.md §4 Cascade: "Repo budget (cannot exceed
+        // workspace)". A repo budget above the workspace budget is a 400
+        // and is not persisted; a valid override is persisted, returned,
+        // and clearable.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-bud"),
+            gyre_common::Id::new("t1"),
+            "Bud",
+            "bud",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        // Workspace budget: 1000 tokens/day, $5.00/day.
+        state
+            .budget_configs
+            .set_config(
+                &crate::api::budget::workspace_key("ws-bud"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    max_cost_per_day: Some(5.0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("r-bud"),
+            gyre_common::Id::new("ws-bud"),
+            "budgeted-repo",
+            "/tmp/gyre-test-r-bud",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let put = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/repos/r-bud")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Token budget above the workspace limit: 400, not persisted.
+        let resp = put(serde_json::json!({
+            "budget": {"max_tokens_per_day": 2000}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(found.budget, None, "violating budget must not persist");
+
+        // Cost budget above the workspace limit: 400.
+        let resp = put(serde_json::json!({
+            "budget": {"max_cost_per_day": 9.0}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Within both limits: persisted and returned.
+        let resp = put(serde_json::json!({
+            "budget": {"max_tokens_per_day": 800, "max_cost_per_day": 4.0}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["budget"]["max_tokens_per_day"], 800);
+        assert_eq!(updated["budget"]["max_cost_per_day"], 4.0);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        let budget = found.budget.expect("repo budget must persist");
+        assert_eq!(budget.max_tokens_per_day, Some(800));
+        assert_eq!(budget.max_cost_per_day, Some(4.0));
+
+        // {} clears the override — the repo inherits the workspace limit.
+        let resp = put(serde_json::json!({"budget": {}})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(
+            found.budget,
+            Some(gyre_domain::BudgetConfig::default()),
+            "an empty budget object clears every override dimension"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_budget_validated_against_effective_workspace_limit() {
+        // Review round 9af67822 F1(a): the repo budget validation must
+        // check against the EFFECTIVE workspace limit (min of the
+        // workspace config and the tenant absolute ceiling), not the raw
+        // workspace config. A dimension the workspace leaves unset is
+        // inherited from the tenant (platform-model.md §1) — a repo
+        // override above the tenant ceiling must be a 400 even when the
+        // workspace's own field is unset.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-bud-eff"),
+            gyre_common::Id::new("t1"),
+            "BudEff",
+            "bud-eff",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        // NO workspace budget config: every dimension inherits the tenant
+        // ceiling below.
+        state
+            .budget_configs
+            .set_config(
+                crate::api::budget::tenant_key(),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(5000),
+                    max_agent_lifetime_secs: Some(1800),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("r-bud-eff"),
+            gyre_common::Id::new("ws-bud-eff"),
+            "budgeted-repo-eff",
+            "/tmp/gyre-test-r-bud-eff",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let put = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/repos/r-bud-eff")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Lifetime above the TENANT ceiling with the workspace field
+        // unset: 400, not persisted (previously accepted because the
+        // raw-config check skipped a dimension the workspace left unset).
+        let resp = put(serde_json::json!({
+            "budget": {"max_agent_lifetime_secs": 3600}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        assert_eq!(found.budget, None, "violating budget must not persist");
+
+        // Tokens above the tenant ceiling, workspace unset: 400.
+        let resp = put(serde_json::json!({
+            "budget": {"max_tokens_per_day": 6000}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Within the tenant ceiling: persisted.
+        let resp = put(serde_json::json!({
+            "budget": {"max_agent_lifetime_secs": 1500, "max_tokens_per_day": 4000}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let found = state.repos.find_by_id(&repo.id).await.unwrap().unwrap();
+        let budget = found.budget.expect("repo budget must persist");
+        assert_eq!(budget.max_agent_lifetime_secs, Some(1500));
+        assert_eq!(budget.max_tokens_per_day, Some(4000));
+
+        // Post-reduction: the tenant ceiling drops below the persisted
+        // override; re-asserting the same override is now a 400 (the
+        // effective limit is recomputed live, not snapshotted).
+        state
+            .budget_configs
+            .set_config(
+                crate::api::budget::tenant_key(),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(5000),
+                    max_agent_lifetime_secs: Some(900),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let resp = put(serde_json::json!({
+            "budget": {"max_agent_lifetime_secs": 1500}
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn archive_and_unarchive_repo() {
         let app = app();
@@ -1339,6 +1818,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(t3_after.status, TaskStatus::Done);
+
+        // analytics.md §Auto-Emitted Events: task.status_changed — the
+        // repo-archive cancellation is a production transition and must
+        // record. Regression: previously only the HTTP status endpoint and
+        // MCP update_task recorded.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "each archived-repo task cancellation must record task.status_changed"
+        );
+        for ev in &events {
+            assert_eq!(ev.properties["new_status"], "Cancelled");
+            let old = ev.properties["old_status"].as_str().unwrap_or_default();
+            assert!(
+                ev.properties["task_id"] == "task-cancel-1" && old == "Backlog"
+                    || ev.properties["task_id"] == "task-cancel-2" && old == "InProgress",
+                "unexpected task_id/old_status pair: {} {}",
+                ev.properties["task_id"],
+                old
+            );
+        }
     }
 
     #[tokio::test]
@@ -1388,6 +1893,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(a2.status, AgentStatus::Idle);
+
+        // analytics.md §Auto-Emitted Events: agent.failed ("Agent fails or
+        // is killed") — the repo-archive agent stop is a kill path, like
+        // stop_agent/admin kill/stale abort. Regression: this path
+        // previously recorded no event.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "repo-archive agent stop must record agent.failed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(ev.properties["task_id"], "task-agent-1");
+        assert_eq!(ev.properties["reason"], "killed (repo archived)");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
     }
 
     #[tokio::test]
@@ -1405,6 +1933,7 @@ mod tests {
         let mr1 = MergeRequest::new(
             Id::new("mr-open-1"),
             Id::new(&repo_id),
+            Id::new("default"),
             "Open MR",
             "feat/x",
             "main",
@@ -1416,6 +1945,7 @@ mod tests {
         let mut mr2 = MergeRequest::new(
             Id::new("mr-approved-2"),
             Id::new(&repo_id),
+            Id::new("default"),
             "Approved MR",
             "feat/y",
             "main",
@@ -1428,6 +1958,7 @@ mod tests {
         let mut mr3 = MergeRequest::new(
             Id::new("mr-merged-3"),
             Id::new(&repo_id),
+            Id::new("default"),
             "Merged MR",
             "feat/z",
             "main",
@@ -1464,6 +1995,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(m3.status, MrStatus::Merged);
+        // analytics.md §Auto-Emitted Events: each MR closed by the archive
+        // must record an `mr.closed` event with the spec-required properties.
+        // Regression: the archive close path previously recorded nothing.
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "one mr.closed event per closed MR (open + approved), none for the merged MR"
+        );
+        let mut closed_ids: Vec<&str> = events
+            .iter()
+            .map(|e| e.properties["mr_id"].as_str().unwrap())
+            .collect();
+        closed_ids.sort();
+        assert_eq!(closed_ids, vec!["mr-approved-2", "mr-open-1"]);
+        for ev in &events {
+            assert_eq!(ev.properties["repo_id"], repo_id);
+            assert_eq!(ev.properties["reason"], "repo_archived");
+        }
     }
 
     #[tokio::test]
