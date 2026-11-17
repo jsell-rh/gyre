@@ -1047,7 +1047,7 @@ mod tests {
         // it must reach the notification bridge via the dispatch channel.
         state
             .emit_event(
-                Some(Id::new("ws-1".to_string())),
+                Id::new("ws-1".to_string()),
                 Destination::Workspace(Id::new("ws-1".to_string())),
                 MessageKind::ReconciliationCompleted,
                 Some(serde_json::json!({ "workspace_id": "ws-1" })),

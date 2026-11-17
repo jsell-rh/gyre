@@ -138,9 +138,12 @@ impl NotificationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
         let uid = user_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
             let result = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::id.eq(id.as_str()))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .first::<NotificationRow>(&mut *conn)
@@ -166,6 +169,7 @@ impl NotificationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
+        let tenant = self.tenant_id.clone();
         // Owned copy for the spawn_blocking closure; empty set matches
         // nothing (port contract), handled explicitly below so the SQL
         // never depends on `IN ()` semantics.
@@ -176,6 +180,7 @@ impl NotificationRepository for SqliteStorage {
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .order(notifications::priority.asc())
                 .then_order_by(notifications::created_at.desc())
@@ -230,6 +235,9 @@ impl NotificationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id,
+        // same as list_for_user (this is its active-only twin).
+        let tenant = self.tenant_id.clone();
         // Owned copy for the spawn_blocking closure; empty set matches
         // nothing (port contract), handled explicitly below so the SQL
         // never depends on `IN ()` semantics — same as list_for_user.
@@ -241,6 +249,7 @@ impl NotificationRepository for SqliteStorage {
             // Same surface as list_for_user plus the active guard
             // (resolved_at/dismissed_at IS NULL) — the drawer's listing.
             let mut query = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())
@@ -391,9 +400,18 @@ impl NotificationRepository for SqliteStorage {
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
         let excl: Vec<String> = exclude_types.iter().map(|s| s.to_string()).collect();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+        // Restored in the task-160 rebase repair — the merge kept the base
+        // side's exclude_types parameter but dropped this filter, re-opening
+        // the cross-tenant read. Notification rows carry the domain
+        // Notification's tenant_id at insert; the storage handle's tenant
+        // scope selects which tenant's rows this read may see
+        // (SqliteStorage handles are per-tenant: new_for_tenant/with_tenant).
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())
@@ -417,9 +435,11 @@ impl NotificationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::read.eq(0))
                 .filter(notifications::resolved_at.is_null())
@@ -470,9 +490,11 @@ impl NotificationRepository for SqliteStorage {
 
     async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows: Vec<NotificationRow> = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .order(notifications::created_at.desc())
                 .limit(limit as i64)
                 .select(NotificationRow::as_select())
@@ -492,9 +514,14 @@ impl NotificationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.clone();
         let ntype = notification_type.to_string();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+        // workspace_id is the fan-out key, but the row's tenant scope still
+        // comes from the storage handle — same contract as has_recent_dismissal.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows: Vec<NotificationRow> = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::workspace_id.eq(ws_id.as_str()))
                 .filter(notifications::notification_type.eq(&ntype))
                 .filter(notifications::created_at.ge(since))
@@ -518,6 +545,7 @@ impl NotificationRepository for SqliteStorage {
         let ws_id = workspace_id.clone();
         let uid = user_id.clone();
         let ntype = notification_type.to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
             let cutoff = std::time::SystemTime::now()
@@ -526,6 +554,7 @@ impl NotificationRepository for SqliteStorage {
                 .as_secs() as i64
                 - (days as i64 * 86400);
             let count = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::workspace_id.eq(ws_id.as_str()))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::notification_type.eq(&ntype))
@@ -551,9 +580,11 @@ impl NotificationRepository for SqliteStorage {
         let uid = user_id.clone();
         let ntype = notification_type.to_string();
         let eref = entity_ref.to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
             let count = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::workspace_id.eq(ws_id.as_str()))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::notification_type.eq(&ntype))
@@ -609,7 +640,10 @@ mod tests {
 
     fn setup() -> (NamedTempFile, SqliteStorage) {
         let tmp = NamedTempFile::new().unwrap();
-        let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        // Scope the handle to the tenant the fixtures are created under —
+        // reads are tenant-filtered (hierarchy-enforcement §3), so a
+        // "default"-scoped handle would not see "tenant-1" rows.
+        let s = SqliteStorage::new_for_tenant(tmp.path().to_str().unwrap(), "tenant-1").unwrap();
         (tmp, s)
     }
 
@@ -1133,6 +1167,45 @@ mod tests {
         assert_eq!(all.len(), 4, "list_for_user keeps the Inbox contract");
     }
 
+    /// hierarchy-enforcement.md §3: the active-only drawer listing is a read
+    /// like any other: a same-user, same-workspace row filed under ANOTHER
+    /// tenant must not leak into tenant-1's drawer. The handle is scoped to
+    /// tenant-1, so the §3 tenant filter must exclude it even though
+    /// user_id, workspace_id and the active guard all match. Remove the
+    /// tenant_id filter from list_active_for_user and this row leaks.
+    #[tokio::test]
+    async fn list_active_for_user_excludes_other_tenants() {
+        let (_tmp, s) = setup();
+        let user1 = Id::new("user-1");
+        NotificationRepository::create(&s, &make("n-active-home", 1000, false))
+            .await
+            .unwrap();
+        let cross_tenant = Notification::new(
+            Id::new("n-active-cross-tenant"),
+            Id::new("ws-1"),
+            Id::new("user-1"),
+            NotificationType::GateFailure,
+            "cross-tenant active".to_string(),
+            "tenant-2",
+            1001,
+        );
+        NotificationRepository::create(&s, &cross_tenant)
+            .await
+            .unwrap();
+
+        let active = NotificationRepository::list_active_for_user(
+            &s, &user1, None, None, None, None, None, 50, 0,
+        )
+        .await
+        .unwrap();
+        let ids: Vec<&str> = active.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["n-active-home"],
+            "the tenant-2 row is excluded even though user_id and workspace_id match"
+        );
+    }
+
     /// The four-level `?priority=` filter pushes down as a type-string set
     /// on the persisted `notification_type` column (amended §Notification
     /// Entity membership table — the band derives from the type, never the
@@ -1359,6 +1432,24 @@ mod tests {
                 .await
                 .unwrap();
         }
+
+        // A same-workspace, same-type, qualifying row filed under ANOTHER
+        // tenant: the handle is scoped to tenant-1, so the §3 tenant filter
+        // must exclude it even though workspace_id + type + since all match.
+        // Remove the tenant_id filter from list_by_workspace_type_since and
+        // this row leaks into tenant-1's briefing exceptions.
+        let cross_tenant = Notification::new(
+            Id::new("n-saf-cross-tenant"),
+            Id::new("ws-1"),
+            Id::new("user-4"),
+            NotificationType::SpecAssertionFailure,
+            "saf cross-tenant".to_string(),
+            "tenant-2",
+            1000,
+        );
+        NotificationRepository::create(&s, &cross_tenant)
+            .await
+            .unwrap();
 
         let rows = NotificationRepository::list_by_workspace_type_since(
             &s,

@@ -13,9 +13,11 @@
 //! The three checks run against real storage — `TaskRepository` for the task-age
 //! checks and `SpecLedgerRepository` (`state.spec_ledger`, the same ledger the
 //! post-receive hook writes) for the modified-spec check — and every finding
-//! produces a real `MessageKind::Escalation` on the message bus, addressed to the
-//! workspace orchestrator's event stream
-//! (`GET /api/v1/workspaces/:id/messages`).
+//! with a resolvable workspace produces a real `MessageKind::Escalation` on
+//! the message bus, addressed to the workspace orchestrator's event stream
+//! (`GET /api/v1/workspaces/:id/messages`). Findings with no resolvable
+//! workspace are skipped and logged (never emitted under a fabricated
+//! scope), and still reach the caller through the patrol response.
 //!
 //! This is deliberately a *separate* patrol from `spec_patrol.rs` (spec-links.md
 //! §Accountability Agent Integration), which inspects the spec *graph*. Different
@@ -358,18 +360,33 @@ fn strip_specs_prefix(rooted_path: &str) -> String {
 /// readable if the orchestrator is restarted, and is queryable at
 /// `GET /api/v1/workspaces/:id/messages?kind=escalation`.
 ///
-/// Findings with no resolvable workspace go to `Destination::Broadcast` —
-/// a fabricated `"default"` scope would mis-target the escalation.
+/// Findings with no resolvable workspace are skipped and logged — never
+/// broadcast. Under the scoped emit contract (`AppState::emit_event`) every
+/// server-originated message resolves its tenant from the workspace record;
+/// there is no scope-less emission path, and a fabricated `"default"`
+/// workspace/tenant would re-target the escalation to whatever scope the
+/// literal happens to collide with (the same skip-and-log contract as
+/// `api/specs.rs`'s SpecApproved/deprecation emissions). The finding still
+/// reaches the caller through the patrol response; only the bus emission is
+/// skipped.
 pub async fn escalate_findings(state: &AppState, findings: &[PatrolFinding]) -> usize {
     let mut escalated = 0usize;
 
     for finding in findings {
-        let (workspace_id, to) = escalation_route(finding.workspace_id.as_deref());
+        let Some(workspace_id) = escalation_workspace(finding.workspace_id.as_deref()) else {
+            warn!(
+                finding_type = %finding.finding_type,
+                spec_path = %finding.spec_path,
+                "spec_lifecycle_patrol: finding has no resolvable workspace \
+                 scope; skipping escalation (cannot resolve tenant scope)"
+            );
+            continue;
+        };
 
         state
             .emit_event(
-                workspace_id,
-                to,
+                workspace_id.clone(),
+                Destination::Workspace(workspace_id),
                 MessageKind::Escalation,
                 Some(serde_json::json!({
                     // message-bus.md §Payload Schemas: `escalation` requires
@@ -409,21 +426,18 @@ pub async fn escalate_findings(state: &AppState, findings: &[PatrolFinding]) -> 
     escalated
 }
 
-/// Where an escalation for a finding goes.
+/// The workspace an escalation for a finding is routed to.
 ///
-/// A workspace id is only usable when it is present and non-blank. Missing
-/// scope means `Broadcast`, never a guessed workspace: `emit_event` would
-/// happily persist an escalation under a scope no operator created, and a
-/// literal `"default"` workspace would then receive escalations that belong to
-/// someone else.
-fn escalation_route(workspace_id: Option<&str>) -> (Option<Id>, Destination) {
-    match workspace_id.map(str::trim).filter(|ws| !ws.is_empty()) {
-        Some(ws) => {
-            let id = Id::new(ws);
-            (Some(id.clone()), Destination::Workspace(id))
-        }
-        None => (None, Destination::Broadcast),
-    }
+/// A workspace id is only usable when it is present and non-blank. A missing
+/// scope yields `None` — the caller skips the emission and logs: `emit_event`
+/// resolves the tenant from the workspace record, and there is no valid
+/// scope-less fallback (a literal `"default"` workspace would receive
+/// escalations that belong to someone else).
+fn escalation_workspace(workspace_id: Option<&str>) -> Option<Id> {
+    workspace_id
+        .map(str::trim)
+        .filter(|ws| !ws.is_empty())
+        .map(Id::new)
 }
 
 /// Does this task carry `label`?
@@ -1029,10 +1043,14 @@ mod tests {
         );
     }
 
-    /// A finding with no workspace still escalates (broadcast) instead of
-    /// fabricating a scope.
+    /// A finding with no resolvable workspace skips the bus escalation (and
+    /// logs) instead of fabricating a scope: the scoped `emit_event` contract
+    /// resolves the tenant from the workspace record, and there is no
+    /// scope-less broadcast path (a fabricated `"default"` tenant would
+    /// re-target the escalation). The finding itself still reaches the caller
+    /// through the patrol response.
     #[tokio::test]
-    async fn workspaceless_finding_broadcasts() {
+    async fn workspaceless_finding_skips_instead_of_fabricating_scope() {
         let state = test_state();
         let mut task = make_task(
             "drift-no-ws",
@@ -1046,20 +1064,19 @@ mod tests {
         let findings = run(&state).await;
         assert_eq!(types(&findings), vec!["stale_drift_review_task"]);
 
-        // Broadcast messages are not persisted (see AppState::emit_event), so
-        // delivery is asserted on the dispatch channel itself — subscribed
-        // before the escalation, since broadcast receivers only see what is
-        // published after they subscribe.
+        // Subscribed before the escalation: any emission — broadcast or
+        // scoped — passes through this channel, so a quiet channel proves
+        // nothing was emitted at all.
         let mut rx = state.message_broadcast_tx.subscribe();
         escalate_findings(&state, &findings).await;
 
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("workspaceless finding must still dispatch an escalation (within 5s)")
-            .expect("escalation must be emitted, not skipped");
-        assert_eq!(msg.kind, MessageKind::Escalation);
-        assert!(matches!(msg.to, Destination::Broadcast));
-        assert!(msg.workspace_id.is_none(), "no workspace to attribute");
+        let leaked = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            leaked.is_err(),
+            "a workspaceless finding must not emit any message (fabricated-scope \
+             broadcast included): {:?}",
+            leaked.map(|m| m.map(|m| (m.kind, m.to)))
+        );
 
         // And nothing may be persisted under a scope no operator created.
         for scope in ["", "default"] {
@@ -1077,16 +1094,14 @@ mod tests {
 
     #[test]
     fn escalation_routing_never_fabricates_a_scope() {
-        let (ws, to) = escalation_route(Some("ws7"));
-        assert!(matches!(&to, Destination::Workspace(id) if id.to_string() == "ws7"));
+        let ws = escalation_workspace(Some("ws7"));
         assert_eq!(ws.map(|i| i.to_string()), Some("ws7".to_string()));
 
         for blank in [None, Some(""), Some("   ")] {
-            let (ws, to) = escalation_route(blank);
-            assert!(ws.is_none(), "{blank:?} has no workspace");
+            let ws = escalation_workspace(blank);
             assert!(
-                matches!(to, Destination::Broadcast),
-                "{blank:?} must broadcast"
+                ws.is_none(),
+                "{blank:?} has no workspace — the escalation must skip, not route"
             );
         }
     }
