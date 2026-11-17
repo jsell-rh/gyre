@@ -50,3 +50,46 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+## Round: R25 (independent review of candidate `3bf43cd3`)
+
+**Reviewer:** Review agent (pi runtime)
+**Candidate:** `3bf43cd3feed2bb6593d12aafc5f27ea96858c0f` (base `1f86b0064bdd4e3d14cb1e48bdb61270804fcf42`)
+**Spec ref:** human-system-interface.md §9–13 (Trust Gradient), abac-policy-engine.md §Policy Composition
+
+### Scope
+
+The base already contains the task's 14 frontmatter commits (feature + rounds R1–R23). The candidate-vs-base delta is the six newer repair commits — `71b202e6` (HSI control-row enforcement: notification classifier, server-side inbox/badge exclusion, SSE/WS push + email/webhook/slack dispatch suppression, briefing detail per level, agent completion summaries, per-handler Admin workspace-role gate on trust_level changes, user-policy 200-299 priority band, atomic `apply_approval_reset_with_task`), `099f08c4` (inherited fmt fix), `2fea93f0` (cfg(test) gate on mem test hook), `34c42250` (drop web client-side priority cap hiding invitations; api-reference band doc fix), `6009d2b4` (clippy), `8a07efa5` (verification test repairs) — plus the base merge and docs/process commits.
+
+### Verification
+
+- **Task contract at the candidate tree (all present, enforced, unchanged from verified rounds):** `TrustLevel` enum (gyre-domain) with strict API parse + safe DB fallback; workspace `trust_level` (migrations 000024 + 000050 default `Supervised`); policy `immutable` (migration 000028); immutable-Deny-first ABAC evaluation (`policy_engine.rs` step 1, with scoped-override tests); `builtin:require-human-spec-approval` seeded immutable at priority 999; policy CRUD rejects `trust:`/`builtin:` prefixes AND out-of-band priorities (400, create + update, stored-name guard on update); `PUT /workspaces/:id` trust transitions atomic with 409 + post-commit cache invalidation (R2-verified, unchanged); merge-time ABAC for the `merge-processor` service identity with human-approval escape (`mr.status == Approved`) and fail-closed store reads (F5/F9).
+- **This round's delta:** all real implementations with meaningful tests (status-code, store-state, and rollback assertions; no self-confirming or assertionless tests found). The notification classifier is documented per HSI row and round-trip tested; the Guided/Autonomous inbox exclusion is applied server-side (list + badge share one exclusion set); the tenant-scope aggregate uses documented intersection semantics with fail-open reads; the web client sends no priority cap (server is the single enforcement point).
+- **`8a07efa5` test repairs (both from the `cargo test --all` verification failure at `24aaf522`, exit 101):** strictly `mod tests`-only changes (all five hunks verified inside test modules). The 404-vs-403 repair adds `tenant_id: "t1"` to the test JWTs — the auth extractor provably scopes requests by the validated `tenant_id` claim (auth.rs), so the cross-tenant containment (404) no longer fires before the per-handler trust gate the test pins; assertions unchanged. The drift fan-out repair runs that one test at Supervised via a new `make_workspace_at_trust` helper — `MetaSpecDrift` is in `AUTONOMOUS_SUPPRESSED`, so the old Autonomous scaffold exercised trust filtering instead of the task-112 dispatch wiring; assertions unchanged, trust suppression keeps its own suite (`dispatch_to_channels_suppresses_by_workspace_trust_level`).
+- **Merge integrity:** of the 21 files the base commit touched, only the 4 trust-touched files differ from base (the task-077 net changes); base-side task-186 content is fully preserved.
+
+### Probes run (evidence in `/tmp/stage/review-evidence/`)
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib` — exit 0 (6m08s) — `probe-cargo-check-server.log`
+- `cargo test -p gyre-domain` — 577 passed, 0 failed (includes all TrustLevel classifier + `trust_policies_for_level` tests) — `probe-domain-tests.log`
+- `cargo test -p gyre-adapters persona_approval_reset` — 1 passed (sqlite atomic persist) — `probe-adapters-atomic.log`
+- `cargo fmt -p {gyre-domain,gyre-ports,gyre-adapters,gyre-server} -- --check` — all clean (repo config) — `probe-fmt-*.log`
+- `web`: `npm ci` + `npx vitest run src/__tests__/Briefing.test.js src/__tests__/Inbox.test.js` — 109 passed — `probe-web-trust-tests.log`
+- `scripts/check-arch.sh`, `check-inert-enforcement.sh`, `check-mem-port-contracts.sh`, `check-fail-open-ref-resolution.sh` — all pass — `probe-*.log`
+- `scripts/check-task-commit-attribution.sh` — passes at the committed candidate (frontmatter lists all 19 task-labeled commits); see observation O2 for the working-tree artifact.
+
+### Deferred to the verifier (build wrapper blocks gyre-server test compilation in this sandbox)
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib trust_level_change_requires_admin_workspace_role`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib sweep_drift_notification_fans_out_to_configured_channels`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` (full lib: 2424 tests at `24aaf522` passed 2422 with only these two, both repaired test-module-only since)
+- `cargo test --all`, all-target Clippy, `cargo fmt --all -- --check`
+
+### Observations (non-blocking)
+
+- **O1 — generated output:** `web/dist` reflects the base merge (task-186 bundle); regeneration is owned by the deterministic verifier. No authored-source concern.
+- **O2 — controller task snapshot staleness (process, not a code defect):** the working-tree `specs/tasks/task-077.md` assigned for this round is the round-23-era snapshot (14-commit frontmatter, `progress: complete`), which does not list the six repair commits that constitute the actual candidate delta; run against it, `check-task-commit-attribution.sh` fails. The committed candidate `3bf43cd3` frontmatter correctly lists all 19 task-labeled commits, so the check passes at the candidate tree. The verifier should scope review/verification rounds against the committed frontmatter, not the stale working-tree snapshot.
+
+### Verdict
+
+approved — every acceptance criterion is implemented with production enforcement at the candidate tree; this round's delta consists of genuine control-row enforcement plus test-scaffold repairs; all independently runnable probes pass. Full-suite execution remains with the verifier as recorded above.
