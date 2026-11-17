@@ -129,8 +129,25 @@ fn parse_agent_status(s: &str) -> Result<AgentStatus, ApiError> {
 
 pub async fn create_agent(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CreateAgentRequest>,
 ) -> Result<(StatusCode, Json<RegisterAgentResponse>), ApiError> {
+    // Preview agents may not register agents (task-206 review F2): this
+    // route mints a fresh opaque agent token under `agent_tokens` for a
+    // NEW agent principal that is not in the preview_agents index, so a
+    // single call from a preview agent launders a fresh identity past
+    // every caller-keyed preview refusal guard (the new token's agent_id
+    // is not a preview agent). The middleware maps this route to
+    // (agent, write), which the Agent role passes via the builtin
+    // agent-scoped-access policy — the per-handler guard is the only
+    // refusal layer for a same-tenant preview-agent JWT.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not register agents — preview runs leave no production \
+             footprint"
+                .to_string(),
+        ));
+    }
     let now = now_secs();
     let mut agent = Agent::new(new_id(), req.name, now);
     agent.parent_id = req.parent_id.map(Id::new);

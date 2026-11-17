@@ -6013,6 +6013,379 @@ mod tests {
         .await;
     }
 
+    /// Review round 2 regressions (F1–F5): the preview-agent containment
+    /// must hold on the five REST routes the first guard pass missed —
+    /// repo-tier orchestrator spawn (role gate + refusal), bare agent
+    /// registration (identity laundering via a minted non-preview token),
+    /// completing ANOTHER agent (caller-keyed, not target-keyed), spec save
+    /// (auto-MR + notification ceremony), and commit provenance recording
+    /// (audit trail). Each refusal is driven on the production router
+    /// (auth + ABAC middleware — the builtin agent-scoped-access policy
+    /// grants the Agent role the mapped action, so the middleware alone
+    /// would let it through) and, where the route is not registry-exempt,
+    /// also on the bare api_router so the per-handler guard itself is the
+    /// only refusal layer being proven.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_agent_rest_identity_provenance_and_repo_orchestrator_are_refused() {
+        use crate::auth::test_helpers::{make_jwt_config, sign_test_jwt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // JWT-enabled twin of the same state (Arc-shared port stores), so a
+        // minted plain Agent-role caller (not a preview agent) can drive the
+        // bare router and prove the orchestrator role gate itself.
+        let mut jwt_state = (*state).clone();
+        jwt_state.jwt_config = Some(make_jwt_config());
+        let jwt_state = std::sync::Arc::new(jwt_state);
+
+        // The repo-orchestrator positive control needs the fail-closed
+        // persona layers (platform-model §4.3), same as startup seeding.
+        crate::seed_builtin_meta_specs(&jwt_state).await;
+        crate::seed_builtin_personas_for_tenant(&jwt_state, &gyre_common::Id::new("default")).await;
+
+        // A non-preview Active victim in the same workspace: F3's escape is
+        // a preview agent completing ANOTHER agent (the target-keyed guard
+        // alone passes because the victim is not a preview agent).
+        let mut victim = gyre_domain::Agent::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            "complete-victim",
+            chrono_now_secs(),
+        );
+        victim.workspace_id = ws_id.clone();
+        victim
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&victim).await.unwrap();
+        let victim_id = victim.id.to_string();
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+
+            crate::abac_middleware::seed_builtin_policies(&jwt_state)
+                .await
+                .expect("seed built-in policies");
+            let prod = crate::build_router(jwt_state.clone());
+            let bare_jwt_router = crate::api::api_router().with_state(jwt_state.clone());
+            let jwt = state
+                .kv_store
+                .kv_get("agent_tokens", &agent_id)
+                .await
+                .unwrap()
+                .expect("preview agent token must be live");
+
+            // In-tenant Agent-role caller that is NOT a preview agent: for
+            // the repo-orchestrator role gate, this is the exact principal
+            // the gate must refuse (a live Agent-role JWT that the builtin
+            // policy would otherwise let through on both tiers).
+            let plain_agent = sign_test_jwt(
+                &serde_json::json!({
+                    "tenant_id": "default",
+                    "sub": "plain-worker",
+                    "preferred_username": "plain-worker",
+                    "realm_access": { "roles": ["agent"] }
+                }),
+                3600,
+            );
+
+            let post = |router: Router, uri: String, token: String, body: serde_json::Value| {
+                async move {
+                    router
+                        .oneshot(
+                            Request::builder()
+                                .method("POST")
+                                .uri(&uri)
+                                .header("authorization", format!("Bearer {token}"))
+                                .header("content-type", "application/json")
+                                .body(Body::from(body.to_string()))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                }
+            };
+
+            // ── F1. POST /api/v1/repos/:id/orchestrator/spawn (repo tier):
+            //    the preview agent through the production router, and the
+            //    plain Agent-role caller through a bare api_router built
+            //    from the JWT twin (no ABAC middleware) so the handler role
+            //    gate itself is the only refusal layer.
+            let orch_uri = format!("/api/v1/repos/{repo_id}/orchestrator/spawn");
+            let orch_body = serde_json::json!({ "name": "should-not-spawn" });
+            let resp = post(
+                prod.clone(),
+                orch_uri.clone(),
+                jwt.clone(),
+                orch_body.clone(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "a preview agent must not spawn a repo orchestrator"
+            );
+            let resp = post(
+                bare_jwt_router.clone(),
+                orch_uri.clone(),
+                plain_agent.clone(),
+                orch_body.clone(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "a plain Agent-role caller must not spawn a repo orchestrator"
+            );
+            assert!(
+                state
+                    .agents
+                    .list_by_workspace(&ws_id)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|a| a.orchestrator_type
+                        != gyre_domain::OrchestratorType::RepoOrchestrator),
+                "neither refusal may have minted a repo orchestrator"
+            );
+            // Positive control: the operator (global Admin token) spawns
+            // the repo orchestrator, then kills it so nothing lingers.
+            let resp = post(
+                prod.clone(),
+                orch_uri.clone(),
+                "test-token".to_string(),
+                serde_json::json!({ "name": "control-repo-orch" }),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin repo-orchestrator spawn must still work"
+            );
+            let orch_json = body_json(resp).await;
+            let orch_id = orch_json["agent"]["id"].as_str().unwrap().to_string();
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/admin/agents/{orch_id}/kill"))
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NO_CONTENT,
+                "admin kill cleanup must work"
+            );
+
+            // ── F2. POST /api/v1/agents: registering an agent mints a fresh
+            //    opaque token for a NEW agent principal that no preview
+            //    guard indexes — one call launders a fresh identity past
+            //    every caller-keyed refusal.
+            let agents_before = state.agents.list().await.unwrap().len();
+            let tokens_before = state
+                .kv_store
+                .kv_list("agent_tokens")
+                .await
+                .unwrap()
+                .len();
+            let reg_body = serde_json::json!({ "name": "laundered-identity" });
+            for router in [prod.clone(), app.clone()] {
+                let resp = post(
+                    router,
+                    "/api/v1/agents".to_string(),
+                    jwt.clone(),
+                    reg_body.clone(),
+                )
+                .await;
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "a preview agent must not register agents (identity laundering)"
+                );
+            }
+            assert_eq!(
+                state.agents.list().await.unwrap().len(),
+                agents_before,
+                "the refused registration must not have created an agent row"
+            );
+            assert_eq!(
+                state.kv_store.kv_list("agent_tokens").await.unwrap().len(),
+                tokens_before,
+                "the refused registration must not have minted an agent token"
+            );
+            // Positive control: the operator registers an agent.
+            let resp = post(
+                prod.clone(),
+                "/api/v1/agents".to_string(),
+                "test-token".to_string(),
+                serde_json::json!({ "name": "operator-registered" }),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin agent registration must still work"
+            );
+
+            // ── F3. POST /api/v1/agents/{id}/complete for ANOTHER agent:
+            //    the caller-keyed guard must refuse the preview agent even
+            //    though the target is not a preview agent (the target-keyed
+            //    guard alone passes).
+            let complete_body = serde_json::json!({
+                "branch": "feat/victim",
+                "title": "ceremony escape",
+                "target_branch": "main",
+            });
+            for router in [prod.clone(), app.clone()] {
+                let resp = post(
+                    router,
+                    format!("/api/v1/agents/{victim_id}/complete"),
+                    jwt.clone(),
+                    complete_body.clone(),
+                )
+                .await;
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "a preview agent must not complete another agent"
+                );
+            }
+            let row = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&victim_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.status,
+                gyre_domain::AgentStatus::Active,
+                "the refused complete must not have transitioned the victim"
+            );
+            assert!(
+                state.merge_requests.list().await.unwrap().is_empty(),
+                "the refused complete must not have created an MR"
+            );
+
+            // ── F4. POST /api/v1/repos/:id/specs/save: auto-creates an MR
+            //    plus a 'Spec pending approval' notification — MR-creation
+            //    ceremony §5 forbids for preview runs.
+            let save_body = serde_json::json!({
+                "spec_path": "specs/system/search.md",
+                "content": "# Search\n\nsmuggled edit\n",
+                "message": "ceremony escape"
+            });
+            for router in [prod.clone(), app.clone()] {
+                let resp = post(
+                    router,
+                    format!("/api/v1/repos/{repo_id}/specs/save"),
+                    jwt.clone(),
+                    save_body.clone(),
+                )
+                .await;
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "a preview agent must not save specs (auto-MR ceremony)"
+                );
+            }
+            assert!(
+                state.merge_requests.list().await.unwrap().is_empty(),
+                "the refused spec save must not have created an MR"
+            );
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                state
+                    .git_ops
+                    .list_branches(&repo.path)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|b| !b.name.starts_with("spec-edit/")),
+                "the refused spec save must not have created a spec-edit branch"
+            );
+            // Positive control: the operator saves the same spec.
+            let resp = post(
+                prod.clone(),
+                format!("/api/v1/repos/{repo_id}/specs/save"),
+                "test-token".to_string(),
+                save_body.clone(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin spec save must still work"
+            );
+
+            // ── F5. POST /api/v1/repos/:id/commits/record: persists a
+            //    caller-supplied agent_id as an AgentCommit provenance row —
+            //    the audit trail §5 says preview runs must not leave.
+            let record_body = serde_json::json!({
+                "agent_id": agent_id,
+                "commit_sha": "a".repeat(40),
+                "branch": "preview-smuggled",
+            });
+            for router in [prod.clone(), app.clone()] {
+                let resp = post(
+                    router,
+                    format!("/api/v1/repos/{repo_id}/commits/record"),
+                    jwt.clone(),
+                    record_body.clone(),
+                )
+                .await;
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "a preview agent must not record commit provenance"
+                );
+            }
+            assert!(
+                state
+                    .agent_commits
+                    .find_by_repo(&gyre_common::Id::new(&repo_id))
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "the refused provenance recording must not have written a row"
+            );
+            // Positive control: the operator records a commit.
+            let resp = post(
+                prod.clone(),
+                format!("/api/v1/repos/{repo_id}/commits/record"),
+                "test-token".to_string(),
+                record_body.clone(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin commit recording must still work"
+            );
+
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
     /// F3 regression: the default workspace-budget path must reserve every
     /// requested slot up front — a single POST with more targets than the
     /// workspace's max_concurrent_agents is 429, not an over-admitted run.

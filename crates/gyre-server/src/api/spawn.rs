@@ -2905,12 +2905,29 @@ pub(crate) async fn create_mr_for_completion(
 /// 1. Creates a MergeRequest (source->target)
 /// 2. Transitions task status to Review
 /// 3. Transitions agent status to Idle
-#[instrument(skip(state, req), fields(agent_id = %id, branch = %req.branch))]
+#[instrument(skip(state, auth, req), fields(agent_id = %id, branch = %req.branch))]
 pub async fn complete_agent(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<CompleteAgentRequest>,
 ) -> Result<(StatusCode, Json<MrResponse>), ApiError> {
+    // Caller-keyed preview refusal (task-206 review F3): a preview agent
+    // completing ANY agent mints a real MR, transitions a task to Review
+    // and writes refs/agents/*/snapshots/* refs — MR-creation ceremony §5
+    // forbids for preview runs. The target-keyed guard below refuses
+    // completing a preview agent; this one refuses the preview agent as
+    // the CALLER, so it cannot run the ceremony against another agent.
+    // The builtin agent-scoped-access policy grants the Agent role
+    // 'complete' on 'agent', so this per-handler guard is the only
+    // refusal layer for a same-tenant preview-agent JWT.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not complete agents — preview runs skip MR creation \
+             and completion ceremony"
+                .to_string(),
+        ));
+    }
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -2924,6 +2941,9 @@ pub async fn complete_agent(
     // `gyre_agent_complete` for preview agents, but allowedTools is advisory:
     // the REST surface must enforce the same invariant or a preview agent can
     // mint a real MR and park itself in Idle through this route.
+    // (task-206 review F3: the caller-keyed guard above refuses the preview
+    // agent as caller; this target-keyed guard refuses completing a preview
+    // agent as the target — both directions are containment.)
     if crate::api::meta_specs::is_preview_agent(&state, &id).await {
         return Err(ApiError::Forbidden(format!(
             "agent {id} belongs to a meta-spec preview run — preview agents skip \
@@ -4492,6 +4512,7 @@ mod tests {
         let (status, mr_json) = {
             let (code, body) = complete_agent(
                 axum::extract::State(state.clone()),
+                auth.clone(),
                 axum::extract::Path(agent_id.clone()),
                 axum::Json(CompleteAgentRequest {
                     branch: "feat/r19".to_string(),

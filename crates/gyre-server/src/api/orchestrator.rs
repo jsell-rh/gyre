@@ -1109,7 +1109,8 @@ pub(crate) fn parse_priority(s: &str) -> gyre_domain::TaskPriority {
 /// bootstrap principal, not a tenant scope, and the documented dev-mode
 /// bootstrap (`gyre bootstrap --dev`, docs/cli.md) authenticates this
 /// route's step-8 repo-orchestrator spawn with that static token against
-/// the freshly created "dev" tenant. (The workspace-tier spawn route above
+/// the freshly created "dev" tenant (the role gate below passes for the
+/// system principal, which resolves as Admin). (The workspace-tier spawn route above
 /// has NO bypass: no bootstrap flow spawns a workspace orchestrator, so
 /// its containment holds for every caller.) The shared core re-checks
 /// containment for every caller (it is also the MCP spawn path, which runs
@@ -1120,6 +1121,42 @@ pub async fn spawn_repo_orchestrator(
     Path(repo_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
+    // Role gate (task-206 review F1, repo tier): spawning the repo
+    // orchestrator is an operator action — it decomposes specs into tasks
+    // and spawns worker agents, durable ledger footprint. The route is
+    // repo-addressed, but the builtin agent-scoped-access policy grants
+    // `write` on `*` to the Agent role, so repo ABAC alone cannot refuse a
+    // same-tenant agent JWT — a preview agent's included, which is
+    // same-tenant by construction for its target repo. Without this gate
+    // any agent JWT could mint a repo orchestrator and receive the minted
+    // orchestrator token. The workspace-tier twin route above carries the
+    // same gate; the dev bootstrap flow is unaffected (the global system
+    // token resolves as Admin).
+    if !(auth.roles.contains(&gyre_domain::UserRole::Admin)
+        || auth.roles.contains(&gyre_domain::UserRole::Developer))
+    {
+        crate::rbac::record_rbac_denied(
+            state.as_ref(),
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/repos/:id/orchestrator/spawn",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "Admin or Developer role required to spawn a repo orchestrator".to_string(),
+        ));
+    }
+    // meta-spec reconciliation §5 (task-206 review F1, repo tier): preview
+    // agents may not spawn orchestrators — throwaway preview scratch must
+    // leave no task/agent ledger footprint. Belt-and-braces with the role
+    // gate above in case a future role band grants Agent the tier.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not spawn orchestrators — preview runs leave no \
+             production footprint"
+                .to_string(),
+        ));
+    }
     // G6: ABAC enforcement - repo access required to spawn its orchestrator.
     if let Err(reason) = crate::abac::check_repo_abac(&state, &repo_id, &auth).await {
         // task-104: AbacDenied audit event — per-handler repo-level ABAC

@@ -900,6 +900,20 @@ pub async fn save_spec(
     caller: AuthenticatedAgent,
     Json(req): Json<SpecSaveRequest>,
 ) -> Result<Response, ApiError> {
+    // Preview agents may not save specs (task-206 review F4): this route
+    // auto-creates an MR targeting the default branch plus a High-priority
+    // 'Spec pending approval' notification — exactly the MR-creation
+    // ceremony §5 forbids for preview runs. The middleware maps it to
+    // (spec, write), which the Agent role passes via the builtin
+    // agent-scoped-access policy, so this per-handler guard is the only
+    // refusal layer for a same-tenant preview-agent JWT.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &caller).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not save specs — preview runs leave no MR or \
+             notification footprint"
+                .to_string(),
+        ));
+    }
     let repo_id_typed = Id::new(&repo_id);
     let repo = state
         .repos
