@@ -46,6 +46,7 @@ pub struct QueryAuditParams {
     pub event_type: Option<String>,
     pub workspace_id: Option<String>,
     pub user_id: Option<String>,
+    pub repo_id: Option<String>,
     pub resource_type: Option<String>,
     /// Parsed manually so a typo yields the repo's ApiError shape instead
     /// of axum's generic Query rejection (task-102 F4).
@@ -343,6 +344,7 @@ pub async fn query_audit_events(
         event_type: params.event_type,
         workspace_id: params.workspace_id,
         user_id: params.user_id,
+        repo_id: params.repo_id,
         resource_type: params.resource_type,
         outcome,
         since: params.since,

@@ -112,6 +112,13 @@ enum Commands {
         /// Git remote name (default: origin)
         #[arg(long, default_value = "origin")]
         remote: String,
+        /// Override reason when your agent stack drifts from the repo's
+        /// gyre-stack.lock and the repo policy is warn-mode — sent as the
+        /// X-Gyre-Stack-Override-Reason push header and recorded in the
+        /// repo's stack-drift audit trail (supply-chain.md §The Laptop
+        /// Problem). Required to push through warn-mode drift.
+        #[arg(long)]
+        stack_override_reason: Option<String>,
     },
     /// Verify the merge attestation bundle attached to a merge commit
     /// (agent-gates.md §Part 3 Verification)
@@ -1235,17 +1242,33 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Push { remote } => {
+        Commands::Push {
+            remote,
+            stack_override_reason,
+        } => {
             let cfg = config::Config::load()?;
             let token = cfg.require_token()?;
 
-            let status = std::process::Command::new("git")
-                .args([
-                    "-c",
-                    &format!("http.extraHeader=Authorization: Bearer {token}"),
-                    "push",
-                    &remote,
-                ])
+            let mut cmd = std::process::Command::new("git");
+            cmd.arg("-c")
+                .arg(format!("http.extraHeader=Authorization: Bearer {token}"));
+            if let Some(reason) = &stack_override_reason {
+                // Flatten whitespace so the reason stays a single header
+                // line; blank reasons are not sent (the server rejects
+                // warn-mode drift without a reason).
+                let flattened: String = reason
+                    .chars()
+                    .map(|c| if c.is_whitespace() { ' ' } else { c })
+                    .collect();
+                if !flattened.trim().is_empty() {
+                    cmd.arg("-c").arg(format!(
+                        "http.extraHeader=X-Gyre-Stack-Override-Reason: {flattened}"
+                    ));
+                }
+            }
+            let status = cmd
+                .arg("push")
+                .arg(&remote)
                 .status()
                 .map_err(|e| anyhow::anyhow!("failed to run git: {e}"))?;
             if !status.success() {
@@ -6032,8 +6055,13 @@ mod tests {
     fn cli_push_parses() {
         let args = Cli::try_parse_from(["gyre", "push"]);
         assert!(args.is_ok());
-        if let Commands::Push { remote } = args.unwrap().command {
+        if let Commands::Push {
+            remote,
+            stack_override_reason,
+        } = args.unwrap().command
+        {
             assert_eq!(remote, "origin");
+            assert!(stack_override_reason.is_none());
         } else {
             panic!("Expected Push");
         }
@@ -6043,6 +6071,30 @@ mod tests {
     fn cli_push_custom_remote_parses() {
         let args = Cli::try_parse_from(["gyre", "push", "--remote", "gyre"]);
         assert!(args.is_ok());
+    }
+
+    #[test]
+    fn cli_push_stack_override_reason_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "push",
+            "--stack-override-reason",
+            "hotfix model upgrade approved by security",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Push {
+            remote,
+            stack_override_reason,
+        } = args.unwrap().command
+        {
+            assert_eq!(remote, "origin");
+            assert_eq!(
+                stack_override_reason.as_deref(),
+                Some("hotfix model upgrade approved by security")
+            );
+        } else {
+            panic!("Expected Push");
+        }
     }
 
     #[test]
