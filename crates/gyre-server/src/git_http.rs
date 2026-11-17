@@ -2582,8 +2582,15 @@ async fn process_persona_changes(
                     .ok()
                     .flatten();
 
-                // Step 1+2: update the entity (or register a new one) and
-                // reset approval to Pending.
+                // Step 1+2: prepare the entity update (or a new
+                // registration) with approval reset to Pending. The write is
+                // DEFERRED until we know whether the approval task must be
+                // created — persona reset + task creation are persisted
+                // atomically via `apply_approval_reset_with_task` (single DB
+                // transaction), so a failure between them can never leave a
+                // persona approval-reset without its required human-approval
+                // task (platform-model.md §2 Repo-Defined Personas).
+                let had_existing = existing.is_some();
                 let persona_after: Option<gyre_domain::Persona> = match existing {
                     Some(mut p) => {
                         if let Some(c) = content {
@@ -2595,36 +2602,17 @@ async fn process_persona_changes(
                         p.approved_by = None;
                         p.approved_at = None;
                         p.updated_at = now;
-                        if let Err(e) = state.personas.update(&p).await {
-                            warn!(slug, "persona-push: failed to update persona: {e}");
-                            continue;
-                        }
-                        info!(
-                            slug,
-                            "persona-push: updated persona and reset approval to Pending"
-                        );
                         Some(p)
                     }
                     None => match content {
-                        Some(c) => {
-                            let p = gyre_domain::Persona::new(
-                                Id::new(uuid::Uuid::new_v4().to_string()),
-                                slug.clone(),
-                                slug.clone(),
-                                repo_scope.clone(),
-                                c,
-                                now,
-                            );
-                            if let Err(e) = state.personas.create(&p).await {
-                                warn!(slug, "persona-push: failed to create persona: {e}");
-                                continue;
-                            }
-                            info!(
-                                slug,
-                                "persona-push: registered new repo-defined persona (Pending)"
-                            );
-                            Some(p)
-                        }
+                        Some(c) => Some(gyre_domain::Persona::new(
+                            Id::new(uuid::Uuid::new_v4().to_string()),
+                            slug.clone(),
+                            slug.clone(),
+                            repo_scope.clone(),
+                            c,
+                            now,
+                        )),
                         None => {
                             // Deleted persona file with no registered entity —
                             // nothing to reset, nothing to approve.
@@ -2636,6 +2624,10 @@ async fn process_persona_changes(
                         }
                     },
                 };
+                // `persona_after` is always `Some` here: every `None`
+                // branch above `continue`d.
+                let persona_after = persona_after
+                    .expect("persona-push: persona_after is Some after the None branches continue");
 
                 let change_kind = match (status_char, has_content) {
                     ('A', true) => "added",
@@ -2646,16 +2638,32 @@ async fn process_persona_changes(
                     _ => "changed",
                 };
 
-                // Step 3: auto-create the human-approval task.
+                // Step 3: auto-create the human-approval task — atomically
+                // with the persona write above.
                 let title = format!("Persona change requires human approval: {slug}");
                 let task_exists = existing_tasks.iter().any(|t| {
                     t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done)
                 });
                 if task_exists {
-                    info!(
-                        title,
-                        "persona-push: approval task already exists, skipping"
-                    );
+                    // The approval task already exists, so the persona
+                    // write has no NEW dependent record — persist it alone.
+                    let write_result = if had_existing {
+                        state.personas.update(&persona_after).await
+                    } else {
+                        state.personas.create(&persona_after).await
+                    };
+                    match write_result {
+                        Err(e) => {
+                            warn!(slug, "persona-push: failed to write persona: {e}");
+                        }
+                        Ok(()) => {
+                            info!(
+                                slug,
+                                "persona-push: updated persona and reset approval to Pending \
+                                 (approval task already exists)"
+                            );
+                        }
+                    }
                 } else {
                     let task = persona_approval_task(
                         &slug,
@@ -2665,24 +2673,35 @@ async fn process_persona_changes(
                         change_kind,
                         now,
                     );
-                    match state.tasks.create(&task).await {
-                        Err(e) => warn!(title, "persona-push: failed to create task: {e}"),
-                        Ok(()) => {
-                            info!(
-                                title,
-                                "persona-push: created approval task for persona change"
-                            );
-                            state
-                                .emit_event(
-                                    Some(repo.workspace_id.clone()),
-                                    gyre_common::message::Destination::Workspace(
-                                        repo.workspace_id.clone(),
-                                    ),
-                                    gyre_common::message::MessageKind::TaskCreated,
-                                    Some(serde_json::json!({"task_id": task.id.to_string()})),
-                                )
-                                .await;
-                        }
+                    // Single transaction: persona approval reset AND the
+                    // human-approval task — on failure NEITHER is persisted
+                    // (the persona keeps its previous approved state rather
+                    // than being stranded as a reset without a task).
+                    if let Err(e) = state
+                        .personas
+                        .apply_approval_reset_with_task(&persona_after, &task)
+                        .await
+                    {
+                        warn!(
+                            slug,
+                            "persona-push: atomic persona approval reset + task creation failed: {e}"
+                        );
+                    } else {
+                        info!(
+                            slug,
+                            "persona-push: reset persona approval to Pending and created its \
+                             approval task atomically"
+                        );
+                        state
+                            .emit_event(
+                                Some(repo.workspace_id.clone()),
+                                gyre_common::message::Destination::Workspace(
+                                    repo.workspace_id.clone(),
+                                ),
+                                gyre_common::message::MessageKind::TaskCreated,
+                                Some(serde_json::json!({"task_id": task.id.to_string()})),
+                            )
+                            .await;
                     }
                 }
 
@@ -2690,10 +2709,7 @@ async fn process_persona_changes(
                 // git has no owner yet, and an owner that does not resolve to
                 // a known user (e.g. an agent id) has no inbox to deliver to —
                 // skip rather than write an undeliverable notification.
-                let notify_owner = persona_after
-                    .as_ref()
-                    .and_then(|p| p.owner.clone())
-                    .filter(|o| !o.is_empty());
+                let notify_owner = persona_after.owner.clone().filter(|o| !o.is_empty());
                 if let Some(owner) = notify_owner {
                     let owner_id = Id::new(owner.clone());
                     let user_exists = state

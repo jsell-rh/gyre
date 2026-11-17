@@ -736,6 +736,13 @@ pub struct BroadcastingNotificationRepo {
     /// user_id), shared with the `/ws` handler. Pushes match this verified
     /// identity — never a client-supplied id.
     ws_connection_users: Arc<RwLock<HashMap<u64, String>>>,
+    /// Workspace lookup for the HSI §2 "Notifications" trust filter: when
+    /// present, a notification whose type the recipient's workspace trust
+    /// level suppresses is persisted but NOT pushed to the realtime
+    /// channels (SSE + WS) — the user chose not to be interrupted by it.
+    /// `None` only on the standalone/test constructor, which has no
+    /// workspace store to consult.
+    workspaces: Option<Arc<dyn gyre_ports::WorkspaceRepository>>,
 }
 
 impl BroadcastingNotificationRepo {
@@ -750,6 +757,32 @@ impl BroadcastingNotificationRepo {
             tx,
             ws_connections: Arc::new(RwLock::new(HashMap::new())),
             ws_connection_users: Arc::new(RwLock::new(HashMap::new())),
+            workspaces: None,
+        }
+    }
+
+    /// HSI §2 "Notifications" trust filter for the realtime channels: is
+    /// this notification type delivered to its workspace at the workspace's
+    /// current trust level? Fail-open on lookup errors (a degraded
+    /// workspace read must not silently disable realtime delivery for
+    /// every notification).
+    async fn trust_delivers(&self, notification: &Notification) -> bool {
+        let Some(workspaces) = &self.workspaces else {
+            return true;
+        };
+        match workspaces.find_by_id(&notification.workspace_id).await {
+            Ok(Some(ws)) => ws
+                .trust_level
+                .delivers_notification(&notification.notification_type),
+            Ok(None) => true,
+            Err(e) => {
+                tracing::warn!(
+                    workspace_id = %notification.workspace_id,
+                    error = %e,
+                    "notification push: workspace trust lookup failed; delivering"
+                );
+                true
+            }
         }
     }
 
@@ -792,6 +825,20 @@ impl BroadcastingNotificationRepo {
 impl NotificationRepository for BroadcastingNotificationRepo {
     async fn create(&self, notification: &Notification) -> anyhow::Result<()> {
         self.inner.create(notification).await?;
+        // HSI §2 "Notifications" row: at Guided trust the user asked for
+        // failures and approvals, at Autonomous for exceptions only — the
+        // realtime channels (SSE stream + WS bell push) must not interrupt
+        // them with anything else. The notification stays PERSISTED (audit,
+        // briefing sources, de-dup, and a lower trust level's inbox all
+        // still read it); only the push is suppressed.
+        if !self.trust_delivers(notification).await {
+            tracing::debug!(
+                notification_type = notification.notification_type.as_str(),
+                workspace_id = %notification.workspace_id,
+                "notification push suppressed by workspace trust level"
+            );
+            return Ok(());
+        }
         if let Ok(json) = serde_json::to_string(notification) {
             let _ = self.tx.send(json);
         }
@@ -968,6 +1015,7 @@ impl AppState {
             tx: self.notification_broadcast_tx.clone(),
             ws_connections: Arc::clone(&self.ws_connections),
             ws_connection_users: Arc::clone(&self.ws_connection_users),
+            workspaces: Some(Arc::clone(&self.workspaces)),
         }
     }
 }
@@ -1325,5 +1373,74 @@ mod tests {
             other_rx.try_recv().is_err(),
             "a connection verified as another user must never receive this push"
         );
+    }
+
+    /// HSI §2 "Notifications" row: at Autonomous trust the realtime channels
+    /// (SSE + WS push) must not interrupt the user with state-change
+    /// notifications — the notification stays PERSISTED (a lower trust
+    /// level's inbox still reads it) but is not pushed. Exceptions still
+    /// push.
+    #[tokio::test]
+    async fn create_notification_suppresses_realtime_push_by_trust_level() {
+        let (state, ws) = setup().await;
+        // Workspace defaults to Supervised; move it to Autonomous.
+        let mut ws_row = state
+            .workspaces
+            .find_by_id(&ws)
+            .await
+            .unwrap()
+            .expect("workspace seeded by setup");
+        ws_row.trust_level = gyre_domain::TrustLevel::Autonomous;
+        state.workspaces.update(&ws_row).await.unwrap();
+
+        let (owner_tx, mut owner_rx) = tokio::sync::mpsc::channel::<String>(32);
+        state.ws_connections.write().await.insert(1, owner_tx);
+        state
+            .ws_connection_users
+            .write()
+            .await
+            .insert(1, "user-n1".to_string());
+
+        // State-change notification (MrMerged): persisted, NOT pushed.
+        let chatter = Notification::new(
+            Id::new("notif-trust-chatter"),
+            ws.clone(),
+            Id::new("user-n1"),
+            NotificationType::MrMerged,
+            "MR merged".to_string(),
+            "tenant-1".to_string(),
+            1_000,
+        );
+        state.create_notification(&chatter).await.unwrap();
+        // Persistence happened — the inbox of a lower trust level still
+        // reads it.
+        let persisted = state
+            .notifications
+            .get(&chatter.id, &Id::new("user-n1"))
+            .await
+            .unwrap();
+        assert!(persisted.is_some(), "suppressed push must still persist");
+        assert!(
+            owner_rx.try_recv().is_err(),
+            "MrMerged must not reach the live channel at Autonomous trust"
+        );
+
+        // Exception notification (AgentEscalation): persisted AND pushed.
+        let exception = Notification::new(
+            Id::new("notif-trust-exception"),
+            ws.clone(),
+            Id::new("user-n1"),
+            NotificationType::AgentEscalation,
+            "Agent escalated".to_string(),
+            "tenant-1".to_string(),
+            1_001,
+        );
+        state.create_notification(&exception).await.unwrap();
+        let payload = owner_rx
+            .recv()
+            .await
+            .expect("exception must still push at Autonomous trust");
+        let msg: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(msg["notification"]["id"], exception.id.as_str());
     }
 }

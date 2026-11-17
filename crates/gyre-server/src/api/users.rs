@@ -58,8 +58,8 @@ use axum::{
 use futures_util::stream;
 use gyre_common::{Id, Notification, NotificationPriority, NotificationType};
 use gyre_domain::{
-    JudgmentType, Team, TeamMembership, User, UserNotificationPreference, UserRole, UserToken,
-    WorkspaceMembership, WorkspaceRole,
+    JudgmentType, Team, TeamMembership, TrustLevel, User, UserNotificationPreference, UserRole,
+    UserToken, WorkspaceMembership, WorkspaceRole,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1081,12 +1081,33 @@ async fn list_my_notifications_impl(
     // and the badge that opens it must agree on what they count/show, while
     // the Inbox (and its own badge via count_unresolved) hides disabled types.
     let disabled = disabled_notification_types(&state, &user_id).await?;
-    let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
+    let disabled = disabled_notification_types(&state, &user_id).await?;
+    // HSI §12: types the user disabled via notification preferences are
+    // excluded from the inbox (before limit/offset), so a page never
+    // comes back short. HSI §2 "Inbox shows" / "Notifications" /
+    // "Inbox priorities shown" rows add the trust-derived exclusion set,
+    // server-side so the contract holds for every client (web, CLI,
+    // API). Explicit `?min_priority=`/`?max_priority=` rank filters from
+    // the caller are still honored verbatim — the trust set only supplies
+    // the DEFAULT view.
+    let trust_excluded = trust_inbox_excluded_types(&state, &user_id, workspace_id.as_ref()).await;
+    let mut excluded: Vec<&str> = disabled.iter().map(String::as_str).collect();
+    for t in &trust_excluded {
+        if !excluded.contains(&t.as_str()) {
+            excluded.push(t.as_str());
+        }
+    }
     // `?active=true` routes to the active-only listing (drawer surface);
     // the default keeps the full listing the Inbox depends on (its
     // show-dismissed toggle needs resolved/dismissed rows client-side).
     // Both branches share the same `type_filter` derivation above, so the
-    // drawer and the Inbox can never disagree on a priority band.
+    // drawer and the Inbox can never disagree on a priority band. The
+    // drawer branch deliberately applies no exclusion set: it is paired
+    // with the unread-count bell badge (`count_unread`), which counts
+    // every active notification regardless of toggles; the drawer and
+    // the badge that opens it must agree on what they count/show, while
+    // the Inbox (and its own badge via count_unresolved) hides disabled
+    // and trust-suppressed types.
     let notifications = if params.active.unwrap_or(false) {
         state
             .notifications
@@ -1111,7 +1132,7 @@ async fn list_my_notifications_impl(
                 params.max_priority,
                 type_filter.as_deref(),
                 repo_id.as_ref(),
-                &disabled,
+                &excluded,
                 limit,
                 offset,
             )
@@ -1136,12 +1157,20 @@ pub async fn get_notification_count(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
-    // Same preference exclusion as the inbox list, so the badge matches it.
+    // Same preference + trust exclusion as the inbox list, so the badge
+    // matches it (port contract: the badge MUST NOT count a notification
+    // the inbox itself would hide — same rule for the trust-derived set).
     let disabled = disabled_notification_types(&state, &user_id).await?;
-    let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
+    let trust_excluded = trust_inbox_excluded_types(&state, &user_id, workspace_id.as_ref()).await;
+    let mut excluded: Vec<&str> = disabled.iter().map(String::as_str).collect();
+    for t in &trust_excluded {
+        if !excluded.contains(&t.as_str()) {
+            excluded.push(t.as_str());
+        }
+    }
     let count = state
         .notifications
-        .count_unresolved(&user_id, workspace_id.as_ref(), &disabled)
+        .count_unresolved(&user_id, workspace_id.as_ref(), &excluded)
         .await?;
     Ok(Json(serde_json::json!({ "count": count })))
 }
@@ -2712,6 +2741,107 @@ async fn disabled_notification_types(
         .collect())
 }
 
+/// Resolve the trust-derived inbox exclusion set (HSI §2 "What Each Level
+/// Controls": the "Inbox shows" range row plus the "Notifications" volume
+/// row). Returns canonical `NotificationType` strings to pass as
+/// `exclude_types` — the same mechanism as the preference exclusions, so
+/// the exclusion is applied by the query, before limit/offset, and the
+/// badge counts share it.
+///
+/// Scope resolution:
+/// - **Workspace-scoped** (`workspace_id` given): that workspace's
+///   `trust_level` — the exact per-workspace behavior the spec table
+///   defines.
+/// - **Tenant-scoped** (no filter — the aggregate inbox spans every
+///   workspace the user belongs to): a type is excluded only when EVERY
+///   member workspace excludes it (the aggregate shows anything any of the
+///   user's workspaces would deliver). Per-row filtering would require a
+///   per-workspace condition inside the port query; the intersection rule
+///   keeps the aggregate read expressible on the existing filter surface.
+///
+/// Fail-open on lookup errors (a read surface must not 500 because a
+/// workspace row could not be read — the caller sees the unfiltered set,
+/// never a silent 403-equivalent empty inbox).
+async fn trust_inbox_excluded_types(
+    state: &AppState,
+    user_id: &Id,
+    workspace_id: Option<&Id>,
+) -> Vec<String> {
+    /// Intersect accumulated exclusions with one workspace's set.
+    fn intersect(acc: Option<Vec<String>>, ws_excluded: Vec<String>) -> Option<Vec<String>> {
+        match acc {
+            None => Some(ws_excluded),
+            Some(current) => Some(
+                current
+                    .into_iter()
+                    .filter(|t| ws_excluded.iter().any(|w| w == t))
+                    .collect(),
+            ),
+        }
+    }
+
+    let levels: Vec<TrustLevel> = match workspace_id {
+        Some(wid) => match state.workspaces.find_by_id(wid).await {
+            Ok(Some(ws)) => vec![ws.trust_level],
+            Ok(None) => {
+                tracing::warn!(workspace_id = %wid, "inbox trust filter: workspace not found");
+                return Vec::new();
+            }
+            Err(e) => {
+                tracing::warn!(workspace_id = %wid, error = %e, "inbox trust filter: lookup failed");
+                return Vec::new();
+            }
+        },
+        None => {
+            // Tenant scope: the user's member workspaces drive the filter.
+            let memberships = match state.workspace_memberships.list_by_user(user_id).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "inbox trust filter: membership lookup failed");
+                    return Vec::new();
+                }
+            };
+            let mut levels = Vec::new();
+            for m in &memberships {
+                match state.workspaces.find_by_id(&m.workspace_id).await {
+                    Ok(Some(ws)) => levels.push(ws.trust_level),
+                    Ok(None) => {
+                        // Membership whose workspace no longer resolves:
+                        // it can contribute no notifications, so it does not
+                        // widen the filter — skip it.
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace_id = %m.workspace_id,
+                            error = %e,
+                            "inbox trust filter: workspace lookup failed"
+                        );
+                        return Vec::new();
+                    }
+                }
+            }
+            // No memberships (agent principals, fresh users): nothing to
+            // filter — no workspace trusts apply.
+            levels
+        }
+    };
+
+    if levels.is_empty() {
+        return Vec::new();
+    }
+    let mut acc: Option<Vec<String>> = None;
+    for level in &levels {
+        let excluded: Vec<String> = level
+            .inbox_excluded_types()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        acc = intersect(acc, excluded);
+    }
+    acc.unwrap_or_default()
+}
+
 /// Shared validation for a `NotificationChannels` update, whichever endpoint
 /// carries it (PUT /notifications/preferences or the `notification_channels`
 /// field of PUT /users/me): `in_app` is forced true ("Always true (can't
@@ -2933,6 +3063,261 @@ mod tests {
             now,
         );
         state.notifications.create(&notif).await.unwrap();
+    }
+
+    /// Helper: create a workspace at the given trust level via the API
+    /// (system token) and return its id.
+    async fn create_workspace_at_trust(app: &Router, slug: &str, trust_level: &str) -> String {
+        let body = serde_json::json!({
+            "tenant_id": "t1",
+            "name": format!("Ws-{slug}"),
+            "slug": slug,
+            "trust_level": trust_level,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        body_json(resp).await["id"].as_str().unwrap().to_string()
+    }
+
+    /// Helper: seed one notification for user "system" in a REAL workspace
+    /// (so the trust filter can resolve the workspace's trust level).
+    async fn seed_notification_in_workspace(
+        state: &std::sync::Arc<crate::AppState>,
+        workspace_id: &str,
+        notification_type: NotificationType,
+        title: &str,
+    ) {
+        let now = 1_700_000_000i64;
+        let notif = Notification::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(workspace_id),
+            Id::new("system"),
+            notification_type,
+            title,
+            "default",
+            now,
+        );
+        state.notifications.create(&notif).await.unwrap();
+    }
+
+    /// HSI §2 "Inbox shows" + "Notifications" rows: at Autonomous trust the
+    /// inbox hides state-change chatter and failures (the agent owns them)
+    /// while exceptions and approval requests stay visible; the suggested
+    /// link (rank 10) is excluded by the "Inbox priorities shown" row.
+    /// Supervised shows everything.
+    #[tokio::test]
+    async fn inbox_trust_filter_autonomous_vs_supervised() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let ws_id = create_workspace_at_trust(&app, "trust-inbox-auto", "Autonomous").await;
+
+        seed_notification_in_workspace(&state, &ws_id, NotificationType::MrMerged, "MR merged")
+            .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::GateFailure,
+            "Gate failed",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::AgentEscalation,
+            "Agent escalated",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::SpecApprovalRequested,
+            "Spec needs approval",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::SuggestedSpecLink,
+            "Suggested link",
+        )
+        .await;
+
+        let list = |app: &Router, ws: &str| {
+            let uri = format!("/api/v1/notifications?workspace_id={ws}");
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+
+        // Autonomous: only the escalation and the approval request.
+        let resp = list(&app, &ws_id).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let types: Vec<&str> = json["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["notification_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["AgentEscalation", "SpecApprovalRequested"],
+            "Autonomous inbox must show exceptions and approvals only"
+        );
+
+        // Badge count matches the filtered inbox (port contract).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/users/me/notifications/count?workspace_id={ws_id}"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["count"], 2,
+            "badge must not count trust-suppressed notifications"
+        );
+
+        // Transition to Supervised: everything becomes visible.
+        let update = serde_json::json!({ "trust_level": "Supervised" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = list(&app, &ws_id).await.unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            5,
+            "Supervised inbox shows every state change"
+        );
+    }
+
+    /// HSI §2 at Guided: failures and approvals deliver; suggested links
+    /// (rank 10) are excluded; invitations stay visible despite rank 10 —
+    /// they are action-required, and the HSI §8 table lists only
+    /// SuggestedSpecLink at priority 10.
+    #[tokio::test]
+    async fn inbox_trust_filter_guided_keeps_failures_and_invitations() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let ws_id = create_workspace_at_trust(&app, "trust-inbox-guided", "Guided").await;
+
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::GateFailure,
+            "Gate failed",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::SuggestedSpecLink,
+            "Suggested link",
+        )
+        .await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::InvitationReceived,
+            "You were invited",
+        )
+        .await;
+        seed_notification_in_workspace(&state, &ws_id, NotificationType::MrMerged, "MR merged")
+            .await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/notifications?workspace_id={ws_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let types: Vec<&str> = json["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["notification_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["GateFailure", "InvitationReceived"],
+            "Guided inbox: failures and approvals; no state changes, no suggested links"
+        );
+    }
+
+    /// A caller's EXPLICIT `?max_priority=` filter is honored verbatim — the
+    /// trust set supplies the default view, never overrides an explicit one.
+    #[tokio::test]
+    async fn inbox_trust_filter_respects_explicit_rank_filter() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let ws_id = create_workspace_at_trust(&app, "trust-inbox-expl", "Autonomous").await;
+        seed_notification_in_workspace(
+            &state,
+            &ws_id,
+            NotificationType::AgentEscalation,
+            "Agent escalated",
+        )
+        .await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/notifications?workspace_id={ws_id}&max_priority=2"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // AgentEscalation is rank 2 — inside the caller's explicit 1-2 range.
+        assert_eq!(json["notifications"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

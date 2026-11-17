@@ -446,6 +446,7 @@
     "section_in_progress": "IN PROGRESS",
     "section_cross_workspace": "CROSS-WORKSPACE",
     "section_exceptions": "EXCEPTIONS",
+    "section_completed_agents": "COMPLETED AGENTS",
     "section_metrics": "METRICS",
     "mrs_merged": "{count} MR{count, plural, one {} other {s}} merged. All gates passed.",
     "decision_label": "Decision: {text}",

@@ -35,7 +35,7 @@
   let description = $state('');
   let scope = $state(defaultScope);
   let scopeId = $state(defaultScopeId ?? '');
-  let priority = $state(100);
+  let priority = $state(250);
   let effect = $state('allow');
   let actionsText = $state('*');
   let resourceTypesText = $state('*');
@@ -52,7 +52,7 @@
       description = p?.description ?? '';
       scope = (p?.scope ?? defaultScope ?? 'tenant').toLowerCase();
       scopeId = p?.scope_id ?? defaultScopeId ?? '';
-      priority = p?.priority ?? 100;
+      priority = p?.priority ?? 250;
       effect = (p?.effect ?? 'allow').toLowerCase();
       actionsText = Array.isArray(p?.actions) && p.actions.length ? p.actions.join(', ') : '*';
       resourceTypesText = Array.isArray(p?.resource_types) && p.resource_types.length ? p.resource_types.join(', ') : '*';
@@ -165,7 +165,7 @@
         </select>
       </label>
       <label class="field">
-        <span class="field-label">Priority</span>
+        <span class="field-label">Priority <span class="field-hint">(200–299 for user-created policies)</span></span>
         <input class="field-input" type="number" bind:value={priority} data-testid="policy-priority-input" />
       </label>
       <label class="field">

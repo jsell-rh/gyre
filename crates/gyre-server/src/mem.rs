@@ -909,6 +909,16 @@ pub struct MemTaskRepository {
     store: Arc<Mutex<HashMap<String, Task>>>,
 }
 
+impl MemTaskRepository {
+    /// Construct over an externally-owned task store — pair with
+    /// `MemPersonaRepository::with_task_store` so the atomic
+    /// `apply_approval_reset_with_task` write and every normal task write
+    /// land in the same store.
+    pub fn from_store(store: Arc<Mutex<HashMap<String, Task>>>) -> Self {
+        Self { store }
+    }
+}
+
 #[async_trait]
 impl TaskRepository for MemTaskRepository {
     async fn create(&self, task: &Task) -> Result<()> {
@@ -2566,6 +2576,42 @@ impl WorkspaceRepository for MemWorkspaceRepository {
 #[derive(Default)]
 pub struct MemPersonaRepository {
     store: Arc<Mutex<HashMap<String, Persona>>>,
+    /// Task store SHARED with `MemTaskRepository` — the mem side of the
+    /// `apply_approval_reset_with_task` port contract (persona approval
+    /// reset + approval task in one atomic write). `None` on the Default
+    /// constructor: a standalone persona repo cannot write tasks, so the
+    /// atomic method fails rather than silently skipping the task half.
+    task_store: Option<Arc<Mutex<HashMap<String, Task>>>>,
+    /// Test hook: when set, `apply_approval_reset_with_task`'s task write
+    /// fails after the persona write — exercising the port's rollback
+    /// contract (the persona write must be undone, never stranded).
+    fail_task_writes: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MemPersonaRepository {
+    /// Construct a persona repo whose `apply_approval_reset_with_task`
+    /// writes tasks into `task_store` — pair it with a
+    /// `MemTaskRepository::from_store(Arc::clone(&task_store))` so both
+    /// halves of the atomic write (and every normal task write) land in the
+    /// same store.
+    pub fn with_task_store(
+        store: Arc<Mutex<HashMap<String, Persona>>>,
+        task_store: Arc<Mutex<HashMap<String, Task>>>,
+    ) -> Self {
+        Self {
+            store,
+            task_store: Some(task_store),
+            fail_task_writes: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Test hook: make the task half of `apply_approval_reset_with_task`
+    /// fail (persona write must roll back).
+    #[cfg(test)]
+    pub fn set_fail_task_writes(&self, fail: bool) {
+        self.fail_task_writes
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[async_trait]
@@ -2621,6 +2667,43 @@ impl PersonaRepository for MemPersonaRepository {
 
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+
+    async fn apply_approval_reset_with_task(&self, persona: &Persona, task: &Task) -> Result<()> {
+        // The mem store has no schema, so the port's atomicity contract is
+        // guarded in code: the persona write is held under the store lock
+        // until the task write succeeds; a task-write failure restores the
+        // previous persona row (or removes a newly-inserted one) so a reset
+        // persona is never stranded without its approval task.
+        let Some(task_store) = &self.task_store else {
+            anyhow::bail!(
+                "MemPersonaRepository built without a shared task store; \
+                 apply_approval_reset_with_task cannot atomically create the \
+                 approval task — pair with_task_store with MemTaskRepository::from_store"
+            );
+        };
+        let mut personas = self.store.lock().await;
+        let previous = personas.get(persona.id.as_str()).cloned();
+        personas.insert(persona.id.to_string(), persona.clone());
+        if self
+            .fail_task_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            match previous {
+                Some(prev) => {
+                    personas.insert(persona.id.to_string(), prev);
+                }
+                None => {
+                    personas.remove(persona.id.as_str());
+                }
+            }
+            anyhow::bail!("approval task write failed (mem test hook)");
+        }
+        task_store
+            .lock()
+            .await
+            .insert(task.id.to_string(), task.clone());
         Ok(())
     }
 }
@@ -5243,8 +5326,14 @@ fn test_state_inner(
         Arc::new(MemAgentRepository::default()),
         Arc::clone(&search),
     );
-    let tasks =
-        crate::search_sync::wrap_tasks(Arc::new(MemTaskRepository::default()), Arc::clone(&search));
+    // The persona repo shares the task store so the atomic
+    // `apply_approval_reset_with_task` write (persona approval reset +
+    // approval task) lands in the same store as every normal task write.
+    let task_store: Arc<Mutex<HashMap<String, Task>>> = Arc::default();
+    let tasks = crate::search_sync::wrap_tasks(
+        Arc::new(MemTaskRepository::from_store(Arc::clone(&task_store))),
+        Arc::clone(&search),
+    );
     let merge_requests =
         crate::search_sync::wrap_mrs(Arc::new(MemMrRepository::default()), Arc::clone(&search));
     let reviews = crate::search_sync::wrap_reviews(
@@ -5253,7 +5342,10 @@ fn test_state_inner(
         Arc::clone(&search),
     );
     let personas = crate::search_sync::wrap_personas(
-        Arc::new(MemPersonaRepository::default()),
+        Arc::new(MemPersonaRepository::with_task_store(
+            Arc::default(),
+            Arc::clone(&task_store),
+        )),
         Arc::clone(&search),
     );
     let analytics = crate::search_sync::wrap_analytics(
@@ -7718,5 +7810,103 @@ mod team_contract_tests {
         assert_eq!(teams.len(), 1);
         repo.delete(&Id::new("t-1")).await.unwrap();
         assert_eq!(repo.list_members(&Id::new("t-1")).await.unwrap().len(), 0);
+    }
+
+    /// Port contract (PersonaRepository::apply_approval_reset_with_task):
+    /// the persona write and its human-approval task persist atomically —
+    /// when the task write fails, the persona write is rolled back (a
+    /// freshly-inserted persona is removed; an updated one is restored), so
+    /// an approval-reset persona is never stranded without its task.
+    #[tokio::test]
+    async fn mem_persona_approval_reset_with_task_is_atomic() {
+        use gyre_domain::{PersonaApprovalStatus, TaskStatus};
+
+        let persona_store: Arc<Mutex<HashMap<String, Persona>>> = Arc::default();
+        let task_store: Arc<Mutex<HashMap<String, Task>>> = Arc::default();
+        let tasks = MemTaskRepository::from_store(Arc::clone(&task_store));
+        let personas = MemPersonaRepository::with_task_store(
+            Arc::clone(&persona_store),
+            Arc::clone(&task_store),
+        );
+
+        let scope = gyre_domain::PersonaScope::Workspace(Id::new("ws-1"));
+
+        // Case 1 — NEW persona: task-write failure removes the inserted row.
+        let mut p_new = Persona::new(
+            Id::new("persona-new"),
+            "backend-dev".to_string(),
+            "backend-dev".to_string(),
+            scope.clone(),
+            "prompt".to_string(),
+            1000,
+        );
+        p_new.approval_status = PersonaApprovalStatus::Pending;
+        let task_new = Task::new(Id::new("task-new"), "Approve persona", 1000);
+        personas.set_fail_task_writes(true);
+        let err = personas
+            .apply_approval_reset_with_task(&p_new, &task_new)
+            .await
+            .expect_err("task-write failure must propagate");
+        assert!(format!("{err:#}").contains("approval task write failed"));
+        assert!(
+            persona_store.lock().await.get("persona-new").is_none(),
+            "the newly-inserted persona must be rolled out on task failure"
+        );
+        assert!(task_store.lock().await.get("task-new").is_none());
+
+        // Case 2 — EXISTING persona: task-write failure restores the
+        // previous row (approved state), not a half-reset one.
+        let mut p_prev = Persona::new(
+            Id::new("persona-exist"),
+            "sre".to_string(),
+            "sre".to_string(),
+            scope,
+            "prompt".to_string(),
+            1000,
+        );
+        p_prev.approval_status = PersonaApprovalStatus::Approved;
+        personas.create(&p_prev).await.unwrap();
+        let mut p_reset = p_prev.clone();
+        p_reset.version += 1;
+        p_reset.approval_status = PersonaApprovalStatus::Pending;
+        let task_exist = Task::new(Id::new("task-exist"), "Approve persona", 1000);
+        let err = personas
+            .apply_approval_reset_with_task(&p_reset, &task_exist)
+            .await
+            .expect_err("task-write failure must propagate");
+        assert!(format!("{err:#}").contains("approval task write failed"));
+        let stored = persona_store
+            .lock()
+            .await
+            .get("persona-exist")
+            .cloned()
+            .expect("the previous persona row must be restored, not deleted");
+        assert_eq!(stored.approval_status, PersonaApprovalStatus::Approved);
+        assert_eq!(stored.version, p_prev.version);
+
+        // Case 3 — success path: both halves land, atomically visible to
+        // the paired task repository (shared store).
+        personas.set_fail_task_writes(false);
+        let mut p_ok = Persona::new(
+            Id::new("persona-ok"),
+            "frontend-dev".to_string(),
+            "frontend-dev".to_string(),
+            gyre_domain::PersonaScope::Workspace(Id::new("ws-1")),
+            "prompt".to_string(),
+            1000,
+        );
+        p_ok.approval_status = PersonaApprovalStatus::Pending;
+        let task_ok = Task::new(Id::new("task-ok"), "Approve persona", 1000);
+        personas
+            .apply_approval_reset_with_task(&p_ok, &task_ok)
+            .await
+            .unwrap();
+        assert!(persona_store.lock().await.get("persona-ok").is_some());
+        let stored_task = tasks
+            .find_by_id(&Id::new("task-ok"))
+            .await
+            .unwrap()
+            .expect("the approval task must be visible through the paired task repository");
+        assert_eq!(stored_task.status, TaskStatus::Backlog);
     }
 }
