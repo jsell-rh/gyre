@@ -24,6 +24,7 @@
   import RepoSettings from './RepoSettings.svelte';
   import RepoDependencies from './RepoDependencies.svelte';
   import AgentCardPanel from './AgentCardPanel.svelte';
+  import { REPO_TABS as TABS } from '../lib/repoTabs.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
@@ -38,17 +39,10 @@
     workspaceBudget = null,
   } = $props();
 
-  const TABS = [
-    { id: 'specs',        labelKey: 'repo_mode.tabs.specs' },
-    { id: 'tasks',        labelKey: 'repo_mode.tabs.tasks' },
-    { id: 'mrs',          labelKey: 'repo_mode.tabs.mrs' },
-    { id: 'agents',       labelKey: 'repo_mode.tabs.agents' },
-    { id: 'architecture', labelKey: 'repo_mode.tabs.architecture' },
-    { id: 'dependencies', labelKey: 'repo_mode.tabs.dependencies' },
-    { id: 'decisions',    labelKey: 'repo_mode.tabs.decisions' },
-    { id: 'code',         labelKey: 'repo_mode.tabs.code' },
-    { id: 'settings',     labelKey: 'repo_mode.tabs.settings', titleKey: 'repo_mode.settings_title' },
-  ];
+  // TABS (the tab strip) comes from web/src/lib/repoTabs.js — the single
+  // source of truth for the repo tab set. ui-navigation.md §1a: the rail,
+  // the drawer, and the repo-tab URL parsing all mirror this list; a local
+  // copy here would drift from them.
 
   // ── Notification count for decisions tab badge ─────────────────────────
   // Must match what Inbox actually shows: repo-scoped, non-dismissed notifications.

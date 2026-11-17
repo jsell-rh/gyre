@@ -40,7 +40,7 @@
 | trusted-foundry-integration.md | 26 | 26 | 0 | 0 | 0 | 0 | 0% |
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
 | ui-layout.md | 42 | 4 | 0 | 31 | 7 | 0 | 18% |
-| ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
+| ui-navigation.md | 34 | 7 | 0 | 1 | 14 | 12 | 96% |
 | user-management.md | 36 | 11 | 0 | 4 | 21 | 0 | 84% |
 | view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
