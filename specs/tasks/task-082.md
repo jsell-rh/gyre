@@ -6,87 +6,85 @@ progress: ready-for-review
 review: specs/reviews/task-082.md
 coverage_sections:
   - "ui-navigation.md §1a Collapsible Navigation Rail (Optional)"
-commits: ["42e12c08d3b67f208e3bc55486a17ed9c9272d4f", "79323318aac3b3015c03867f8f6130d0e913e67a", "9561ee864b066ba4a41fed4aa1f33cb16f4a0b47", "72bd582329ac50dbb2062d3ea2f3ea0b7f6213d3", "f332f774069ee409b407f2b7c9ee63deba51e3b6"]
+commits:
+  - d99ace7b
+  - f332f774
+  - 72bd5823
+  - 9561ee86
+  - 79323318
+  - 42e12c08
+  - fa9cc057
+  - 0fab4972
 ---
 
 ## Shipped
 
-Implementation of the retargeted requirement (ui-navigation.md §1a), landed
-as commit `42e12c08` (code + tests) and `fa9cc057` (docs/spec/coverage
-updates) on top of the base retarget merge `29ed796e`.
+The retargeted requirement (ui-navigation.md §1a, Collapsible Navigation
+Rail) is implemented and repaired through review round
+`79201380b96745dd8707d170d3b1274c`: rail code + tests in `42e12c08`,
+docs/spec/coverage updates in `fa9cc057`, and review-finding repairs
+(F7–F9) in `0fab4972`.
 
 ### Behavior
 
 - **Rail component** (`web/src/components/NavRail.svelte`): icon-only
-  48px collapsed by default, toggle expands to labelled 240px; preference
-  persisted per user per mode under
+  48px collapsed by default, toggle expands to labelled 240px;
+  preference persisted per user per mode under
   `gyre_nav_rail_expanded.<mode>.<user-id>` (first use = collapsed);
   scope-labelled header; stable per-mode item order; active item
-  highlighted via `.active` + `aria-current="page"`; `display: none`
-  below 768px so there is no persistent rail on mobile.
-- **Where it renders** (App.svelte `showNavRail`): workspace home (with a
-  selected workspace) and repo mode without an open entity detail. Never
-  on focused surfaces: full-page entity detail (popped-out detail panel),
-  workspace settings / agent rules / analytics / profile sub-pages,
-  cross-workspace view, notification settings. Every destination remains
+  highlighted via `.active` + `aria-current="page"`; hidden below
+  768px so there is no persistent rail on mobile.
+- **Where it renders** (App.svelte `showNavRail`): workspace home (with
+  a selected workspace) and repo mode without an open entity detail.
+  Never on focused surfaces: full-page entity detail, workspace
+  settings / agent rules / analytics / profile sub-pages,
+  cross-workspace view, notification settings. Every destination stays
   reachable without the rail (dashboard sections, repo tab strip, ⌘K,
-  g-shortcuts all unchanged).
-- **Item sets**: workspace-home rail = Decisions, Specs, Architecture,
-  Repos, Briefing, Agent Rules, Settings (§2 canonical order + Settings;
-  Settings navigates to workspace settings; Architecture expands the
-  collapsed dashboard section via `archExpandSignal` then scrolls). Repo
-  rail mirrors the RepoMode `TABS` strip exactly, including Dependencies,
-  each keeping its shipped tab position; selection calls `goToRepoTab`
-  (same route as clicking the tab).
-- **Scope labels**: workspace name at workspace home; `workspace / repo`
-  path in repo mode. No global menu shared across modes.
-- **Narrow viewports**: the hamburger drawer now offers the rail's
-  per-mode item set (workspace sections in canonical order + Settings at
-  workspace scope; the repo tab strip exactly in repo mode); the
-  tenant-scope `/all` drawer keeps its §10 section semantics; the
-  Analytics drawer entry was removed (still reachable via the topbar
-  gear).
+  g-shortcuts unchanged).
+- **Item sets**: workspace-home rail = §2 dashboard sections in
+  canonical order + Settings; repo rail mirrors the RepoMode `TABS`
+  strip exactly, each keeping its shipped tab position, selecting a
+  rail item takes the same route as clicking the tab.
+- **Section selection (§1a, repaired F8)**: section items scroll to
+  their dashboard section on the workspace home (Architecture also
+  expands the collapsed section via `archExpandSignal`; Agent Rules
+  scrolls to `section-agent-rules` — fixed from the sub-page escape);
+  Settings is the only navigation exception (workspace settings page).
+- **Labels (repaired F7)**: all rail/drawer labels resolve through real
+  i18n keys; `common.settings` added to `en.json` so the Settings item
+  renders "Settings" instead of the raw-key fallback.
+- **Narrow viewports**: the hamburger drawer offers the rail's per-mode
+  item set (workspace sections + Settings at workspace scope; the repo
+  tab strip exactly in repo mode); tenant scope (`/all`) keeps its §10
+  section semantics.
 
 ### Test evidence
 
-- `web/src/__tests__/NavRail.test.js` (new, 12 tests): collapse default,
-  expand toggle + persistence per user per mode, restore on mount,
-  collapse persistence, active highlight + onSelect, app-level workspace
-  rail item set/order/scope label, Architecture scroll+expand+active,
-  Settings navigation + rail absence on the sub-page, repo rail tab-strip
-  mirror + tab switching + scope label, rail absence on full-page entity
-  detail and with no workspace selected, per-mode localStorage keys.
-- `web/src/__tests__/NoSidebar.test.js` (updated): adds an explicit
-  rail-vs-permanent-sidebar distinction test (rail present but collapsed
-  on workspace home; absent on workspace settings; old `.sidebar`
-  selectors still asserted null); drawer test strengthened to assert the
-  full §1a canonical item set and order.
-- `web/src/__tests__/AppShell.test.js` (updated): the repo-mode drawer
-  test was retargeted from the superseded `drawer-item-briefing` behavior
-  to the §1a tab-strip mirror (exact item ids and order, no Briefing
-  item, Architecture click activates the tab). Briefing sub-tab deep-link
-  coverage remains in ExplorerViewScope.test.js.
-- Focused runs (exit 0): `npx vitest run src/__tests__/NavRail.test.js
-  NoSidebar.test.js AppShell.test.js WorkspaceDrawerSectionNav.test.js`
-  (97 passed), plus RepoMode/RepoModeHeader/RepoModeHealth/
-  BidirectionalNav/ScopeTransitions/CrossWorkspaceEntry/
-  CrossWorkspaceHome/WorkspaceHomeSections/SearchBar (179 passed,
-  41 skipped).
-- Full `web` unit suite at the implementation commit: 123 files,
-  2449 passed / 41 skipped, 0 failures (no pre-existing failures
-  observed in this run). Frontend deps installed with `npm ci` (locked
-  versions). Evidence retained under /tmp/stage/review-evidence.
-- Not run here (owned by independent verification): cargo gates, arch
-  checks, Playwright e2e/visual suites, exact-head GitHub CI. The change
-  touches no Rust code and no visual-snapshot target (rail never renders
-  on ExplorerView/canvas surfaces; e2e `no_sidebar_present` targets
-  `[data-testid="sidebar"]`, unaffected).
-
-### Deferred to verification
-
-- Server-side suites: none required (no Rust changes; `cargo check`
-  not needed for a web-only change, but the verifier may confirm).
-- GitHub CI on the branch head.
+- `web/src/__tests__/NavRail.test.js` (14 tests, incl. F7/F9 repairs):
+  component contract (collapse default, expand toggle + per-user
+  per-mode persistence, restore on mount, active highlight + onSelect)
+  and app integration (workspace/repo rail item sets, order, scope
+  labels, Architecture scroll+expand, Agent Rules scroll to
+  `section-agent-rules` with the actual `scrollIntoView` target pinned
+  via `mock.contexts` and active highlight, Settings navigation + rail
+  absence on the sub-page, repo tab switching, rail absence on focused
+  surfaces, per-mode localStorage keys, resolved-label test asserting
+  the expanded rail and mobile drawer Settings texts with no raw i18n
+  key text surfacing).
+- `web/src/__tests__/NoSidebar.test.js` (5 tests): no permanent sidebar;
+  rail-vs-permanent-sidebar distinction; drawer canonical §1a item set
+  and order; ⌘1-6 not advertised; `g 2` tab shortcut.
+- `web/src/__tests__/AppShell.test.js` (77 tests): drawer agent-rules
+  test retargeted to the §1a scroll semantics (stays on workspace
+  home); repo-mode drawer tab-strip mirror and all prior URL/shortcut
+  coverage unchanged.
+- Focused runs (exit 0, fixed tree): NavRail + NoSidebar + AppShell =
+  96 passed; WorkspaceDrawerSectionNav + BidirectionalNav = 19 passed.
+  Mutation checks recorded in `/tmp/stage/review-evidence`
+  (`task-082-repair.md`): removing `common.settings` fails the label
+  test with `common.settings` surfaced; reverting the agent-rules case
+  to the sub-page escape fails both the NavRail scroll test and the
+  AppShell drawer test.
 
 ## Supersession and retarget (2026-11-16)
 
@@ -105,12 +103,11 @@ default to preserve canvas/editor space, and a narrow-viewport drawer. The
 rail is never load-bearing: every destination stays reachable without it, and
 focused editor/canvas surfaces keep full width.
 
-**Honest status:** the rail is specified but **not implemented**. The
-original deliverable below was removed from the product in commit `08e5f91f`
-(nav rework, PRs #589–#599) and must not be re-landed as-is. Progress is
-`not-started` against the retargeted requirement; the controller decomposes
-implementation work after amendment task-246 merges. The `commits:` list
-above is the historical record of the superseded deliverable.
+**Honest status:** implemented per the retargeted §1a requirement
+(rail code `42e12c08`, docs `fa9cc057`), then repaired after independent
+review (F7 i18n key, F8 agent-rules scroll semantics, F9 label test
+gaps) in `0fab4972`. The `commits:` entries before `42e12c08` are the
+historical record of the superseded deliverable.
 
 ## Requirement (retargeted) — acceptance criteria
 
