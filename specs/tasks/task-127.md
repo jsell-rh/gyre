@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["72a4bd097379b58fb05fdb843ae79649b0390d3b", "770378cc0687b56bf37abb52faf823de8f0670fd", "6d71565c5cb4a691d7ea0eddfdaeb50f59cba348", "1ed61cf1a71249c007a2dcf0bb59316e812b6d76", "94f6eb357ceb0f055283ec96453dae0b20826b68", "80641b880eb540870f63bbba7d9a1c78faa986f1", "14f27ab5f4ed0ca56d6d59dd4f2503157b4f8a19", "f5aee7dab7577d13d3698e29818a837de63adad0", "b02f8f185cf6fecddee1470c779c1dd1d38b39a5", "e468155e73374c55968e7ea3b956c8b80227bf2f", "c5902874c8d6692ed9ab6c1544ffd1daf2380839", "d577374a98ca345672978b2b8a9763b618a6af31", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["1a32b4e6422a0533c5a5075b4991a2163918a76f", "0f127bc0e111c65ace292e45231ab585242aad99", "b696609378236716366ce85ef42a9b9a2c65d92c", "1deff0b561bed7e78f2a0ece83bf2d79ac593dc2", "50f338e93383f6a4d59c408a3676d63aac85b45b", "64c85ec9c91d105a34196ce0d370036ca70b801a", "4aa5a87ada50825ab676317fd030220dc814d01e", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "c5902874c8d6692ed9ab6c1544ffd1daf2380839", "e468155e73374c55968e7ea3b956c8b80227bf2f", "b02f8f185cf6fecddee1470c779c1dd1d38b39a5", "f5aee7dab7577d13d3698e29818a837de63adad0", "14f27ab5f4ed0ca56d6d59dd4f2503157b4f8a19", "80641b880eb540870f63bbba7d9a1c78faa986f1", "94f6eb357ceb0f055283ec96453dae0b20826b68", "1ed61cf1a71249c007a2dcf0bb59316e812b6d76", "6d71565c5cb4a691d7ea0eddfdaeb50f59cba348", "770378cc0687b56bf37abb52faf823de8f0670fd", "72a4bd097379b58fb05fdb843ae79649b0390d3b", "d577374a98ca345672978b2b8a9763b618a6af31", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "4de47315cc28796662ba04fb99cc36403390979a", "ed9cdd578be1db26eb850244d953805375bf8447"]
 ---
 
 ## Spec Excerpt
@@ -111,27 +111,32 @@ badge, priority grouping, deep links, mark read/unread), Notification
 Preferences, and the `/invite/{token}` magic-link accept page
 (unauthenticated preview + accept/decline, local-mode first API key
 displayed once; disjoint from the authenticated `/invite/{workspaceId}`
-flow by token shape).
+flow by token shape). The sub-hour invitation expiry label renders
+`Math.floor(secs / 60)` minutes on both accept flows (fix 72a4bd09).
 
-### Review-repair round (fca63afe)
+### Verification-repair round (ed9cdd57)
 
-Fixed in 72a4bd09: `InvitationAccept.svelte` `expiryLabel()`'s
-sub-hour branch now computes `Math.floor(secs / 60)` — the same defect
-class as the WorkspaceSettings copy fixed in 770378cc. A pending
-invitation expiring in 30 minutes renders "expires in 30m" on both
-the `/invite/{workspaceId}` and `/invite/{token}` pages, never
-"expires in 1800m".
+The prior verification round failed only the changed-line rustfmt gate:
+unformatted regions in `crates/gyre-server/src/api/{invitations,users}.rs`
+and `api/mod.rs` (the preview/user-role work from earlier rounds).
+Commit ed9cdd57 applies `rustfmt --edition 2021` to those three files;
+the change is line-break placement and trailing commas only — token
+streams are unchanged (whitespace-stripped comparison plus rustfmt's
+own parse), so no behavior or test semantics moved. `python3
+scripts/check-rustfmt-diff.py 1f86b006` now exits 0 ("changed lines
+clean, 10 Rust files checked") after failing on the same base before
+the fix. Evidence: /tmp/stage/review-evidence/probe-rustfmt-repair.md.
 
 ### Test evidence
 
-- `InvitationAccept.test.js` (15 passed): both expiry-rendering tests
-  (authenticated and magic-link flows) now assert a sub-hour pending
-  row renders exactly 'expires in 30m' — verified to fail with
-  'expires in 1800m' when the division is reverted (evidence:
-  /tmp/stage/review-evidence/probe-invitation-accept-expiry-repair.md).
-- Sibling expiry-label suites re-run green: InvitationAccept +
-  WorkspaceSettings + TenantSettings, 153/153.
-- Full web suite via `npm ci` + `npx vitest run`: 124 files,
-  2495 passed / 41 skipped (pre-existing skips; none added).
-- No Rust code changed in this round; `cargo test --all` remains the
-  verifier-owned gate.
+- Web suite (unchanged this round): 2495 passed / 41 skipped via
+  `npm ci` + vitest full run in the prior round; `InvitationAccept`,
+  `WorkspaceSettings`, `TenantSettings` expiry-label suites green
+  (153/153) after the 72a4bd09 fix.
+- Rust: formatting-only change; `cargo check -p gyre-server` could not
+  complete inside this sandbox's memory-bounded single-job build
+  wrapper (cargo check exceeded the 20-minute sandbox budget with a
+  cold target dir). `cargo test --all` remains the verifier-owned gate;
+  the full server suite (invitations preview x4, update_user_role x2,
+  and all prior task-127 server tests) is recorded for independent
+  verification.
