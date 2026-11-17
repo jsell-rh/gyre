@@ -3728,7 +3728,10 @@ mod tests {
             .expect("last_login_at recorded");
         assert!(login > 0);
 
-        // Editable profile fields round-trip without touching auth-provider info.
+        // Editable profile fields round-trip without touching auth-provider
+        // info. The body also spoofs the auth-provider fields — serde ignores
+        // them because UpdateProfileRequest has no such field, so a client
+        // cannot set either.
         let resp = app
             .clone()
             .oneshot(
@@ -3738,7 +3741,9 @@ mod tests {
                     .header("authorization", format!("Bearer {jwt}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"display_name":"Renamed","timezone":"Europe/Berlin"}"#,
+                        r#"{"display_name":"Renamed","timezone":"Europe/Berlin",
+                            "oidc_issuer":"https://attacker.example/realms/spoof",
+                            "last_login_at":12345}"#,
                     ))
                     .unwrap(),
             )
@@ -3749,7 +3754,24 @@ mod tests {
         assert_eq!(me2["display_name"], "Renamed");
         assert_eq!(me2["timezone"], "Europe/Berlin");
         assert_eq!(me2["oidc_issuer"], "http://localhost:8080/realms/gyre");
-        assert_eq!(me2["last_login_at"].as_u64(), Some(login));
+        // The PUT re-authenticates through validate_jwt, whose provisioning
+        // path re-stamps last_login_at on each auth (user-management spec:
+        // "last_login_at is set on each authentication"), so the stored value
+        // may legitimately advance by the wall-clock time elapsed between the
+        // two requests. It must stay inside that wall-clock window — never
+        // regress, never clear, and never take the spoofed 12345 (which is
+        // far below the real auth timestamps). Strict equality here flaked
+        // across a second boundary on a loaded CI runner.
+        let t_after_put = crate::api::now_secs();
+        let login_after_put = me2["last_login_at"]
+            .as_u64()
+            .expect("last_login_at still recorded after profile update");
+        assert!(
+            login <= login_after_put && login_after_put <= t_after_put,
+            "last_login_at must stay in the real auth window \
+             [{login}, {t_after_put}], got {login_after_put} \
+             (spoofed value must be ignored)"
+        );
     }
 
     /// Seed a tenant so create_user's tenant validation can resolve it

@@ -1115,7 +1115,14 @@
     "impact_affected_spec_count": "Affected specs",
     "impact_affected_workspaces": "Affected workspaces",
     "impact_affected_repos": "Affected repos",
-    "impact_reason": "Reason"
+    "impact_reason": "Reason",
+    "predicting": "Predicting…",
+    "impact_bar_aria": "Spec link impact",
+    "impact_loading": "Computing link impact…",
+    "impact_connected_specs": "{count} connected specs",
+    "impact_repos_implementing": "{count} repos implement",
+    "impact_governed_nodes": "{count} governed nodes",
+    "impact_governed_nodes_unknown": "governed nodes: unknown"
   },
   "concurrent_edit": {
     "warning_one": "{user} is also editing this spec",
@@ -1380,6 +1387,8 @@
     "ghost_new": "+ new",
     "ghost_modified": "~ modified",
     "ghost_removed": "− removed",
+    "ghost_overlay_aria": "Predicted structural changes overlay",
+    "ghost_node_aria": "Predicted {action}: {name}. {reason}",
     "predicted_impact": "Predicted impact on canvas",
     "accept": "Accept",
     "dismiss": "Dismiss",
