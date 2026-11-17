@@ -448,9 +448,14 @@ impl NotificationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.clone();
         let ntype = notification_type.to_string();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+        // workspace_id is the fan-out key, but the row's tenant scope still
+        // comes from the storage handle — same contract as has_recent_dismissal.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows: Vec<NotificationRow> = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::workspace_id.eq(ws_id.as_str()))
                 .filter(notifications::notification_type.eq(&ntype))
                 .filter(notifications::created_at.ge(since))
@@ -1260,6 +1265,22 @@ mod tests {
                 .await
                 .unwrap();
         }
+
+        // A same-workspace, same-type, qualifying row filed under ANOTHER
+        // tenant: the handle is scoped to tenant-1, so the §3 tenant filter
+        // must exclude it even though workspace_id + type + since all match.
+        // Remove the tenant_id filter from list_by_workspace_type_since and
+        // this row leaks into tenant-1's briefing exceptions.
+        let cross_tenant = Notification::new(
+            Id::new("n-saf-cross-tenant"),
+            Id::new("ws-1"),
+            Id::new("user-4"),
+            NotificationType::SpecAssertionFailure,
+            "saf cross-tenant".to_string(),
+            "tenant-2",
+            1000,
+        );
+        NotificationRepository::create(&s, &cross_tenant).await.unwrap();
 
         let rows = NotificationRepository::list_by_workspace_type_since(
             &s,

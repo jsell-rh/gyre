@@ -444,9 +444,14 @@ impl NotificationRepository for PgStorage {
         let pool = Arc::clone(&self.pool);
         let ws_id = workspace_id.clone();
         let ntype = notification_type.to_string();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+        // workspace_id is the fan-out key, but the row's tenant scope still
+        // comes from the storage handle — same contract as has_recent_dismissal.
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows: Vec<NotificationRow> = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::workspace_id.eq(ws_id.as_str()))
                 .filter(notifications::notification_type.eq(&ntype))
                 .filter(notifications::created_at.ge(since))
