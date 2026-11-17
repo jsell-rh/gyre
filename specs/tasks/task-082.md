@@ -2,86 +2,17 @@
 title: "Navigation: context-dependent collapsible rail (retargeted from HSI stable sidebar)"
 spec_ref: "ui-navigation.md §1a"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 review: specs/reviews/task-082.md
 coverage_sections:
   - "ui-navigation.md §1a Collapsible Navigation Rail (Optional)"
-commits: ["0fab4972d43f8fd9a477bd0177cb5a0a8f318682", "42e12c08d3b67f208e3bc55486a17ed9c9272d4f", "79323318aac3b3015c03867f8f6130d0e913e67a", "9561ee864b066ba4a41fed4aa1f33cb16f4a0b47", "72bd582329ac50dbb2062d3ea2f3ea0b7f6213d3", "f332f774069ee409b407f2b7c9ee63deba51e3b6"]
+commits:
+  - d99ace7b
+  - f332f774
+  - 72bd5823
+  - 9561ee86
+  - 79323318
 ---
-
-## Shipped
-
-The retargeted requirement (ui-navigation.md §1a, Collapsible Navigation
-Rail) is implemented and repaired through independent review round
-`79201380b96745dd8707d170d3b1274c`: rail code + tests in `42e12c08`,
-docs/spec/coverage updates in `fa9cc057`, and review-finding repairs
-(F7–F9) in `0fab4972`. This round is a contract repair only: the executor
-restored the assigned task document after a protected-text edit; the
-production tree is unchanged from checkpoint `09a44b9d` (verified empty
-`git diff 09a44b9d -- web/ docs/ specs/`).
-
-### Behavior
-
-- **Rail component** (`web/src/components/NavRail.svelte`): icon-only
-  48px collapsed by default, toggle expands to labelled 240px;
-  preference persisted per user per mode under
-  `gyre_nav_rail_expanded.<mode>.<user-id>` (first use = collapsed);
-  scope-labelled header; stable per-mode item order; active item
-  highlighted via `.active` + `aria-current="page"`; hidden below
-  768px so there is no persistent rail on mobile.
-- **Where it renders** (App.svelte `showNavRail`): workspace home (with
-  a selected workspace) and repo mode without an open entity detail.
-  Never on focused surfaces: full-page entity detail, workspace
-  settings / agent rules / analytics / profile sub-pages,
-  cross-workspace view, notification settings. Every destination stays
-  reachable without the rail (dashboard sections, repo tab strip, ⌘K,
-  g-shortcuts unchanged).
-- **Item sets**: workspace-home rail = §2 dashboard sections in
-  canonical order + Settings; repo rail mirrors the RepoMode `TABS`
-  strip exactly, each keeping its shipped tab position, selecting a
-  rail item takes the same route as clicking the tab.
-- **Section selection (§1a, repaired F8)**: section items scroll to
-  their dashboard section on the workspace home (Architecture also
-  expands the collapsed section via `archExpandSignal`; Agent Rules
-  scrolls to `section-agent-rules` — fixed from the sub-page escape);
-  Settings is the only navigation exception (workspace settings page).
-- **Labels (repaired F7)**: all rail/drawer labels resolve through real
-  i18n keys; `common.settings` added to `en.json` so the Settings item
-  renders "Settings" instead of the raw-key fallback.
-- **Narrow viewports**: the hamburger drawer offers the rail's per-mode
-  item set (workspace sections + Settings at workspace scope; the repo
-  tab strip exactly in repo mode); tenant scope (`/all`) keeps its §10
-  section semantics.
-
-### Test evidence
-
-- `web/src/__tests__/NavRail.test.js` (14 tests, incl. F7/F9 repairs):
-  component contract (collapse default, expand toggle + per-user
-  per-mode persistence, restore on mount, active highlight + onSelect)
-  and app integration (workspace/repo rail item sets, order, scope
-  labels, Architecture scroll+expand, Agent Rules scroll to
-  `section-agent-rules` with the actual `scrollIntoView` target pinned
-  via `mock.contexts` and active highlight, Settings navigation + rail
-  absence on the sub-page, repo tab switching, rail absence on focused
-  surfaces, per-mode localStorage keys, resolved-label test asserting
-  the expanded rail and mobile drawer Settings texts with no raw i18n
-  key text surfacing).
-- `web/src/__tests__/NoSidebar.test.js` (5 tests): no permanent sidebar;
-  rail-vs-permanent-sidebar distinction; drawer canonical §1a item set
-  and order; ⌘1-6 not advertised; `g 2` tab shortcut.
-- `web/src/__tests__/AppShell.test.js` (77 tests): drawer agent-rules
-  test retargeted to the §1a scroll semantics (stays on workspace
-  home); repo-mode drawer tab-strip mirror and all prior URL/shortcut
-  coverage unchanged.
-- Focused runs at this contract-repair checkout (exit 0, fixed tree):
-  NavRail + NoSidebar + AppShell = 96 passed;
-  WorkspaceDrawerSectionNav + BidirectionalNav = 19 passed. Earlier
-  mutation checks recorded in `/tmp/stage/review-evidence`
-  (`task-082-repair.md`): removing `common.settings` fails the label
-  test with `common.settings` surfaced; reverting the agent-rules case
-  to the sub-page escape fails both the NavRail scroll test and the
-  AppShell drawer test. This round's rerun record:
-  `task-082-contract-repair.md`.
 
 ## Supersession and retarget (2026-11-16)
 

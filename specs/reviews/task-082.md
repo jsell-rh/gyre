@@ -69,3 +69,80 @@ F1–F5 remain resolved in the current implementation (`064a94fe`) — verified 
 F1–F6 remain resolved at HEAD — verified in code and by test run. Task suites pass: `WorkspaceSidebarSectionNav.test.js` + `WorkspaceHomeSections.test.js` + `WorkspaceHomeArchitecture.test.js` 47 passed / 51 skipped (skips are the pre-existing old-layout suites: Repos/Decisions/Agent Rules/Error handling), `AppShell.test.js` + `Sidebar.test.js` 101/101. Structural verification of the F6 fix (`79323318` + `9561ee86`): `section-briefing`, `section-specs`, and `section-architecture` render unconditionally at workspace scope inside `ws-main-content` (outside any wsTab/conditional guard beyond the `{#if !workspace}` outer guard and the decisions `{:else}` branch); the `archExpandSignal` effect expands the Architecture section and lazily loads the graph without a reactive loop; the ExplorerCanvas is fed `nodes`/`edges` from `api.workspaceGraph`, matching both the component's prop contract and the `KnowledgeGraphResponse` shape; locale keys for all four section headings plus `decisions_empty` (exact docs/ui.md copy) and `show/hide_workspace_graph` are present in `en.json`.
 
 No new findings. Two observations considered and rejected as below the relevance bar: (1) the F6-resolution text attributes the regression tests to `79323318` while the un-skipped test suites actually land in `9561ee86` (both are task-082 commits listed in frontmatter, and the tests do fail against the pre-fix code, so the coverage claim holds); (2) the specs table status cell displays `approval_status ?? status` while the icon lookup keys on `spec.status` alone — the same pattern the tenant-scope twin (`CrossWorkspaceHome.svelte`) uses, so it is consistent with existing code and cosmetic at most.
+## R11 Findings — retargeted requirement (ui-navigation.md §1a Collapsible Navigation Rail)
+
+Candidate `9456d78a` (base `9f446d0e`). Reviewed the retargeted §1a
+requirement, not the superseded HSI §1.3 deliverable. Evidence:
+`/tmp/stage/review-evidence/task-082-rail-review.md`.
+
+**All eight retargeted acceptance criteria are satisfied by real,
+independently probed behavior:**
+
+- Rail renders on workspace home (with a selected workspace) and repo
+  mode (without an open full-page entity detail) only; every focused
+  surface excludes it (sub-pages are distinct modes; the Editor Split
+  renders only inside the side DetailPanel's expanded pop-out, during
+  which `main.content` collapses to zero width and clips the rail).
+- Scope-labelled per mode (workspace name; `workspace / repo` path); no
+  global menu — per-mode item sets only.
+- Workspace-home set = §1a's enumerated list (decisions, specs,
+  architecture, repos, briefing, agent-rules, settings); repo set =
+  RepoMode `TABS` exactly (verified against the component source).
+- Stable ordering (static arrays); collapsed icon-only 48px default,
+  240px expanded, persisted per user per mode under
+  `gyre_nav_rail_expanded.<mode>.<user-id>` (first use collapsed).
+- Never load-bearing: dashboard sections, tab strip, ⌘K, g-shortcuts all
+  unchanged; `NoSidebar.test.js` updated (rail-vs-permanent-sidebar
+  distinction), not deleted.
+- Narrow viewports: rail hidden ≤767px, hamburger drawer offers the
+  per-mode item set, Esc dismisses; Analytics remains reachable via the
+  topbar button after its drawer item was replaced by the §1a set.
+- `docs/ui.md` documents the shipped rail.
+
+Focused runs at the candidate tree: NavRail + NoSidebar (19) + AppShell
+(77) + WorkspaceDrawerSectionNav + BidirectionalNav (19) all pass.
+Mutation probe: reverting the agent-rules scroll repair fails the NavRail
+test (target pinned via the real `section-agent-rules` element) — the
+tests are not self-confirming for that criterion.
+
+- [ ] **F10: the repo-mode rail mirror is a hand-maintained copy of the
+  tab strip, not a derivation from it — the §1a "source of truth"
+  coupling is unenforced and untested in the direction that matters.**
+  `ui-navigation.md` §1a: "The tab strip is the source of truth for the
+  item set and the rail mirrors it exactly, including any additional repo
+  tabs shipped at implementation time." The candidate encodes the mirror
+  as a fourth independent constant: `RepoMode.svelte` `TABS` (9 ids),
+  `App.svelte` `REPO_RAIL_TAB_IDS` (9 ids), and the hardcoded expected
+  arrays in `NavRail.test.js` and `AppShell.test.js` (RepoMode is mocked
+  in both, so the suites cannot read the real `TABS`). Nothing in the
+  tree fails if `RepoMode.TABS` gains, loses, or reorders a tab: the rail
+  silently diverges from the tab strip with every test green — the
+  mirrored-logic class the repo-wide no-fakery standard excludes from
+  closing a section. The risk is not hypothetical: the same file already
+  contains a drifted copy of the same list — pre-existing
+  `REPO_TABS` (App.svelte:238, 8 ids) is missing `dependencies`, so a
+  deep link or refresh on `/workspaces/:slug/r/:repo/dependencies`
+  misparses to the Specs tab (parseRoute falls back to `'specs'` for
+  unknown tabs). That misparse is a base defect outside this diff, but
+  it demonstrates that uncoupled copies of the tab list in App.svelte
+  have already drifted. Fix: export `TABS` from `RepoMode.svelte` (or
+  move it to a shared `web/src/lib` module), derive
+  `REPO_RAIL_TAB_IDS` and the test expectations from it (a test that
+  imports the real `TABS` and asserts the rail mirrors it), and
+  opportunistically reconcile the drifted `REPO_TABS` route-parse list.
+
+**Observations (non-blocking, recorded for the verifier / next tasks):**
+
+- Pre-existing (in base `9f446d0e`, not introduced by this candidate):
+  `REPO_TABS` at App.svelte:238 omits `dependencies`, so the
+  dependencies tab is not deep-linkable (URL misparses to Specs). The
+  rail's `dependencies` item behaves identically to clicking the tab
+  (same `goToRepoTab` route), so §1a's "same route as clicking the tab"
+  holds; the deep-link repair is a separate task.
+- Coverage row 1a notes "NavRail.test.js (12)" — the file ships 14
+  tests. Cosmetic count drift in the note; the `implemented` status
+  itself is accurate.
+- The working tree carries an uncommitted stage restore of
+  `specs/tasks/task-082.md` to the assigned contract body (progress
+  `not-started`, historical commits list); it is not part of the
+  candidate commit and was left untouched by this review.
