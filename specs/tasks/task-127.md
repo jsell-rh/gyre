@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["6d71565c5cb4a691d7ea0eddfdaeb50f59cba348", "1ed61cf1a71249c007a2dcf0bb59316e812b6d76", "94f6eb357ceb0f055283ec96453dae0b20826b68", "80641b880eb540870f63bbba7d9a1c78faa986f1", "14f27ab5f4ed0ca56d6d59dd4f2503157b4f8a19", "f5aee7dab7577d13d3698e29818a837de63adad0", "b02f8f185cf6fecddee1470c779c1dd1d38b39a5", "e468155e73374c55968e7ea3b956c8b80227bf2f", "c5902874c8d6692ed9ab6c1544ffd1daf2380839", "d577374a98ca345672978b2b8a9763b618a6af31", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f"]
+commits: ["d1736a94", "6d71565c", "1ed61cf1", "94f6eb35", "80641b88", "14f27ab5", "f5aee7da", "b02f8f18", "e468155e", "c5902874", "d577374a", "8d72ffec", "4aa5a87a", "64c85ec9", "50f338e9", "1deff0b5", "b6966093", "fe84485b", "0f127bc0", "4de47315", "1a32b4e6"]
 ---
 
 ## Spec Excerpt
@@ -97,77 +97,80 @@ Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `
 
 ## Shipped
 
-All §UI Pages rows ship as real Svelte 5 (runes) components consuming
-the task-110/124/125 endpoints. Prior rounds shipped the core pages
-(User Settings + Session Management in `UserProfile.svelte`, User
-Profile at `/@username`, Tenant User Management, Workspace
-Members/Invitations with ownership transfer, Team Management,
-Notification Drawer with unread badge/priority grouping/deep links).
-This review-repair round (findings 61bf6f38) closes the three rows
-that review left open:
+All §UI Pages rows ship as real Svelte 5 (runes) components
+consuming the task-110/124/125 endpoints: User Settings + Session
+Management (`UserProfile.svelte`, `/profile` — display name, timezone,
+locale, theme/density/diff preferences, notification channel config,
+active sessions with revoke), User Profile at `/@{username}`
+(`PublicUserProfile.svelte` — identity header, workspace memberships
+with roles, teams, public-action activity feed), Tenant User
+Management (Users tab in `TenantSettings.svelte`, TenantAdmin-gated:
+list/search, invite, deactivate, inline global-role editing),
+Workspace Members/Invitations with role change and ownership
+transfer (`WorkspaceSettings.svelte`), Team Management within
+workspace settings, and the Notification Drawer (bell with unread
+badge, priority-grouped active notifications, deep links, mark
+read/unread) plus Notification Preferences.
 
-### Tenant Invitation Management (finding 1)
+### Tenant Invitation Management
 
-`TenantSettings.svelte` gains an Invitations tab (TenantAdmin-gated —
-a forbidden listing renders the not-admin note, not an error) over the
-in-tree task-110 endpoints: `GET /api/v1/tenant/invitations` with a
-status filter (Pending/Accepted/Declined/Expired/Revoked), a single
-invite modal (email + GlobalRole + optional expiry-days override →
+`TenantSettings.svelte` has an Invitations tab (TenantAdmin-gated — a
+forbidden listing renders the not-admin note, not an error) over the
+task-110 endpoints: `GET /api/v1/tenant/invitations` with a status
+filter (Pending/Accepted/Declined/Expired/Revoked), a single invite
+modal (email + GlobalRole + optional expiry-days override →
 `POST /tenant/invite`), a bulk invite modal (one email per line →
 `POST /tenant/invite/bulk`, per-entry errors surfaced), revoke for
 Pending rows (`DELETE /tenant/invitations/{id}`), and the create
 response's one-time `invite_url` surfaced with a copy action.
 
-### `/invite/{token}` magic-link accept page (finding 2)
+### `/invite/{token}` magic-link accept page
 
 `App.svelte` `parseUrl` disambiguates the 64-hex CSPRNG token from
-the authenticated flow's UUID workspace id (the shapes are disjoint);
-`InvitationAccept.svelte` handles both. The token flow previews via a
-new read-only unauthenticated `GET /api/v1/invite/{token}/preview`
-(kind/status/invited email/role/workspace names — satisfying the spec
-row "accept/decline with workspace preview" without amendment), then
-accepts/declines via `POST /invite/{token}/accept|decline` (tenant)
-and `POST /workspaces/invitations/{token}/accept|decline`
-(workspace). `api.js` `request()` gains `skipAuth`: the token calls
-carry NO Bearer header, so a logged-in session of a different user
-cannot burn an invitation issued to another address. The local-mode
-tenant accept displays the response's minted first API key exactly
-once with a copy action (`api_key.key`); terminal-status
-(used/expired/revoked) and unknown-token links render no accept
-action.
+the authenticated flow's UUID workspace id. The token flow previews
+via the unauthenticated read-only `GET /api/v1/invite/{token}/preview`
+(kind/status/invited email/role/workspace names — the spec row's
+"accept/decline with workspace preview"), then accepts/declines via
+`POST /invite/{token}/accept|decline` (tenant) and
+`POST /workspaces/invitations/{token}/accept|decline` (workspace).
+Token calls carry no Bearer header, so a logged-in session of a
+different user cannot burn another address's invitation. Local-mode
+tenant accept displays the minted first API key exactly once;
+terminal-status (used/expired/revoked) and unknown-token links render
+no accept action.
 
-### Inline global-role editing (finding 3)
+### Inline global-role editing
 
-New `PUT /api/v1/users/{id}/role` (TenantAdmin-only per-handler
-check, same-tenant containment, self-change and deactivated-target
-409s, GlobalRole and UserRole set in lockstep, audit-logged as
-`user_global_role_changed`; ABAC registry entry added) consumed by an
-inline Member/TenantAdmin select in the Users tab, hidden for self
-and deactivated accounts. The stored record is what `is_tenant_admin`
-reads on every call, so a demotion is effective immediately.
+`PUT /api/v1/users/{id}/role` (TenantAdmin-only per-handler check,
+same-tenant containment, self-change and deactivated-target 409s,
+GlobalRole and UserRole set in lockstep, audit-logged) consumed by an
+inline role select in the Users tab, hidden for self and deactivated
+accounts.
+
+### This round: rebase onto main 9f446d0e
+
+Resolved the docs/ui.md conflict in the Shell Layout section: kept
+this branch's notification-bell top-bar wording (the dated bell
+re-pointing the Top Bar section and user-management.md §In-App
+Notification UI already describe) and took main's ui-navigation.md
+§1a nav-rail amendment paragraphs (2026-11-16 decision
+`16871182b1370b61693fc691`, task-246 decomposition) verbatim,
+including the no-*permanent*-sidebar emphasis. All other files
+auto-merged; `web/src` and `web/dist` are byte-identical to the
+retained source.
 
 ### Test evidence
 
-- Full web suite (`cd web && npx vitest run`): **2494 passed / 0
-  failed** (41 pre-existing skips), including the new tests:
+- Mechanical gates after the rebase: `check-arch.sh`,
+  `check-abac-route-registry.sh`, `check-mcp-write-tools.sh`,
+  `check-migration-versions.sh` — all pass.
+- Prior round's full web suite (`cd web && npx vitest run`): 2494
+  passed / 0 failed (41 pre-existing skips), including
   token-flow accept/decline/preview/credential display
   (InvitationAccept.test.js), Invitations tab list/filter/invite/
-  bulk/revoke/not-admin + inline role select (TenantSettings.test.js),
-  parseUrl/urlFor token round-trip (AppShell.test.js), and the
-  skipAuth/no-Bearer + new-endpoint contracts (api.test.js).
-- `cargo check -p gyre-server --lib --tests`: clean (includes the new
-  test code).
-- Mechanical checks: `check-abac-route-registry`,
-  `check-abac-exempt-handlers`, `check-arch`, `check-mem-port-contracts`
-  pass; a full `scripts/check-*.sh` sweep shows zero output differences
-  vs the assignment base (no new violations).
-- **For the independent verifier** (deferred per the 4 GiB build
-  budget — large gyre-server test compilation must run there):
-  - `cargo test -p gyre-server --lib api::invitations::tests::preview`
-    (4 tests: tenant preview with pre-assigned workspaces,
-    workspace-kind preview, expired-pending reported-not-persisted,
-    unknown token 404)
-  - `cargo test -p gyre-server --lib api::users::tests::update_user_role`
-    (2 tests: lockstep role change + guards/audit, cross-tenant and
-    deactivated guards)
-  - `cargo test --all` and the full CI gate set.
+  bulk/revoke/not-admin + inline role select (TenantSettings.test.js).
+  This round changed no `web/src` file, so those results remain
+  the evidence; verifier should re-run `cd web && npm ci && npm test`
+  plus `cargo test --all` (focused server packages:
+  `cargo test -p gyre-server users::` for the role/invitation
+  handler tests) at the integrated head.
