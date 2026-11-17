@@ -57,3 +57,56 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — independent review at candidate `5eadb2fd684434bfe3c138ae8eb0c8aeb553d94b` (verdict: approved)
+
+Assignment base `9f446d0eb33ecb24b04c821e47007d8884882b63` → candidate `5eadb2fd` (tree clean
+after probes; all 17 `commits:` frontmatter entries verified ancestors of the candidate).
+This round covers the rebase onto the assigned base plus the E0308 verification repair
+(`c964e54a`, message_dispatcher test aligned with the required-scope `emit_event`).
+
+Independent evidence (logs under `/tmp/stage/review-evidence/`, run on the clean candidate tree;
+every mutation restored and `git status` re-verified clean):
+
+- `scripts/check-hierarchy.sh` exit 0. Mutation kills re-probed: `Task.workspace_id → Option<Id>`
+  → exit 1 naming `task.rs:60`; deleting the field → exit 1 "missing from the struct".
+- `scripts/check-tenant-filter.sh` exit 0 (124 read methods on tenant-column tables, 0
+  violations; 193 backlog reads on tenant-less tables reported non-failing). Mutation kill:
+  blanking the three `analytics_events::tenant_id.eq(&tenant)` filters in
+  `sqlite/analytics.rs` → exit 1, 3 violations with file:line. The pre-task script from the
+  base is confirmed dead on this system (mawk syntax error, exit 2, plus it scanned a
+  nonexistent `src/pg` dir) — the rewrite is a real repair, not churn.
+- `scripts/check-api-auth.sh` exit 0. Mutation kills for all three checks: removing the
+  `abac_middleware` layer from the api router → exit 1 (Check 1); adding a non-ABAC POST route
+  whose handler has no auth extractor (`admin_jobs` probe) → exit 1 (Check 2); deleting the
+  `/api/v1/activity` RouteResourceMapping → exit 1 via the delegated frozen
+  `check-abac-route-registry.sh` (Check 3).
+- `cargo test -p gyre-adapters --test tenant_isolation` → 2 passed / 0 failed. Load-bearing:
+  removing `merge_requests::tenant_id.eq(&tenant)` from sqlite `find_by_id` fails BOTH tests
+  (cross-tenant leak + fabricated-stamp assertions fire).
+- `cargo check -p gyre-server --lib --tests` (SKIP_WEB_BUILD=1) → exit 0 — the E0308 target
+  from the failed prior verification round is repaired on this head.
+- `cargo test -p gyre-adapters --lib` → 573 passed / 0 failed (covers the modified
+  notification/analytics/workspace/repository/saved_view/compute_target adapter tests).
+- Frozen-exemption hygiene: all `scripts/*-exemptions.txt` files byte-identical to the
+  assigned base — no new grandfather slots. `check-arch.sh`,
+  `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
+  `check-inert-enforcement.sh` all exit 0. No merge-conflict markers in authored source.
+- Skip-list rationales spot-checked against code: `budget_call.rs::list_since`'s only budget-port
+  caller is `apply_rolling_24h_window` (api/budget.rs:1768), which recomputes per-workspace sums
+  across the whole deployment — cross-tenant by design, as documented.
+- Prior-round findings F1 (dead exemption slots) and F2 (record/resolve blind spot) remain
+  fixed on this head (prefix set includes `record|resolve`; exemption file equals the live set).
+
+Scanner heuristic limits noted and accepted as within the spec's grep-lint contract (not
+findings): `has_tenant` is body-wide rather than per-table (join cross-table ambiguity), and
+read detection is name-prefix + terminal based — the residual blind-spot sweep found no live
+read-terminal fn on a tenant-column table outside the heuristic.
+
+Deferred to the independent verifier (4 GiB budget): `cargo test --all` — specifically
+`cargo test -p gyre-server message_dispatcher` for the repaired dispatcher test — plus the
+full workspace gates and `scripts/check-task-commit-attribution.sh` (needs full clone history;
+timed out in this sandbox — manual ancestry check of all 17 commits substituted).
+
+Generated-output observation (non-blocking, verifier-owned): task commits include
+`web/dist/*` asset changes; bundle regeneration is the deterministic verifier's stage.
