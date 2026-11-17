@@ -929,6 +929,14 @@ mod tests {
     /// `max_agent_iterations` configures the repo's Ralph-loop ceiling.
     async fn loop_state(max_agent_iterations: Option<u32>) -> Arc<AppState> {
         let state = test_state();
+        // Production parity: server startup seeds the built-in meta-specs
+        // (main.rs → seed_builtin_meta_specs) and the task-093 spawn cores
+        // enforce the persona meta-spec layer fail-closed (validate_persona
+        // in api/orchestrator.rs) — the failure-routing path below spawns a
+        // repo orchestrator on demand, which needs the approved
+        // "repo-orchestrator" meta-spec in addition to the entity-layer
+        // persona seeded below.
+        crate::seed_builtin_meta_specs(&state).await;
         let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
         state.workspaces.create(&ws).await.unwrap();
 

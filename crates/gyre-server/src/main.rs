@@ -48,9 +48,10 @@ async fn main() -> Result<()> {
     bootstrap_default_tenant(&state).await;
 
     // Initialise ABAC resource resolver and seed built-in policies (M34 Slice 4).
-    // Fails closed: if any built-in policy (incl. the immutable
-    // builtin:require-human-spec-approval Deny, HSI §2) cannot be persisted,
-    // refuse to start rather than serve with a partially seeded policy set.
+    // Fails closed: abort startup when any built-in policy (incl. the immutable
+    // builtin:require-human-spec-approval Deny, HSI §2) cannot be seeded —
+    // running without them (including default-deny) would leave the server
+    // unrestricted (specs/reviews/task-077.md F6 flaw class).
     abac_middleware::init_resolver();
     abac_middleware::seed_builtin_policies(&state).await?;
 
