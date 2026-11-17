@@ -405,6 +405,21 @@ pub struct LinkNodeResponse {
 pub struct PredictResponse {
     pub repo_id: String,
     pub predictions: Vec<serde_json::Value>,
+    /// Specs linked to the predicted spec (§3 fast tier, spec-edit calls
+    /// only): the other side of every spec link touching `spec_path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected_specs: Option<Vec<String>>,
+    /// Repos whose knowledge graphs contain nodes governed by the predicted
+    /// spec (§3 fast tier, spec-edit calls only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected_repos: Option<Vec<String>>,
+    /// Deterministic pre-execution cost estimate for implementing the
+    /// predicted changes (§3 fast tier, spec-edit calls only): a fixed
+    /// per-change rate over the prediction count. An estimate by
+    /// definition — actual cost is recorded per agent at completion
+    /// (record_agent_usage).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_agent_cost: Option<String>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -2320,7 +2335,7 @@ pub async fn predict_graph(
     // spec-edit framing note rides the system prompt (same slot it used
     // before the core was extracted) so the model sees it as instruction,
     // not as part of the user's question.
-    let (user_prompt, system_note) = if let (Some(spec_path), Some(draft)) =
+    let (user_prompt, system_note, output_contract) = if let (Some(spec_path), Some(draft)) =
         (&req.spec_path, &req.draft_content)
     {
         (
@@ -2330,27 +2345,292 @@ pub async fn predict_graph(
                 Some(
                     "\n\nThe user is editing a spec and wants to understand the structural impact.",
                 ),
+                // §3 prediction contract: ghost overlays render action,
+                // confidence and reason, so the spec-edit caller must get
+                // those fields back — not the free-form improvement
+                // categories the default prompt requests.
+                Some(
+                    "\n\nFor this spec-edit prediction, respond with a JSON array of prediction objects, each with exactly these fields: \n\
+                     \"action\" (\"add\"|\"modify\"|\"remove\"), \n\
+                     \"node_type\" (e.g. \"Type\", \"Trait\", \"TraitMethod\", \"Module\"), \n\
+                     \"name\" (the new or existing element name), \n\
+                     \"node_id\" (the existing node's id from the context, when the prediction targets an existing node), \n\
+                     \"confidence\" (a number between 0.0 and 1.0), \n\
+                     \"reason\" (a one-sentence justification), \n\
+                     \"changes\" (array of strings describing the modification, for \"modify\"), \n\
+                     \"parent_trait\" (the existing trait or type a new element belongs to, for \"add\").",
+                ),
             )
     } else if let Some(spec_path) = &req.spec_path {
         (
             format!("Predict structural improvements related to spec: {spec_path}"),
+            None,
             None,
         )
     } else {
         (
             format!("Predict structural improvements for repo {id}."),
             None,
+            None,
         )
     };
 
-    let predictions =
-        run_structural_prediction(&state, &workspace_id, &repo_id, &user_prompt, system_note)
-            .await?;
+    let predictions = run_structural_prediction(
+        &state,
+        &workspace_id,
+        &repo_id,
+        &user_prompt,
+        system_note,
+        output_contract,
+    )
+    .await?;
+
+    // §3 fast-tier context (spec-edit calls only): real link-graph and
+    // knowledge-graph queries, never fabricated.
+    let (affected_specs, affected_repos, estimated_agent_cost) = if req.spec_path.is_some() {
+        (
+            Some(affected_specs_for(&state, req.spec_path.as_deref().unwrap_or("")).await),
+            Some(
+                affected_repos_for(
+                    &state,
+                    &workspace_id,
+                    req.spec_path.as_deref().unwrap_or(""),
+                )
+                .await,
+            ),
+            // Deterministic estimate over the prediction count (documented
+            // rate; the field is an estimate by spec — actual spend is
+            // recorded per agent at completion).
+            Some(format!("${:.2}", 0.05 + 0.10 * predictions.len() as f64)),
+        )
+    } else {
+        (None, None, None)
+    };
 
     Ok(Json(PredictResponse {
         repo_id: id,
         predictions,
+        affected_specs,
+        affected_repos,
+        estimated_agent_cost,
     }))
+}
+
+/// §3 fast tier: specs connected to `spec_path` — the other side of every
+/// spec link (either direction) recorded in the spec-links store.
+async fn affected_specs_for(state: &AppState, spec_path: &str) -> Vec<String> {
+    let links = state.spec_links_store.lock().await;
+    let mut specs: Vec<String> = links
+        .iter()
+        .filter_map(|l| {
+            if l.source_path == spec_path && l.target_path != spec_path {
+                Some(l.target_path.clone())
+            } else if l.target_path == spec_path && l.source_path != spec_path {
+                Some(l.source_path.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    specs.sort();
+    specs.dedup();
+    specs
+}
+
+/// §3 fast tier: repos implementing `spec_path` — the workspace's repos
+/// whose knowledge graphs contain live (non-deleted) nodes governed by the
+/// spec. Repo names, the form the spec's example response uses.
+async fn affected_repos_for(state: &AppState, workspace_id: &Id, spec_path: &str) -> Vec<String> {
+    let repo_ids: Vec<Id> = state
+        .repos
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let mut names = Vec::new();
+    for repo_id in repo_ids {
+        let Ok(nodes) = state.graph_store.list_nodes(&repo_id, None).await else {
+            continue;
+        };
+        if nodes
+            .iter()
+            .any(|n| n.deleted_at.is_none() && n.spec_path.as_deref() == Some(spec_path))
+        {
+            if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
+                names.push(repo.name);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/repos/{id}/graph/thorough-preview — §3 thorough tier
+// ---------------------------------------------------------------------------
+
+/// Request body for the thorough preview (system-explorer.md §3 "Thorough
+/// (minutes, on-demand) — Full preview").
+#[derive(Deserialize)]
+pub struct ThoroughPreviewRequest {
+    /// Spec file path the draft edits.
+    pub spec_path: String,
+    /// Full draft spec content to implement on the throwaway branch.
+    pub draft_content: String,
+}
+
+/// Response for the thorough preview: the preview task and the agent
+/// spawned to implement the draft on a throwaway branch.
+#[derive(Serialize)]
+pub struct ThoroughPreviewResponse {
+    pub repo_id: String,
+    pub task_id: String,
+    pub agent_id: String,
+    /// Throwaway branch the preview agent implements on. Never merged
+    /// unless a human chooses to — the completion MR is the preview
+    /// artifact the client diffs against.
+    pub branch: String,
+    /// Whether the agent process launched on a compute target
+    /// (agent-runtime.md §1 Phase 7). False means the task and agent
+    /// records exist but nothing is executing — the client's poll surfaces
+    /// the stall, never a fabricated completion.
+    pub process_launched: bool,
+}
+
+/// POST /api/v1/repos/{id}/graph/thorough-preview
+///
+/// §3 thorough tier: create a preview task carrying the spec draft, then
+/// spawn an implementation agent on a throwaway `preview/...` branch via
+/// the shared spawn core (same worktree/JWT/compute-target/budget path as
+/// POST /agents/spawn). The client polls the task; when the agent
+/// completes, the completion MR (source = the throwaway branch) carries
+/// the real code diff.
+///
+/// Compensating rollback: if the spawn fails, the just-created preview
+/// task is deleted so a failed preview leaves no orphaned Backlog task
+/// behind (same invariant as the spawn core's agent/worktree rollback).
+pub async fn thorough_preview(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    caller: AuthenticatedAgent,
+    Json(req): Json<ThoroughPreviewRequest>,
+) -> Result<(StatusCode, Json<ThoroughPreviewResponse>), ApiError> {
+    if req.spec_path.trim().is_empty() {
+        return Err(ApiError::InvalidInput(
+            "spec_path is required for a thorough preview".to_string(),
+        ));
+    }
+    if req.draft_content.trim().is_empty() {
+        return Err(ApiError::InvalidInput(
+            "draft_content is required for a thorough preview".to_string(),
+        ));
+    }
+
+    // Repo + workspace scope (the spawn core re-checks repo ABAC and
+    // budget against the caller — defense in depth, not duplication).
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    let now = now_secs();
+    let task_id = new_id();
+    // Char-boundary-safe unique prefixes (ids are server-generated, but
+    // the repo invariant forbids fixed byte-index slicing on principle).
+    let id_prefix: String = task_id.as_str().chars().take(8).collect();
+    let spec_stem: String = req
+        .spec_path
+        .rsplit('/')
+        .next()
+        .unwrap_or("spec")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let branch = format!("preview/{spec_stem}-{id_prefix}");
+
+    // Preview task: the draft rides the description — the spawned agent
+    // reads its task and implements exactly this content on its branch.
+    let mut task = gyre_domain::Task::new(
+        task_id.clone(),
+        format!("Spec preview: {}", req.spec_path),
+        now,
+    );
+    task.description = Some(format!(
+        "Thorough preview (system-explorer.md §3): implement the following \
+         spec draft on the throwaway branch '{branch}'. This is a preview, \
+         not a production change — produce real code matching the draft.\n\
+         Spec: {}\n\n--- draft content ---\n{}",
+        req.spec_path, req.draft_content
+    ));
+    task.task_type = Some(gyre_domain::TaskType::Implementation);
+    task.labels = vec!["spec-preview".to_string()];
+    task.spec_path = Some(req.spec_path.clone());
+    task.workspace_id = repo.workspace_id.clone();
+    task.repo_id = repo.id.clone();
+    task.branch = Some(branch.clone());
+    state
+        .tasks
+        .create(&task)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let spawn_req = crate::api::spawn::SpawnAgentRequest {
+        name: format!("preview-{id_prefix}"),
+        repo_id: repo.id.to_string(),
+        task_id: task_id.to_string(),
+        branch: branch.clone(),
+        parent_id: None,
+        compute_target_id: None,
+        disconnected_behavior: None,
+        loop_config: None,
+        agent_type: None,
+        conversation_sha: None,
+        persona: None,
+        persona_slug: None,
+    };
+    match crate::api::spawn::spawn_agent_core(
+        &state,
+        spawn_req,
+        &caller,
+        "POST /api/v1/repos/:id/graph/thorough-preview",
+    )
+    .await
+    {
+        Ok(resp) => Ok((
+            StatusCode::CREATED,
+            Json(ThoroughPreviewResponse {
+                repo_id: id,
+                task_id: task_id.to_string(),
+                agent_id: resp.agent.id.to_string(),
+                branch,
+                process_launched: resp.process_launched,
+            }),
+        )),
+        Err(e) => {
+            // Compensating rollback: the spawn failed (budget, ABAC,
+            // compute target, …) — remove the orphaned preview task so it
+            // is never picked up by the scheduler as real work.
+            if let Err(del_err) = state.tasks.delete(&task_id).await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %del_err,
+                    "thorough-preview: failed to roll back preview task after spawn failure"
+                );
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Shared structural-prediction core (system-explorer.md §3 fast tier and
@@ -2364,12 +2644,15 @@ pub async fn predict_graph(
 /// `instruction` is the user-side prompt describing the change to predict.
 /// `system_note` is appended to the substituted system prompt for
 /// caller-specific framing (the spec-edit caller marks the edit context).
+/// `output_contract` (spec-edit caller only) appends the §3 prediction
+/// JSON shape so ghost overlays get action/confidence/reason fields.
 pub(crate) async fn run_structural_prediction(
     state: &AppState,
     workspace_id: &Id,
     repo_id: &Id,
     instruction: &str,
     system_note: Option<&str>,
+    output_contract: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, ApiError> {
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
@@ -2433,6 +2716,9 @@ pub(crate) async fn run_structural_prediction(
         .replace("{{edges}}", &edges_json);
     if let Some(note) = system_note {
         system_prompt.push_str(note);
+    }
+    if let Some(contract) = output_contract {
+        system_prompt.push_str(contract);
     }
 
     // Resolve model and call LLM for structured JSON output.
@@ -3009,6 +3295,461 @@ mod tests {
         assert!(
             !predictions.is_empty(),
             "mock LLM should return at least one prediction"
+        );
+    }
+
+    /// §3 fast tier: a spec-edit predict call (spec_path + draft_content)
+    /// must return the ghost-overlay prediction contract — action,
+    /// confidence, reason — plus the real link-graph context
+    /// (affected_specs, affected_repos, estimated_agent_cost), and the
+    /// system prompt sent to the LLM must carry the §3 output contract.
+    #[tokio::test]
+    async fn predict_graph_spec_edit_returns_ghost_contract_and_link_context() {
+        use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
+
+        let mut s = (*test_state()).clone();
+        let adapter = std::sync::Arc::new(gyre_adapters::MockLlmAdapter::json_response(
+            serde_json::json!([
+                {
+                    "action": "add",
+                    "node_type": "Type",
+                    "name": "VectorIndex",
+                    "confidence": 0.85,
+                    "reason": "Spec mentions vector similarity search"
+                },
+                {
+                    "action": "modify",
+                    "node_id": "node-search",
+                    "confidence": 0.9,
+                    "reason": "Search needs modes",
+                    "changes": ["New field: mode"]
+                }
+            ]),
+        ));
+        s.llm = Some(std::sync::Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: adapter.clone(),
+        }) as _);
+        let state = std::sync::Arc::new(s);
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Workspace + repo (real workspace row so the affected-repos query
+        // resolves the repo name).
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"name": "ws-predict-shape"}))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "predict-shape-repo",
+                            "workspace_id": ws_id,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A live graph node governed by the spec → the repo implements it.
+        let mut node = _new_node(&repo_id, "SearchQuery", NodeType::Type);
+        node.spec_path = Some("specs/system/search.md".to_string());
+        state.graph_store.create_node(node).await.unwrap();
+
+        // A spec link touching the spec → a connected spec.
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "link-1".to_string(),
+            source_path: "specs/system/search.md".to_string(),
+            source_repo_id: Some(repo_id.clone()),
+            source_sha: "sha-1".to_string(),
+            link_type: SpecLinkType::References,
+            target_path: "specs/system/dependency-graph.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1000,
+            stale_since: None,
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/predict"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/system/search.md",
+                            "draft_content": "# Search\n\nNeeds semantic mode."
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        // §3 prediction contract round-trips: ghost overlays need action,
+        // confidence and reason.
+        let predictions = json["predictions"].as_array().unwrap();
+        assert_eq!(predictions.len(), 2);
+        assert_eq!(predictions[0]["action"].as_str().unwrap(), "add");
+        assert_eq!(predictions[0]["name"].as_str().unwrap(), "VectorIndex");
+        assert!((predictions[0]["confidence"].as_f64().unwrap() - 0.85).abs() < 1e-9);
+        assert!(predictions[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("vector"));
+
+        // Real link-graph context, never fabricated.
+        let affected: Vec<&str> = json["affected_specs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(affected, vec!["specs/system/dependency-graph.md"]);
+        let repos: Vec<&str> = json["affected_repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(repos, vec!["predict-shape-repo"]);
+        // Deterministic estimate over the prediction count.
+        assert_eq!(json["estimated_agent_cost"].as_str().unwrap(), "$0.25");
+
+        // The LLM actually received the §3 output contract (ghost fields).
+        let prompts = adapter.captured_system_prompts.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("\"action\"")),
+            "spec-edit predict must instruct the LLM to return the §3 prediction shape"
+        );
+    }
+
+    /// §3 thorough tier: POST /repos/:id/graph/thorough-preview creates a
+    /// preview task carrying the draft, spawns an implementation agent on
+    /// a throwaway preview/ branch, and reports both ids.
+    #[tokio::test]
+    async fn thorough_preview_creates_task_and_spawns_agent_on_throwaway_branch() {
+        let app = app();
+
+        // Workspace + repo.
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"name": "ws-thorough"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "thorough-repo",
+                            "workspace_id": ws_id,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/thorough-preview"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/system/search.md",
+                            "draft_content": "# Search\n\nAdd semantic mode."
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let task_id = json["task_id"].as_str().unwrap().to_string();
+        let agent_id = json["agent_id"].as_str().unwrap().to_string();
+        let branch = json["branch"].as_str().unwrap().to_string();
+        assert!(
+            branch.starts_with("preview/search-md-"),
+            "throwaway preview branch, got {branch}"
+        );
+        assert_eq!(json["repo_id"].as_str().unwrap(), repo_id);
+
+        // The preview task exists, is assigned to the spawned agent, and
+        // carries the spec + branch + preview label.
+        let task_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task_resp.status(), StatusCode::OK);
+        let task = body_json(task_resp).await;
+        assert_eq!(task["status"].as_str().unwrap(), "in_progress");
+        assert_eq!(
+            task["spec_path"].as_str().unwrap(),
+            "specs/system/search.md"
+        );
+        assert_eq!(task["branch"].as_str().unwrap(), branch);
+        assert_eq!(task["assigned_to"].as_str().unwrap(), agent_id);
+        assert!(task["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l == "spec-preview"));
+        // The draft rides the task the agent reads.
+        assert!(task["description"]
+            .as_str()
+            .unwrap()
+            .contains("Add semantic mode."));
+
+        // The agent exists and is bound to the task.
+        let agent_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/agents/{agent_id}"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn thorough_preview_rejects_missing_fields_and_unknown_repo() {
+        let app = app();
+
+        // Unknown repo → 404.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos/repo-nope/graph/thorough-preview")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/a.md",
+                            "draft_content": "draft"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Create a real repo for the field-validation cases.
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "thorough-validate-repo",
+                            "workspace_id": "ws-any",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Empty draft → 400.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/thorough-preview"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/a.md",
+                            "draft_content": "   "
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Missing spec_path → 422: axum's Json<T> extractor rejects a
+        // body missing a required field before the handler runs (same
+        // contract as the release.rs missing-field case).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/thorough-preview"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"draft_content": "d"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Compensating rollback: when the spawn fails (here: the repo's
+    /// workspace row is missing, so the spawn fails closed), the
+    /// just-created preview task is deleted — a failed preview leaves no
+    /// orphaned Backlog task for the scheduler to pick up as real work.
+    #[tokio::test]
+    async fn thorough_preview_rolls_back_preview_task_when_spawn_fails() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Repo with a dangling workspace reference (POST /repos accepts
+        // any workspace_id): the spawn core fails closed on it.
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "thorough-rollback-repo",
+                            "workspace_id": "ws-does-not-exist",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(repo_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/thorough-preview"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "spec_path": "specs/system/rollback.md",
+                            "draft_content": "draft"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::CREATED);
+
+        // No preview task survived the failed spawn.
+        let tasks = state
+            .tasks
+            .list_by_spec_path("specs/system/rollback.md")
+            .await
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "failed thorough preview must roll back its task, found {}",
+            tasks.len()
         );
     }
 
