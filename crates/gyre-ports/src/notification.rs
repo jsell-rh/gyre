@@ -110,6 +110,20 @@ pub trait NotificationRepository: Send + Sync {
     /// Ordered by created_at descending.
     async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>>;
 
+    /// List notifications of a given type within a workspace created at or
+    /// after `since` (epoch seconds), across ALL users — the SpecAssertionFailure
+    /// fan-out creates one row per notified member, so a user-scoped query
+    /// cannot serve workspace-level consumers. Unbounded by design: callers
+    /// (HSI §9 briefing exceptions) must see every qualifying row, not a
+    /// globally-truncated recency window like `list_recent`'s. Ordered by
+    /// created_at descending.
+    async fn list_by_workspace_type_since(
+        &self,
+        workspace_id: &Id,
+        notification_type: &str,
+        since: i64,
+    ) -> Result<Vec<Notification>>;
+
     /// Returns true if there is a recent dismissal for the given (workspace, user, type)
     /// within `days` days. Used by the trust-suggestion job to suppress re-creation.
     async fn has_recent_dismissal(
