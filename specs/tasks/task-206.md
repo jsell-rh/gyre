@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["a4d8bd712ed166b78311ce648a70c58791082ea1", "2f10e8d134c1911f52b07400d7becabb910dbe21", "7cad12616cd28f691664cac1922337c9f5d72bef", "683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: ["a4d8bd712ed166b78311ce648a70c58791082ea1", "2f10e8d134c1911f52b07400d7becabb910dbe21", "7cad12616cd28f691664cac1922337c9f5d72bef", "683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f", "c1a709ba62490cf3661b06b6ea6b72308488ebf4"]
 ---
 
 ## Spec Excerpt
@@ -131,31 +131,43 @@ Preview mode is a real agent run path, not an estimate (meta-spec-reconciliation
 
 - **Spawn** — `POST /api/v1/meta-specs/preview` (Admin/Developer; global route per spec) validates every target up front (repo exists, caller passes repo ABAC + tenant containment, spec_path exists on the default branch), then provisions per target a real `Active` agent row, a `preview/{preview_id}/{slug}` branch pinned to the default-branch tip, a real git worktree, and a short-lived preview JWT (`GYRE_PREVIEW_JWT_TTL_SECS`, default 1800 s). Response is exactly the spec shape: `202 {preview_id, agents:[{agent_id, repo_id, spec_path, branch}]}`. Provisioning is all-or-nothing per request.
 - **Draft delivery** — the draft travels out-of-band in the agent process environment (`GYRE_PREVIEW_ID`, `GYRE_META_SPEC_DRAFT_KIND`, `GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_TARGET_SPEC_PATH`; `GYRE_TASK_ID` deliberately absent). `docker/gyre-agent/agent-runner.mjs` reads those vars and builds the prompt itself: draft meta-spec as governing "how to build" context over the target spec, task-mutating MCP tools withheld, push to the preview branch as the entire deliverable.
-- **Skip-ceremony enforced, not just skipped** — the MCP dispatch refuses task/MR/provenance mutations for preview agents, and the REST surface refuses preview-agent callers on agent complete/stop/fail/status/usage, task create/update/status, MR create/status, merge-queue enqueue/cancel, spec approve, compose apply/teardown, and workspace-orchestrator spawn (403; the registry-exempt stop/fail/usage routes additionally enforce per-handler tenant containment, and stop/fail require Admin or the victim's in-tenant authorization). No spec-approval gate, no quality gates, no MR, no merge queue, no provenance, no `refs/agents/*`/`refs/tasks/*` writes, never `Idle`. Budget: workspace budget by default, `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` caps preview spawns independently when set (429 on overflow).
+- **Skip-ceremony enforced, not just skipped** — the MCP dispatch refuses task/MR/provenance mutations for preview agents, and the REST surface refuses preview-agent callers on agent complete (both as caller and as target), agent stop/fail/status/usage, agent registration, task create/update/status, MR create/status, merge-queue enqueue/cancel, spec approve, spec save, commit provenance recording, compose apply/teardown, and orchestrator spawn on both tiers (repo tier additionally role-gated to Admin/Developer — see the repair round below). No spec-approval gate, no quality gates, no MR, no merge queue, no provenance, no `refs/agents/*`/`refs/tasks/*` writes, never `Idle`. Budget: workspace budget by default, `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` caps preview spawns independently when set (429 on overflow).
 - **Completion** — every compute-target monitor routes exits through `spawn::on_agent_process_exit` → `finish_preview_agent`: token revoked, worktree removed, budget slot released (idempotent), agent row lands `Stopped` — never `Idle`. The branch survives for diffing.
 - **Status + diff** — `GET /api/v1/meta-specs/preview/{preview_id}` reports per-agent state derived from the real agent rows and the produced `diff` (preview branch vs. pinned base sha, same git plumbing as MR diffs) once the branch exists.
 - **Cleanup** — `DELETE /api/v1/meta-specs/preview/{preview_id}` kills agents, force-removes worktrees, closes open MRs on `preview/{id}/*` branches, deletes every preview branch, revokes tokens, drops the kv records; 404 on unknown id. Background job `meta_spec_preview_gc` (interval `GYRE_META_SPEC_PREVIEW_GC_INTERVAL_SECS`, default 1 h; TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) tears down expired runs and reclaims orphaned agent entries. No refs, no provenance, no audit trail.
 - **Clean cutover** — the hollow structural-impact preview and the workspace-scoped routes (and their ABAC exemption entries) are gone; docs updated (`docs/api-reference.md`, `docs/server-config.md`, `docker/gyre-agent/README.md`).
 
+### Review repair round c1a709ba (findings F1–F5)
+
+The first guard pass missed five REST routes whose middleware ABAC mapping the builtin agent-scoped-access policy satisfies for any Agent-role JWT. All five now refuse preview-agent callers, with per-handler comments citing the finding:
+
+- **F1** `spawn_repo_orchestrator` (repo tier): Admin/Developer role gate (audited `rbac_denied`) + preview refusal, mirroring the workspace-tier twin. Dev bootstrap unaffected — the global system token resolves as Admin; the MCP twin already required a workspace-orchestrator token.
+- **F2** `create_agent` (`POST /api/v1/agents`): caller authenticated + preview refusal — the route minted a fresh opaque `agent_tokens` entry for a new principal no preview guard indexes, laundering a clean identity past every caller-keyed refusal in one call. It was the only production REST route that mints such tokens.
+- **F3** `complete_agent`: caller-keyed preview refusal added (the existing guard was target-keyed only, so a preview agent could run the MR/completion ceremony against any other agent); target-keyed guard kept — both directions contained.
+- **F4** `save_spec` (`POST /api/v1/repos/{id}/specs/save`): preview refusal before the auto-MR + "Spec pending approval" notification ceremony.
+- **F5** `record_commit` (`POST /api/v1/repos/{id}/commits/record`): caller authenticated + preview refusal — no forged `AgentCommit` provenance rows (REST twin of the MCP `conversation_upload` refusal).
+
+Regression test `preview_agent_rest_identity_provenance_and_repo_orchestrator_are_refused` drives the preview agent's live JWT through both the production router and the bare `api_router` for all five routes, asserts the side effects did not happen (no orchestrator row, no laundered agent token, victim untouched, no MR or `spec-edit/` branch, no provenance row), and includes admin positive controls for F1/F2/F4/F5.
+
 ### Verification repair (round a4d8bd71)
 
-The independent verification run failed `check-clippy-diff.py` on two `clippy::to_string_in_format_args` warnings on changed test lines in `meta_specs.rs` (`mr.id.to_string()` inside the MR-status guard-test `format!` URIs). Fixed by passing `Id` directly (it implements `Display`); rustfmt collapsed the calls; the changed-lines clippy gate now passes in-sandbox. The run's other failure (stale ABAC route-registry exemption lines for the removed workspace-scoped preview routes) does not reproduce on this head: the branch removes both the routes and their exemption entries, replaying the base merge in a scratch clone preserves the removal, and both ABAC check scripts pass on this tree (the finding log's own second suite run also passed).
+The independent verification run failed `check-clippy-diff.py` on two `clippy::to_string_in_format_args` warnings on changed test lines in `meta_specs.rs`. Fixed by passing `Id` directly (it implements `Display`); the changed-lines clippy gate now passes. The run's other failure (stale ABAC route-registry exemption lines for the removed workspace-scoped preview routes) does not reproduce on this head.
 
 ### Test evidence
 
 In-sandbox on this head (evidence under `/tmp/stage/review-evidence/summary.md`):
 
 - `cargo check -p gyre-server --lib --tests` (SKIP_WEB_BUILD=1) — clean, 0 errors.
-- `python3 scripts/check-clippy-diff.py 64d0b865` — changed lines clean (29 files; 750 pre-existing warnings outside changes ignored).
-- `python3 scripts/check-rustfmt-diff.py 64d0b865` — changed lines clean.
+- `python3 scripts/check-clippy-diff.py 97062a0` — changed lines clean (29 files; 750 pre-existing warnings outside changes ignored).
+- `python3 scripts/check-rustfmt-diff.py 97062a0` — changed lines clean.
 - `bash scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh` (83 handlers), `check-mcp-write-tools.sh`, `check-migration-versions.sh`, `check-dead-message-kinds.sh`, `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`, `check-fail-open-ref-resolution.sh`, `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-scope-literal-defaults.sh`, `check-inert-enforcement.sh`, `check-forged-scope-fields.sh`, `check-forwarded-header-trust.sh`, `check-in-memory-state-stores.sh`, `check-unbounded-external-http.sh`, `check-migration-sql-portability.sh`, `check-task-commit-attribution.sh` — all pass.
 
 The build wrapper blocks gyre-server test codegen in this stage, so server test execution is deferred to the independent verifier. Required probes:
 
-- `cargo test -p gyre-server --lib -- preview_` (full preview suite: spawn/draft/authz/skip-ceremony/DELETE/GC-TTL/diff, budget cap, rollback, cross-tenant containment, REST/MCP escape-class guards)
-- `cargo test -p gyre-server --lib api::spawn` / `api::orchestrator` / `api::compose` / `api::specs` (in-file suites touched by the escape-class guards)
-- `cargo test -p gyre-server --lib -- uninstrumented_role_guards`
-- `cargo test -p gyre-server --test api_integration orchestrator_spawn_denied_across_tenants`
+- `cargo test -p gyre-server --lib -- preview_` (full preview suite: spawn/draft/authz/skip-ceremony/DELETE/GC-TTL/diff, budget cap, rollback, cross-tenant containment, REST/MCP escape-class guards — including the new `preview_agent_rest_identity_provenance_and_repo_orchestrator_are_refused`)
+- `cargo test -p gyre-server --lib api::spawn` / `api::orchestrator` / `api::agents` / `api::specs_assist` / `api::agent_tracking` (in-file suites touched by the guard signature changes)
+- `cargo test -p gyre-server --test api_integration` (agent registration, commits/record, orchestrator spawn — all authenticated callers)
+- `cargo test -p gyre-server --test auth_integration` / `e2e_ralph_loop` / `git_integration` / `m18_oidc_integration` (complete-route callers — all send Authorization headers)
 - `cd web && npm ci && npm test`
 
 Sandbox limitation: this stage's probes ran source checks and type checking only; exact-head GitHub checks remain mandatory after independent review.
