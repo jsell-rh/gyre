@@ -6,15 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-082.md
 coverage_sections:
   - "ui-navigation.md §1a Collapsible Navigation Rail (Optional)"
-commits:
-  - d99ace7b
-  - f332f774
-  - 72bd5823
-  - 9561ee86
-  - 79323318
-  - 42e12c08
-  - fa9cc057
-  - 0fab4972
+commits: ["0fab4972d43f8fd9a477bd0177cb5a0a8f318682", "42e12c08d3b67f208e3bc55486a17ed9c9272d4f", "79323318aac3b3015c03867f8f6130d0e913e67a", "9561ee864b066ba4a41fed4aa1f33cb16f4a0b47", "72bd582329ac50dbb2062d3ea2f3ea0b7f6213d3", "f332f774069ee409b407f2b7c9ee63deba51e3b6"]
 ---
 
 ## Shipped
