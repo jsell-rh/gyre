@@ -7,7 +7,7 @@ coverage_sections:
   - "supply-chain.md §AIBOM Contents"
   - "supply-chain.md §SLSA Provenance Integration"
   - "supply-chain.md §The Laptop Problem"
-commits: ["442e656f346c207e45f96bb19863dab7c7f5bd66", "e7d8c215b30105da21112f2a91efc9fce9c0398c", "edfb0ac8fd0ec757e17453a896332b58a084491f", "da1432739b4c912f2d0de1eca7eed70dd606184c", "39a0aaec029ffbfa9025bc0b2d766ca391a15fc1"]
+commits: ["39a0aaec029ffbfa9025bc0b2d766ca391a15fc1", "da1432739b4c912f2d0de1eca7eed70dd606184c", "edfb0ac8fd0ec757e17453a896332b58a084491f", "e7d8c215b30105da21112f2a91efc9fce9c0398c", "442e656f346c207e45f96bb19863dab7c7f5bd66", "44f5041118a1dabcf198eed43090855fa4d88394"]
 ---
 
 ## Spec Excerpt
@@ -53,8 +53,9 @@ Read `specs/system/supply-chain.md` §"AIBOM Contents", §"SLSA Provenance Integ
 
 All three coverage sections are implemented in production code: feature
 work in `39a0aaec`, review repairs in `da143273`, a rustfmt pass in
-`edfb0ac8`, the round-1 verification repair in `e7d8c215`, and the
-round-2 verification repair in `442e656f`.
+`edfb0ac8`, the round-1 verification repair in `e7d8c215`, the round-2
+verification repair in `442e656f`, and the round-3 review repair in
+`44f50411`.
 
 ### AIBOM release artifacts (§AIBOM Contents)
 
@@ -65,11 +66,21 @@ default every commit reachable from `to`/the default branch) so
 `human_commits` is counted from actual git history; `agents[]` carries
 commits, `stack_attestation {fingerprint, level, verified}` (verified =
 registered stack fingerprint matches the `gyre-stack.lock` committed at
-the release tip), model, `mcp_servers`, `spawned_by`, `task_ids`, and
-`sigstore_entries` (Rekor UUIDs per commit); `stack_policy {lockfile_hash,
-all_commits_attested, minimum_level, policy_violations}` (drift events with
-full override context); `summary` block. Unresolvable refs → 404, unknown
-format → 400.
+the release tip), model, `mcp_servers`, `spawned_by`, `task_ids`,
+`sigstore_entries` (Rekor UUIDs per commit), and `conversation_shas`
+(the agent's conversation-blob SHAs from the conversation repository,
+tenant-scoped via the repo's workspace — the prompt provenance the spec
+section calls for; when the workspace cannot be resolved the scope cannot
+be determined, so the SHAs are omitted and the skip is logged, never
+fabricated with a default tenant); `commits[]` carries every commit in
+the release range (agent-attributed and human) with
+`agent_id`/`task_id`/`timestamp` (null for human commits) and the
+per-commit chain attestation data `{attestation_id, chain_depth, chain}`
+(full chain nodes via `chain_attestations.find_by_commit` + `load_chain`,
+absent when none is on record); `stack_policy {lockfile_hash,
+all_commits_attested, minimum_level, policy_violations}` (drift events
+with full override context); `summary` block. Unresolvable refs → 404,
+unknown format → 400.
 
 ### SLSA provenance mapping (§SLSA Provenance Integration)
 
@@ -92,60 +103,59 @@ fingerprints, integrity_verified, reason naming differing components,
 mode, outcome, override_reason, branch, agent, repo, workspace). Warn-mode
 acceptance requires `X-Gyre-Stack-Override-Reason` (sent by `gyre push
 --stack-override-reason`). `GET /api/v1/repos/:id/stack-drift` queries the
-repo-scoped history, newest-first, `?limit` default 100 cap 500.
+repo-scoped history, newest-first, `?limit` default 100 cap 500; `total`
+is a storage-level `count_filtered` count, never bounded by the list
+query's internal 1000-event cap.
 
-### Verification repair round 2 (442e656f)
+### Round-3 review repair (44f50411)
 
-Round-2 `cargo test --all` failed exactly one test:
-`api::aibom::tests::aibom_release_format_full_attribution` panicked 404 vs
-200 at its first request, while its sibling
-(`aibom_release_format_range_and_unknown_format`) — identical setup, same
-handler branch — passed in the same run. The 404 can only originate from
-the handler's git children: the repo lookup is same-state, and
-`api_router` (what the tests mount) carries no middleware. The helpers
-`git_rev_parse`/`git_rev_list` collapsed every git child failure into
-`None`, so a child that could not be spawned or died to a signal (fork
-failure, OOM kill under the verifier's 4 GiB `cargo test --all` run) was
-reported as "ref does not resolve".
+F1 (major): the release artifact now includes the two content items the
+plan requires that round 2 omitted — per-agent conversation SHAs
+(`state.conversations.list_by_agent`, tenant-scoped via the repo's
+workspace; unresolvable workspace → omitted + logged, lookup failure →
+error) and per-commit chain attestation data (new `commits[]` array with
+the full `{attestation_id, chain_depth, chain}` block).
+`aibom_release_format_full_attribution` stores a real zstd-compressed
+conversation blob and a real attestation chain node and asserts both
+fields plus the human-commit null attribution. Coverage row 14 amended.
 
-The repair separates the failure classes: `run_git_child` returns a clean
-git exit (any code — git's answer, including unknown-revision) to the
-caller immediately, retries OS-level execution failures (spawn error,
-signal death) three times with short backoff, and surfaces a persistent
-execution failure as 500 Internal. Unresolvable refs keep the 404 (git
-exits 128 cleanly for unknown refs and for missing repo paths — verified).
-Rejected refs/ranges are logged with git's stderr; the release-format
-tests assert 200 through `expect_ok`, which embeds the response body in
-the assertion message so any future failure names the exact server error
-instead of a bare status code.
+Minor: `get_stack_drift`'s `total` was the length of the (limit-1000)
+list query. `AuditQueryFilter` gained a `repo_id` dimension (honored by
+`query` in mem/sqlite/postgres; `stack_drift_events_for_repo` now scopes
+at the storage level) and `AuditRepository` gained `count_filtered`
+(count ignores `limit`), implemented by mem (shared predicate with
+`query`), sqlite + postgres (shared `apply_filters`), and the indexing
+wrapper; `get_stack_drift` uses it. New tests:
+`stack_drift_total_exceeds_list_query_cap` (1001 events; fails with
+total==1000 against the old code) and
+`audit_query_by_repo_and_count_filtered` (sqlite).
 
-Not reproducible in the agent sandbox (the build wrapper blocks gyre-server
-test compilation): isolated replicas of every layer involved — the exact
-git command sequence (2000 full test-replica iterations, ~28k git
-invocations), and the axum router + query-extractor + handler git flow for
-both query shapes (1500 requests) — completed with zero failures, and the
-retry semantics are covered by 7 passing probe tests (clean nonzero exit
-returned without retry, transient signal death recovered by retry,
-persistent execution failure errors after 3 attempts, real ref resolution
-on a real repo). Evidence retained under `/tmp/stage/review-evidence/`
-(`git-flow-replica.sh`, `aibom-git-probe/`, `aibom-axum-probe/`).
+### Test evidence and deferred probes
 
-### Test evidence (this round)
+In-sandbox (build wrapper permits these):
 
-- `cargo check -p gyre-server --lib --tests` (build wrapper): clean.
-- `python3 scripts/check-rustfmt-diff.py e69fd990`: changed lines clean
-  (11 Rust files checked).
-- `python3 scripts/check-clippy-diff.py e69fd990`: changed lines clean.
-- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-inert-enforcement.sh`, `check-byte-slice-truncation.sh`,
-  `check-unbounded-external-http.sh`,
-  `check-lossy-secret-conversion.sh`: all OK.
+- `cargo check -p gyre-ports -p gyre-adapters` — pass.
+- `cargo check -p gyre-server --lib --tests` — pass (includes the new
+  test code).
+- `cargo clippy -p gyre-server --lib --tests` — no new warnings in the
+  changed files.
+- `cargo test -p gyre-adapters --lib sqlite::audit` — 15 passed,
+  including the new `audit_query_by_repo_and_count_filtered`.
+- Mechanical invariant scripts re-run clean: check-arch,
+  check-fabricated-scope-defaults, check-scope-literal-defaults,
+  check-inert-enforcement, check-lossy-secret-conversion,
+  check-mem-port-contracts, check-relative-path-defaults,
+  check-assertionless-tests, check-conditional-test-guards,
+  check-aspirational-test-names, check-fail-open-ref-resolution,
+  check-dead-test-code.
 
-### Deferred to the independent verifier
+The build wrapper blocks gyre-server test compilation in this sandbox
+(4 GiB budget — see `/tmp/stage/review-evidence/`). The independent
+verifier must run:
 
-Server test compilation is wrapper-blocked in the agent sandbox (4 GiB
-budget). The verifier must run:
-
-- `cargo test --all --quiet` (the assigned repair command),
-- `cargo test -p gyre-server --lib api::aibom::tests api::provenance::tests`
-  (the release/SLSA tests touched by this repair).
+- `cargo test --all` (the task's acceptance criterion), in particular
+  `cargo test -p gyre-server --lib api::aibom` and
+  `cargo test -p gyre-server --lib api::stack_attest`, which exercise
+  the round-3 changes (new assertions in
+  `aibom_release_format_full_attribution`, new
+  `stack_drift_total_exceeds_list_query_cap`).
