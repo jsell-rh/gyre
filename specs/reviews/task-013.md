@@ -45,3 +45,61 @@ All R1–R3 findings verified resolved. Systematic re-review of the full impleme
 - **MR reverts:** `revert()` updates `updated_at` (domain model line 117), filter sound ✓
 - **MCP parity:** delegates to shared `assemble_briefing`, three-step `since` resolution matches REST ✓
 - **Test coverage:** 10 dedicated unit tests + 3 integration tests + 4 MCP tests cover positive, negative, and edge cases ✓
+
+---
+
+## Independent Review (R5) — candidate `849ab5ad` (base `e69fd990`)
+
+**Reviewer:** Independent review agent (pi runtime)
+**Verdict:** `approved` (0 blocking findings)
+
+Scope: the candidate delta from base `e69fd990` — the R4 repair round on
+`assemble_briefing` exceptions plus the new
+`NotificationRepository::list_by_workspace_type_since` port query.
+
+### What was verified
+
+1. **Gate-failure time gate (F-fix):** outer `mr.updated_at >= since` filter
+   removed; `finished_at >= since` retained as the sole time gate. Correct:
+   the gate failure path never touches `mr.updated_at` (domain model:
+   only `revert()` and status transitions do), so the old outer filter
+   dropped fresh failures on stale MR records. No old-failure leak — the
+   inner filter plus the pre-existing
+   `briefing_exceptions_gate_failures_excludes_old_gate_results` test kill
+   that regression; the new
+   `briefing_exceptions_gate_failure_on_stale_mr_record` test kills
+   re-introduction of the outer filter.
+2. **Scoped assertion-failure query:** new port method implemented by every
+   `NotificationRepository` impl — mem, SQLite, PostgreSQL (dialect-neutral
+   Diesel, no raw SQL), and the `BroadcastingNotificationRepo` wrapper.
+   Workspace+type+since scoped, unbounded (recency-window truncation
+   eliminated). SQLite adapter test run live: PASS. Mutation probe
+   (`since` filter disabled) makes it FAIL — the test is not
+   self-confirming. Restored; tree clean.
+3. **Fan-out dedup:** dedup key `(source.entity_id, title, created_at)`
+   verified against the producer (graph_extraction.rs): `now`, `title`, and
+   `entity_id` are each computed once outside the per-member loop, so all
+   copies of one event share the key exactly. Tests cover fan-out collapse
+   and distinct-event preservation.
+4. **Mechanical checks:** `cargo check -p gyre-server` and `--tests` PASS;
+   clippy on changed non-server packages: no warnings in changed files;
+   check-mem-port-contracts, check-arch, check-inert-enforcement,
+   check-nested-time-scope all PASS.
+
+### Server tests the verifier must execute
+
+`cargo test -p gyre-server --lib api::graph::tests::briefing` (the wrapper
+blocks server test compilation in the review sandbox; tests compile clean
+under `cargo check --tests`). Full evidence:
+`/tmp/stage/review-evidence/`.
+
+### Non-blocking observations
+
+- Dedup key could over-collapse two distinct failure events in the same
+  second on the same spec path with the same failure count (bodies differ by
+  commit_sha) — documented heuristic, negligible.
+- Gate-failure loop is N+1 per workspace MR (`list_by_mr_id`); acceptable
+  for a low-frequency human view.
+- Flat response / `entity_type` naming vs spec excerpt's `sections`/`type`:
+  pre-existing deviation recorded in coverage rows 45/46, outside this
+  diff's scope.
