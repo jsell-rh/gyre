@@ -113,27 +113,27 @@ Preferences, and the `/invite/{token}` magic-link accept page
 displayed once; disjoint from the authenticated `/invite/{workspaceId}`
 flow by token shape).
 
-### Test-flakiness repair round (7d598cc9)
+### Rebase-repair round (merge 39d59028)
 
-The prior review round flagged the acceptance command `cd web && npm
-test` as intermittently failing: the two whole-minute expiry assertions
-in `web/src/__tests__/InvitationAccept.test.js` seeded `expires_at`
-from a live `Date.now()` and asserted an exact `expires in 30m` label,
-while the component recomputes the minute floor at render time — any
-gap of one second or more between seeding and render flipped the label
-to `expires in 29m`. Fix 7d598cc9 freezes `Date.now` via a spy in those
-two tests so the seeded expiry and the render-time computation agree
-exactly; the assertion strength (exact `.toBe('expires in 30m')`) and
-the production `expiryLabel` logic are unchanged.
+Resolved the assigned rebase onto base e8f73c06 (task-082 navigation
+rail). The only content conflict was the `docs/ui.md` shell-layout
+paragraph; resolved by combining this task's notification-bell top-bar
+wording with task-082's per-mode navigation-rail drawer model. The
+auto-merged `App.svelte` was verified to render both the NavRail
+(task-082) and the NotificationBell (task-127) with `REPO_TAB_IDS` as
+the shared repo-tab source of truth; `ui-navigation.md` keeps both the
+bell amendment (§1) and the rail shipped-status amendment (§1a).
 
 ### Test evidence
 
-- `npx vitest run src/__tests__/InvitationAccept.test.js`: 15/15
-  passed, then 6 consecutive re-runs 15/15 each (90/90 total) after the
-  freeze fix — the race is removed by construction, not by loosening
-  the assertion. Evidence:
-  `/tmp/stage/review-evidence/probe-invitationaccept-stress.md`.
-- Prior rounds: full web suite 2545 passed / 41 skipped with the
-  flake as the only failure; same file 15/15 in isolation. Full web
-  suite and `cargo test --all` re-run belongs to independent
-  verification (no Rust code changed in 7d598cc9).
+- Post-merge focused vitest (locked deps, `npm ci`): AppShell, NavRail,
+  NoSidebar, NotificationBell, NotificationDrawer (120/120);
+  InvitationAccept, InvitationDeclineNavigate, UserProfile,
+  PublicUserProfile, TenantSettings, WorkspaceSettings, Inbox,
+  BidirectionalNav (290/290); WorkspaceDrawerSectionNav,
+  WorkspaceHome, WorkspaceHomeSections, CrossWorkspaceHome (85 passed,
+  41 pre-existing skipped). Evidence:
+  `/tmp/stage/review-evidence/probe-task127-rebase-merge.md`.
+- Full web suite and `cargo test --all` belong to independent
+  verification (no Rust code changed on this branch since the last
+  verified full run: 2545 passed / 41 skipped).
