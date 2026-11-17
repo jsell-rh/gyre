@@ -38,9 +38,10 @@ test.describe('App shell', () => {
     const searchTrigger = page.locator('.search-trigger').first();
     await expect(searchTrigger).toBeVisible({ timeout: 3000 });
 
-    // Decisions badge visible in topbar
-    const decisionsBadge = page.locator('[data-testid="decisions-badge"]');
-    await expect(decisionsBadge).toBeVisible({ timeout: 3000 });
+    // Notification bell visible in topbar (user-management.md §In-App
+    // Notification UI — unread-count badge opening the notification drawer)
+    const notificationBell = page.locator('[data-testid="notification-bell"]');
+    await expect(notificationBell).toBeVisible({ timeout: 3000 });
 
     // User avatar button visible
     const userBtn = page.getByRole('button', { name: /user menu/i });

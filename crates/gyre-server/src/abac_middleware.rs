@@ -777,6 +777,9 @@ impl ResourceResolver {
                 // Deactivation is TenantAdmin-only, enforced in-handler
                 // (same split as POST /users).
                 RouteResourceMapping::api("/api/v1/users/:id/deactivate", "user", None),
+                // GlobalRole change is TenantAdmin-only, enforced
+                // in-handler (same split as deactivation).
+                RouteResourceMapping::api("/api/v1/users/:id/role", "user", None),
                 // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
                 RouteResourceMapping::exempt("/api/v1/notifications"),

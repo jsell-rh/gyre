@@ -45,6 +45,19 @@ function parseUrl(pathname) {
     return { mode: 'user_profile', slug: null, repoName: null, tab: null, username: raw[0].slice(1) };
   }
 
+  // /invite/:workspaceId OR /invite/:token — pending invitation accept
+  // page (§UI Pages). A 64-char lowercase-hex segment is a task-110
+  // magic-link token; anything else is the authenticated flow's
+  // workspace id (a UUID).
+  if (raw[0] === 'invite' && raw.length === 2) {
+    const isToken = /^[0-9a-f]{64}$/.test(raw[1]);
+    return {
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: isToken ? null : raw[1],
+      inviteToken: isToken ? raw[1] : null,
+    };
+  }
+
   // /all  or  /all/settings  (cross-workspace view §10)
   if (raw[0] === 'all') {
     const tab = raw[1] ?? null;
@@ -68,9 +81,13 @@ function parseUrl(pathname) {
 
 function urlFor(parsed) {
   if (!parsed) return '/';
-  const { mode: m, slug, repoName, tab, username } = parsed;
+  const { mode: m, slug, repoName, tab, username, inviteId, inviteToken } = parsed;
   if (m === 'profile') return '/profile';
   if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
+  if (m === 'invite_accept') {
+    const seg = inviteToken ?? inviteId ?? '';
+    return `/invite/${encodeURIComponent(seg)}`;
+  }
   if (m === 'cross_workspace') {
     return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
   }
@@ -234,8 +251,48 @@ describe('urlFor', () => {
     expect(urlFor({ mode: 'profile', slug: null, repoName: null, tab: null })).toBe('/profile');
   });
 
-  it('generates /@username for the public profile route', () => {
-    expect(urlFor({ mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'jsell' })).toBe('/@jsell');
+  it('parses /@username as user_profile', () => {
+    expect(parseUrl('/@asmith')).toEqual({
+      mode: 'user_profile', slug: null, repoName: null, tab: null, username: 'asmith',
+    });
+  });
+
+  it('parses /invite/:id as invite_accept', () => {
+    expect(parseUrl('/invite/ws-9')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: 'ws-9', inviteToken: null,
+    });
+    // A UUID workspace id is never mistaken for a token.
+    expect(parseUrl('/invite/3f8a2b1e-9c4d-4e2a-8f1b-0d5c6e7a8b9c')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: '3f8a2b1e-9c4d-4e2a-8f1b-0d5c6e7a8b9c', inviteToken: null,
+    });
+  });
+
+  it('parses /invite/:token (64-hex magic link) as invite_accept with the token, not a workspace id', () => {
+    const token = 'a'.repeat(64);
+    expect(parseUrl(`/invite/${token}`)).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null, inviteId: null, inviteToken: token,
+    });
+    // Uppercase hex is not a minted token (tokens are lowercase hex);
+    // it falls through to the workspace-id shape.
+    expect(parseUrl('/invite/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')).toEqual({
+      mode: 'invite_accept', slug: null, repoName: null, tab: null,
+      inviteId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', inviteToken: null,
+    });
+  });
+
+  it('generates /@username and /invite/:id URLs', () => {
+    expect(urlFor({ mode: 'user_profile', username: 'asmith' })).toBe('/@asmith');
+    expect(urlFor({ mode: 'invite_accept', inviteId: 'ws-9' })).toBe('/invite/ws-9');
+    // Token form takes precedence in the canonical URL.
+    const token = 'b'.repeat(64);
+    expect(urlFor({ mode: 'invite_accept', inviteId: null, inviteToken: token })).toBe(`/invite/${token}`);
+  });
+
+  it('round-trips a magic-link /invite/:token URL through parseUrl → urlFor byte-for-byte', () => {
+    const token = 'c0ffee'.padEnd(64, '0');
+    const parsed = parseUrl(`/invite/${token}`);
+    expect(urlFor(parsed)).toBe(`/invite/${token}`);
   });
 
   it('URL-encodes handles in /@username', () => {
@@ -330,6 +387,8 @@ vi.mock('../lib/api.js', () => ({
     workspaceRepos: vi.fn().mockResolvedValue([]),
     workspaceBudget: vi.fn().mockResolvedValue(null),
     notificationCount: vi.fn().mockResolvedValue(0),
+    unreadNotificationCount: vi.fn().mockResolvedValue(0),
+    notifications: vi.fn().mockResolvedValue({ notifications: [] }),
     tokenInfo: vi.fn().mockResolvedValue({ kind: 'global' }),
     me: vi.fn().mockResolvedValue(null),
     version: vi.fn().mockResolvedValue({ version: '0.1.0', commit: 'abc1234', milestone: 'M35' }),
@@ -355,6 +414,8 @@ describe('App shell — topbar first, no sidebar (ui-navigation.md §1)', () => 
     api.workspaceRepos.mockResolvedValue([]);
     api.workspaceBudget.mockResolvedValue(null);
     api.notificationCount.mockResolvedValue(0);
+    api.unreadNotificationCount.mockResolvedValue(0);
+    api.notifications.mockResolvedValue({ notifications: [] });
   });
 
   it('renders topbar without a sidebar', async () => {
@@ -365,6 +426,105 @@ describe('App shell — topbar first, no sidebar (ui-navigation.md §1)', () => 
     }, { timeout: 3000 });
   });
 
+});
+
+// ── Notification bell (user-management.md §In-App Notification UI, ──────
+//    amended ui-navigation.md §1: the bell is the single top-bar
+//    notification surface — it shows the unread count and opens the
+//    notification drawer)
+
+describe('Notification bell (user-management.md §In-App Notification UI)', () => {
+  // The bell's unread count rides lib/notifications.svelte.js
+  // (refreshUnreadCount → raw fetch of GET /notifications/unread-count),
+  // not the api.js mock — mock the endpoint at the fetch level.
+  function mockUnreadCountFetch(counts) {
+    let call = 0;
+    global.fetch = vi.fn(() => {
+      const count = counts[Math.min(call, counts.length - 1)];
+      call += 1;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ count }) });
+    });
+  }
+
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+    api.unreadNotificationCount.mockResolvedValue(0);
+    api.notifications.mockResolvedValue({ notifications: [] });
+    api.version.mockResolvedValue({ version: '0.1.0' });
+  });
+
+  it('badge shows the unread count from GET /notifications/unread-count, not the decisions count', async () => {
+    // The bell badge is the unread notification count (spec: "Notification
+    // bell in top nav with unread count badge"). decisionsCount (legacy
+    // /users/me/notifications/count) must not drive the badge.
+    api.notificationCount.mockResolvedValue(7);
+    mockUnreadCountFetch([3]);
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    await waitFor(() => {
+      const badge = container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toBe('3');
+    }, { timeout: 3000 });
+    // The count came from the unread-count endpoint (raw fetch), not from
+    // the decisions-count endpoint (api.notificationCount).
+    const fetchedUrls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(fetchedUrls.some(u => u.includes('/notifications/unread-count'))).toBe(true);
+  });
+
+  it('clicking the bell opens the notification drawer', async () => {
+    mockUnreadCountFetch([2]);
+    api.notifications.mockResolvedValue({
+      notifications: [
+        { id: 'n-1', title: 'Gate failure in payment-api', priority_level: 'High', read: false, created_at: 1700000000 },
+      ],
+    });
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="notification-bell"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-drawer"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // The drawer lists active-only notifications (?active=true).
+    expect(api.notifications).toHaveBeenCalledWith({ limit: 50, active: true });
+  });
+
+  it('refreshes the unread badge when the drawer closes', async () => {
+    // Read-state changes made inside the drawer (mark read / mark all read)
+    // must be reflected on the bell badge when it closes.
+    mockUnreadCountFetch([2, 0]);
+    api.notifications.mockResolvedValue({ notifications: [] });
+    const { container } = render(App);
+    await waitFor(() => {
+      const badge = container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]');
+      expect(badge).toBeTruthy();
+      expect(badge.textContent).toBe('2');
+    }, { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="notification-bell"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-drawer"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // Close via the drawer's close button.
+    await fireEvent.click(container.querySelector('[data-testid="notification-drawer"] .close-btn'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="notification-bell"] [data-testid="notification-badge"]')).toBeNull();
+    }, { timeout: 3000 });
+    // The badge was re-read from the server after the close.
+    const unreadCalls = global.fetch.mock.calls
+      .map(c => String(c[0]))
+      .filter(u => u.includes('/notifications/unread-count'));
+    expect(unreadCalls.length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 // ── Mobile drawer section navigation (ui-navigation.md §8) ──────────────

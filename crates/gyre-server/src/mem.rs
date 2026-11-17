@@ -3228,6 +3228,51 @@ impl NotificationRepository for MemNotificationRepository {
             .collect())
     }
 
+    async fn list_active_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_types: Option<&[&str]>,
+        repo_id: Option<&Id>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>> {
+        // Same filters as list_for_user plus the active guard (resolved and
+        // dismissed rows excluded) — the drawer's listing. Guarded in code
+        // like every other mem contract (no schema to enforce it): an empty
+        // type set matches nothing, same as the SQL adapters.
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store
+            .iter()
+            .filter(|n| {
+                n.user_id == *user_id
+                    && n.resolved_at.is_none()
+                    && n.dismissed_at.is_none()
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && min_priority.is_none_or(|min| n.priority_rank >= min)
+                    && max_priority.is_none_or(|max| n.priority_rank <= max)
+                    && match notification_types {
+                        None => true,
+                        Some(ts) => !ts.is_empty() && ts.contains(&n.notification_type.as_str()),
+                    }
+                    && repo_id.is_none_or(|r| n.source.repo_id.as_ref() == Some(r))
+            })
+            .cloned()
+            .collect();
+        items.sort_by(|a, b| {
+            a.priority_rank
+                .cmp(&b.priority_rank)
+                .then(b.created_at.cmp(&a.created_at))
+        });
+        Ok(items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect())
+    }
+
     async fn update_body_by_entity_ref(
         &self,
         entity_ref: &str,
