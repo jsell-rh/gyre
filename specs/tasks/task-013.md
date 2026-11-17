@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 review: specs/reviews/task-013.md
 coverage_sections: []
-commits: ["a09baf85167f05a28fea9ac67a3bfd65a3543714"]
+commits: ["a09baf85167f05a28fea9ac67a3bfd65a3543714", "1aa8f84a5ba299919ce96f27bf543975e60ff6bf"]
 ---
 
 ## Spec Excerpt
@@ -105,81 +105,71 @@ When working on this task:
 HSI §9 Briefing `cross_workspace` and `exceptions` sections are
 implemented in production code in `crates/gyre-server/src/api/graph.rs`
 (`assemble_briefing`), shared by the REST route and the MCP briefing
-resource; no stubs remain. The R4 repair round fixed the three blocking
-findings from the independent review of candidate `f8e9944` (finding id
-`98422bb21a4d48b4a672c395bc65f930`); that production fix is commit
-`a09baf85167f05a28fea9ac67a3bfd65a3543714` on this branch and is
-preserved unchanged.
+resource; no stubs remain.
 
-### Contract repair (this round)
-
-The prior checkpoint added an R4 line to the protected `## Git Commits`
-provenance section (contract finding `38b93875e29a4b42b538aa81671b4fbc`).
-The executor restored the assigned task document; this round keeps that
-assigned protected text byte-identical (the Git Commits list above is the
-assigned four-line version) and records all progress under exactly this
-`## Shipped` section. The R4 commit is attributed for review scoping via
-the `commits:` frontmatter. No production code changed in this round —
-the working tree matches `a09baf85` exactly for `crates/` and `web/`.
-
-### Behavior (R4 production fix, commit a09baf85)
+### Behavior
 
 - **cross_workspace**: inbound spec links read from `state.spec_links_store`
   with the directional filter `source_repo_id IN workspace AND
   target_repo_id NOT IN workspace`, time-scoped by
   `created_at >= since OR stale_since >= since`, repo-filter aware, each
-  item carrying `source_workspace_slug` and `spec_path` (unchanged from the
-  prior round — no findings against it).
-- **exceptions — gate failures (F2 fix)**: the gate result's `finished_at`
-  is now the sole time gate. The outer `mr.updated_at >= since` filter was
-  removed: gates run asynchronously after MR enqueue and the failure path
-  never touches `mr.updated_at`, so that outer filter silently dropped
-  fresh failures on stale MR records (approved days ago, enqueued and
-  failed today, `mr.updated_at < since`).
-- **exceptions — spec assertion failures (F1 + F3 fix)**: sourced via a new
+  item carrying `source_workspace_slug` and `spec_path`.
+- **exceptions — gate failures**: the gate result's `finished_at` is the
+  sole time gate (no `mr.updated_at` outer filter — gates run
+  asynchronously after MR enqueue and the failure path never touches
+  `mr.updated_at`, so that outer filter silently dropped fresh failures on
+  stale-MR records).
+- **exceptions — spec assertion failures**: sourced via the
   `NotificationRepository::list_by_workspace_type_since(workspace_id, type,
-  since)` port query — workspace+type+since-scoped, across all users, and
-  unbounded — replacing `list_recent(200)`, whose globally-truncated
-  recency window dropped the failure once 200 newer notifications existed
-  anywhere. The per-member notification fan-out (one row per notified
-  Admin/Developer/Owner, identical source event) is deduplicated in
+  since)` port query — workspace+type+since-scoped and unbounded — replacing
+  `list_recent(200)` whose globally-truncated recency window dropped the
+  failure once 200 newer notifications existed anywhere. The per-member
+  notification fan-out (identical source event) is deduplicated in
   `assemble_briefing` by `(source.entity_id, title, created_at)`, so one
-  failure event yields exactly one exception item; distinct events (different
-  `created_at`) each keep their own item.
-- **exceptions — MR reverts**: unchanged (Reverted MRs since `since`).
-- The new port method is implemented by every adapter: mem
-  (`gyre-server/src/mem.rs`), SQLite and PostgreSQL
+  failure event yields exactly one exception item. Implemented by every
+  adapter: mem (`gyre-server/src/mem.rs`), SQLite and PostgreSQL
   (`gyre-adapters/src/{sqlite,postgres}/notification.rs`), and the
   `BroadcastingNotificationRepo` wrapper (`gyre-server/src/notifications.rs`).
+- **exceptions — MR reverts**: Reverted MRs since `since`.
+- Empty sections return `[]`, never null or omitted; zero-activity
+  briefings still return 200 with the full schema.
 
-### Test evidence (re-verified at this HEAD, this round)
+### This round (verification repair, commit 1aa8f84a)
 
-- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — **exit 0**
-  (includes the new/extended briefing unit tests; log:
-  `/tmp/stage/review-evidence/task-013-cargo-check-gyre-server.log`).
-- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib sqlite::notification` —
-  **10 passed, 0 failed**, including
-  `list_by_workspace_type_since_scopes_and_is_unbounded` (fan-out copies
-  from all users returned; other-workspace and pre-`since` rows excluded;
-  250 newer noise rows of another type irrelevant; `since` past the event
-  returns nothing; log:
-  `/tmp/stage/review-evidence/task-013-adapters-sqlite-notification.log`).
-- Server unit tests in `graph.rs` (execution deferred to the independent
-  verifier per the build-budget constraint):
-  - `briefing_exceptions_spec_assertion_failures` extended with a second
-    per-member fan-out copy (same entity_id/title/created_at, different
-    user) plus a distinct second event — asserts 2 items (fan-out
-    deduplicated, distinct events kept).
-  - `briefing_exceptions_gate_failure_on_stale_mr_record` —
-    `mr.updated_at=1000 < since=1500 <= gr.finished_at=2000` → exactly 1
-    `gate_failure` item, `timestamp=2000`.
-  - `briefing_exceptions_assertion_failure_beyond_recency_window` — a
-    `SpecAssertionFailure` followed by 201 newer notifications of other
-    types (across users and workspaces) is still reported.
+Verification of candidate `b8597270` (finding id
+`31b77ca69db04b31b9d6a0941119c7ce`) failed the changed-line clippy gate:
+`mem.rs:3294 clippy::unnecessary_sort_by` in the mem adapter's
+`list_by_workspace_type_since` (introduced by the R4 fix `a09baf85`).
+Fixed by replacing the `sort_by` closure with the `sort_by_key` +
+`std::cmp::Reverse` idiom already used throughout `mem.rs` — semantics
+identical (stable descending sort by `created_at`), no behavior change.
+The assigned `## Git Commits` provenance list above is kept byte-identical;
+review scoping for the R4 and repair commits is via the `commits:`
+frontmatter.
 
-### Verifier commands (server tests, deferred)
+### Test evidence (this round, at HEAD 1aa8f84a)
 
-```
-SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib briefing_
-SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib sqlite::notification
-```
+- `SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --lib` — exit 0;
+  `unnecessary_sort_by` no longer fires at `mem.rs:3294`. The remaining
+  clippy warnings in touched files (`mem.rs:2002/2019/2030/3273/5395`,
+  `graph.rs:1374`) are byte-identical pre-existing baseline code outside
+  this branch's changed hunks (log:
+  `/tmp/stage/review-evidence/task-013-clippy-mem-sort.log`).
+- `cargo fmt -p gyre-server -- --check` — exit 0.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib sqlite::notification`
+  — 10 passed, 0 failed, including
+  `list_by_workspace_type_since_scopes_and_is_unbounded` (log:
+  `/tmp/stage/review-evidence/task-013-adapters-notification-tests.log`).
+
+### Server tests for the independent verifier
+
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets`
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::graph` — the
+  briefing suite covers: `briefing_cross_workspace_populated_when_linked_spec_changes`,
+  `briefing_cross_workspace_excludes_same_workspace_links`,
+  `briefing_cross_workspace_stale_since_includes_recently_stale_link`,
+  `briefing_cross_workspace_stale_since_excludes_old_stale_link`,
+  `briefing_exceptions_gate_failures`,
+  `briefing_exceptions_gate_failures_excludes_old_gate_results`, and the
+  assertion-failure/revert/empty-section cases in the same module
+  (exercised through the mem adapter, including the repaired sort).
