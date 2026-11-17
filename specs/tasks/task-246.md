@@ -2,7 +2,7 @@
 title: "Apply operator decision for task-082: Amend toward a context-dependent collapsible sidebar on navigation-heavy screens"
 spec_ref: "human-system-interface.md §1.3"
 depends_on: []
-progress: ready-for-review
+progress: complete
 commits: []
 ---
 
