@@ -2,10 +2,10 @@
 title: "Briefing Data Assembly — Cross-Workspace & Exceptions"
 spec_ref: "human-system-interface.md §9 (Briefing Detail)"
 depends_on: []
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-013.md
 coverage_sections: []
-commits: []
+commits: ["a09baf85"]
 ---
 
 ## Spec Excerpt
@@ -99,55 +99,76 @@ When working on this task:
 - `fix(briefing): address R1 findings — filter direction, actions field, gate timestamp (TASK-013)`
 - `fix(briefing): address R2 findings — exception type values, cross-workspace timestamp filter (TASK-013)`
 - `fix(briefing): address R3 findings — source_workspace_slug field, stale_since test coverage (TASK-013)`
+- `fix(briefing): address R4 findings — dedup assertion-failure fan-out, gate time gate, scoped notification query (TASK-013)`
 
 ## Shipped
 
-Complete. HSI §9 Briefing Detail `cross_workspace` and `exceptions`
-sections are implemented in production code in
-`crates/gyre-server/src/api/graph.rs` (`assemble_briefing`), shared by the
-REST route and the MCP briefing resource; no stubs remain. The
-implementation was developed on the original pipeline branch, reviewed
-through four rounds (R1–R3 findings fixed, R4 verdict `complete`, 0
-findings — see `specs/reviews/task-013.md`), and reconciled into mainline
-via PR #627 (carried by `d7940e857`, an ancestor of this assignment's
-base), so the assigned base already contains the full production fix.
+HSI §9 Briefing `cross_workspace` and `exceptions` sections are
+implemented in production code in `crates/gyre-server/src/api/graph.rs`
+(`assemble_briefing`), shared by the REST route and the MCP briefing
+resource; no stubs remain. This round repairs the three blocking findings
+from the independent review of candidate `f8e9944` (finding id
+`98422bb21a4d48b4a672c395bc65f930`).
 
 ### Behavior
 
 - **cross_workspace**: inbound spec links read from `state.spec_links_store`
   with the directional filter `source_repo_id IN workspace AND
-  target_repo_id NOT IN workspace` (our spec depends on an external one),
-  time-scoped by `created_at >= since OR stale_since >= since`, and
-  repo-filter aware. Each item carries `source_workspace_slug` (extracted
-  from the `@slug/...` target display), `spec_path` (the local affected
-  spec), and `timestamp` preferring `stale_since` when set.
-- **exceptions**: three real sources, each since-scoped — (1) gate failures:
-  failed gate results for workspace MRs with `finished_at >= since` (inner
-  filter prevents old failures leaking through recently-updated MRs);
-  (2) spec assertion failures: `SpecAssertionFailure` notifications filtered
-  to the workspace and repo scope; (3) MR reverts: MRs in `Reverted` status
-  with `reverted_at`/`updated_at >= since`. Discriminators match the
-  spec enum (`gate_failure`, `spec_assertion_failure`, `reverted`) and each
-  type carries static `actions` labels.
-- **Empty sections** serialize as `[]`, never null or omitted.
+  target_repo_id NOT IN workspace`, time-scoped by
+  `created_at >= since OR stale_since >= since`, repo-filter aware, each
+  item carrying `source_workspace_slug` and `spec_path` (unchanged from the
+  prior round — no findings against it).
+- **exceptions — gate failures (F2 fix)**: the gate result's `finished_at`
+  is now the sole time gate. The outer `mr.updated_at >= since` filter was
+  removed: gates run asynchronously after MR enqueue and the failure path
+  never touches `mr.updated_at`, so that outer filter silently dropped
+  fresh failures on stale MR records (approved days ago, enqueued and
+  failed today, `mr.updated_at < since`).
+- **exceptions — spec assertion failures (F1 + F3 fix)**: sourced via a new
+  `NotificationRepository::list_by_workspace_type_since(workspace_id, type,
+  since)` port query — workspace+type+since-scoped, across all users, and
+  unbounded — replacing `list_recent(200)`, whose globally-truncated
+  recency window dropped the failure once 200 newer notifications existed
+  anywhere. The per-member notification fan-out (one row per notified
+  Admin/Developer/Owner, identical source event) is deduplicated in
+  `assemble_briefing` by `(source.entity_id, title, created_at)`, so one
+  failure event yields exactly one exception item; distinct events (different
+  `created_at`) each keep their own item.
+- **exceptions — MR reverts**: unchanged (Reverted MRs since `since`).
+- The new port method is implemented by every adapter: mem
+  (`gyre-server/src/mem.rs`), SQLite and PostgreSQL
+  (`gyre-adapters/src/{sqlite,postgres}/notification.rs`), and the
+  `BroadcastingNotificationRepo` wrapper (`gyre-server/src/notifications.rs`).
 
 ### Test evidence
 
-Focused probe at this branch HEAD `95df7622f` (repair round, branch
-`pipeline/task-013/a03ebc5dbe174cd8acf86dc61a6683bd-1`):
-`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib briefing_` —
-**26 passed, 0 failed** (exit 0), including the 10 dedicated TASK-013 unit
-tests (cross-workspace positive/negative, stale_since include/exclude,
-gate failures incl. old-result exclusion, assertion failures, MR reverts,
-empty-sections-as-arrays, since-filtering) and 4 MCP parity tests. Log
-retained at `/tmp/stage/review-evidence/task-013-briefing-tests-repair.log`.
+- New adapter test (executed locally, real SQLite):
+  `cargo test -p gyre-adapters --lib sqlite::notification` —
+  **10 passed, 0 failed**, including
+  `list_by_workspace_type_since_scopes_and_is_unbounded` (fan-out copies
+  from all users returned; other-workspace and pre-`since` rows excluded;
+  250 newer noise rows of another type irrelevant; `since` past the event
+  returns nothing).
+- New/extended server unit tests in `graph.rs` (type-checked via
+  `cargo check -p gyre-server --all-targets`, exit 0; execution deferred to
+  the independent verifier per the build-budget constraint):
+  - `briefing_exceptions_spec_assertion_failures` extended with a second
+    per-member fan-out copy (same entity_id/title/created_at, different
+    user) plus a distinct second event — asserts 2 items (fan-out
+    deduplicated, distinct events kept).
+  - `briefing_exceptions_gate_failure_on_stale_mr_record` —
+    `mr.updated_at=1000 < since=1500 <= gr.finished_at=2000` → exactly 1
+    `gate_failure` item, `timestamp=2000`.
+  - `briefing_exceptions_assertion_failure_beyond_recency_window` — a
+    `SpecAssertionFailure` followed by 201 newer notifications of other
+    types (across users and workspaces) is still reported.
+- Invariant scripts pass locally: `check-arch.sh`,
+  `check-nested-time-scope.sh`, `check-inert-enforcement.sh`,
+  `check-mem-port-contracts.sh`.
 
-### Repair round (contract)
+### Verifier commands (server tests, deferred)
 
-The prior checkpoint changed the protected task text (rewrote the Git
-Commits provenance section); the executor restored the assigned task
-document in this checkout. This round preserves the production fix
-untouched (no source changes — the implementation already rides the
-assigned base via the mainline carrier) and restores the progress notes
-under this `## Shipped` heading only, leaving the assigned contract text
-intact.
+```
+SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib briefing_
+SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib sqlite::notification
+```
