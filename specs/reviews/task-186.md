@@ -1,0 +1,41 @@
+# Review — task-186 (Ghost Overlays — structural prediction visualization on canvas)
+
+Spec: `specs/system/system-explorer.md` §3 "Inline Spec Editing with Progressive Preview" (ghost overlay visual language table, three-tier edit→preview flow, `POST /repos/{id}/graph/predict` contract, thorough preview via agent on a throwaway branch).
+
+Candidate under review: `674e0aa59d75c792b8f1f6b5feee3879b383b371` (base `9f446d0eb33ecb24b04c821e47007d8884882b63`, branch `pipeline/task-186/10fa0258586a409299956720f754df7b-1`). Cumulative diff: 16 files, +2564/−141 — `web/src/lib/ghostOverlay.js` + `GhostOverlay.svelte` (new shared ghost model + SVG layer), `ArchPreviewCanvas.svelte`, `EditorSplit.svelte`, `DetailPanel.svelte`, locales, 3 frontend test files; server side `api/graph.rs` (predict extension + `POST /repos/:id/graph/thorough-preview` + 4 new tests), route + ABAC registry entries, `explorer_views.rs` signature update, `api/users.rs` CI-flake repair; docs/api-reference + task file.
+
+Verdict: **approved** (no blocking findings).
+
+## Probes run (evidence in `/tmp/stage/review-evidence/`)
+
+- `npm ci` in `web/`, then `npx vitest run src/__tests__/ghostOverlay.test.js src/__tests__/GhostOverlay.test.js src/__tests__/EditorSplit.test.js` — **104/104 pass**.
+- Full frontend suite `npm test` — **2487 passed, 41 skipped, 124 files, 0 failures** (no regressions in sibling surfaces: DetailPanel/Explorer also render the changed canvas).
+- **Mutation probe 1** (opacity): `ghostOpacity` body temporarily replaced with `return 1;` → **5 tests fail across both ghost test files**. The confidence→opacity assertions genuinely bind to production behavior. Restored; tree verified clean.
+- **Mutation probe 2** (debounce): `PREDICT_DEBOUNCE_MS = 1200 → 0` in `EditorSplit.svelte` → **the debounced-prediction test fails**. The 1.2 s edit-pause behavior is really enforced, not per-keystroke. Restored; tree verified clean.
+- `cargo check -p gyre-server` — **OK** (8m cold, includes web build; server test compilation deferred to the verifier per the 4 GiB budget rule).
+- Mechanical gates on the candidate tree: `check-arch.sh` OK, `check-abac-route-registry.sh` OK (new `thorough-preview` route IS registered in the resolver with `graph`/`write`; no exemption-file growth), `check-byte-slice-truncation.sh` OK (branch-slug truncation uses `chars().take(8)`), `check-task-commit-attribution.sh` OK on the committed candidate (the working-tree failure observed during review was caused solely by the review stage's own unstaged revert of `specs/tasks/task-186.md` to `commits: []`; stash→run→pop confirmed exit 0 on the candidate state).
+
+## Verified working (per acceptance criterion)
+
+- **Ghost visual language matches the §3 table exactly.** `GhostOverlay.svelte` renders add = dotted `#22c55e` outline + green fill, modify = yellow `#eab308` dotted highlight overlaid on the existing node's position, remove = red `#ef4444` dotted outline + red strikethrough line, ghost edges = dotted green lines, `ghost-previewing` = CSS pulse animation, `ghost-confirmed` = solid border (dasharray removed) + full opacity. Component tests assert every one of these against real rendered SVG attributes (stroke color, dasharray ≠ none, strikethrough presence, class transitions).
+- **Confidence→opacity:** `ghostOpacity` = `1.4·c − 0.4` clamped — 0.3 at 50%, 1.0 at 100%, linear between anchors, 0.15 faint floor below (documented extension; spec only defines the two anchors). Anchors land exactly (4-decimal rounding kills float drift). Tested at the anchors, monotonic, and out-of-range/percent/non-numeric clamping.
+- **Tooltips:** hover/focus opens a tooltip carrying the prediction reason, confidence %, and change bullets; ghosts carry no click handlers (non-navigation is asserted).
+- **Debounced fast tier:** `EditorSplit.svelte` fires `POST /repos/:id/graph/predict` with `{spec_path, draft_content}` 1.2 s after the edit pause (spec: 1–2 s), suppressed while a thorough preview runs, "Predicting…" chip while in flight. Mutation-probe-proven.
+- **Instant tier impact bar:** real data — `GET /specs/:path/links` (connected specs, either direction) + `GET /repos/:id/graph` (governed node count = live nodes with `spec_path` match, repos implementing). Rendered above the editor; each segment degrades independently on failure.
+- **Server predict extension:** spec-edit calls now carry the §3 output contract in the system prompt (verified end-to-end: the mock LLM's captured system prompt must contain the `"action"` field instructions — asserted in `predict_graph_spec_edit_returns_ghost_contract_and_link_context`), and the response adds `affected_specs` (real spec-links store query, both directions, deduped), `affected_repos` (real cross-repo scan of live graph nodes governed by the spec), `estimated_agent_cost` (deterministic `$0.05 + $0.10·n`). All three asserted against seeded real state, not fabricated.
+- **Thorough tier:** `POST /repos/:id/graph/thorough-preview` creates a real preview task (draft rides the description; `spec-preview` label; repo/workspace derived from the looked-up repo, never caller-supplied) and spawns a real implementation agent on a throwaway `preview/<stem>-<id>` branch through `spawn_agent_core` — which enforces repo ABAC (`check_repo_abac`), spawn budget, and records the endpoint. Compensating rollback deletes the preview task when the spawn fails (tested with a dangling-workspace repo). `process_launched` is surfaced honestly rather than fabricating completion. Frontend polls `GET /tasks/{id}` using the real wire vocabulary (`review`/`done` = complete, `blocked`/`cancelled` = fail — matches `task_status_str` exactly; the fake `'completed'`/`'failed'` statuses the old code polled never exist on the wire), ghosts pulse via `ghostMode='previewing'` while running and go solid via `'confirmed'` on completion, and the completion MR's real diff (`GET /merge-requests/:id/diff` hunks) renders in the Code Diff tab.
+- **Overlay clears when editing ends:** save clears `derivedGhosts` and suppresses re-prediction of the unchanged draft (tested, including the no-re-prediction assertion).
+- **Canvas integration:** modify/remove ghosts overlay their existing node (by id, else name); add ghosts near the predicted `parent_trait`, staggered, or in deterministic free space; ghost positions included in canvas bounds; ghosts render even for specs with no graph linkage (empty state only when no nodes AND no ghosts).
+- **CI-flake repair (`api/users.rs`):** the strict `last_login_at` equality assertion is replaced with a real-auth-window assertion plus added spoof coverage (`oidc_issuer`/`last_login_at` in the PUT body must be ignored). The repair's premise is real: `auth.rs:2286` stamps `last_login_at = Some(now)` on every JWT provisioning pass, so the PUT's re-authentication legitimately advances the value across a second boundary — verified in code, not just in the commit message.
+
+## Minor (not blocking, recorded for completeness)
+
+- `docs/api-reference.md` tags the predict rate limit "(task-186)", but the 10 req/60 s limiter pre-dates this candidate (pre-existing `check_rate_limit` call at `graph.rs:2201`); only the doc attribution is imprecise, the behavior exists and is unchanged.
+- `governedNodes` in the instant tier counts only the currently open repo's graph (the canvas the user is looking at); the cross-repo view exists server-side in `affected_repos`. A reasonable reading of "how many nodes in the knowledge graph are governed by this spec" for the per-repo canvas surface.
+- The candidate ships a regenerated `web/dist/` (`fe774590`) — generated output is verifier-owned and rebuilt remotely; recorded separately, not a source finding.
+
+## Verifier must run (deferred from this review)
+
+- `cargo nextest run -p gyre-server api::graph` — covers the 4 new tests: `predict_graph_spec_edit_returns_ghost_contract_and_link_context`, `thorough_preview_creates_task_and_spawns_agent_on_throwaway_branch`, `thorough_preview_rejects_missing_fields_and_unknown_repo`, `thorough_preview_rolls_back_preview_task_when_spawn_fails`.
+- `cargo nextest run -p gyre-server api::users::tests::get_me_returns_recorded_auth_provider_info` — the flake-repaired test.
+- Full CI (nextest --all, web vitest, mechanical scripts) on the integrated tree, per the standard verifier stage.
