@@ -21,8 +21,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 // ── Pure function tests (parseUrl + urlFor replicated from App.svelte) ──
+// The tab list is NOT replicated: it is derived from lib/repoTabs.js, the
+// same single source of truth App.svelte and RepoMode.svelte use, so the
+// replica cannot drift from the real parser's tab set.
+import { REPO_TAB_IDS } from '../lib/repoTabs.js';
 
-const REPO_TABS = ['specs', 'architecture', 'decisions', 'code', 'settings'];
+const REPO_TABS = REPO_TAB_IDS;
 
 function parseUrl(pathname) {
   const raw = pathname.split('/').filter(Boolean).map(p => {
@@ -160,6 +164,25 @@ describe('parseUrl', () => {
     expect(parseUrl('/workspaces/payments/r/payment-api/settings')).toEqual({
       mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'settings',
     });
+  });
+
+  it('parses repo mode with dependencies tab (drift regression)', () => {
+    // The App.svelte route-parse list once drifted from the tab strip and
+    // lost 'dependencies', misparsing this deep link to the Specs tab. The
+    // tab set is now derived from lib/repoTabs.js, so every tab on the
+    // strip — including any added later — must parse.
+    expect(parseUrl('/workspaces/payments/r/payment-api/dependencies')).toEqual({
+      mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: 'dependencies',
+    });
+  });
+
+  it('parses every tab on the repo tab strip', () => {
+    // Completeness guard: the parser accepts exactly the strip's tab set.
+    for (const id of REPO_TAB_IDS) {
+      expect(parseUrl(`/workspaces/payments/r/payment-api/${id}`)).toEqual({
+        mode: 'repo', slug: 'payments', repoName: 'payment-api', tab: id,
+      });
+    }
   });
 
   it('falls back to specs for unknown repo tab', () => {
@@ -376,29 +399,47 @@ describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
     });
   }
 
-  it('clicking Briefing in repo mode opens the repo-scope Briefing sub-tab', async () => {
-    // ui-navigation.md §3 "Sub-tabs in the control bar": Briefing at repo
-    // scope is the Architecture tab's Briefing sub-tab (?repo_id= narrative).
-    // The drawer must stay in the repo's scope, not escape to workspace home.
+  it('repo-mode drawer mirrors the tab strip exactly and switches tabs (§1a narrow viewports)', async () => {
+    // ui-navigation.md §1a "Narrow viewports": the drawer offers the rail's
+    // per-mode item set; in repo mode that set mirrors the repo tab strip
+    // exactly (the tab strip is the source of truth - no 'briefing' item,
+    // it is a sub-tab of Architecture, not a tab). Selecting a drawer item
+    // activates the corresponding tab, same route as clicking the tab.
     window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
     const { container } = render(App);
     // RepoMode is stubbed in jsdom; the document title proves repo mode.
     await waitFor(() => expect(document.title).toBe('core — Payments | Gyre'), { timeout: 3000 });
     await openDrawer(container);
-    await fireEvent.click(container.querySelector('[data-testid="drawer-item-briefing"]'));
-    // Stays in repo mode on the Architecture tab (the Briefing sub-tab's
-    // parent tab), with the subTab deep-link param for ExplorerView.
+    const drawer = container.querySelector('[data-testid="mobile-drawer"]');
+    const itemIds = Array.from(drawer.querySelectorAll('.drawer-link')).map(
+      (el) => el.getAttribute('data-testid').replace('drawer-item-', '')
+    );
+    // Canonical tab order — derived from the same shared list
+    // (lib/repoTabs.js) RepoMode's tab strip and App's rail render from.
+    expect(itemIds).toEqual(REPO_TAB_IDS);
+    // Briefing is an Architecture sub-tab, never a drawer/tab item.
+    expect(container.querySelector('[data-testid="drawer-item-briefing"]')).toBeNull();
+    // Selecting Architecture activates the Architecture tab (same route as
+    // clicking the tab).
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-architecture"]'));
     await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/r/core/architecture'), { timeout: 3000 });
-    await waitFor(() => expect(window.location.search).toBe('?subTab=briefing'), { timeout: 3000 });
   });
 
 
-  it('clicking Agent Rules navigates to agent-rules page', async () => {
+  it('clicking Agent Rules at workspace scope scrolls to the dashboard section, not the sub-page (§1a)', async () => {
+    // ui-navigation.md §1a: section items scroll to their dashboard
+    // section on the workspace home; Settings is the only navigation
+    // exception. Agent Rules must not escape to the agent-rules sub-page
+    // (WorkspaceHome is stubbed here, so the observable is the URL: the
+    // workspace home is preserved; the scroll itself is covered by
+    // NavRail.test.js against the real WorkspaceHome).
     window.history.pushState({}, '', '/workspaces/payments');
     const { container } = render(App);
     await openDrawer(container);
     await fireEvent.click(container.querySelector('[data-testid="drawer-item-agent-rules"]'));
-    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/agent-rules'), { timeout: 3000 });
+    await new Promise(r => setTimeout(r, 100));
+    expect(window.location.pathname).toBe('/workspaces/payments');
+    expect(window.history.state?.mode).toBe('workspace_home');
   });
 
   it('repo mode drawer click on Specs switches to the Specs repo tab', async () => {
