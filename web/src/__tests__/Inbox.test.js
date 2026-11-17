@@ -125,29 +125,32 @@ describe('Inbox', () => {
     expect(() => render(Inbox)).not.toThrow();
   });
 
-  // HSI §2 "Inbox filtering by trust level": the UI reads the workspace's
-  // trust_level and maps it to the priority range before calling the
-  // endpoint — Priorities 1-9 (max_priority 9) at Guided/Autonomous,
-  // everything at Supervised/Custom.
-  it('requests max_priority 9 when the workspace trust level is Guided', async () => {
-    api.workspace.mockResolvedValue({ id: 'ws-1', trust_level: 'Guided' });
-    render(Inbox, { workspaceId: 'ws-1', scope: 'workspace' });
+  // HSI §2 "Inbox shows" / "Inbox priorities shown" rows: the client sends
+  // NO priority cap — the server-side trust filter (type-set exclusion via
+  // exclude_types) is the single enforcement point for every client. A
+  // client-side max_priority=9 cap would hide rank-10 action-required
+  // types (InvitationReceived, MembershipChanged) that the type-set
+  // deliberately keeps visible, desynchronizing the inbox list from the
+  // badge count endpoint (which applies the same type-set exclusion).
+  it('sends no client-side priority cap at Guided trust and renders rank-10 invitations', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-invite',
+        notification_type: 'InvitationReceived',
+        priority: 10,
+        title: 'Workspace invitation',
+      }),
+    ]);
+    const { findByText } = render(Inbox, { workspaceId: 'ws-1', scope: 'workspace' });
     await waitFor(() => {
-      expect(api.myNotifications).toHaveBeenCalled();
-    });
-    const params = api.myNotifications.mock.calls[0][0];
-    expect(params.max_priority).toBe(9);
-    expect(params.workspace_id).toBe('ws-1');
-  });
-
-  it('requests no priority cap when the workspace trust level is Supervised', async () => {
-    api.workspace.mockResolvedValue({ id: 'ws-1', trust_level: 'Supervised' });
-    render(Inbox, { workspaceId: 'ws-1', scope: 'workspace' });
-    await waitFor(() => {
-      expect(api.myNotifications).toHaveBeenCalled();
+      expect(api.myNotifications).toHaveBeenCalledWith({ workspace_id: 'ws-1' });
     });
     const params = api.myNotifications.mock.calls[0][0];
     expect(params.max_priority).toBeUndefined();
+    // The rank-10 action-required invitation renders in the inbox — the
+    // server-side type-set exclusion (not a rank cap) is what hides the
+    // chatter types, so invitations stay visible at Guided/Autonomous.
+    expect(await findByText('Workspace invitation')).toBeTruthy();
   });
 
   it('mounts and produces DOM output', () => {
