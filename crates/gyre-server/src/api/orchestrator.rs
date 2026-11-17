@@ -319,6 +319,23 @@ pub(crate) async fn launch_orchestrator_process(
                     };
                 }
                 env.insert("GYRE_PROMPT_PERSONA".to_string(), persona.system_prompt);
+                // Persona attestation (platform-model.md §8): version +
+                // content_hash identify exactly which approved persona
+                // content the orchestrator received. The Approved check
+                // above guarantees these describe human-approved content.
+                env.insert("GYRE_PERSONA_ID".to_string(), persona.id.to_string());
+                env.insert(
+                    "GYRE_PERSONA_VERSION".to_string(),
+                    persona.version.to_string(),
+                );
+                env.insert(
+                    "GYRE_PERSONA_CONTENT_HASH".to_string(),
+                    persona.content_hash.clone(),
+                );
+                env.insert(
+                    "GYRE_PERSONA_APPROVAL_STATUS".to_string(),
+                    format!("{:?}", persona.approval_status),
+                );
             }
             _ => {
                 tracing::warn!(
@@ -339,7 +356,12 @@ pub(crate) async fn launch_orchestrator_process(
     };
     env.insert(
         "GYRE_PROMPT_CONTEXT".to_string(),
-        crate::api::prompts::context_prompt_for_orchestrator(orch_repo.as_ref()),
+        crate::api::prompts::context_prompt_for_orchestrator(
+            state,
+            &prompt_scope,
+            orch_repo.as_ref(),
+        )
+        .await,
     );
     env.insert(
         "GYRE_PROMPT_CONSTRAINTS".to_string(),
