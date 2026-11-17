@@ -3203,7 +3203,16 @@ pub async fn fail_agent(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
 
-    if agent.status == AgentStatus::Failed {
+    // Already-terminal guard (task-093 review): a failed/stopped/dead agent
+    // is a corpse — re-failing it must not re-run the budget decrement,
+    // notifications, or orchestrator death handling (which would spawn a
+    // second live replacement, breaking §3.2 exactly-one-live). Idempotent
+    // 200. `transition_status` permits (any, Failed), so without this guard
+    // stop-then-fail double-fires the terminal side effects.
+    if matches!(
+        agent.status,
+        AgentStatus::Failed | AgentStatus::Stopped | AgentStatus::Dead
+    ) {
         return Ok(StatusCode::OK);
     }
 
@@ -3304,6 +3313,18 @@ pub async fn fail_agent(
         }
     }
 
+    // TASK-093 (F6): orchestrator death handling on the fail path — same
+    // treatment as the stale-agent Abort path: restart a replacement when
+    // restart_on_failure is set (subject to the spawn budget) and escalate
+    // repo-tier deaths to the live workspace orchestrator.
+    if agent.is_orchestrator() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        crate::stale_agents::handle_orchestrator_death(&state, &agent, now, "fail").await;
+    }
+
     Ok(StatusCode::OK)
 }
 
@@ -3321,11 +3342,16 @@ pub async fn stop_agent(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
 
-    if agent.status == AgentStatus::Stopped {
-        // early-return:ok - idempotency guard; key generation lives in
-        // bootstrap_agent_keypair, a separate pub(crate) fn the check's
-        // fn-boundary regex does not recognize, so its keygen is (wrongly)
-        // attributed to this function's span.
+    if matches!(
+        agent.status,
+        AgentStatus::Failed | AgentStatus::Stopped | AgentStatus::Dead
+    ) {
+        // early-return:ok — terminal-state idempotency guard (task-093
+        // review): stop after fail/dead must not re-run budget decrement or
+        // the orchestrator death handling (a second replacement would break
+        // §3.2 exactly-one-live). The check's fn-boundary regex attributes
+        // bootstrap_agent_keypair's keygen to this span; the original guard
+        // carried the same marker (see task-099 F2 revision history).
         return Ok(StatusCode::OK);
     }
 
@@ -3370,6 +3396,19 @@ pub async fn stop_agent(
         agent.repo_id.as_ref(),
     );
     let _ = state.analytics.record(&ev).await;
+
+    // TASK-093 (F6): orchestrator death handling on the stop path. Stop is
+    // operator-initiated, but `restart_on_failure` is the owner's explicit
+    // exactly-one-live directive for the orchestrator, so the same shared
+    // death handling runs here (restart gated by spawn budget, repo-tier
+    // escalation names the replacement when one was spawned).
+    if agent.is_orchestrator() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        crate::stale_agents::handle_orchestrator_death(&state, &agent, now, "stop").await;
+    }
 
     Ok(StatusCode::OK)
 }
