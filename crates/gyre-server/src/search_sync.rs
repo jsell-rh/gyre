@@ -410,6 +410,21 @@ impl PersonaRepository for IndexingPersonaRepository {
         deindex_doc(&self.search, "persona", &id.to_string()).await;
         Ok(())
     }
+
+    async fn apply_approval_reset_with_task(&self, persona: &Persona, task: &Task) -> Result<()> {
+        self.inner
+            .apply_approval_reset_with_task(persona, task)
+            .await?;
+        // search.md §Index Updates: "Persona created/updated -> indexed",
+        // "Task created/updated -> indexed". The transactional method writes
+        // BOTH entities, so both documents are indexed here — the task write
+        // bypasses `IndexingTaskRepository` (it happens inside the persona
+        // port's transaction), and this decorator is the one place that sees
+        // both.
+        index_doc(&self.search, persona_document(persona)).await;
+        index_doc(&self.search, task_document(task)).await;
+        Ok(())
+    }
 }
 
 // ─── Activity Event (analytics) ──────────────────────────────────────────────

@@ -115,6 +115,16 @@
       // server returns the queue across all workspaces the user belongs to.
       const params = {};
       if (scope !== 'tenant' && workspaceId) params.workspace_id = workspaceId;
+      // HSI §2 "Inbox shows" / "Inbox priorities shown" rows: NO
+      // client-side priority cap is sent. The server applies the trust
+      // filter as a TYPE-SET exclusion (exclude_types derived from the
+      // workspace's trust_level) whenever max_priority is absent, which is
+      // the single enforcement point for every client (web, CLI, API) and
+      // keeps the list in lockstep with the badge count endpoint. A
+      // client-side max_priority=9 cap would additionally hide rank-10
+      // action-required types (InvitationReceived, MembershipChanged)
+      // that the type-set deliberately keeps visible at every trust
+      // level — the badge would count an invitation the inbox hides.
       let raw = await api.myNotifications(params);
       if (gen !== loadGen) return; // scope changed while loading
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);

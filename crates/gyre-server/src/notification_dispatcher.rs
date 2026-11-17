@@ -107,6 +107,36 @@ pub async fn resolve_channels(state: &AppState, user_id: &Id) -> NotificationCha
 /// channels (§Delivery Channels). Best-effort per channel: a channel failure
 /// is logged, never propagated — in-app delivery already succeeded.
 pub async fn dispatch_to_channels(state: &AppState, notif: &Notification) {
+    // HSI §2 "Notifications" row: the trust gradient governs EVERY delivery
+    // channel, not just the in-app inbox. When the notification's workspace
+    // trust level suppresses this type, the user asked not to be interrupted
+    // by it — skip email/webhook/slack. (In-app persistence already
+    // happened at the caller; the inbox listing applies the same filter.)
+    // Fail-open on lookup errors: a degraded workspace read must not
+    // silently disable a user's configured channels.
+    match state.workspaces.find_by_id(&notif.workspace_id).await {
+        Ok(Some(ws)) => {
+            if !ws
+                .trust_level
+                .delivers_notification(&notif.notification_type)
+            {
+                tracing::debug!(
+                    notification_type = notif.notification_type.as_str(),
+                    workspace_id = %notif.workspace_id,
+                    "channel dispatch suppressed by workspace trust level"
+                );
+                return;
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %notif.workspace_id,
+                error = %e,
+                "channel dispatch: workspace trust lookup failed; delivering"
+            );
+        }
+    }
     let channels = resolve_channels(state, &notif.user_id).await;
     dispatch_with(state, notif, &channels, &ReqwestSender::default()).await;
 }
@@ -2000,5 +2030,82 @@ mod tests {
                 "{user} must not receive the security finding"
             );
         }
+    }
+
+    /// HSI §2 "Notifications" row: the trust gradient gates EVERY delivery
+    /// channel. At Autonomous trust a state-change notification (MrMerged)
+    /// must not reach the email outbox, while an exception (AgentEscalation)
+    /// still dispatches.
+    #[tokio::test]
+    async fn dispatch_to_channels_suppresses_by_workspace_trust_level() {
+        let state = test_state();
+
+        // Workspace at Autonomous trust.
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-dispatch-trust"),
+            gyre_common::Id::new("tenant-1"),
+            "Dispatch Ws",
+            "dispatch-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let mut ws_row = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new("ws-dispatch-trust"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws_row.trust_level = gyre_domain::TrustLevel::Autonomous;
+        state.workspaces.update(&ws_row).await.unwrap();
+
+        // Recipient with the email channel enabled at Low band.
+        let mut user = gyre_domain::User::new(
+            gyre_common::Id::new("user-dispatch-trust"),
+            "user-dispatch-trust",
+            "dispatch-user",
+            0,
+        );
+        user.tenant_id = Some(gyre_common::Id::new("tenant-1"));
+        user.preferences.notification_channels.email = gyre_domain::EmailConfig {
+            enabled: true,
+            digest: gyre_domain::DigestFrequency::Immediate,
+            min_priority: NotificationPriority::Low,
+            type_overrides: Default::default(),
+        };
+        state.users.create(&user).await.unwrap();
+
+        let mk = |id: &str, t: NotificationType| {
+            Notification::new(
+                gyre_common::Id::new(id),
+                gyre_common::Id::new("ws-dispatch-trust"),
+                gyre_common::Id::new("user-dispatch-trust"),
+                t,
+                format!("title-{id}"),
+                "tenant-1",
+                1_000,
+            )
+        };
+
+        // Suppressed state change: no email queued.
+        dispatch_to_channels(&state, &mk("notif-chatter", NotificationType::MrMerged)).await;
+        let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
+        assert!(
+            outbox.is_empty(),
+            "MrMerged must not reach the email outbox at Autonomous trust"
+        );
+
+        // Exception: dispatched to the email channel.
+        dispatch_to_channels(
+            &state,
+            &mk("notif-exception", NotificationType::AgentEscalation),
+        )
+        .await;
+        let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
+        assert_eq!(
+            outbox.len(),
+            1,
+            "AgentEscalation must still dispatch at Autonomous trust"
+        );
+        assert!(outbox[0].1.contains("notif-exception"));
     }
 }
