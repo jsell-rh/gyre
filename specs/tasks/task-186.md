@@ -2,10 +2,10 @@
 title: "Ghost Overlays — structural prediction visualization on canvas"
 spec_ref: "system-explorer.md §3"
 depends_on: [task-178, task-185]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §3. Inline Spec Editing with Progressive Preview"
-commits: ["2e6b190d8db841a5b62b99a0f4152ecc93e733cb", "44310fa1fcf02864c93460b3496601f12b89d516", "343ff8c8c4d5a55504571c5c3a53abba9280da5f", "fe77459041d8f40fdf77bee5384dc4f696a7cb96"]
+commits: ["c052a61b8688c5ba21a01d41028581a97fe40a09", "fe77459041d8f40fdf77bee5384dc4f696a7cb96", "a88f1a6ddfa2fe25d28d7d09876e2002da9b6466"]
 ---
 
 ## Spec Excerpt
@@ -107,7 +107,10 @@ The §3 progressive-preview loop runs end to end with real data on every
  tier: instant link-graph impact, debounced LLM structural prediction rendered
  as the spec's ghost visual language, and a thorough preview that really spawns
  an implementation agent on a throwaway branch whose completion MR carries the
- code diff.
+ code diff. The implementation was squashed onto this branch as
+ `verify(task-186): reconcile candidate with main` (c052a61b) with its
+ verified asset build (fe774590); this round repairs the CI failure that
+ blocked the candidate (see F4 below).
 
 ### Ghost visual language (shared model + SVG layer)
 
@@ -201,8 +204,9 @@ graph. Each segment degrades independently; none blocks editing.
   failure condition to the fictional `'failed'` fails 5 tests. Both real-
   vocabulary branches are now load-bearing for the suite.
 - Server: `cargo check -p gyre-server --tests` clean at the F1/F2 repair
-  round; the mechanical guards pass (ABAC route registry, architecture
-  lint, mem port contracts, inert enforcement, in-memory state stores).
+  round and again after the F4 repair; the mechanical guards pass (ABAC
+  route registry, architecture lint, mem port contracts, inert enforcement,
+  in-memory state stores).
 
 ### Deferred to the independent verifier (server test binaries)
 
@@ -215,6 +219,7 @@ budget. Execute:
 - `cargo test -p gyre-server --lib api::graph::tests::thorough_preview_rolls_back_preview_task_when_spawn_fails`
 - `cargo test -p gyre-server --lib api::graph::tests::predict_graph` (pre-existing predict regressions)
 - `cargo test -p gyre-server --lib api::spawn` (spawn-core regressions — the thorough preview delegates to it)
+- `cargo test -p gyre-server --lib api::users::tests::get_me_returns_recorded_auth_provider_info` (the F4 flake repair)
 
 ### Repair rounds
 
@@ -235,5 +240,21 @@ budget. Execute:
   preview test mocks the real vocabulary (`in_progress` while running,
   `review`/`done` for completion), and a new failure-path test covers
   `blocked` and `cancelled`. Mutation probes confirm both branches are
-  load-bearing (see above). Evidence:
-  `/tmp/stage/review-evidence/finding-F3-repair-real-task-statuses.md`.
+  load-bearing (see above).
+- **F4 (CI run 44025941598, commit a88f1a6d)** — the candidate failed
+  `api::users::tests::get_me_returns_recorded_auth_provider_info` with
+  `last_login_at` off by exactly one second (1794894780 vs 1794894779).
+  Root cause: the test asserted strict equality between the
+  `last_login_at` read at `GET /users/me` and the value read back after a
+  `PUT /users/me`, but the PUT re-authenticates through `validate_jwt`,
+  whose provisioning path re-stamps `last_login_at` on each auth (user
+  spec: "set on each authentication") — so the values differ whenever the
+  two requests straddle a wall-clock second boundary. Test-only defect;
+  production unchanged. The assertion is now a two-sided wall-clock bound
+  (GET value ≤ PUT value ≤ time sampled after the PUT response) and the
+  PUT body spoofs `oidc_issuer`/`last_login_at` to keep the
+  anti-forgery guarantee load-bearing: a client-set value fails the bound
+  from either side, a cleared value fails the `expect`. The repair was
+  type-checked with `cargo check -p gyre-server --tests` (clean); the
+  test binary itself is deferred to the verifier (see list above).
+  Evidence: `/tmp/stage/review-evidence/finding-F4-ci-flake-repair.md`.
