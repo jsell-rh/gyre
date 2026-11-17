@@ -50,3 +50,50 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+---
+
+## Round: R24 (candidate `24aaf522`, base `e69fd990`)
+
+**Reviewer:** Independent review (pipeline stage)
+**Date:** 2026-11-09
+**Commits reviewed:** diff `e69fd990..24aaf522` (25 files, +2562/−260: clippy/round repairs `6009d2b4`, `24aaf522`, plus the round-23 merge resolution), with the full task contract re-verified in-tree (earlier feature rounds are ancestors of the base).
+
+### Independent verification performed
+
+- **Static invariant gates (19 scripts):** all OK — check-arch, abac-route-registry, abac-exempt-handlers, mcp-write-tools, migration-versions, migration-sql-portability, dead-message-kinds, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, mem-port-contracts, fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults, inert-enforcement, forwarded-header-trust, in-memory-state-stores, unbounded-external-http, forged-scope-fields.
+- **`cargo test -p gyre-domain`:** 569 passed, 0 failed — includes the four `trust_policies_for_level_*` field-level tests and the workspace trust/notification-filter suite (roundtrip + inbox-range tests).
+- **`cargo check -p gyre-server`** (SKIP_WEB_BUILD=1): clean.
+- **Web:** `npm ci` + full vitest: 122 files, 2439 passed / 41 skipped — includes the new Briefing completed-agents/uncertainty-highlight tests and the Inbox no-client-cap/invitation-visibility tests.
+- **rustfmt --check on all 16 changed .rs files:** clean. Clippy on the changed domain/ports files: clean — the `6009d2b4` repair of the three diff-scope clippy findings (needless_borrow ×2, double_must_use) holds.
+- **Mutation probe (restored after):** injecting `GateFailure` into `GUIDED_SUPPRESSED` is killed by `guided_suppresses_state_change_chatter_but_delivers_failures_and_approvals` — the trust tests kill real regressions, not self-confirming.
+- **Attribution gate:** `check-task-commit-attribution.sh` PASSES against the candidate's committed `specs/tasks/task-077.md` (18-commit list) and FAILS against the controller-synced working-tree override (14-commit list) — see observation O1.
+
+### Code review of the candidate delta
+
+Every hunk of the base→candidate diff was read. Notable verifications:
+
+- **PUT /workspaces/:id trust gate (Admin workspace role):** enforced per-handler on `trust_level` writes via `find_by_user_and_workspace` with `accepted && Admin|Owner`; pending memberships grant nothing; the `caller_is_system` escape (`user_id.is_none() && Admin`) is sound because per-agent tokens authenticate with `roles: vec![UserRole::Agent]` (auth.rs) — no agent principal can satisfy it. Non-trust updates remain Developer-allowed (gate correctly scoped). Hard test covers no-membership / Developer-membership / pending-Admin / accepted-Admin / system-token.
+- **409 + rollback:** `update_workspace_trust_transition_failure_returns_409` drives a failing repo and asserts 409, unchanged trust_level, and no partially-applied `trust:` policies.
+- **Notification trust gradient:** inbox list + badge share one exclusion set (`inbox_excluded_types`), applied in-query before pagination; realtime SSE/WS push suppressed while persistence is retained; email/webhook/slack dispatch suppressed by workspace trust; lookups fail OPEN toward delivery (a degraded read cannot silently disable channels — the safe direction). Tenant-scope aggregate intersects member workspaces; explicit caller rank filters still honored.
+- **Policy band enforcement:** create AND update reject user-created priorities outside 200–299 with a 400 naming the band; boundary-inclusive tests.
+- **Briefing trust variation:** Guided/Autonomous roll up completed MRs and in-progress tasks per spec; Autonomous surfaces only low-confidence decisions (payload shaping, stored messages untouched); lookup failure falls back to Supervised (fail-open on detail).
+- **Persona approval reset atomicity:** new port method `apply_approval_reset_with_task` implemented as one Diesel transaction on SQLite AND Postgres (extracted `upsert_task_txn`/`upsert_persona_txn`), mem adapter guards the rollback contract in code with a cfg(test) fail hook, search_sync indexes both entities post-commit, and git_http's persona-push path uses the atomic method (task-exists case degrades to the single write, which has no dependent record). Port-contract tests in mem + SQLite adapters.
+- **Merge-time F5 (in base, re-verified by reading):** `supervised_trust_hold` evaluates ABAC as `subject.type "system"` / `subject.id "merge-processor"`, fails CLOSED on workspace/policy-store read errors, human-approval escape on `mr.status == Approved`, selection-loop + atomic-group coverage via `selection_trust_hold`.
+- **e2e_ralph_loop / git_integration** (round-23 repair, in base): merge-expecting test workspaces created at `trust_level: "Autonomous"` — verified in source.
+
+### Observations (non-blocking, for the controller/verifier)
+
+- **O1 — controller-synced task body regresses the commits list:** the uncommitted working-tree override of `specs/tasks/task-077.md` (matching the assignment's task body) lists 14 commits and drops five product-surface task-077 branch commits (`6009d2b4`, `34c42250`, `2fea93f0`, `71b202e6`, `099f08c4`), which fails `check-task-commit-attribution.sh` (exit 1; evidence `probe-attribution.log`). The candidate's COMMITTED version carries the full 18-commit list and passes (exit 0; evidence `probe-attribution-candidate.log`). The controller must regenerate the list from branch history (dev-attribution.py) before verification, or the attribution gate will fail on an otherwise-clean tree. Not a candidate defect.
+- **O2 — coverage matrix rows 9–13** (the assigned HSI §2 sections) still read `task-assigned | task-077` — understated, not hollow; the matrix flip is the coverage stage's action, and the underlying behavior is implemented and tested.
+- **O3 — generated `web/dist/`** untouched by this round; the verifier owns the rebuild (a prior verification run built it cleanly).
+
+### Deferred to the independent verifier (server test compilation exceeds the review sandbox budget)
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — the full lib suite incl. `trust_level_change_requires_admin_workspace_role`, `update_workspace_trust_transition_failure_returns_409`, `create/update_policy_rejects_out_of_band_priority`, `inbox_trust_filter_*`, `create_notification_suppresses_realtime_push_by_trust_level`, `dispatch_to_channels_suppresses_by_workspace_trust_level`, `briefing_detail_and_completion_summaries_vary_by_trust_level`, `mem_persona_approval_reset_with_task_is_atomic`, `persona_approval_reset_with_task_persists_both_rows`, merge-processor F5/F9 tests.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --test e2e_ralph_loop --test git_integration` — the Autonomous-trust workspace fixtures.
+- `cargo test --all`, all-target Clippy (diff-scope), workspace-wide `cargo fmt --all -- --check` (per-file rustfmt verified clean here).
+
+### Verdict
+
+**approved** — the candidate satisfies the task contract with real implementations and killing tests; no code defects found. O1 is a controller-stage bookkeeping repair, recorded so verification is not failed by the stale synced task body.
