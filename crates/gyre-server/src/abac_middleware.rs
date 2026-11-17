@@ -258,6 +258,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/bookmark", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
                 RouteResourceMapping::api(
+                    "/api/v1/repos/:id/orchestrator/spawn",
+                    "repo",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/repos/:id/commits/:sha/signature/verification",
                     "repo",
                     None,
@@ -536,6 +541,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/workspaces", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/repos", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/orchestrator/spawn",
+                    "workspace",
+                    Some("write"),
+                ),
                 // Workspace-scoped entity lists (M34 Slice 6 — primary access patterns)
                 RouteResourceMapping::api("/api/v1/workspaces/:workspace_id/tasks", "task", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:workspace_id/agents", "agent", None),
@@ -1848,8 +1858,11 @@ pub(crate) fn domain_builtin_policies() -> Vec<Policy> {
 /// default-deny catch-all. If any seed fails to persist, returning `Ok` would
 /// leave the server enforcing a stricter- or looser-than-configured policy
 /// set silently — an agent could approve specs while the operator believes
-/// the immutable Deny at priority 999 is active. The caller must refuse to
-/// serve with a partially seeded policy set.
+/// the immutable Deny at priority 999 is active. Seeding errors therefore
+/// propagate and abort the caller (startup): the caller must refuse to serve
+/// with a partially seeded policy set. Idempotency is preserved by the
+/// existence check: a policy that is already stored is skipped, never
+/// re-created.
 pub async fn seed_builtin_policies(state: &Arc<AppState>) -> anyhow::Result<()> {
     let mut policies = m34_builtin_policies();
     policies.extend(domain_builtin_policies());
@@ -1886,10 +1899,10 @@ pub async fn seed_builtin_policies(state: &Arc<AppState>) -> anyhow::Result<()> 
                 }
             }
             Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "failed to check existence of built-in ABAC policy {}: {e}",
+                return Err(e.context(format!(
+                    "failed to check existence of built-in ABAC policy {}",
                     policy.id
-                ));
+                )));
             }
         }
     }
