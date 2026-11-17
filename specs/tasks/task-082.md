@@ -1,15 +1,61 @@
 ---
-title: "HSI Stable Sidebar Navigation Model"
-spec_ref: "human-system-interface.md §1.3"
+title: "Navigation: context-dependent collapsible rail (retargeted from HSI stable sidebar)"
+spec_ref: "ui-navigation.md §1a"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 review: specs/reviews/task-082.md
 coverage_sections:
-  - "human-system-interface.md §1.3 Stable Sidebar, Adaptive Content"
-commits: ["79323318aac3b3015c03867f8f6130d0e913e67a", "9561ee864b066ba4a41fed4aa1f33cb16f4a0b47", "72bd582329ac50dbb2062d3ea2f3ea0b7f6213d3", "f332f774069ee409b407f2b7c9ee63deba51e3b6"]
+  - "ui-navigation.md §1a Collapsible Navigation Rail (Optional)"
+commits:
+  - d99ace7b
+  - f332f774
+  - 72bd5823
+  - 9561ee86
+  - 79323318
 ---
 
-## Spec Excerpt
+## Supersession and retarget (2026-11-16)
+
+This task originally instructed building the permanent six-item sidebar from
+`human-system-interface.md` §1.3 ("Stable Sidebar, Adaptive Content"). That
+instruction is **retired**. Operator decision `16871182b1370b61693fc691`
+(option_c, recorded by jsell; full record in `specs/tasks/task-246.md` and
+`ui-navigation.md` §1a) superseded both the literal six-fixed-items binding
+and `ui-navigation.md`'s blanket "no sidebar" rule.
+
+**Current requirement:** `ui-navigation.md` §1a (Collapsible Navigation Rail)
+— an optional, collapsible, scope-labelled left panel on navigation-heavy
+screens (workspace home and repo mode), with stable per-mode item sets
+mirroring the dashboard sections / repo tab strip, collapsed (icon-only) by
+default to preserve canvas/editor space, and a narrow-viewport drawer. The
+rail is never load-bearing: every destination stays reachable without it, and
+focused editor/canvas surfaces keep full width.
+
+**Honest status:** the rail is specified but **not implemented**. The
+original deliverable below was removed from the product in commit `08e5f91f`
+(nav rework, PRs #589–#599) and must not be re-landed as-is. Progress is
+`not-started` against the retargeted requirement; the controller decomposes
+implementation work after amendment task-246 merges. The `commits:` list
+above is the historical record of the superseded deliverable.
+
+## Requirement (retargeted) — acceptance criteria
+
+- [ ] Optional collapsible navigation rail on workspace home and repo mode only; never rendered on focused editor/canvas surfaces (Editor Split, popped-out detail panels, full-screen modals)
+- [ ] Scope-labelled per mode (workspace name at workspace home; workspace/repo path in repo mode); no global menu shared across modes
+- [ ] Workspace-home item set mirrors the §2 dashboard sections in canonical order plus Settings; repo-mode item set mirrors the repo tab strip exactly
+- [ ] Stable item ordering within each mode (items never move, appear, or disappear within a mode)
+- [ ] Collapsed (icon-only, 48px) by default; toggle expands to labelled form (240px); preference persisted per user per mode
+- [ ] Every rail destination remains reachable without the rail (dashboard, tabs, ⌘K, `g`-shortcuts); `NoSidebar.test.js` asserts the absence of a *permanent* sidebar (updated, not deleted, if its assertions need to distinguish rail from permanent sidebar)
+- [ ] Narrow viewports (<768px): rail item set offered via the hamburger drawer; no persistent rail on mobile
+- [ ] `docs/ui.md` updated to describe the shipped rail once implemented
+
+## Historical record (SUPERSEDED — preserved for intent, not for implementation)
+
+The following is the original task body. Its acceptance criteria were met by
+the sidebar implementation that was later removed (`08e5f91f`); the checked
+boxes below describe that deleted implementation and are record only.
+
+### Spec Excerpt (superseded)
 
 The sidebar is **permanent and unchanging** regardless of scope. Users build muscle memory for nav item positions. The *content area* adapts to the current scope (tenant, workspace, repo), not the sidebar.
 
@@ -27,7 +73,10 @@ Six items. That's it.
 
 **Why not scope-dependent sidebar?** Changing the sidebar when the user navigates between scopes is disorienting — the same navigation item moves position or disappears. The content area is where scope manifests.
 
-## Implementation Plan
+*(Superseding note: `human-system-interface.md` §1.3 now carries the
+supersession record; the current requirement is `ui-navigation.md` §1a.)*
+
+### Implementation Plan (superseded — do not execute)
 
 The current UI has no sidebar (confirmed by auditor: App.svelte:1032 "no sidebar"). A mobile drawer exists with 5 items. The spec requires a permanent 6-item sidebar.
 
@@ -54,7 +103,7 @@ The current UI has no sidebar (confirmed by auditor: App.svelte:1032 "no sidebar
 
 4. **Remove old navigation patterns** that conflict with the stable sidebar model (mobile drawer items should align with sidebar).
 
-## Acceptance Criteria
+### Acceptance Criteria (superseded — historical record of the deleted implementation)
 
 - [x] Permanent 6-item sidebar visible on all routes (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin)
 - [x] Sidebar does NOT change based on current scope (tenant, workspace, repo)
@@ -65,51 +114,9 @@ The current UI has no sidebar (confirmed by auditor: App.svelte:1032 "no sidebar
 - [x] `npm test` passes in `web/` (task-082 suites AppShell + Sidebar: 101/101 — 92 after R5, +1 repo-scope Briefing regression (F5), +9 tenant-scope suite (Post-R8 sweep); pre-existing canvas/ResizeObserver failures in FlowRenderer/MoldableViewNodeTypeFilter/ExplorerViewAskViewSpec are unrelated and reproduce identically at merge-base `4988865b`)
 - [x] No regression in existing navigation flows
 
-## Agent Instructions
+### Agent Instructions (superseded — do not execute)
 
 Read `specs/system/human-system-interface.md` §1.3 (Stable Sidebar, Adaptive Content) and `docs/ui.md` for the current navigation model. The main app layout is in `web/src/App.svelte`. The spec explicitly states "no sidebar" was a previous decision — this task replaces that with the HSI spec's 6-item permanent sidebar. Check `ui-layout.md` §1 for sidebar dimensions and layout constraints. The sidebar items must exactly match the 6 listed (no more, no fewer). Keyboard shortcuts Cmd+1 through Cmd+6 (§1.8) should map to these same items — verify the existing g-key shortcuts still work alongside.
 
-## Shipped
-
-### Status: complete in history; requirement superseded via spec lifecycle
-
-The assigned product — the permanent 6-item sidebar — was implemented and
-review-accepted in the original round (commits `d99ace7b`, `f332f774`,
-`72bd5823`, `9561ee86`, `79323318`; review rounds R1-R10 in
-`specs/reviews/task-082.md`, R10 closed with no findings). All five commits
-are ancestors of this branch's base `078ec12a5`.
-
-The requirement was then superseded through the spec lifecycle:
-`ui-navigation.md` (header note + Principle 5 "No sidebar" + §9 "From HSI
-§1") supersedes HSI §1's navigation model; task-210's 2026-10-09 navigation
-binding correction removed the sidebar from the shell and reclassified this
-task's coverage section (HSI §1.3) as `n/a`-superseded in the coverage matrix,
-with the explicit note that task-082 is historical implementation, "not an
-instruction to reintroduce the obsolete sidebar."
-
-### This round's work
-
-This round does **not** reintroduce the sidebar — that would ship code
-contradicting the canonical spec and re-open the recorded ui-navigation
-coverage row-3 regression that task-210 resolved. The remaining real gap in
-this task's coverage section was that the HSI spec text itself still
-literally mandated the removed sidebar with no supersession note in place —
-the "formal spec amendment via spec lifecycle" half of the resolution the
-2026-09-30 ui-navigation audit called for (task-208's user-management.md
-amendment is the precedent). Shipped:
-
-- `specs/system/human-system-interface.md`: dated supersession note under
-  §1 (Navigation Model) and an amendment note on §1.3, recording the
-  ui-navigation.md supersession, the task-082 historical implementation, and
-  the task-210 removal. Historical text retained.
-- `specs/coverage/system/human-system-interface.md` row 3: amended to record
-  the in-place spec amendment.
-
-### Test evidence
-
-Focused web suites at base `078ec12a5` (no product-code change this round,
-so base runs are the operative evidence): `NoSidebar.test.js`,
-`WorkspaceDrawerSectionNav.test.js`, `AppShell.test.js` — 78/78 passed
-(vitest; output retained under /tmp/stage/review-evidence/
-web-focused-nosidebar-shell.txt). NoSidebar asserts the canonical no-sidebar
-shell directly; reintroducing the sidebar would fail it.
+*(Retarget note: for the current requirement, read `ui-navigation.md` §1a and
+`docs/ui.md` instead. Nothing in the superseded plan above is authorized.)*
