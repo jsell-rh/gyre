@@ -69,3 +69,44 @@ F1–F5 remain resolved in the current implementation (`064a94fe`) — verified 
 F1–F6 remain resolved at HEAD — verified in code and by test run. Task suites pass: `WorkspaceSidebarSectionNav.test.js` + `WorkspaceHomeSections.test.js` + `WorkspaceHomeArchitecture.test.js` 47 passed / 51 skipped (skips are the pre-existing old-layout suites: Repos/Decisions/Agent Rules/Error handling), `AppShell.test.js` + `Sidebar.test.js` 101/101. Structural verification of the F6 fix (`79323318` + `9561ee86`): `section-briefing`, `section-specs`, and `section-architecture` render unconditionally at workspace scope inside `ws-main-content` (outside any wsTab/conditional guard beyond the `{#if !workspace}` outer guard and the decisions `{:else}` branch); the `archExpandSignal` effect expands the Architecture section and lazily loads the graph without a reactive loop; the ExplorerCanvas is fed `nodes`/`edges` from `api.workspaceGraph`, matching both the component's prop contract and the `KnowledgeGraphResponse` shape; locale keys for all four section headings plus `decisions_empty` (exact docs/ui.md copy) and `show/hide_workspace_graph` are present in `en.json`.
 
 No new findings. Two observations considered and rejected as below the relevance bar: (1) the F6-resolution text attributes the regression tests to `79323318` while the un-skipped test suites actually land in `9561ee86` (both are task-082 commits listed in frontmatter, and the tests do fail against the pre-fix code, so the coverage claim holds); (2) the specs table status cell displays `approval_status ?? status` while the icon lookup keys on `spec.status` alone — the same pattern the tenant-scope twin (`CrossWorkspaceHome.svelte`) uses, so it is consistent with existing code and cosmetic at most.
+## F11 Review — CI-repair round (candidate `62a51e86`, base `e69fd990`)
+
+Independent review of the retargeted §1a deliverable plus this round's e2e
+baseline repair. Evidence: `/tmp/stage/review-evidence/task-082-review.md`.
+
+**Approved — no findings.**
+
+- **CI repair is sound and grounded.** `explorer-visual.spec.js` is
+  byte-identical to base (no threshold/logic edits). All 16 baselines that
+  failed CI run 44039546790 are sha256-identical to that run's own
+  `-actual.png` artifacts (retained at `/tmp/stage/ci-artifacts/0`), and
+  `web/src` + `web/tests` are source-identical between the CI head
+  (`ab16c31e`) and the candidate — the replaced baselines are ground-truth
+  renders of the shipped source on the pinned CI runner, not
+  locally-fabricated approvals. The rail shift those baselines encode is
+  spec-compliant: the Explorer architecture tab is §3 repo mode, where §1a
+  renders the rail.
+- **§1a acceptance criteria all verified in source** (rail surfaces,
+  scope labels, per-mode item sets mirroring §2 sections + Settings and the
+  repo tab strip via the shared `lib/repoTabs.js` single source of truth,
+  48px/240px collapse with per-user-per-mode persistence, never
+  load-bearing — ⌘K/g-shortcuts/tab strip/dashboard untouched, Analytics
+  still reachable via the topbar after its drawer item removal,
+  <768px drawer form, docs/ui.md updated).
+- **Tests are lethal, not inflated.** 113/113 across NavRail/NoSidebar/
+  RepoMode/AppShell plus WorkspaceDrawerSectionNav 3/3 (npm ci + vitest).
+  Mutation probe: forcing `showNavRail` false fails 8 tests; source
+  restored byte-identical afterwards. No skipped tests in the task suites;
+  scroll-target assertions pin the actual clicked target.
+- **Non-blocking generated-output observation:** the committed `web/dist`
+  at this candidate is a pre-rail bundle (no `nav-rail` strings); the
+  deterministic verifier owns the dist rebuild, and the E2E workflow
+  rebuilds from source before testing, so no gate depends on the committed
+  bundle.
+- **Remote verification required:** the exact-head GitHub "E2E Tests"
+  check must be confirmed green — especially
+  `filter_preset_buttons_show_correct_subsets`, whose
+  `filter-preset-types-linux.png` was regenerated locally (its CI run
+  aborted before capturing that snapshot; measured noise class 0.25% <<
+  the 2%/0.05 comparator limits). A failure there implicates only that one
+  baseline, not source.
