@@ -2,10 +2,10 @@
 title: "Spec registry — supply chain AIBOM integration"
 spec_ref: "spec-registry.md §Supply Chain (supply-chain.md)"
 depends_on: [task-165]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §Supply Chain (supply-chain.md)"
-commits: ["ad473d3c0846cbdb5888f4973b3ea8e406f09586", "a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5"]
+commits: ["a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5", "ad473d3c0846cbdb5888f4973b3ea8e406f09586"]
 ---
 
 ## Spec Excerpt
@@ -57,14 +57,14 @@ Read `specs/system/spec-registry.md` §"Supply Chain (supply-chain.md)". The AIB
 
 ## Shipped
 
-The spec registry now contributes manifest state to AIBOM artifacts and release
-metadata (spec-registry.md §Supply Chain). New module
+The spec registry contributes manifest state to AIBOM artifacts and release
+metadata (spec-registry.md §Supply Chain). Module
 `crates/gyre-server/src/aibom_spec_registry.rs` builds one shared `spec_registry`
 section from real storage, embedded verbatim by both surfaces:
 
-- `GET /api/v1/repos/:id/aibom` — new `spec_registry` field on `AibomResponse`
+- `GET /api/v1/repos/:id/aibom` — `spec_registry` field on `AibomResponse`
   (`aibom_version` bumped 1.1 → 1.2 for the schema extension).
-- `POST /api/v1/release/prepare` — new `spec_registry` field on
+- `POST /api/v1/release/prepare` — `spec_registry` field on
   `ReleasePrepareResponse`, so release metadata and the standalone AIBOM are
   built by the same function and cannot disagree.
 
@@ -75,15 +75,15 @@ section from real storage, embedded verbatim by both surfaces:
   (coverage summary). Ledger entries are scoped by `repo_id`; other repos'
   entries do not leak in.
 - Approval chain for approved specs: the active approval events for the
-  current version from the approval event history — `approved_at` (earliest),
+current version from the approval event history — `approved_at` (earliest),
   `approved_by` (ids), and a full `approval_chain` (approver_id, approver_type,
   persona, approved_at). Stale-SHA events and revoked events are excluded.
   `approval_mode` comes from the ledger entry.
 - Drift risk per spec-registry.md: `drift_status` per spec plus a `drifted`
   count.
 - `manifest_version`: git blob SHA of `specs/manifest.yaml` at HEAD via
-  `git rev-parse`; reported `null` when there is no manifest — never
-  fabricated.
+  `git rev-parse` (path validated against injection); reported `null` when
+  there is no manifest — never fabricated.
 - Spec-to-code binding status: every repo MR carrying a `spec_ref`, with
   `approved_at_merge_time` evaluated against the same per-SHA approval ledger
   the merge gate (`verify_spec_ref`) enforces — an approval counts only when
@@ -97,17 +97,32 @@ Storage failures propagate (`anyhow::Result` → `ApiError::Internal`) so the
 section cannot silently under-report spec provenance; only genuine absence
 (no manifest, no events, no MRs) is reported as empty/null.
 
-### Test evidence
+### Resume-round verification (merged head 8b9c0e55 = candidate + base ce336114)
 
-`cargo check -p gyre-server` and `cargo check -p gyre-server --tests` passed at
-`a4c24fc1`; after the verification repair (rustfmt + removal of one useless
-`format!` — whitespace-only otherwise) `cargo fmt --check -p gyre-server` and
-`cargo clippy -p gyre-server --lib` (no new warnings, in particular no
-`useless_format` in `aibom_spec_registry.rs`) pass at head `ad473d3c`. The
-sandbox build wrapper blocks gyre-server test code
-generation ("exceeds 4 GiB") — an infrastructure limit recorded in
-`/tmp/stage/review-evidence/task-169-probes.md`, not a code defect. The
-independent verifier must run:
+The prior candidate (PR #854, head `d100b576`) failed the "Development
+controller" CI check (run 44076006080, logs never published). Investigation
+at the merged head found no code defect: the controller suites
+(`test_dev*.py`, `test_pipeline*.py`) fail identically at the BASE commit
+`ce336114` in this sandbox — the failures are environmental (cargo-wrapper
+shims exit 64, network-restricted pipeline tests), and none of the failing
+tests touch the candidate's diff (gyre-server Rust files + markdown). Node
+controller tests (`scripts/dashboard/test`, `scripts/test`) pass. The Go
+dispatcher suite could not run locally (go not installed). Evidence recorded
+in `/tmp/stage/review-evidence/task-169-probes.md`.
+
+Local probes at the merged head: `cargo check -p gyre-server` PASS,
+`cargo check -p gyre-server --tests` PASS, `cargo fmt --check -p gyre-server`
+PASS, `cargo clippy -p gyre-server --lib` — no new warnings in changed files
+(pre-existing `sort_by_key` advisory at `api/aibom.rs:244` is an unchanged
+line). Mechanical guards PASS: check-arch, in-memory-state-stores,
+fail-open-ref-resolution, unwired-port-methods, inert-enforcement,
+relative-path-defaults, scope-literal-defaults, mem-port-contracts,
+task-commit-attribution (after restoring this file's `commits:` list).
+
+### Tests the independent verifier must execute
+
+The sandbox build wrapper blocks gyre-server test compilation ("exceeds
+4 GiB") — an infrastructure limit, not a code defect.
 
 - `cargo test -p gyre-server --lib aibom_spec_registry` — 3 tests, including
   ones that fail on real defects: an approval granted after the merge and an
@@ -123,7 +138,6 @@ independent verifier must run:
   `release_prepare_includes_spec_registry_metadata`.
 - `cargo test --all` — acceptance criterion; deferred to the verifier per the
   sandbox memory budget.
-
-Mechanical guards pass: check-arch, in-memory-state-stores,
-fail-open-ref-resolution, unwired-port-methods, inert-enforcement,
-relative-path-defaults, scope-literal-defaults, mem-port-contracts.
+- CI "Development controller" job: `go test -race ./...` in
+  `tools/fullsend-dispatcher` (go not available in this sandbox) plus the
+  Python/Node controller suites.
