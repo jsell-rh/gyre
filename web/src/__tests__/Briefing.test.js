@@ -71,6 +71,77 @@ describe('Briefing S4.3', () => {
     expect(() => render(Briefing)).not.toThrow();
   });
 
+  // HSI §2 "Agent completion summaries": the COMPLETED AGENTS section
+  // renders the decision log with confidence badges and the uncertainties
+  // block; at Guided trust the uncertainties are highlighted.
+  it('renders completed agents with decisions and highlighted uncertainties at Guided trust', async () => {
+    const { api } = await import('../lib/api.js');
+    api.getWorkspaceBriefing.mockResolvedValue({
+      ...MOCK_STRUCTURED,
+      completed_agents: [
+        {
+          agent_id: 'worker-12',
+          spec_ref: 'payment-retry.md',
+          decisions: [
+            { what: 'used exponential backoff', why: 'idempotency', confidence: 'high' },
+            { what: 'capped retries at 3', why: 'spec silent', confidence: 'low' },
+          ],
+          uncertainties: ['timeout behavior undefined'],
+          completed_at: 1711324800,
+        },
+      ],
+    });
+    const { container, getByText } = render(Briefing, {
+      props: { workspaceId: 'ws-1', scope: 'workspace', trustLevel: 'Guided' },
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="section-completed-agents"]')).toBeTruthy();
+    });
+    // Expand the accordion (single-expansion, ui-layout.md §3).
+    await fireEvent.click(container.querySelector('[data-testid="section-toggle-completed-agents"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="completed-agent-item"]')).toBeTruthy();
+    });
+    // Decision log with confidence badges.
+    expect(getByText(/exponential backoff/)).toBeTruthy();
+    expect(container.querySelectorAll('.confidence-badge').length).toBe(2);
+    // Uncertainty rendered AND highlighted at Guided trust (HSI §2 row:
+    // "Uncertainties highlighted").
+    const uncertainties = container.querySelector('[data-testid="agent-uncertainties"]');
+    expect(uncertainties).toBeTruthy();
+    expect(uncertainties.classList.contains('uncertainties-highlighted')).toBe(true);
+    expect(getByText('timeout behavior undefined')).toBeTruthy();
+  });
+
+  it('does not highlight completed-agent uncertainties at Supervised trust', async () => {
+    const { api } = await import('../lib/api.js');
+    api.getWorkspaceBriefing.mockResolvedValue({
+      ...MOCK_STRUCTURED,
+      completed_agents: [
+        {
+          agent_id: 'worker-12',
+          spec_ref: 'payment-retry.md',
+          decisions: [{ what: 'used backoff', confidence: 'high' }],
+          uncertainties: ['timeout behavior undefined'],
+          completed_at: 1711324800,
+        },
+      ],
+    });
+    const { container } = render(Briefing, {
+      props: { workspaceId: 'ws-1', scope: 'workspace', trustLevel: 'Supervised' },
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="section-completed-agents"]')).toBeTruthy();
+    });
+    await fireEvent.click(container.querySelector('[data-testid="section-toggle-completed-agents"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="completed-agent-item"]')).toBeTruthy();
+    });
+    const uncertainties = container.querySelector('[data-testid="agent-uncertainties"]');
+    expect(uncertainties).toBeTruthy();
+    expect(uncertainties.classList.contains('uncertainties-highlighted')).toBe(false);
+  });
+
   it('shows the briefing title', () => {
     const { getByText } = render(Briefing);
     expect(getByText('Briefing')).toBeTruthy();

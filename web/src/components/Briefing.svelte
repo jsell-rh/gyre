@@ -614,6 +614,85 @@
         </section>
       {/if}
 
+      <!-- COMPLETED AGENTS (HSI §2 "Agent completion summaries" row: full
+           decision log at Supervised, uncertainties highlighted at Guided,
+           only low-confidence decisions surfaced at Autonomous — the server
+           filters the decisions array by trust level; this section renders
+           what arrives, and emphasizes uncertainties at Guided) -->
+      {#if briefing.completed_agents?.length}
+        <section class="briefing-section" data-testid="section-completed-agents" aria-labelledby="briefing-completed-agents">
+          <AccordionItem
+            id="completed_agents"
+            headingId="briefing-completed-agents"
+            headerClass="section-heading"
+            testId="section-toggle-completed-agents"
+            open={expandedSection === 'completed_agents'}
+            ontoggle={toggleSection}
+          >
+            {#snippet header()}
+              <span class="section-icon completed-icon" aria-hidden="true">✓</span>
+              {$t('briefing.section_completed_agents')}
+              <span class="expand-icon" aria-hidden="true">{expandedSection === 'completed_agents' ? '▲' : '▼'}</span>
+            {/snippet}
+            {#snippet children()}
+              <div class="section-body-list" id="briefing-section-completed-agents-body">
+                {#each briefing.completed_agents as agent (agent.agent_id)}
+                  <div class="section-item" data-testid="completed-agent-item">
+                    <div class="item-title">
+                      <span class="item-icon completed-icon" aria-hidden="true">✓</span>
+                      <button
+                        class="entity-ref agent-ref"
+                        onclick={() => openEntity('agent', agent.agent_id, { name: agent.agent_id })}
+                        data-testid="completed-agent-ref"
+                      >
+                        {resolveEntityName('agent', agent.agent_id)}
+                      </button>
+                      {#if agent.spec_ref}
+                        <button
+                          class="entity-ref"
+                          onclick={() => handleViewSpec(agent.spec_ref)}
+                          data-testid="completed-agent-spec-ref"
+                        >
+                          spec: {agent.spec_ref}
+                        </button>
+                      {/if}
+                    </div>
+                    {#if agent.decisions?.length}
+                      <div class="agent-decisions" data-testid="agent-decisions">
+                        {#each agent.decisions as d}
+                          <div class="agent-decision-row">
+                            <span class="item-decision">
+                              {$t('briefing.decision_label', { values: { text: d.what ?? d.why ?? '' } })}
+                              {#if d.confidence}
+                                <span class="confidence-badge confidence-{d.confidence}">({$t('briefing.confidence', { values: { level: d.confidence } })})</span>
+                              {/if}
+                            </span>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                    {#if agent.uncertainties?.length}
+                      <div
+                        class="uncertainties"
+                        class:uncertainties-highlighted={trustLevel === 'Guided' || trustLevel === 'Autonomous'}
+                        data-testid="agent-uncertainties"
+                      >
+                        {#each agent.uncertainties as u}
+                          <div class="uncertainty-row">
+                            <span class="uncertainty-icon" aria-hidden="true">⚠</span>
+                            <span class="uncertainty-text">{u}</span>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/snippet}
+          </AccordionItem>
+        </section>
+      {/if}
+
       <!-- METRICS -->
       {#if briefing.metrics}
         <section class="metrics-row" data-testid="section-metrics" aria-labelledby="briefing-metrics">
@@ -953,6 +1032,22 @@
     border-left: 3px solid var(--color-warning);
     margin-left: calc(var(--space-2) + var(--text-sm));
   }
+
+  /* HSI §2 "Agent completion summaries" row — Guided/Autonomous highlight
+     uncertainties in the completed-agent summaries (Supervised shows the
+     same block unemphasized as part of the full decision log). */
+  .uncertainties-highlighted {
+    background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+    border-left-width: 4px;
+  }
+
+  .agent-decisions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .agent-decision-row { font-size: var(--text-sm); }
 
   .uncertainty-row {
     display: flex;
