@@ -70,6 +70,57 @@ class CheckIntegrityTest(unittest.TestCase):
         self.assertEqual(check.read_text(), "exit 0\n", "candidate tree was not restored after failure")
         self.assertEqual(self.git("status", "--porcelain"), "")
 
+    def test_exemption_data_follows_the_merge(self):
+        # The clean-cutover case: upstream's frozen exemption data references
+        # a route the candidate removed together with its exemption entry.
+        # Phase one must judge the merged tree with the merged tree's data,
+        # not fail on upstream data describing routes that no longer exist.
+        (self.work / "routes.txt").write_text("/api/old-route\n")
+        (self.work / "scripts/example-exemptions.txt").write_text("/api/old-route\n")
+        (self.work / "scripts/check-abac-exempt-handlers.sh").write_text(
+            '#!/usr/bin/env bash\n'
+            '# Model of the real gate: exemption entries must reference\n'
+            '# routes registered in the tree under test.\n'
+            'set -uo pipefail\n'
+            'cd "$(dirname "$0")/.."\n'
+            'fail=0\n'
+            'while IFS= read -r entry; do\n'
+            '  [ -n "$entry" ] || continue\n'
+            '  grep -qxF "$entry" routes.txt || { echo "ERROR: exempt route $entry is not registered" >&2; fail=1; }\n'
+            'done < scripts/example-exemptions.txt\n'
+            'exit $fail\n')
+        self.commit("upstream data-driven gate")
+        (self.work / "routes.txt").write_text("")
+        (self.work / "scripts/example-exemptions.txt").write_text("")
+        self.commit("candidate removes route and exemption entry")
+        result = subprocess.run(["bash", str(self.runner)], capture_output=True, text=True, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_candidate_stale_exemption_entry_still_fails(self):
+        # The safety property of the data-follows-merge behavior: a candidate
+        # that removes a route but keeps its exemption entry ships inconsistent
+        # data of its own, and phase one must still reject it.
+        (self.work / "routes.txt").write_text("/api/old-route\n")
+        (self.work / "scripts/example-exemptions.txt").write_text("/api/old-route\n")
+        (self.work / "scripts/check-abac-exempt-handlers.sh").write_text(
+            '#!/usr/bin/env bash\n'
+            'set -uo pipefail\n'
+            'cd "$(dirname "$0")/.."\n'
+            'fail=0\n'
+            'while IFS= read -r entry; do\n'
+            '  [ -n "$entry" ] || continue\n'
+            '  grep -qxF "$entry" routes.txt || { echo "ERROR: exempt route $entry is not registered" >&2; fail=1; }\n'
+            'done < scripts/example-exemptions.txt\n'
+            'exit $fail\n')
+        self.commit("upstream data-driven gate")
+        (self.work / "routes.txt").write_text("")
+        self.commit("candidate removes route but keeps exemption entry")
+        result = subprocess.run(["bash", str(self.runner)], capture_output=True, text=True, env=self.env)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("exempt route /api/old-route is not registered", result.stderr)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_candidate_deleted_upstream_script_does_not_contaminate_checkout(self):
         old=self.work/'scripts/python-callgraph.py'
         old.write_text('print("old extractor")\n')
