@@ -93,7 +93,7 @@ From `user-management.md` §UI Pages:
 
 ## Agent Instructions
 
-Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `web/src/lib/` or `web/src/components/` — check for existing user-related components. Route structure: `web/src/routes/` or `web/src/App.svelte`. Existing settings pages: grep for `WorkspaceSettings\|TenantSettings\|UserSettings` in `web/src/`. Notification components: grep for `Notification\|Inbox\|notification` in `web/src/`. The frontend uses Svelte 5 with runes ($state, $derived, $effect). Check `docs/ui.md` for component conventions and navigation model.
+Read `specs/system/user-management.md` §UI Pages. Existing Svelte components: `web/src/lib/` — check for existing user-related components. Route structure: `web/src/routes/` or `web/src/App.svelte`. Existing settings pages: grep for `WorkspaceSettings\|TenantSettings\|UserSettings` in `web/src/`. Notification components: grep for `Notification\|Inbox\|notification` in `web/src/`. The frontend uses Svelte 5 with runes ($state, $derived, $effect). Check `docs/ui.md` for component conventions and navigation model.
 
 ## Shipped
 
@@ -128,16 +128,30 @@ Both findings fixed in 770378cc:
 duplicate `PUT /users/me` via the form's default submit) and Cancel
   cannot trigger a spurious save.
 
+### Contract-repair round (6d9a4b89)
+
+The executor restored the assigned task document (Agent Instructions
+now read `web/src/lib/` only); no production code changed in this
+round — the 770378cc fix and all shipped surfaces were re-verified
+intact on the restored checkout (invitation expiry division,
+`type="button"` edit actions, TenantSettings Users/Invitations tabs
+with inline role editing and bulk invite, and the
+`/invite/{token}` magic-link preview/accept/decline flow).
+
 ### Test evidence
 
 - `web/src/__tests__/WorkspaceSettings.test.js` (85 passed): the
-  expiry test now asserts a sub-hour pending row renders exactly
-  `Expires in 30m` — verified to fail with `Expires in 1800m` when the
-  division is reverted.
-- `web/src/__tests__/UserProfile.test.js` (38 passed): new test
+  expiry test asserts a sub-hour pending row renders exactly
+  `Expires in 30m` — previously verified to fail with `Expires in
+  1800m` when the division is reverted.
+- `web/src/__tests__/UserProfile.test.js` (38 passed): the test
   asserts one Save click issues exactly one `PUT /users/me` with the
-  edited display name — verified to fail with two calls when
-  `type="button"` is removed.
-- Both suites run via `npx vitest run` after `npm ci` (locked
-  versions); full web suite and `cargo test --all` remain with the
+  edited display name — previously verified to fail with two calls
+  when `type="button"` is removed.
+- Contract-repair round re-ran both suites plus the other task-surface
+  suites (`InvitationAccept`, `InvitationDeclineNavigate`,
+  `NotificationBell`, `NotificationDrawer`, `NotificationSettings`,
+  `PublicUserProfile`, `TenantSettings`, `notifications-store`):
+  224/224 passed via `npx vitest run` with the locked `npm ci`
+  versions; full web suite and `cargo test --all` remain with the
   independent verifier per the build-budget rule.
