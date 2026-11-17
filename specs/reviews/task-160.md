@@ -57,3 +57,69 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+---
+
+## Round 5 — independent review at candidate `da632ff1` (base `9f446d0e`)
+
+Rebase-repair round: the task-160 branch (all prior rounds) rebased onto base
+`9f446d0e` (task-093 Platform Model Orchestrator Lifecycle Protocol), with the
+lib.rs merge conflict (message dispatcher vs scoped emitters) resolved in
+`1e1e3ad3`. Verdict: **approved** — no new material findings on the
+base→candidate diff.
+
+Independently verified on the exact candidate tree (`da632ff1`, worktree clean
+except the controller's task-file baseline restore):
+
+- **All three scripts pass**: `check-hierarchy.sh` exit 0;
+  `check-tenant-filter.sh` exit 0 (124 read methods on tenant-column tables
+  checked, 0 violations; 193 backlog reads on tenant-less tables reported
+  visibly); `check-api-auth.sh` exit 0 (middleware chain + 8 non-ABAC handlers
+  + delegated route-registry check).
+- **Kill sensitivity re-probed on this exact tree** (each mutation restored
+  afterwards): `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming
+  task.rs:60; deleting `Task.workspace_id` entirely → exit 1 (missing-field
+  arm); stripping the tenant predicate from `sqlite/repository.rs::list` →
+  tenant-filter exit 1 with file:line; same on the **postgres** twin
+  (`postgres/repository.rs::list`) → exit 1 (pg dir genuinely scanned);
+  deleting the `/api/v1/workspaces` RouteResourceMapping pair → api-auth
+  exit 1 via the delegated registry check; removing the `abac_middleware`
+  layer from build_router → api-auth Check 1 exit 1.
+- **End-to-end isolation proof holds and is not self-confirming**:
+  `cargo test -p gyre-adapters --test tenant_isolation` → 2 passed; with the
+  tenant predicate stripped from `sqlite/merge_request.rs::find_by_id` BOTH
+  tests fail with exact leak diagnostics (cross-tenant `find_by_id` some;
+  create-stamp invisibility) — the test kills the real bug class.
+- **Rebase conflict resolution is sound**: the base's task-093 content
+  survives (message_dispatcher still wired in main.rs:172-173;
+  signal_chain test-fixture meta-spec seeding intact); the scoped-emitter
+  side survives (`emit_event(Id, …)` + `emit_tenant_event` for the one
+  tenant-scoped broadcast, caller-derived tenant, skip-and-log on
+  unresolvable scope). Mechanical `Some(...)` removals audited across all
+  touched server files — no silent broadcast fallback reintroduced.
+- **Compile/test evidence**: `cargo check -p gyre-adapters` clean;
+  `cargo check -p gyre-server` clean (0 warnings);
+  `cargo test -p gyre-adapters --lib` → 573 passed / 0 failed;
+  `cargo test -p gyre-domain` → 572 passed; tenant_isolation → 2 passed.
+  Enforcement suite green: check-arch, check-scope-literal-defaults,
+  check-fabricated-scope-defaults, check-abac-route-registry,
+  check-abac-exempt-handlers, check-in-memory-state-stores,
+  check-dead-message-kinds, check-migration-versions. No exemption-file
+  entries added (diff touches none).
+- **Wiring**: CI un-advisored for check-api-auth/check-tenant-filter
+  (blocking, no `|| true`); hierarchy blocking with `GYRE_CHECK_HIERARCHY=1`;
+  all three in `.pre-commit-config.yaml` (ids tenant-filter/api-auth/hierarchy).
+  The default-on hierarchy gate with `=0` opt-out is the spec §2 end-state
+  (M34 Slice 3 migration has landed — fields are `Id`), documented in the
+  script header; not a contradiction.
+- **For the verifier** (out of review budget here): `cargo test --all`,
+  in particular `cargo test -p gyre-server` (server test compilation),
+  plus the full pre-commit hook set. Everything reviewed smaller than that
+  is green above.
+
+Evidence: `/tmp/stage/review-evidence/` — check-*-run.txt (clean runs),
+mutation-hierarchy.txt, mutation-tenant-filter.txt (sqlite + pg),
+mutation-api-auth-registry.txt, mutation-api-auth-middleware.txt,
+tenant-isolation-test.txt, tenant-isolation-mutation.txt (kill check),
+server-check.txt, adapters-lib-tests.txt, domain-tests.txt,
+enforcement-suite.txt.
