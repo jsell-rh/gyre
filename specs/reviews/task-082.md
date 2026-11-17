@@ -69,3 +69,78 @@ F1–F5 remain resolved in the current implementation (`064a94fe`) — verified 
 F1–F6 remain resolved at HEAD — verified in code and by test run. Task suites pass: `WorkspaceSidebarSectionNav.test.js` + `WorkspaceHomeSections.test.js` + `WorkspaceHomeArchitecture.test.js` 47 passed / 51 skipped (skips are the pre-existing old-layout suites: Repos/Decisions/Agent Rules/Error handling), `AppShell.test.js` + `Sidebar.test.js` 101/101. Structural verification of the F6 fix (`79323318` + `9561ee86`): `section-briefing`, `section-specs`, and `section-architecture` render unconditionally at workspace scope inside `ws-main-content` (outside any wsTab/conditional guard beyond the `{#if !workspace}` outer guard and the decisions `{:else}` branch); the `archExpandSignal` effect expands the Architecture section and lazily loads the graph without a reactive loop; the ExplorerCanvas is fed `nodes`/`edges` from `api.workspaceGraph`, matching both the component's prop contract and the `KnowledgeGraphResponse` shape; locale keys for all four section headings plus `decisions_empty` (exact docs/ui.md copy) and `show/hide_workspace_graph` are present in `en.json`.
 
 No new findings. Two observations considered and rejected as below the relevance bar: (1) the F6-resolution text attributes the regression tests to `79323318` while the un-skipped test suites actually land in `9561ee86` (both are task-082 commits listed in frontmatter, and the tests do fail against the pre-fix code, so the coverage claim holds); (2) the specs table status cell displays `approval_status ?? status` while the icon lookup keys on `spec.status` alone — the same pattern the tenant-scope twin (`CrossWorkspaceHome.svelte`) uses, so it is consistent with existing code and cosmetic at most.
+## R11 Findings — retargeted rail (ui-navigation.md §1a), candidate `ebe69d67`
+
+Retargeted-contract review (the R1–R10 record above covers the superseded
+HSI §1.3 sidebar deliverable). Candidate `ebe69d67` (base `9f446d0e`) ships
+the retargeted §1a requirement and repairs the two prior rail review rounds:
+F7–F9 (attempt `79201380`) in `0fab4972` and F10 (attempt `805b3a08`) in
+`b508a6f6`. All findings from both rounds are resolved; no new findings.
+
+Repairs verified in code and by probe:
+
+- [x] **F7 (missing `common.settings` i18n key):** `common.settings:
+  "Settings"` added to `web/src/locales/en.json`; a resolved-label regression
+  test (NavRail.test.js "renders resolved i18n labels in the expanded rail
+  and the mobile drawer") asserts the real App label functions produce
+  "Settings" and that no raw key text (`common.`/`topbar.`/`repo_mode.`)
+  surfaces — covering F9's missing-assertion class as well.
+- [x] **F8 (Agent Rules escaped to the sub-page):** the workspace-scope
+  `case 'agent-rules'` in `handleSectionNavigate` now stays on the workspace
+  home and scrolls to `section-agent-rules` (a real §2 section,
+  WorkspaceHome.svelte:1678); NavRail.test.js pins the scroll target via
+  `Element.prototype.scrollIntoView.mock.contexts` and asserts the URL stays
+  at `/workspaces/payments`.
+- [x] **F10 (hand-maintained repo tab mirror):** real single source of truth
+  — new `web/src/lib/repoTabs.js` exports `REPO_TABS`/`REPO_TAB_IDS`;
+  RepoMode renders its tab strip from it, App derives `REPO_RAIL_TAB_IDS`,
+  the narrow-viewport drawer item set, and `parseUrl`'s tab acceptance from
+  the same import (the drifted local `REPO_TABS` parse list is gone, also
+  fixing the pre-existing `dependencies` deep-link misparse). Tests derive
+  expectations from the shared list; RepoMode.test.js asserts the rendered
+  strip order equals `REPO_TAB_IDS` (kills re-hardcoding in RepoMode);
+  AppShell.test.js adds the `dependencies` deep-link drift regression and a
+  strip-completeness parse test.
+
+Independent probe evidence (`/tmp/stage/review-evidence/`):
+
+- `npm ci` (exit 0), then focused suites NavRail + NoSidebar + RepoMode +
+  AppShell: **113/113 passed**
+  (`task-082-focused-tests.log`).
+- Mutation probe 1 — reintroduce the F10 defect (hardcoded drifted
+  `REPO_RAIL_TAB_IDS` without `dependencies`): NavRail repo-rail mirror and
+  AppShell repo-drawer mirror tests **fail** (drift is caught in the
+  direction that matters).
+- Mutation probe 2 — add a hypothetical tab to `lib/repoTabs.js`: RepoMode's
+  strip tripwire fails (explicit 9-tab count + wrap-around tests must be
+  consciously updated) while every derived surface (rail, drawer, deep-link
+  parsing, test expectations) follows the shared list automatically —
+  derivation, not mirroring. Both mutations reverted; tree restored clean.
+- Adjacent navigation suites (WorkspaceDrawerSectionNav, BidirectionalNav,
+  RepoModeHeader, RepoModeHealth, WorkspaceHomeSections): 97 passed /
+  41 skipped (pre-existing skips).
+- Focused-surface audit: Editor Split is reachable only via the full-page
+  DetailPanel (`entityDetail` set → `showNavRail` false) or MetaSpecs
+  (agent_rules mode → no rail); full-screen modals are fixed overlays at
+  z-index 1000 covering the rail; sub-pages (settings/analytics/agent-rules/
+  profile/notification-settings/cross-workspace) never render it. Analytics,
+  removed from the drawer in favor of the §1a mirror item set, stays
+  reachable on narrow viewports via the always-visible topbar
+  `ws-analytics-btn`.
+
+All eight retargeted acceptance criteria verified: rail on workspace home +
+repo mode only (never on focused surfaces); scope-labelled per mode with no
+shared global menu; workspace-home item set = §2 sections in canonical order
++ Settings, repo item set = tab strip exactly (derived); stable per-mode
+ordering; collapsed 48px default / 240px expanded with per-user per-mode
+persistence (`gyre_nav_rail_expanded.<mode>.<user-id>`, first use collapsed);
+all destinations reachable without the rail (dashboard, tab strip, ⌘K,
+g-shortcuts); narrow viewports use the hamburger drawer with the per-mode
+item set and no persistent rail; `docs/ui.md` documents the shipped rail.
+NoSidebar.test.js updated (not deleted) to assert the absence of a
+*permanent* sidebar while distinguishing the optional rail. Spec §1a
+implementation-status note, HSI supersession records, and the coverage
+matrix row 1a are accurate.
+
+Full `npm test`, workspace Rust suites, and web/dist regeneration are owned
+by the independent verifier.
