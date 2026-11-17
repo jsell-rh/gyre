@@ -1911,6 +1911,8 @@ pub(crate) async fn launch_agent_process(
     };
     let prompt_protocol = crate::api::prompts::protocol_prompt().to_string();
     let prompt_context = crate::api::prompts::context_prompt_for_spawn(
+        state,
+        &prompt_scope,
         task,
         repo,
         if ctx.is_interrogation {
@@ -1918,7 +1920,8 @@ pub(crate) async fn launch_agent_process(
         } else {
             Some((req_branch.as_str(), worktree_path.as_str()))
         },
-    );
+    )
+    .await;
     let prompt_constraints = crate::api::prompts::constraints_prompt(state, &prompt_scope).await;
     let prompt_persona = ctx.persona.as_ref().map(|p| p.system_prompt.clone());
 
@@ -2009,6 +2012,26 @@ pub(crate) async fn launch_agent_process(
         // agent-runtime.md §5).
         if let Some(persona_prompt) = &prompt_persona {
             container_env.insert("GYRE_PROMPT_PERSONA".to_string(), persona_prompt.clone());
+        }
+        // Persona attestation (platform-model.md §8: the persona prompt is
+        // served from the approved persona entity — version + content_hash
+        // identify exactly which approved content the agent received, for
+        // downstream attestation/review). `ctx.persona` only ever holds a
+        // persona that resolved fail-closed to Approved at spawn.
+        if let Some(persona) = &ctx.persona {
+            container_env.insert("GYRE_PERSONA_ID".to_string(), persona.id.to_string());
+            container_env.insert(
+                "GYRE_PERSONA_VERSION".to_string(),
+                persona.version.to_string(),
+            );
+            container_env.insert(
+                "GYRE_PERSONA_CONTENT_HASH".to_string(),
+                persona.content_hash.clone(),
+            );
+            container_env.insert(
+                "GYRE_PERSONA_APPROVAL_STATUS".to_string(),
+                format!("{:?}", persona.approval_status),
+            );
         }
         container_env.insert("GYRE_PROMPT_PROTOCOL".to_string(), prompt_protocol.clone());
         container_env.insert("GYRE_PROMPT_CONTEXT".to_string(), prompt_context.clone());
@@ -7115,6 +7138,13 @@ exit 1\n"
         (app, json)
     }
 
+    /// platform-model.md §8 / §4.3: all four system prompts are injected
+    /// at spawn. Note on dev mode (§8 "Dev Mode (No OIDC)"): the spawn
+    /// below authenticates with the server's static global token
+    /// (`test-token` = `state.auth_token`) against a state with
+    /// `jwt_config: None` — exactly the dev-mode server configuration
+    /// (static-token-only auth, no OIDC). Prompt injection is therefore
+    /// proven under the dev-mode auth path, not just OIDC/JWT callers.
     #[tokio::test]
     async fn spawn_injects_all_four_system_prompts_with_persona() {
         let state = test_state();
@@ -7142,6 +7172,41 @@ exit 1\n"
             task.description = Some("Acceptance: all four prompts injected.".to_string());
             state.tasks.update(&task).await.unwrap();
         }
+        // Seed a real workspace budget (config + usage) so the context
+        // prompt's budget snapshot renders real looked-up numbers, not a
+        // hardcoded string (platform-model.md §8: context includes budget
+        // limits — remaining tokens/cost for the day).
+        {
+            let ws_key = crate::api::budget::workspace_key(&ws_id);
+            state
+                .budget_configs
+                .set_config(
+                    &ws_key,
+                    &gyre_domain::BudgetConfig {
+                        max_tokens_per_day: Some(100_000),
+                        max_cost_per_day: Some(10.0),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            state
+                .budget_usages
+                .set_usage(
+                    &ws_key,
+                    &gyre_domain::BudgetUsage {
+                        entity_type: "workspace".to_string(),
+                        entity_id: Id::new(&ws_id),
+                        tokens_used_today: 40_000,
+                        cost_today: 2.5,
+                        active_agents: 1,
+                        period_start: 0,
+                        compute_minutes: 0,
+                    },
+                )
+                .await
+                .unwrap();
+        }
         let (app, ct_id) =
             create_prompt_dump_compute_target(app, "prompt-dump-all", &dump_path).await;
 
@@ -7151,6 +7216,27 @@ exit 1\n"
             "You are the prompt-worker persona.",
         )
         .await;
+        // Bump the persona to a non-trivial version + content hash so the
+        // attestation env vars are observed against real looked-up values,
+        // not constants (platform-model.md §8: persona prompt served from
+        // the approved persona entity, version + content_hash for
+        // attestation).
+        let expected_version;
+        let expected_hash;
+        {
+            let mut persona = state
+                .personas
+                .find_by_id(&Id::new(&persona_id))
+                .await
+                .unwrap()
+                .expect("seeded persona must exist");
+            persona.version = 4;
+            persona.system_prompt = "You are the prompt-worker persona v4.".to_string();
+            persona.refresh_content_hash();
+            expected_version = persona.version;
+            expected_hash = persona.content_hash.clone();
+            state.personas.update(&persona).await.unwrap();
+        }
 
         create_worktree_dir(&state, &ws_id, "wt-repo", "feat/prompts");
         let (_, json) = do_spawn_with_persona(
@@ -7173,8 +7259,32 @@ exit 1\n"
         let env = pod_env_map(&dump);
         assert_eq!(
             env.get("GYRE_PROMPT_PERSONA").map(String::as_str),
-            Some("You are the prompt-worker persona."),
+            Some("You are the prompt-worker persona v4."),
             "persona prompt must be injected verbatim:\n{dump}"
+        );
+        // Persona attestation (platform-model.md §8): version + content_hash
+        // of exactly the approved persona entity whose prompt was injected.
+        assert_eq!(
+            env.get("GYRE_PERSONA_ID").map(String::as_str),
+            Some(persona_id.as_str()),
+            "persona id attestation must be injected:\n{dump}"
+        );
+        assert_eq!(
+            env.get("GYRE_PERSONA_VERSION").map(String::as_str),
+            Some("4"),
+            "persona version attestation must be the looked-up version \
+             (expected {expected_version}):\n{dump}"
+        );
+        assert_eq!(
+            env.get("GYRE_PERSONA_CONTENT_HASH").map(String::as_str),
+            Some(expected_hash.as_str()),
+            "persona content_hash attestation must be the recomputed hash \
+             of the injected prompt:\n{dump}"
+        );
+        assert_eq!(
+            env.get("GYRE_PERSONA_APPROVAL_STATUS").map(String::as_str),
+            Some("Approved"),
+            "persona approval attestation must record the approved status:\n{dump}"
         );
         assert!(
             env.get("GYRE_PROMPT_PROTOCOL")
@@ -7212,6 +7322,21 @@ exit 1\n"
                 .unwrap_or(false),
             "context prompt must carry the worktree branch:\n{dump}"
         );
+        // §8: the context document includes the budget limits — the
+        // snapshot must render the seeded config + usage (real lookups:
+        // 40000 of 100000 tokens, 60000 remaining).
+        assert!(
+            env.get("GYRE_PROMPT_CONTEXT")
+                .map(|p| p.contains("## Budget"))
+                .unwrap_or(false),
+            "context prompt must carry the budget snapshot:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONTEXT")
+                .map(|p| p.contains("40000 used today of 100000 (60000 remaining)"))
+                .unwrap_or(false),
+            "context budget snapshot must render the seeded workspace usage:\n{dump}"
+        );
         assert!(
             env.get("GYRE_PROMPT_CONSTRAINTS")
                 .map(|p| p.starts_with("# Agent Constraints"))
@@ -7223,6 +7348,20 @@ exit 1\n"
                 .map(|p| p.contains(&format!("Workspace: {ws_id}")))
                 .unwrap_or(false),
             "constraints prompt must carry the workspace scope boundary:\n{dump}"
+        );
+        // §8: workspace trust level affects agent autonomy — the fixture
+        // workspace defaults to Supervised.
+        assert!(
+            env.get("GYRE_PROMPT_CONSTRAINTS")
+                .map(|p| p.contains("## Trust Level"))
+                .unwrap_or(false),
+            "constraints prompt must carry the workspace trust level:\n{dump}"
+        );
+        assert!(
+            env.get("GYRE_PROMPT_CONSTRAINTS")
+                .map(|p| p.contains("Workspace trust level: Supervised"))
+                .unwrap_or(false),
+            "constraints prompt must render the workspace's trust level:\n{dump}"
         );
     }
 
@@ -7703,8 +7842,27 @@ exit 1\n"
             "protocol prompt must carry the Ralph loop rules:\n{env_protocol}"
         );
         assert!(
-            env_protocol.contains("agent.complete"),
+            env_protocol.contains("gyre_agent_complete"),
             "protocol prompt must carry completion signaling:\n{env_protocol}"
+        );
+        // platform-model.md §8: the protocol norms include the MCP tool
+        // catalog with usage patterns and the handoff protocol.
+        assert!(
+            env_protocol.contains("## MCP tools"),
+            "protocol prompt must carry the MCP tool catalog:\n{env_protocol}"
+        );
+        assert!(
+            env_protocol.contains("## Handoff protocol"),
+            "protocol prompt must carry the handoff protocol:\n{env_protocol}"
+        );
+        // Single source of truth: GYRE_PROTOCOL_PROMPT and
+        // GYRE_PROMPT_PROTOCOL must carry identical protocol norms.
+        assert_eq!(
+            env_protocol,
+            env.get("GYRE_PROMPT_PROTOCOL").expect(
+                "pod manifest must carry GYRE_PROMPT_PROTOCOL alongside GYRE_PROTOCOL_PROMPT"
+            ),
+            "both protocol env injections must serve the identical protocol norms text"
         );
     }
 
@@ -7799,6 +7957,98 @@ exit 1\n"
         assert!(
             !text.contains("Ralph loop rules"),
             "system://persona must not serve the protocol section:\n{text}"
+        );
+    }
+
+    /// platform-model.md §8 (task-101): the MCP `system://persona` prompt
+    /// carries persona-entity attestation metadata — the bound persona's
+    /// slug, version, content_hash, and approval status — so a consumer can
+    /// attest exactly which approved persona content styles the agent.
+    /// Spawn binds the persona fail-closed (Approved only), so the metadata
+    /// must reflect the looked-up persona row, not a fabricated identity.
+    #[tokio::test]
+    async fn mcp_persona_prompt_carries_bound_persona_attestation() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Persona attestation task").await;
+
+        let persona_id =
+            seed_spawn_persona(&state, "attest-worker", "You are the attestation persona.").await;
+        // Non-trivial version + refreshed hash: the attested values must be
+        // looked up from the persona row, not constants.
+        let expected_hash = {
+            let mut persona = state
+                .personas
+                .find_by_id(&Id::new(&persona_id))
+                .await
+                .unwrap()
+                .expect("seeded persona must exist");
+            persona.version = 7;
+            persona.system_prompt = "You are the attestation persona v7.".to_string();
+            persona.refresh_content_hash();
+            let hash = persona.content_hash.clone();
+            state.personas.update(&persona).await.unwrap();
+            hash
+        };
+
+        let (_app, spawn_json) = do_spawn_with_persona(
+            app,
+            "worker-attest",
+            &repo_id,
+            &task_id,
+            "feat/attest",
+            None,
+            "attest-worker",
+        )
+        .await;
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        // Fetch the persona prompt AS the spawned agent (same router-sharing
+        // pattern as mcp_persona_prompt_serves_meta_spec_section_only).
+        let resp = crate::build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {agent_token}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 92,
+                            "method": "prompts/get",
+                            "params": { "name": "system://persona" }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let meta = &json["result"]["metadata"]["persona"];
+        assert_eq!(
+            meta["slug"].as_str(),
+            Some("attest-worker"),
+            "persona attestation must carry the bound persona's slug: {meta}"
+        );
+        assert_eq!(
+            meta["version"].as_u64(),
+            Some(7),
+            "persona attestation must carry the looked-up version: {meta}"
+        );
+        assert_eq!(
+            meta["content_hash"].as_str(),
+            Some(expected_hash.as_str()),
+            "persona attestation must carry the recomputed content_hash: {meta}"
+        );
+        assert_eq!(
+            meta["approval_status"].as_str(),
+            Some("Approved"),
+            "persona attestation must record the approved status: {meta}"
         );
     }
 
