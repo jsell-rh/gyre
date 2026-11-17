@@ -52,7 +52,10 @@ pub struct PatrolFinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     /// Workspace the finding belongs to — routes orchestrator escalation.
-    /// `None` means the scope is unknown and the escalation must broadcast.
+    /// `None` means the scope is unknown: the escalation is skipped and
+    /// logged, never emitted under a fabricated scope (the scoped
+    /// `AppState::emit_event` contract resolves the tenant from the
+    /// workspace record and has no scope-less broadcast path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
 }

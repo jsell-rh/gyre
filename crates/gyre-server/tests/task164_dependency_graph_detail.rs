@@ -36,9 +36,15 @@ async fn graph_edges_carry_version_and_breaking_change_detail() {
     let state = build_state("task164-token", "http://127.0.0.1:1", None);
 
     // Workspace with two repos: app depends on lib.
+    // Seed workspaces under the tenant the build_state SQLite handle is
+    // scoped to ("default"): per hierarchy-enforcement.md §3, the workspace
+    // store's id lookups verify tenant, so a row filed under another tenant
+    // is invisible to the scoped handler (same convention as
+    // search_wiring.rs). The repo rows created through this handle are
+    // scoped to "default" the same way.
     let ws = Workspace::new(
         Id::new("ws-1"),
-        Id::new("tenant-1"),
+        Id::new("default"),
         "Graph WS",
         "graph-ws",
         1,
@@ -164,7 +170,7 @@ async fn graph_edges_carry_version_and_breaking_change_detail() {
     // A workspace with no dependency edges returns an empty graph.
     let ws2 = Workspace::new(
         Id::new("ws-2"),
-        Id::new("tenant-1"),
+        Id::new("default"),
         "Empty WS",
         "empty-ws",
         1,
