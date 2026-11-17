@@ -1907,11 +1907,17 @@ mod tests {
             )
         };
 
-        // A tenant Developer with NO workspace membership: 403.
+        // A tenant Developer with NO workspace membership: 403. The JWT
+        // carries the workspace's tenant ("t1") — the doc contract maps an
+        // absent claim to the bootstrapped "default" tenant, and a
+        // cross-tenant caller is contained earlier (404, existence not
+        // confirmed), which would never reach the trust gate this test
+        // exists to exercise.
         let dev_jwt = sign_test_jwt(
             &serde_json::json!({
                 "sub": "trust-gate-dev",
                 "preferred_username": "trust-gate-dev",
+                "tenant_id": "t1",
                 "realm_access": { "roles": ["developer"] }
             }),
             3600,
@@ -2020,6 +2026,7 @@ mod tests {
             &serde_json::json!({
                 "sub": "trust-gate-admin-sub",
                 "preferred_username": "trust-gate-admin",
+                "tenant_id": "t1",
                 "realm_access": { "roles": ["developer"] }
             }),
             3600,
