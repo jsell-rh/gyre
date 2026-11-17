@@ -18,7 +18,9 @@
 //! release metadata), so a release artifact and the standalone AIBOM can
 //! never disagree about spec provenance.
 
-use gyre_domain::{ApprovalStatus, MergeRequest, MrStatus, Repository, SpecLedgerEntry};
+use gyre_domain::{
+    ApprovalStatus, MergeRequest, MrStatus, Repository, SpecApproval, SpecLedgerEntry,
+};
 use serde::Serialize;
 
 use crate::AppState;
@@ -110,10 +112,15 @@ pub struct AibomSpecCodeBinding {
     /// whose record no longer retains the merge moment.
     pub merged_at: Option<u64>,
     /// Whether the pinned spec version had an active approval at merge
-    /// time (the exact check `verify_spec_ref` performs when the merge
-    /// gate runs). `Some(true)`/`Some(false)` for Merged MRs with a pinned
-    /// SHA; `None` when merge-time approval cannot be determined (MR not
-    /// merged, merged-then-reverted, or no pinned version).
+    /// time (the check `verify_spec_ref` performs when the merge gate
+    /// runs). `Some(true)` when a ledger row was determinably active at
+    /// the merge moment; `Some(false)` when the rows determinably show no
+    /// active approval then (granted after the merge, or withdrawn at or
+    /// before it); `None` when it cannot be determined (MR not merged,
+    /// merged-then-reverted, no pinned version, or the relevant approvals
+    /// were withdrawn AFTER the merge — withdrawal clears `approved_at`
+    /// (mutual exclusivity), so a post-merge withdrawal leaves no record
+    /// of whether the grant preceded the merge).
     pub approved_at_merge_time: Option<bool>,
 }
 
@@ -296,20 +303,17 @@ async fn build_code_bindings(
         };
 
         // Merge-time approval: the same per-SHA ledger the merge gate checks
-        // (`verify_spec_ref`). An approval counts when it was granted at or
-        // before the merge and was not withdrawn (revoked/rejected) at or
-        // before the merge — i.e. it was active at the moment the gate ran.
+        // (`verify_spec_ref`), evaluated three-valued — see
+        // `merge_time_approval`. Withdrawal (revoked/rejected) clears
+        // `approved_at` on the ledger row, so a withdrawal AFTER the merge
+        // makes merge-time approval indeterminable rather than false.
         let approved_at_merge_time = match (mr.status, merged_at, spec_sha.as_str()) {
             (MrStatus::Merged, Some(merged_ts), sha) if !sha.is_empty() => {
                 let rows = state
                     .spec_approvals
                     .find_by_spec_sha(&spec_path, sha)
                     .await?;
-                Some(rows.iter().any(|a| {
-                    a.approved_at.map(|t| t <= merged_ts).unwrap_or(false)
-                        && a.revoked_at.map(|t| t > merged_ts).unwrap_or(true)
-                        && a.rejected_at.map(|t| t > merged_ts).unwrap_or(true)
-                }))
+                merge_time_approval(&rows, merged_ts)
             }
             _ => None,
         };
@@ -335,6 +339,58 @@ fn mr_status_label(status: &MrStatus) -> &'static str {
         MrStatus::Merged => "merged",
         MrStatus::Closed => "closed",
         MrStatus::Reverted => "reverted",
+    }
+}
+
+/// Evaluate whether any ledger row was active for the pinned spec version
+/// at the merge moment — three-valued:
+///
+/// - `Some(true)` — some row was determinably active at `merged_ts`
+///   (granted at or before it, and not withdrawn at or before it);
+/// - `Some(false)` — the rows determinably show no active approval then
+///   (every row was granted after the merge, withdrawn at or before it,
+///   or never approved);
+/// - `None` — indeterminable.
+///
+/// Why `None` exists: `SpecApproval::revoke()`/`reject()` clear
+/// `approved_at` (mutual exclusivity, gyre-domain/src/spec_approval.rs), so
+/// a row withdrawn AFTER the merge retains no grant time — it may have
+/// been active when the gate ran (granted before, withdrawn after) or
+/// never active (granted after the merge, then withdrawn). Reporting
+/// `Some(false)` there would misreport every MR pinned to a spec version
+/// whose approval was later withdrawn — the systematic case, since every
+/// push that modifies a spec file auto-revokes that path's approvals
+/// (git_http.rs), and `POST /specs/:path/revoke` exists. A withdrawn row
+/// proves non-approval at merge only when the withdrawal itself happened
+/// at or before the merge (granted ≤ withdrawn ≤ merged).
+fn merge_time_approval(rows: &[SpecApproval], merged_ts: u64) -> Option<bool> {
+    let mut indeterminate = false;
+    for a in rows {
+        // Withdrawn row: the withdrawal timestamp is the only evidence
+        // left (the transition cleared approved_at).
+        if let Some(withdrawn_at) = a.revoked_at.or(a.rejected_at) {
+            if withdrawn_at > merged_ts {
+                // Withdrawn after the merge: grant time unknown — this row
+                // may or may not have been active when the gate ran.
+                indeterminate = true;
+            }
+            // Withdrawn at or before the merge: granted ≤ withdrawn ≤
+            // merged_ts, so this row was not active at the merge —
+            // determinably false; keep scanning the other rows.
+            continue;
+        }
+        // Active or pending row: approved_at carries the grant time.
+        match a.approved_at {
+            Some(granted_at) if granted_at <= merged_ts => return Some(true),
+            // Granted after the merge, or never granted (pending): not
+            // active at the merge — determinably false for this row.
+            _ => continue,
+        }
+    }
+    if indeterminate {
+        None
+    } else {
+        Some(false)
     }
 }
 
@@ -676,6 +732,75 @@ mod tests {
         reverted.revert("r".repeat(40), 3000).unwrap();
         state.merge_requests.update(&reverted).await.unwrap();
 
+        // mr-8: approved at t=900, merged at t=1000, revoked at t=2000
+        // (AFTER the merge — the systematic case: every push that modifies
+        // the spec file auto-revokes its approvals). The approval WAS
+        // active when the merge gate ran, but revoke() clears approved_at
+        // (mutual exclusivity), so the grant time is gone from the row and
+        // merge-time approval is indeterminable — it must NOT be reported
+        // as Some(false).
+        let v6 = sha(6);
+        let mut m8 = mr("repo-b", 8);
+        m8.spec_ref = Some(format!("{path}@{v6}"));
+        state.merge_requests.create(&m8).await.unwrap();
+        let row8 = seed_sha_approval(&state, path, &v6, 900).await;
+        merge_mr(&state, m8, 1000).await;
+        state
+            .spec_approvals
+            .revoke(&row8, "user:alice", "spec superseded", 2000)
+            .await
+            .expect("revoke transition");
+
+        // mr-9: same shape via the reject path — approved at t=900,
+        // merged at t=1000, rejected at t=2000 → indeterminable (None).
+        let v7 = sha(7);
+        let mut m9 = mr("repo-b", 9);
+        m9.spec_ref = Some(format!("{path}@{v7}"));
+        state.merge_requests.create(&m9).await.unwrap();
+        let row9 = seed_sha_approval(&state, path, &v7, 900).await;
+        merge_mr(&state, m9, 1000).await;
+        state
+            .spec_approvals
+            .reject(&row9, "user:alice", "declined after review", 2000)
+            .await
+            .expect("reject transition");
+
+        // mr-10: two rows for the same version — one still-active approval
+        // granted at t=800 (before the merge) and one granted at t=900
+        // then revoked at t=2000 (after the merge). The active row
+        // determinably proves merge-time approval: Some(true) wins over
+        // the indeterminate withdrawn row.
+        let v8 = sha(8);
+        let mut m10 = mr("repo-b", 10);
+        m10.spec_ref = Some(format!("{path}@{v8}"));
+        state.merge_requests.create(&m10).await.unwrap();
+        seed_sha_approval(&state, path, &v8, 800).await;
+        let row10 = seed_sha_approval(&state, path, &v8, 900).await;
+        merge_mr(&state, m10, 1000).await;
+        state
+            .spec_approvals
+            .revoke(&row10, "user:alice", "superseded by earlier approval", 2000)
+            .await
+            .expect("revoke transition");
+
+        // mr-11: one row granted at t=1100 (after the merge, still active —
+        // determinably not active at merge) and one withdrawn at t=2000
+        // (after the merge, grant time unknown). No row proves activity at
+        // the merge, and the withdrawn row leaves it undecidable → None,
+        // not Some(false).
+        let v9 = sha(9);
+        let mut m11 = mr("repo-b", 11);
+        m11.spec_ref = Some(format!("{path}@{v9}"));
+        state.merge_requests.create(&m11).await.unwrap();
+        seed_sha_approval(&state, path, &v9, 1100).await;
+        let row11 = seed_sha_approval(&state, path, &v9, 900).await;
+        merge_mr(&state, m11, 1000).await;
+        state
+            .spec_approvals
+            .revoke(&row11, "user:alice", "superseded", 2000)
+            .await
+            .expect("revoke transition");
+
         let section = build_spec_registry_section(&state, &repo).await.unwrap();
 
         let b1 = binding_for(&section, "mr-1");
@@ -713,9 +838,34 @@ mod tests {
             "merged-then-reverted MR must not be evaluated against the revert timestamp"
         );
 
-        assert_eq!(section.bindings_summary.total, 5);
-        assert_eq!(section.bindings_summary.merged, 4);
-        assert_eq!(section.bindings_summary.approved_at_merge_time, 1);
+        let b8 = binding_for(&section, "mr-8");
+        assert_eq!(
+            b8.approved_at_merge_time, None,
+            "approval granted before the merge but revoked AFTER it is indeterminable, not Some(false)"
+        );
+
+        let b9 = binding_for(&section, "mr-9");
+        assert_eq!(
+            b9.approved_at_merge_time, None,
+            "approval granted before the merge but rejected AFTER it is indeterminable, not Some(false)"
+        );
+
+        let b10 = binding_for(&section, "mr-10");
+        assert_eq!(
+            b10.approved_at_merge_time,
+            Some(true),
+            "a still-active approval granted before the merge proves merge-time approval even when a sibling row was withdrawn after the merge"
+        );
+
+        let b11 = binding_for(&section, "mr-11");
+        assert_eq!(
+            b11.approved_at_merge_time, None,
+            "no determinable active-at-merge row plus a post-merge withdrawal is indeterminable, not Some(false)"
+        );
+
+        assert_eq!(section.bindings_summary.total, 9);
+        assert_eq!(section.bindings_summary.merged, 8);
+        assert_eq!(section.bindings_summary.approved_at_merge_time, 2);
     }
 
     #[tokio::test]
