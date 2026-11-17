@@ -197,3 +197,103 @@ describe('api.js — auth header', () => {
     expect(body).not.toHaveProperty('project_id');
   });
 });
+
+
+describe('api.js — invitation + role management surface (task-127)', () => {
+  const TOKEN = 'ab'.repeat(32);
+
+  function lastCall() {
+    return global.fetch.mock.calls[global.fetch.mock.calls.length - 1];
+  }
+
+  it('invitationPreview() GETs /invite/{token}/preview WITHOUT an Authorization header', async () => {
+    setAuthToken('some-session-token');
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ kind: 'tenant' }) })
+    );
+    await api.invitationPreview(TOKEN);
+    const [url, options] = lastCall();
+    expect(url).toBe(`/api/v1/invite/${TOKEN}/preview`);
+    expect(options.method).toBeUndefined();
+    // The magic-link token is the auth factor: a logged-in session's
+    // Bearer identity must not ride along (the server rejects a
+    // mismatched authenticated invitee).
+    expect(options.headers['Authorization']).toBeUndefined();
+  });
+
+  it('acceptTenantInvitationByToken() POSTs the token accept without a Bearer header', async () => {
+    setAuthToken('some-session-token');
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ user_id: 'u1' }) })
+    );
+    await api.acceptTenantInvitationByToken(TOKEN, { username: 'alice' });
+    const [url, options] = lastCall();
+    expect(url).toBe(`/api/v1/invite/${TOKEN}/accept`);
+    expect(options.method).toBe('POST');
+    expect(options.headers['Authorization']).toBeUndefined();
+    expect(JSON.parse(options.body)).toEqual({ username: 'alice' });
+  });
+
+  it('declineWorkspaceInvitationByToken() POSTs the workspace token decline without a Bearer header', async () => {
+    setAuthToken('some-session-token');
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) })
+    );
+    await api.declineWorkspaceInvitationByToken(TOKEN);
+    const [url, options] = lastCall();
+    expect(url).toBe(`/api/v1/workspaces/invitations/${TOKEN}/decline`);
+    expect(options.method).toBe('POST');
+    expect(options.headers['Authorization']).toBeUndefined();
+  });
+
+  it('tenantInvitations() lists with an optional status filter and a Bearer header', async () => {
+    setAuthToken('admin-token');
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ invitations: [] }) })
+    );
+    await api.tenantInvitations('Pending');
+    const [url, options] = lastCall();
+    expect(url).toBe('/api/v1/tenant/invitations?status=Pending');
+    expect(options.headers['Authorization']).toBe('Bearer admin-token');
+    await api.tenantInvitations();
+    expect(lastCall()[0]).toBe('/api/v1/tenant/invitations');
+  });
+
+  it('inviteToTenant() and bulkInviteToTenant() POST their payloads', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ id: 'i1' }) })
+    );
+    await api.inviteToTenant({ email: 'a@example.com', role: 'Member' });
+    let [url, options] = lastCall();
+    expect(url).toBe('/api/v1/tenant/invite');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({ email: 'a@example.com', role: 'Member' });
+
+    await api.bulkInviteToTenant({ invitations: [{ email: 'b@example.com' }] });
+    [url, options] = lastCall();
+    expect(url).toBe('/api/v1/tenant/invite/bulk');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({ invitations: [{ email: 'b@example.com' }] });
+  });
+
+  it('revokeTenantInvitation() DELETEs by id', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) })
+    );
+    await api.revokeTenantInvitation('inv-42');
+    const [url, options] = lastCall();
+    expect(url).toBe('/api/v1/tenant/invitations/inv-42');
+    expect(options.method).toBe('DELETE');
+  });
+
+  it('updateUserGlobalRole() PUTs the GlobalRole to /users/{id}/role', async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ id: 'u-1' }) })
+    );
+    await api.updateUserGlobalRole('u-1', { role: 'TenantAdmin', reason: 'promotion' });
+    const [url, options] = lastCall();
+    expect(url).toBe('/api/v1/users/u-1/role');
+    expect(options.method).toBe('PUT');
+    expect(JSON.parse(options.body)).toEqual({ role: 'TenantAdmin', reason: 'promotion' });
+  });
+});
