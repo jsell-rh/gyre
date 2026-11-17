@@ -112,7 +112,7 @@ impl TenantMetaSpecSetRepository for SqliteStorage {
         tokio::task::spawn_blocking(move || -> Result<Option<String>> {
             let mut conn = pool.get().context("get db connection")?;
             let result = tenant_meta_spec_sets::table
-                .find(tid.as_str())
+                .filter(tenant_meta_spec_sets::tenant_id.eq(tid.as_str()))
                 .first::<TenantMetaSpecSetRow>(&mut *conn)
                 .optional()
                 .context("find tenant_meta_spec_set by tenant_id")?;

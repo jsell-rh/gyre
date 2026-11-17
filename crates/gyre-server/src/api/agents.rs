@@ -140,7 +140,7 @@ pub async fn create_agent(
     crate::search_indexer::index(&state, crate::search_indexer::agent_document(&agent)).await;
     state
         .emit_event(
-            Some(agent.workspace_id.clone()),
+            agent.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(agent.workspace_id.clone()),
             gyre_common::message::MessageKind::AgentCreated,
             Some(serde_json::json!({"agent_id": agent.id.to_string()})),
@@ -303,7 +303,7 @@ pub async fn update_agent_status(
     }
     state
         .emit_event(
-            Some(agent.workspace_id.clone()),
+            agent.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(agent.workspace_id.clone()),
             gyre_common::message::MessageKind::AgentStatusChanged,
             Some(serde_json::json!({"agent_id": agent.id.to_string(), "status": req.status})),

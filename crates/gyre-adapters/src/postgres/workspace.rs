@@ -144,10 +144,13 @@ impl WorkspaceRepository for PgStorage {
     async fn find_by_id(&self, id: &Id) -> Result<Option<Workspace>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Workspace>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: id lookups must verify tenant.
             let result = workspaces::table
                 .find(id.as_str())
+                .filter(workspaces::tenant_id.eq(&tenant))
                 .first::<WorkspaceRow>(&mut *conn)
                 .optional()
                 .context("find workspace by id")?;
@@ -158,9 +161,11 @@ impl WorkspaceRepository for PgStorage {
 
     async fn list(&self) -> Result<Vec<Workspace>> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Workspace>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = workspaces::table
+                .filter(workspaces::tenant_id.eq(&tenant))
                 .order(workspaces::created_at.asc())
                 .load::<WorkspaceRow>(&mut *conn)
                 .context("list workspaces")?;

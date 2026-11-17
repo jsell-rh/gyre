@@ -100,10 +100,13 @@ impl SavedViewRepository for SqliteStorage {
     async fn get(&self, id: &Id) -> Result<Option<SavedView>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<SavedView>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: id lookups must verify tenant.
             let result = saved_views::table
                 .find(id.as_str())
+                .filter(saved_views::tenant_id.eq(&tenant))
                 .first::<SavedViewRow>(&mut *conn)
                 .optional()
                 .context("find saved view by id")?;
@@ -115,9 +118,11 @@ impl SavedViewRepository for SqliteStorage {
     async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<SavedView>> {
         let pool = Arc::clone(&self.pool);
         let rid = repo_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<SavedView>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = saved_views::table
+                .filter(saved_views::tenant_id.eq(&tenant))
                 .filter(saved_views::repo_id.eq(rid.as_str()))
                 .order(saved_views::created_at.asc())
                 .load::<SavedViewRow>(&mut *conn)
@@ -130,9 +135,11 @@ impl SavedViewRepository for SqliteStorage {
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<SavedView>> {
         let pool = Arc::clone(&self.pool);
         let wid = workspace_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<SavedView>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = saved_views::table
+                .filter(saved_views::tenant_id.eq(&tenant))
                 .filter(saved_views::workspace_id.eq(wid.as_str()))
                 .order(saved_views::created_at.asc())
                 .load::<SavedViewRow>(&mut *conn)
