@@ -645,37 +645,75 @@ impl AppState {
     /// `emit_reconciliation_completed`): a message carrying a fabricated
     /// tenant re-targets delivery to whatever scope the id happens to
     /// collide with.
-    async fn message_tenant_id(&self, workspace_id: Option<&Id>) -> Option<Id> {
-        match workspace_id {
-            Some(wid) => match self.workspaces.find_by_id(wid).await {
-                Ok(Some(ws)) => Some(ws.tenant_id),
-                Ok(None) => {
-                    tracing::warn!(
-                        workspace_id = %wid,
-                        "emit: workspace not found; skipping message (cannot resolve tenant scope)"
-                    );
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        workspace_id = %wid,
-                        error = %e,
-                        "emit: failed to resolve workspace tenant; skipping message"
-                    );
-                    None
-                }
-            },
-            // Broadcast messages have no workspace; server-originated
-            // broadcasts carry the documented default-tenant scope
-            // (message-bus.md auth-context table).
-            None => Some(Id::new(auth::system_principal_tenant())),
+    async fn message_tenant_id(&self, workspace_id: &Id) -> Option<Id> {
+        match self.workspaces.find_by_id(workspace_id).await {
+            Ok(Some(ws)) => Some(ws.tenant_id),
+            Ok(None) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    "emit: workspace not found; skipping message (cannot resolve tenant scope)"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace_id = %workspace_id,
+                    error = %e,
+                    "emit: failed to resolve workspace tenant; skipping message"
+                );
+                None
+            }
         }
     }
 
     /// Emit an Event-tier server-originated message: sign, persist, broadcast to WS clients,
     /// and dispatch to consumers. Best-effort: logs errors, never panics.
+    ///
+    /// The message's tenant is resolved from the workspace record — a
+    /// server-originated message never rides a fabricated scope identity. If
+    /// the owning tenant cannot be resolved, the message is dropped with a
+    /// warning (skip-and-log, per the task-099 F1 remediation direction).
     pub async fn emit_event(
         &self,
+        workspace_id: Id,
+        to: Destination,
+        kind: MessageKind,
+        payload: Option<serde_json::Value>,
+    ) {
+        // F1: tenant scope resolved from the workspace record, never a
+        // fabricated literal (skip-and-log on unresolvable).
+        let Some(tenant_id) = self.message_tenant_id(&workspace_id).await else {
+            return;
+        };
+        self.emit_scoped_event(tenant_id, Some(workspace_id), to, kind, payload)
+            .await;
+    }
+
+    /// Emit an Event-tier server-originated message scoped to a tenant whose
+    /// Id the caller already holds (tenant-level domain events such as the
+    /// tenant meta-spec set update). The scope is known by construction —
+    /// derived from the authenticated caller's tenant in the handler — so it
+    /// is carried directly instead of being derived from a workspace record;
+    /// it is never fabricated. The message has no single workspace audience
+    /// (`workspace_id: None`): the audience (the tenant's workspaces) is
+    /// enumerated by the consumers of the event, not by this emitter.
+    pub async fn emit_tenant_event(
+        &self,
+        tenant_id: Id,
+        to: Destination,
+        kind: MessageKind,
+        payload: Option<serde_json::Value>,
+    ) {
+        self.emit_scoped_event(tenant_id, None, to, kind, payload)
+            .await;
+    }
+
+    /// Shared body of the Event-tier emitters: build, sign, persist
+    /// (non-Broadcast), broadcast to WS clients, and dispatch to consumers.
+    /// Best-effort: logs errors, never panics.
+    async fn emit_scoped_event(
+        &self,
+        tenant_id: Id,
         workspace_id: Option<Id>,
         to: Destination,
         kind: MessageKind,
@@ -687,12 +725,6 @@ impl AppState {
             .unwrap_or_default()
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
-
-        // F1: tenant scope resolved from the workspace record, never a
-        // fabricated literal (skip-and-log on unresolvable).
-        let Some(tenant_id) = self.message_tenant_id(workspace_id.as_ref()).await else {
-            return;
-        };
 
         let mut msg = Message {
             id,
@@ -760,7 +792,7 @@ impl AppState {
         let id = Id::new(uuid::Uuid::new_v4().to_string());
 
         // F1: tenant scope resolved from the workspace record.
-        let Some(tenant_id) = self.message_tenant_id(Some(&workspace_id)).await else {
+        let Some(tenant_id) = self.message_tenant_id(&workspace_id).await else {
             return;
         };
 
@@ -1856,7 +1888,7 @@ pub async fn emit_reconciliation_completed(
 ) {
     state
         .emit_event(
-            Some(workspace_id.clone()),
+            workspace_id.clone(),
             Destination::Workspace(workspace_id),
             MessageKind::ReconciliationCompleted,
             payload,

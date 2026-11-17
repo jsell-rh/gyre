@@ -1355,13 +1355,19 @@ mod tests {
         .iter()
         .enumerate()
         {
+            // Tenant must match the storage handle's scope (setup() opens
+            // the base handle, whose documented scope is "default") —
+            // notification reads filter by the handle's tenant
+            // (hierarchy-enforcement.md §3), so a mismatched fixture tenant
+            // would make the row invisible to list_for_user/count_unresolved
+            // and assert the wrong thing (0 instead of 3).
             let n = Notification::new(
                 Id::new(format!("n{i}")),
                 Id::new("ws1"),
                 u.id.clone(),
                 t.clone(),
                 "t",
-                "t1",
+                "default",
                 1000 + i as i64,
             );
             NotificationRepository::create(&s, &n).await.unwrap();

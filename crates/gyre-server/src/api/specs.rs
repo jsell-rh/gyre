@@ -904,46 +904,49 @@ pub async fn approve_spec(
             // This is the single trigger for all agent work via the signal chain:
             // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
             // Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
+            // A ledger entry without a workspace scope cannot be targeted
+            // safely: the event is skipped (and logged), never broadcast
+            // under a fabricated tenant identity. The signal chain mirrors
+            // this — on_spec_approved routes nothing without a workspace.
             if prior_status != ApprovalStatus::Approved
                 && entry.approval_status == ApprovalStatus::Approved
             {
-                let dest = match entry.workspace_id.as_deref() {
-                    Some(ws_id) => {
-                        gyre_common::message::Destination::Workspace(gyre_common::Id::new(ws_id))
-                    }
-                    None => gyre_common::message::Destination::Broadcast,
-                };
-                let payload = serde_json::json!({
-                    "repo_id": entry.repo_id,
-                    "spec_path": spec_path,
-                    "spec_sha": req.sha,
-                    "approved_by": event.approver_id,
-                    "approval_id": event.id,
-                    // workspace_id is consumed by the server-side signal chain
-                    // (not part of the spec'd bus payload — the bus destination
-                    // already carries it) to scope the orchestrator registry.
-                    "workspace_id": entry.workspace_id,
-                });
-                state
-                    .emit_event(
-                        entry
-                            .workspace_id
-                            .as_ref()
-                            .map(|ws| gyre_common::Id::new(ws.as_str())),
-                        dest,
-                        gyre_common::message::MessageKind::SpecApproved,
-                        Some(payload.clone()),
-                    )
-                    .await;
+                if let Some(ws_id) = entry.workspace_id.as_deref() {
+                    let ws = gyre_common::Id::new(ws_id);
+                    let payload = serde_json::json!({
+                        "repo_id": entry.repo_id,
+                        "spec_path": spec_path,
+                        "spec_sha": req.sha,
+                        "approved_by": event.approver_id,
+                        "approval_id": event.id,
+                        // workspace_id is consumed by the server-side signal chain
+                        // (not part of the spec'd bus payload — the bus destination
+                        // already carries it) to scope the orchestrator registry.
+                        "workspace_id": entry.workspace_id,
+                    });
+                    state
+                        .emit_event(
+                            ws.clone(),
+                            gyre_common::message::Destination::Workspace(ws),
+                            gyre_common::message::MessageKind::SpecApproved,
+                            Some(payload.clone()),
+                        )
+                        .await;
 
-                // Task-115 (agent-runtime.md §1 Phases 1–3): intercept the
-                // workspace-destined SpecApproved signal server-side and route
-                // it through the orchestrator registry — ensure exactly one
-                // active workspace orchestrator, deliver the message to its
-                // inbox, and run its cross-repo delegation processing. Internal
-                // server mechanism, not a message bus feature (the bus message
-                // above is unaffected).
-                crate::signal_chain::on_spec_approved(&state, &payload).await;
+                    // Task-115 (agent-runtime.md §1 Phases 1–3): intercept the
+                    // workspace-destined SpecApproved signal server-side and route
+                    // it through the orchestrator registry — ensure exactly one
+                    // active workspace orchestrator, deliver the message to its
+                    // inbox, and run its cross-repo delegation processing. Internal
+                    // server mechanism, not a message bus feature (the bus message
+                    // above is unaffected).
+                    crate::signal_chain::on_spec_approved(&state, &payload).await;
+                } else {
+                    tracing::warn!(
+                        "spec approval: ledger entry {spec_path} has no workspace \
+                         scope; skipping SpecApproved event"
+                    );
+                }
             }
         }
     }
@@ -969,29 +972,32 @@ pub async fn approve_spec(
                     target_entry.updated_at = now;
                     let _ = state.spec_ledger.save(&target_entry).await;
 
-                    // Emit deprecation event on the message bus.
-                    let dest = match target_entry.workspace_id.as_deref() {
-                        Some(ws_id) => gyre_common::message::Destination::Workspace(
-                            gyre_common::Id::new(ws_id),
-                        ),
-                        None => gyre_common::message::Destination::Broadcast,
-                    };
-                    state
-                        .emit_event(
-                            target_entry
-                                .workspace_id
-                                .as_ref()
-                                .map(|ws| gyre_common::Id::new(ws.as_str())),
-                            dest,
-                            gyre_common::message::MessageKind::StaleSpecWarning,
-                            Some(serde_json::json!({
-                                "type": "spec_deprecated",
-                                "spec_path": link.target_path,
-                                "superseded_by": spec_path,
-                                "deprecated_at": now,
-                            })),
-                        )
-                        .await;
+                    // Emit deprecation event on the message bus. Skipped (and
+                    // logged) when the target entry has no workspace scope —
+                    // never broadcast under a fabricated tenant identity.
+                    if let Some(ws_id) = target_entry.workspace_id.as_deref() {
+                        state
+                            .emit_event(
+                                gyre_common::Id::new(ws_id),
+                                gyre_common::message::Destination::Workspace(gyre_common::Id::new(
+                                    ws_id,
+                                )),
+                                gyre_common::message::MessageKind::StaleSpecWarning,
+                                Some(serde_json::json!({
+                                    "type": "spec_deprecated",
+                                    "spec_path": link.target_path,
+                                    "superseded_by": spec_path,
+                                    "deprecated_at": now,
+                                })),
+                            )
+                            .await;
+                    } else {
+                        tracing::warn!(
+                            "spec-links: ledger entry {} has no workspace \
+                             scope; skipping deprecation event",
+                            link.target_path
+                        );
+                    }
 
                     tracing::info!(
                         source = %spec_path,
@@ -1503,10 +1509,12 @@ pub async fn reject_spec(
                     // stop path (review F3).
                     crate::secret_rotation::revoke_agent_task_secrets(&state, &agent).await;
 
-                    // Send shutdown message to agent's inbox.
+                    // Send shutdown message to agent's inbox. The message is
+                    // scoped to the cancelled task's workspace — the agent's
+                    // scope, never a fabricated identity.
                     state
                         .emit_event(
-                            None,
+                            task.workspace_id.clone(),
                             gyre_common::message::Destination::Agent(agent.id.clone()),
                             gyre_common::message::MessageKind::StatusUpdate,
                             Some(serde_json::json!({
@@ -1526,9 +1534,10 @@ pub async fn reject_spec(
     // workspace Admin/Developer members.
     if let Some(ws_id) = &entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
-        // Resolve the tenant from the workspace record — never fabricate a
-        // "default" tenant identity on lookup failure (task-097 F3). If the
-        // scope cannot be determined, skip the notification fanout and log.
+        // Resolve tenant_id from the workspace's real scope row (§Access
+        // Scoping). A lookup failure means the scope cannot be determined —
+        // skip the fanout and log; never fabricate a "default" tenant
+        // (task-097 F3), which silently re-targets the notification.
         match state.workspaces.find_by_id(&ws_id).await {
             Ok(Some(ws)) => {
                 if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
@@ -1553,10 +1562,12 @@ pub async fn reject_spec(
                 }
             }
             Ok(None) => {
-                tracing::warn!("spec_reject: workspace {ws_id} not found; skipping notifications");
+                tracing::warn!(
+                    "spec rejected fanout: workspace {ws_id} not found; skipping notifications"
+                );
             }
             Err(e) => {
-                tracing::warn!("spec_reject: failed to resolve workspace tenant for {ws_id}: {e}");
+                tracing::warn!("spec rejected fanout: failed to resolve workspace tenant: {e}");
             }
         }
     }

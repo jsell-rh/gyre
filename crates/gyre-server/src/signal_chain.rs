@@ -227,7 +227,7 @@ pub async fn on_spec_approved(state: &Arc<AppState>, payload: &serde_json::Value
     // GET /api/v1/agents/:id/messages).
     state
         .emit_event(
-            Some(workspace_id.clone()),
+            workspace_id.clone(),
             Destination::Agent(orchestrator.id.clone()),
             MessageKind::SpecApproved,
             Some(payload.clone()),
@@ -3653,7 +3653,7 @@ mod tests {
         // stale-agent detector does on repo-orchestrator death).
         state
             .emit_event(
-                Some(Id::new("ws-1")),
+                Id::new("ws-1"),
                 Destination::Agent(orch.id.clone()),
                 MessageKind::Escalation,
                 Some(serde_json::json!({
