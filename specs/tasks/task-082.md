@@ -2,7 +2,7 @@
 title: "Navigation: context-dependent collapsible rail (retargeted from HSI stable sidebar)"
 spec_ref: "ui-navigation.md §1a"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-082.md
 coverage_sections:
   - "ui-navigation.md §1a Collapsible Navigation Rail (Optional)"
