@@ -6,16 +6,27 @@ progress: ready-for-review
 review: specs/reviews/task-082.md
 coverage_sections:
   - "ui-navigation.md §1a Collapsible Navigation Rail (Optional)"
-commits: ["0fab4972d43f8fd9a477bd0177cb5a0a8f318682", "42e12c08d3b67f208e3bc55486a17ed9c9272d4f", "79323318aac3b3015c03867f8f6130d0e913e67a", "9561ee864b066ba4a41fed4aa1f33cb16f4a0b47", "72bd582329ac50dbb2062d3ea2f3ea0b7f6213d3", "f332f774069ee409b407f2b7c9ee63deba51e3b6"]
+commits:
+  - d99ace7b
+  - f332f774
+  - 72bd5823
+  - 9561ee86
+  - 79323318
+  - 42e12c08
+  - fa9cc057
+  - 0fab4972
 ---
 
 ## Shipped
 
 The retargeted requirement (ui-navigation.md §1a, Collapsible Navigation
-Rail) is implemented and repaired through review round
+Rail) is implemented and repaired through independent review round
 `79201380b96745dd8707d170d3b1274c`: rail code + tests in `42e12c08`,
 docs/spec/coverage updates in `fa9cc057`, and review-finding repairs
-(F7–F9) in `0fab4972`.
+(F7–F9) in `0fab4972`. This round is a contract repair only: the executor
+restored the assigned task document after a protected-text edit; the
+production tree is unchanged from checkpoint `09a44b9d` (verified empty
+`git diff 09a44b9d -- web/ docs/ specs/`).
 
 ### Behavior
 
@@ -70,13 +81,15 @@ docs/spec/coverage updates in `fa9cc057`, and review-finding repairs
   test retargeted to the §1a scroll semantics (stays on workspace
   home); repo-mode drawer tab-strip mirror and all prior URL/shortcut
   coverage unchanged.
-- Focused runs (exit 0, fixed tree): NavRail + NoSidebar + AppShell =
-  96 passed; WorkspaceDrawerSectionNav + BidirectionalNav = 19 passed.
-  Mutation checks recorded in `/tmp/stage/review-evidence`
+- Focused runs at this contract-repair checkout (exit 0, fixed tree):
+  NavRail + NoSidebar + AppShell = 96 passed;
+  WorkspaceDrawerSectionNav + BidirectionalNav = 19 passed. Earlier
+  mutation checks recorded in `/tmp/stage/review-evidence`
   (`task-082-repair.md`): removing `common.settings` fails the label
   test with `common.settings` surfaced; reverting the agent-rules case
   to the sub-page escape fails both the NavRail scroll test and the
-  AppShell drawer test.
+  AppShell drawer test. This round's rerun record:
+  `task-082-contract-repair.md`.
 
 ## Supersession and retarget (2026-11-16)
 
@@ -95,11 +108,12 @@ default to preserve canvas/editor space, and a narrow-viewport drawer. The
 rail is never load-bearing: every destination stays reachable without it, and
 focused editor/canvas surfaces keep full width.
 
-**Honest status:** implemented per the retargeted §1a requirement
-(rail code `42e12c08`, docs `fa9cc057`), then repaired after independent
-review (F7 i18n key, F8 agent-rules scroll semantics, F9 label test
-gaps) in `0fab4972`. The `commits:` entries before `42e12c08` are the
-historical record of the superseded deliverable.
+**Honest status:** the rail is specified but **not implemented**. The
+original deliverable below was removed from the product in commit `08e5f91f`
+(nav rework, PRs #589–#599) and must not be re-landed as-is. Progress is
+`not-started` against the retargeted requirement; the controller decomposes
+implementation work after amendment task-246 merges. The `commits:` list
+above is the historical record of the superseded deliverable.
 
 ## Requirement (retargeted) — acceptance criteria
 
