@@ -1167,6 +1167,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::predict_graph).post(graph::predict_graph),
         )
         .route(
+            "/api/v1/repos/:id/graph/thorough-preview",
+            post(graph::thorough_preview),
+        )
+        .route(
             "/api/v1/repos/:id/graph/query-dryrun",
             post(graph::view_query_dryrun),
         )

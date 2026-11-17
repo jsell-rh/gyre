@@ -1385,6 +1385,7 @@ pub async fn ask_explorer(
                     &repo_id,
                     &instruction,
                     None,
+                    None,
                 )
                 .await
                 {
