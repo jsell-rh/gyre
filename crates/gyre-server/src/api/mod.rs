@@ -182,6 +182,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         // AI Bill of Materials (M14.3)
         .route("/api/v1/repos/:id/aibom", get(aibom::get_aibom))
+        // AIBOM structured release artifact (supply-chain.md §AIBOM Contents,
+        // task-166): `?format=release`
+        .route(
+            "/api/v1/repos/:id/slsa-provenance",
+            get(provenance::get_slsa_provenance),
+        )
+        // Stack drift history (supply-chain.md §The Laptop Problem, task-166)
+        .route(
+            "/api/v1/repos/:id/stack-drift",
+            get(stack_attest::get_stack_drift),
+        )
         // Agent-commit tracking
         .route(
             "/api/v1/repos/:id/commits/record",
