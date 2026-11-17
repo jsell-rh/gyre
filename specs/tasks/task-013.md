@@ -2,7 +2,7 @@
 title: "Briefing Data Assembly — Cross-Workspace & Exceptions"
 spec_ref: "human-system-interface.md §9 (Briefing Detail)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-013.md
 coverage_sections: []
 commits: ["1aa8f84aeb1e014caf329651ba1da18818429a30", "a09baf85167f05a28fea9ac67a3bfd65a3543714"]
