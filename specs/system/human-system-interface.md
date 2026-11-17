@@ -21,7 +21,26 @@ Every surface in this spec exists to serve one of those five activities. If it d
 
 ## 1. Navigation Model
 
-### Stable Sidebar, Adaptive Content
+> **Superseded (amended 2026-11-10, task-082 re-dispatch):** The navigation model
+> in this section — the permanent six-item sidebar, the scope-adaptive content
+> matrix, and the breadcrumb as primary scope control — is **superseded by
+> [`ui-navigation.md`](ui-navigation.md)** (its header note and Principle 5 "No
+> sidebar", §9 "From HSI §1"). The active navigation contract is the
+> workspace-home + repo-tabs shell defined there; the active shell requirement is
+> tracked in the ui-navigation coverage matrix. Sections §2-§12 of this spec
+> remain valid. The six-item sidebar was implemented by task-082 (commits
+> `d99ace7b`..`79323318`, reviewed through R10) and subsequently removed by
+> task-210's 2026-10-09 navigation binding correction, which resolved the
+> recorded ui-navigation coverage row-3 contradiction in favor of the replacement
+> model. The text below is retained as the historical record.
+
+### Stable Sidebar, Adaptive Content (superseded — see ui-navigation.md)
+
+> **Amendment (2026-11-10, task-082 re-dispatch):** This subsection is obsolete.
+> `ui-navigation.md` Principle 5 mandates "No sidebar"; the shell is a top bar +
+> status bar with a workspace-home dashboard and repo-mode horizontal tabs.
+> Task-082 is the historical implementation of this text, not an instruction to
+> reintroduce the sidebar. Historical text follows.
 
 > **SUPERSEDED — do not implement.** The permanent six-item sidebar described below is no longer the navigation contract. It was superseded by `ui-navigation.md` (two-mode model: workspace home dashboard + repo horizontal tabs, Principle 5 "no permanent sidebar"), and then — by operator decision `16871182b1370b61693fc691` (2026-11-16, option_c, recorded by jsell; see `specs/tasks/task-246.md`) — amended toward a **context-dependent collapsible navigation rail** on navigation-heavy screens. The current requirement is `ui-navigation.md` §1a (Collapsible Navigation Rail): optional, scope-labelled, per-mode item sets with stable ordering, collapsed by default to preserve canvas/editor space, and a drawer on narrow viewports. The historical text is preserved below for intent only.
 

@@ -2,17 +2,90 @@
 title: "Navigation: context-dependent collapsible rail (retargeted from HSI stable sidebar)"
 spec_ref: "ui-navigation.md §1a"
 depends_on: []
-progress: not-started
+progress: complete
 review: specs/reviews/task-082.md
 coverage_sections:
   - "ui-navigation.md §1a Collapsible Navigation Rail (Optional)"
-commits:
-  - d99ace7b
-  - f332f774
-  - 72bd5823
-  - 9561ee86
-  - 79323318
+commits: ["b508a6f6538082f7c8f7d4ab95265a2d989fa263", "0fab4972d43f8fd9a477bd0177cb5a0a8f318682", "42e12c08d3b67f208e3bc55486a17ed9c9272d4f", "79323318aac3b3015c03867f8f6130d0e913e67a", "9561ee864b066ba4a41fed4aa1f33cb16f4a0b47", "72bd582329ac50dbb2062d3ea2f3ea0b7f6213d3", "f332f774069ee409b407f2b7c9ee63deba51e3b6"]
 ---
+
+## Shipped
+
+The retargeted requirement (ui-navigation.md §1a, Collapsible Navigation
+Rail) is implemented and repaired through independent review rounds
+`79201380b96745dd8707d170d3b1274c` (F7–F9) and
+`805b3a085a7f42cbb73331c5c69a70ab` (F10). Rail code + tests in `42e12c08`,
+docs/spec/coverage updates in `fa9cc057`, F7–F9 repairs in `0fab4972`, and
+the F10 single-source-of-truth repair in `b508a6f6`.
+
+### Behavior
+
+- **Rail component** (`web/src/components/NavRail.svelte`): icon-only
+  48px collapsed by default, toggle expands to labelled 240px;
+  preference persisted per user per mode under
+  `gyre_nav_rail_expanded.<mode>.<user-id>` (first use = collapsed);
+  scope-labelled header; stable per-mode item order; active item
+  highlighted via `.active` + `aria-current="page"`; hidden below
+  768px so there is no persistent rail on mobile.
+- **Where it renders** (App.svelte `showNavRail`): workspace home (with
+  a selected workspace) and repo mode without an open entity detail.
+  Never on focused surfaces: full-page entity detail, workspace
+  settings / agent rules / analytics / profile sub-pages,
+  cross-workspace view, notification settings. Every destination stays
+  reachable without the rail (dashboard sections, repo tab strip, ⌘K,
+  g-shortcuts unchanged).
+- **Item sets**: workspace-home rail = §2 dashboard sections in
+  canonical order + Settings. Repo rail, the narrow-viewport drawer, and
+  the repo-tab URL parsing are all **derived from a single source of
+  truth** (`web/src/lib/repoTabs.js`, F10 repair): RepoMode renders its
+  tab strip from that list, App derives `REPO_RAIL_TAB_IDS`, the drawer
+  item set, and `parseUrl`'s tab acceptance from the same `REPO_TAB_IDS`
+  — the rail cannot drift from the strip, and the pre-existing drift
+  bug (route-parse list missing `dependencies`, deep links misparsing
+  to the Specs tab) is fixed.
+- **Section selection (§1a)**: section items scroll to their dashboard
+  section on the workspace home (Architecture also expands the collapsed
+  section via `archExpandSignal`; Agent Rules scrolls to
+  `section-agent-rules`); Settings is the only navigation exception
+  (workspace settings page).
+- **Labels**: all rail/drawer labels resolve through real i18n keys
+  (`common.settings` added to `en.json`, F7 repair).
+- **Narrow viewports**: the hamburger drawer offers the rail's per-mode
+  item set; tenant scope (`/all`) keeps its §10 section semantics.
+
+### Test evidence
+
+- `web/src/__tests__/NavRail.test.js` (14 tests): component contract
+  (collapse default, expand toggle + per-user per-mode persistence,
+  restore on mount, active highlight + onSelect) and app integration
+  (workspace/repo rail item sets, order, scope labels, Architecture
+  scroll+expand, Agent Rules scroll target pinned via `mock.contexts`,
+  Settings navigation + rail absence on the sub-page, repo tab
+  switching, rail absence on focused surfaces, per-mode localStorage
+  keys, resolved-label test with no raw i18n key text surfacing). The
+  repo rail item assertion derives from `lib/repoTabs.js` (F10).
+- `web/src/__tests__/AppShell.test.js` (79 tests): URL routing,
+  shortcuts, responsive drawer; repo-mode drawer item assertion derived
+  from `REPO_TAB_IDS`; new dependencies-tab deep-link drift regression
+  and strip-completeness parse test (F10).
+- `web/src/__tests__/RepoMode.test.js`: rendered tab-bar ids must equal
+  `REPO_TAB_IDS` (kills re-hardcoding a local tab list in RepoMode,
+  F10).
+- `web/src/__tests__/NoSidebar.test.js` (5 tests): no permanent
+  sidebar; drawer remains the narrow-viewport form of the rail pattern.
+- Focused run (this repair, exit 0): NavRail + NoSidebar + RepoMode +
+  AppShell + RepoModeHeader + RepoModeHealth = **151 passed / 6 files**
+  (`/tmp/stage/review-evidence/task-082-f10-fix-focused-tests.log`).
+- F10 mutation evidence (both directions): re-introducing a hardcoded
+  drifted rail list in App.svelte fails NavRail + AppShell; adding a
+  hypothetical tab to `lib/repoTabs.js` trips RepoMode's explicit
+  tab-count tripwire while every derived surface (rail, drawer, deep-link
+  parsing, test expectations) follows automatically — recorded in
+  `/tmp/stage/review-evidence/task-082-f10-fix.md`.
+- Full `npm test` and workspace suites are owned by the independent
+  verifier; pre-existing canvas/ResizeObserver failures in unrelated
+  suites (FlowRenderer, MoldableViewNodeTypeFilter, ExplorerViewAskViewSpec)
+  reproduce identically at the merge base per prior review rounds.
 
 ## Supersession and retarget (2026-11-16)
 

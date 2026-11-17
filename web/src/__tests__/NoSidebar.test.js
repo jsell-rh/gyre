@@ -1,16 +1,18 @@
 /**
- * NoSidebar.test.js — ui-navigation.md Principle 5 + §9
+ * NoSidebar.test.js — ui-navigation.md Principle 5 ("no permanent sidebar") + §9
  *
- * "No sidebar. The workspace home is a dashboard. The repo view has
- * horizontal tabs. There's no persistent sidebar that needs to morph
- * between scopes." ui-navigation.md explicitly supersedes HSI §1's
- * six-item sidebar (Inbox/Briefing/Explorer/Specs/Meta-specs/Admin)
- * and ui-layout.md §1's 240px shell sidebar.
+ * "No permanent sidebar. The workspace home is a dashboard. The repo view
+ * has horizontal tabs." ui-navigation.md explicitly supersedes HSI §1's
+ * six-item sidebar (Inbox/Briefing/Explorer/Specs/Meta-specs/Admin) and
+ * ui-layout.md §1's 240px shell sidebar. The optional collapsible
+ * navigation rail (§1a, task-082) is NOT a permanent sidebar: it renders
+ * per-mode on navigation-heavy screens only, collapsed by default.
  *
  * Covers:
  *   - The app shell renders NO sidebar element
  *   - The old Sidebar component is gone from the module graph
- *   - The mobile drawer (§8) lists the workspace-home sections
+ *   - The §1a rail is optional/collapsed, absent on focused surfaces
+ *   - The mobile drawer (§8) offers the rail's per-mode item set
  *   - Drawer links navigate to section anchors, not a sidebar
  */
 
@@ -70,6 +72,35 @@ describe('No sidebar (ui-navigation.md Principle 5)', () => {
     expect(container.querySelector('.sidebar-item')).toBeNull();
   });
 
+  it('the §1a navigation rail is optional, not a permanent sidebar (task-082)', async () => {
+    // Amendment 16871182b1370b61693fc691 (§1a): the shell has no PERMANENT
+    // sidebar. The optional collapsible rail renders only on
+    // navigation-heavy screens (workspace home / repo mode), collapsed by
+    // default - on focused sub-page surfaces it is absent entirely.
+    api.workspaces.mockResolvedValue([{ id: 'ws-1', name: 'Payments', slug: 'payments' }]);
+    window.history.pushState({}, '', '/workspaces/payments');
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="nav-rail"]')).toBeTruthy();
+    }, { timeout: 3000 });
+    // Collapsed (icon-only) by default: not a permanent labelled sidebar.
+    const rail = container.querySelector('[data-testid="nav-rail"]');
+    expect(rail.classList.contains('expanded')).toBe(false);
+    expect(container.querySelector('.nav-rail-label')).toBeNull();
+
+    // Focused sub-page surface (workspace settings): no rail at all.
+    window.history.pushState({}, '', '/workspaces/payments/settings');
+    window.dispatchEvent(new PopStateEvent('popstate', {
+      state: { mode: 'workspace_settings', wsId: 'ws-1', repoName: null, repoTab: 'specs' },
+    }));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="nav-rail"]')).toBeNull();
+    }, { timeout: 3000 });
+    // And still no permanent sidebar of the old kind.
+    expect(container.querySelector('.sidebar')).toBeNull();
+    expect(container.querySelector('.sidebar-item')).toBeNull();
+  });
+
   it('no ⌘1-6 sidebar shortcuts are advertised in the overlay', async () => {
     const { container } = render(App);
     await waitFor(() => {
@@ -87,7 +118,8 @@ describe('No sidebar (ui-navigation.md Principle 5)', () => {
     expect(text).toContain('g 2');
   });
 
-  it('mobile drawer lists the five workspace-home sections (§8)', async () => {
+  it('mobile drawer offers the rail item set: workspace-home sections in canonical order plus Settings (§8, §1a)', async () => {
+    api.workspaces.mockResolvedValue([{ id: 'ws-1', name: 'Payments', slug: 'payments' }]);
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
@@ -96,11 +128,12 @@ describe('No sidebar (ui-navigation.md Principle 5)', () => {
     await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
     const drawer = container.querySelector('[data-testid="mobile-drawer"]');
     expect(drawer).toBeTruthy();
-    expect(drawer.textContent).toContain('Decisions');
-    expect(drawer.textContent).toContain('Repos');
-    expect(drawer.textContent).toContain('Briefing');
-    expect(drawer.textContent).toContain('Specs');
-    expect(drawer.textContent).toContain('Agent Rules');
+    const ids = Array.from(drawer.querySelectorAll('.drawer-link')).map(
+      (el) => el.getAttribute('data-testid').replace('drawer-item-', '')
+    );
+    // §1a workspace-home rail item set: §2 dashboard sections in canonical
+    // order, then Settings.
+    expect(ids).toEqual(['decisions', 'specs', 'architecture', 'repos', 'briefing', 'agent-rules', 'settings']);
     // Old HSI §1.3 items must not appear.
     expect(drawer.textContent).not.toContain('Inbox');
     expect(drawer.textContent).not.toContain('Meta-specs');
