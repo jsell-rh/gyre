@@ -654,3 +654,66 @@ mod persona_tests {
         assert_eq!(after.len(), 4, "re-seed must not duplicate rows");
     }
 }
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    /// hierarchy-enforcement.md §3: workspace id lookups must verify tenant.
+    /// `find_by_id` filters by the storage handle's tenant scope, so a row
+    /// filed under another tenant is invisible to it — a `find(id)` without
+    /// the tenant filter would leak cross-tenant workspace records (and the
+    /// per-handler caller-vs-record tenant comparison in the API layer would
+    /// never run, because the row would already be loaded). Also pins the
+    /// seeding rule `build_state`-backed tests rely on: a workspace must be
+    /// created under the tenant its storage handle is scoped to, or scoped
+    /// lookups (e.g. GET /workspaces/:id/dependency-graph) 404 on it.
+    #[tokio::test]
+    async fn find_by_id_verifies_tenant_scope() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let default = SqliteStorage::new(path).unwrap();
+        let other = default.with_tenant("t-other");
+
+        // Row filed under the handle's own tenant: visible to it.
+        let ws_default = Workspace::new(
+            Id::new("ws-d"),
+            Id::new("default"),
+            "Default WS",
+            "default-ws",
+            1,
+        );
+        WorkspaceRepository::create(&default, &ws_default)
+            .await
+            .unwrap();
+        assert!(WorkspaceRepository::find_by_id(&default, &ws_default.id)
+            .await
+            .unwrap()
+            .is_some());
+
+        // Row filed under a different tenant: invisible to the "default"
+        // handle's id lookup, visible to a handle scoped to that tenant.
+        let ws_other = Workspace::new(
+            Id::new("ws-o"),
+            Id::new("t-other"),
+            "Other WS",
+            "other-ws",
+            1,
+        );
+        WorkspaceRepository::create(&other, &ws_other)
+            .await
+            .unwrap();
+        assert!(
+            WorkspaceRepository::find_by_id(&default, &ws_other.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "id lookup must not return a workspace filed under another tenant"
+        );
+        assert!(WorkspaceRepository::find_by_id(&other, &ws_other.id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+}
