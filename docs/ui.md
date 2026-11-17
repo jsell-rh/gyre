@@ -12,7 +12,7 @@ The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localho
 
 ### Shell Layout (no persistent sidebar)
 
-There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5: no *permanent* sidebar). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, decisions badge), the workspace-home sections, and the repo-mode horizontal tabs.
+There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5: no *permanent* sidebar). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, notification bell), the workspace-home sections, and the repo-mode horizontal tabs. On narrow viewports, the hamburger (`[≡]`) opens a drawer offering the per-mode navigation-rail item set (workspace-home sections / repo tab strip).
 
 #### Navigation Rail (optional, collapsible — `ui-navigation.md` §1a)
 
@@ -33,8 +33,8 @@ On navigation-heavy screens an optional **navigation rail** renders as a narrow 
 
 - **Workspace selector** (`Payments ▾`): Clicking the name navigates to Workspace Home; the arrow opens the workspace switcher dropdown.
 - **Search** (`⌘K`): Global command palette — specs, types, agents, repos, concepts.
-- **Decisions badge** (`🔔 3`): Count of unresolved items requiring human judgment. Clicking navigates to Workspace Home with the Decisions section expanded.
-- **User avatar**: Profile (notification prefs, API tokens, judgment ledger) and sign-out.
+- **Notification bell** (`🔔 3`): Unread notification count (user-management.md §In-App Notification UI). Clicking opens the notification drawer — recent active notifications grouped by priority with deep links. The workspace home's Decisions section still shows the active-decisions count.
+- **User avatar**: Profile (notification prefs, API tokens, active sessions with revoke, judgment ledger) and sign-out.
 
 **In Repo Mode**, the top bar adds context:
 
@@ -43,7 +43,7 @@ On navigation-heavy screens an optional **navigation rail** renders as a narrow 
 ```
 
 - **Back arrow**: Returns to Workspace Home.
-- **Decisions badge**: Shows count for this repo only in repo mode.
+- **Notification bell**: Same unread count and drawer behavior as workspace mode (repo-scoped unread filtering is not yet supported).
 
 ### Status Bar (bottom, always visible)
 
