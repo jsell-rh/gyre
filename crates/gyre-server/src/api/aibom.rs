@@ -414,24 +414,86 @@ pub async fn get_aibom(
 
 // ── Release artifact builder (supply-chain.md §AIBOM Contents) ───────────────
 
+/// Run a git child, retrying OS-level execution failures. Returns the
+/// captured output when git ran to a clean exit — success OR a nonzero
+/// exit code, because a clean nonzero exit is git's *answer* (e.g. "unknown
+/// revision"), not an execution failure. A child that could not be spawned
+/// or was killed by a signal (fork failure, OOM killer) is transient: it is
+/// retried a bounded number of times, and a persistent execution failure is
+/// reported as an error so callers do not mistake "git did not run" for
+/// "git ran and said no" — on the release-artifact and SLSA endpoints that
+/// conflation turns an infrastructure hiccup into a bogus "ref not found".
+async fn run_git_child(git_bin: &str, args: &[&str]) -> Result<std::process::Output, ApiError> {
+    const GIT_EXEC_ATTEMPTS: usize = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=GIT_EXEC_ATTEMPTS {
+        match tokio::process::Command::new(git_bin)
+            .args(args)
+            .output()
+            .await
+        {
+            // A clean exit (any code) is git's verdict — return it to the
+            // caller to interpret.
+            Ok(out) if out.status.success() || out.status.code().is_some() => return Ok(out),
+            // No exit code → the child died to a signal.
+            Ok(out) => {
+                last_err = format!("git terminated by a signal: {}", out.status);
+            }
+            Err(e) => {
+                last_err = format!("failed to execute git: {e}");
+            }
+        }
+        if attempt < GIT_EXEC_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    Err(ApiError::Internal(anyhow::anyhow!(
+        "{last_err} (after {GIT_EXEC_ATTEMPTS} attempts)"
+    )))
+}
+
 /// Resolve a ref to a commit SHA (`git rev-parse --verify --end-of-options`).
-pub(crate) async fn git_rev_parse(git_bin: &str, repo_path: &str, r: &str) -> Option<String> {
-    let out = tokio::process::Command::new(git_bin)
-        .args(["-C", repo_path, "rev-parse", "--verify", "--end-of-options"])
-        .arg(r)
-        .output()
-        .await
-        .ok()?;
+/// `Ok(Some(sha))` — the ref resolves. `Ok(None)` — git ran and the ref does
+/// not resolve (the caller's not-found case). `Err` — git could not be
+/// executed at all (spawn failure / signal death after retries): an
+/// internal error, not a missing ref.
+pub(crate) async fn git_rev_parse(
+    git_bin: &str,
+    repo_path: &str,
+    r: &str,
+) -> Result<Option<String>, ApiError> {
+    let out = run_git_child(
+        git_bin,
+        &[
+            "-C",
+            repo_path,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            r,
+        ],
+    )
+    .await?;
     if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ))
     } else {
-        None
+        tracing::warn!(
+            repo = repo_path,
+            requested_ref = r,
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "git rev-parse rejected ref"
+        );
+        Ok(None)
     }
 }
 
 /// List the commit SHAs in a rev range (`git rev-list`), newest-first,
 /// de-duplicated. `pub(crate)` so the SLSA provenance endpoint
 /// (provenance.rs) can scope its commit set to the subject ref's history.
+/// Like [`git_rev_parse`]: `Ok(None)` means git ran and rejected the range;
+/// `Err` means git could not be executed (internal error).
 ///
 /// The range is a single argv element and cannot occupy an option
 /// position: callers pass either a SHA resolved by [`git_rev_parse`]
@@ -444,15 +506,16 @@ pub(crate) async fn git_rev_list(
     git_bin: &str,
     repo_path: &str,
     range: &str,
-) -> Option<Vec<String>> {
-    let out = tokio::process::Command::new(git_bin)
-        .args(["-C", repo_path, "rev-list"])
-        .arg(range)
-        .output()
-        .await
-        .ok()?;
+) -> Result<Option<Vec<String>>, ApiError> {
+    let out = run_git_child(git_bin, &["-C", repo_path, "rev-list", range]).await?;
     if !out.status.success() {
-        return None;
+        tracing::warn!(
+            repo = repo_path,
+            range = range,
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "git rev-list rejected range"
+        );
+        return Ok(None);
     }
     let shas = String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -460,7 +523,7 @@ pub(crate) async fn git_rev_list(
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
-    Some(shas)
+    Ok(Some(shas))
 }
 
 /// Build the structured AIBOM release artifact (supply-chain.md §AIBOM
@@ -488,7 +551,7 @@ async fn build_release_aibom(
         .clone()
         .unwrap_or_else(|| format!("refs/heads/{}", repo.default_branch));
     let to_sha = git_rev_parse(&git_bin, &repo.path, &to_ref)
-        .await
+        .await?
         .ok_or_else(|| {
             ApiError::NotFound(format!("cannot resolve ref '{to_ref}' in repo {repo_id}"))
         })?;
@@ -499,7 +562,7 @@ async fn build_release_aibom(
         None => to_sha.clone(),
     };
     let release_shas = git_rev_list(&git_bin, &repo.path, &range)
-        .await
+        .await?
         .ok_or_else(|| {
             ApiError::NotFound(format!(
                 "cannot enumerate commits for range '{range}' in repo {repo_id}"
@@ -726,6 +789,22 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Assert a 200 and return the parsed body. On any other status the
+    /// assertion message carries the response body, so a future failure
+    /// names the exact server error (which not-found path fired, or the
+    /// internal git-execution error) instead of a bare status code —
+    /// verification round 2 lost exactly that distinction on
+    /// `aibom_release_format_full_attribution` (404 with no body retained).
+    async fn expect_ok(resp: axum::response::Response) -> serde_json::Value {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert_eq!(status, StatusCode::OK, "request failed, body: {text}");
+        serde_json::from_str(&text).unwrap()
     }
 
     async fn create_repo(app: Router) -> (Router, String) {
@@ -1210,8 +1289,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
+        let json = expect_ok(resp).await;
 
         // Artifact envelope (supply-chain.md §AIBOM Contents).
         assert_eq!(json["aibom_version"], "1.0");
@@ -1300,8 +1378,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
+        let json = expect_ok(resp).await;
         assert_eq!(json["summary"]["total_commits"], 1);
         assert_eq!(json["summary"]["attested_commits"], 1);
         assert_eq!(json["summary"]["human_commits"], 0);

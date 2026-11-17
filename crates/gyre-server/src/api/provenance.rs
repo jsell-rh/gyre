@@ -839,7 +839,7 @@ pub async fn get_slsa_provenance(
         .clone()
         .unwrap_or_else(|| format!("refs/heads/{}", repo.default_branch));
     let sha = super::aibom::git_rev_parse(&git_bin, &repo.path, &ref_used)
-        .await
+        .await?
         .ok_or_else(|| {
             ApiError::NotFound(format!("cannot resolve ref '{ref_used}' in repo {repo_id}"))
         })?;
@@ -862,7 +862,7 @@ pub async fn get_slsa_provenance(
     // unrelated or deleted branch would otherwise appear in the per-commit
     // attribution and cap the subject's SLSA Build Level.
     let history = super::aibom::git_rev_list(&git_bin, &repo.path, &sha)
-        .await
+        .await?
         .ok_or_else(|| {
             ApiError::Internal(anyhow::anyhow!(
                 "cannot enumerate commits reachable from '{sha}' in repo {repo_id}"
