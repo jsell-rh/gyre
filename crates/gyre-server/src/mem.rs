@@ -3291,7 +3291,7 @@ impl NotificationRepository for MemNotificationRepository {
             })
             .cloned()
             .collect();
-        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.sort_by_key(|n| std::cmp::Reverse(n.created_at));
         Ok(items)
     }
 
