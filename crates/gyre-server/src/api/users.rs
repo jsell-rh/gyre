@@ -1073,14 +1073,6 @@ async fn list_my_notifications_impl(
         .map(|ts| ts.iter().map(String::as_str).collect());
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
-    // HSI §12: types the user disabled via notification preferences are
-    // excluded from the inbox listing (before limit/offset), so a page never
-    // comes back short. The drawer's `?active=true` listing does not apply
-    // the exclusion — it is paired with the unread-count bell badge, which
-    // counts every active notification regardless of toggles; the drawer
-    // and the badge that opens it must agree on what they count/show, while
-    // the Inbox (and its own badge via count_unresolved) hides disabled types.
-    let disabled = disabled_notification_types(&state, &user_id).await?;
     let disabled = disabled_notification_types(&state, &user_id).await?;
     // HSI §12: types the user disabled via notification preferences are
     // excluded from the inbox (before limit/offset), so a page never
