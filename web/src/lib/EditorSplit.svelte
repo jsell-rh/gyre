@@ -10,6 +10,7 @@
   import { t } from 'svelte-i18n';
   import { lineDiff, diffSummary } from './lineDiff.js';
   import { applyDiffOps, streamAssist, suggestionText } from './specAssist.js';
+  import { normalizeGhosts } from './ghostOverlay.js';
 
   /**
    * EditorSplit — full-width editor + architecture preview split layout
@@ -80,13 +81,23 @@
   let graphEdges = $state([]);
   let graphLoading = $state(false);
   let graphLoaded = $state(false);
-  // Ghost overlays derived from graphPredict predictions — same normalization
-  // DetailPanel uses (predictions → { nodeId, type }).
-  let derivedOverlays = $state([]);
+  // Ghost overlays derived from graphPredict predictions (system-explorer.md
+  // §3 fast tier): normalized via the shared ghostOverlay.js model so the
+  // canvas renders the full ghost visual language (action colors,
+  // confidence opacity, tooltips, dotted edges) — the same normalization
+  // DetailPanel uses.
+  let derivedGhosts = $state([]);
+  // Instant tier (§3 "Link graph impact"): connected specs, repos
+  // implementing this spec, governed node count — computed from real link
+  // + graph data the moment editing begins, shown in the impact bar.
+  let impact = $state(null);
 
   // Effective overlays: caller-supplied ghosts (e.g. DetailPanel arch tab)
-  // take precedence; otherwise the locally predicted ones.
-  let overlays = $derived(ghostOverlays.length ? ghostOverlays : derivedOverlays);
+  // take precedence; otherwise the locally predicted ones. Both shapes
+  // normalize through the shared model.
+  let overlays = $derived(
+    normalizeGhosts(ghostOverlays.length ? ghostOverlays : derivedGhosts),
+  );
 
   // ── Preview state machine (ui-layout.md §2/§9) ─────────────────────────────
   // editing → preview_running → preview_complete (Iterate returns to editing
@@ -101,6 +112,9 @@
   let codeDiffFiles = $state([]); // [{ path, diff: [{op,text}] }]
   let previewRunning = $state(false);
   let activeImpactTab = $state('architecture');
+  // Agent spawned by the thorough preview (§3 thorough tier) — used to
+  // resolve the completion MR and its real code diff.
+  let previewAgentId = $state(null);
   // Last meta-spec preview result (real PreviewResponse shape: preview_id,
   // state, specs, blast_radius, structural_impact) rendered in the right pane.
   let metaPreviewResult = $state(null);
@@ -128,6 +142,105 @@
       loadGraph();
     }
   });
+
+  // Instant tier (§3 "Link graph impact", milliseconds): the moment spec
+  // editing begins, compute the link-graph impact — connected specs (spec
+  // links API), repos implementing this spec (inbound implements links +
+  // the repos whose graphs govern this spec's nodes), governed node count.
+  // Rendered as the compact info bar above the editor. Best-effort: a
+  // failing segment degrades to the others, never blocks editing.
+  $effect(() => {
+    if (repoId && specPath) loadImpact(repoId, specPath);
+  });
+
+  // ── Fast tier: debounced structural prediction (§3 "Fast (2-5 seconds)") ──
+  // As the user edits, predictions are debounced (PREDICT_DEBOUNCE_MS) and
+  // fired against POST /repos/:id/graph/predict with the current draft;
+  // the response's predictions render as ghost overlays on the canvas.
+  // Suppressed while a thorough preview runs (editor locked, §9 State 2)
+  // and after a save (editing ended — the overlay cleared below).
+  const PREDICT_DEBOUNCE_MS = 1200;
+  let predicting = $state(false);
+  let lastPredictedContent = null;
+
+  $effect(() => {
+    const draft = content;
+    const rid = repoId;
+    const path = specPath;
+    if (!rid || !path) return;
+    if (previewState !== 'editing') return;
+    if (draft === lastPredictedContent) return;
+    const timer = setTimeout(() => {
+      runPrediction(rid, path, draft);
+    }, PREDICT_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
+
+  async function runPrediction(rid, path, draft) {
+    predicting = true;
+    try {
+      const result = await api.graphPredict(rid, {
+        spec_path: path,
+        draft_content: draft || undefined,
+      });
+      const predictions = result?.predictions ?? result?.overlays ?? [];
+      derivedGhosts = normalizeGhosts(predictions);
+      lastPredictedContent = draft;
+    } catch {
+      // Best-effort (§3: predictions are probabilistic feedback, not a
+      // gate): keep the previous overlay, clear the loading indicator.
+      lastPredictedContent = draft;
+    } finally {
+      predicting = false;
+    }
+  }
+
+  async function loadImpact(rid, path) {
+    try {
+      // Connected specs: every spec link touching this path (either
+      // direction), from the spec links API.
+      let connectedSpecs = [];
+      let reposImplementing = [];
+      try {
+        const links = await api.specLinks(path, rid);
+        const connected = new Set();
+        const implementing = new Set();
+        for (const link of links ?? []) {
+          const other =
+            link?.source_path === path ? link?.target_path : link?.source_path;
+          if (other) connected.add(other);
+          const lt = String(link?.link_type ?? '').toLowerCase();
+          if (lt === 'implements' && link?.target_path === path && link?.source_repo_id) {
+            implementing.add(link.source_repo_id);
+          }
+        }
+        connectedSpecs = [...connected].sort();
+        reposImplementing = [...implementing];
+      } catch {
+        // links unavailable — governed-node counts below still render
+      }
+
+      // Repos implementing this spec + governed node count, from the
+      // loaded graph(s): the current repo's nodes filtered by spec_path.
+      let governedNodes = null;
+      try {
+        const graph = await api.repoGraph(rid);
+        const specNodes = (graph?.nodes ?? []).filter(
+          (n) => n.spec_path === path && !n.deleted_at,
+        );
+        governedNodes = specNodes.length;
+        if (specNodes.length && !reposImplementing.includes(rid)) {
+          reposImplementing.push(rid);
+        }
+      } catch {
+        // graph unavailable — links segment still renders
+      }
+
+      impact = { connectedSpecs, reposImplementing, governedNodes };
+    } catch {
+      impact = null;
+    }
+  }
 
   // Stop any preview poll when the component is destroyed.
   $effect(() => {
@@ -166,46 +279,8 @@
         }
         nodes = specNodes;
       } catch {
-        // graceful: fall through to predictions only
-      }
-
-      // Fast preview: ask the LLM what the draft would change structurally,
-      // and render those predictions as ghost overlays on the real graph.
-      // Prediction-only nodes (LLM-invented names) are appended so the
-      // canvas isn't empty for specs with no graph linkage yet.
-      try {
-        const result = await api.graphPredict(repoId, {
-          spec_path: specPath,
-          draft_content: content || undefined,
-        });
-        const predictions = result?.predictions ?? result?.overlays ?? [];
-        const predOverlays = predictions
-          .map((p) => ({
-            nodeId: p.node_id ?? p.nodeId ?? p.name ?? p.qualified_name,
-            type: p.change_type ?? p.type ?? 'modified',
-          }))
-          .filter((p) => p.nodeId);
-        derivedOverlays = predOverlays;
-        if (nodes.length) {
-          // Match predictions to existing graph nodes by name; append
-          // synthetic ghost nodes for unmatched predictions.
-          const byName = new Map(nodes.map((n) => [n.name ?? n.label ?? n.id, n]));
-          const synthetic = [];
-          for (const p of predOverlays) {
-            const existing = byName.get(p.nodeId);
-            if (!existing && p.type !== 'removed') {
-              synthetic.push({ id: p.nodeId, name: p.nodeId, node_type: p.node_type ?? 'type' });
-            }
-          }
-          nodes = [...nodes, ...synthetic];
-        } else {
-          nodes = predOverlays
-            .filter((p) => p.type !== 'removed')
-            .map((p) => ({ id: p.nodeId, name: p.nodeId, node_type: 'type' }));
-          edges = [];
-        }
-      } catch {
-        // graceful: show base graph without ghost overlays; user can still edit
+        // graceful: fall through to an empty canvas — the debounced
+        // graphPredict ghosts still render via the ghost overlay layer
       }
 
       graphNodes = nodes;
@@ -300,11 +375,15 @@
           failPreview($t('editor_split.preview_unavailable'));
         }
       } else if (repoId && specPath) {
-        // Spec preview: thorough preview on a throwaway branch.
+        // Spec preview: thorough preview on a throwaway branch — the server
+        // creates a preview task and spawns an implementation agent
+        // (§3 thorough tier); we poll the task and render the resulting MR's
+        // real code diff.
         const result = await api.thoroughPreview(repoId, {
           spec_path: specPath,
           draft_content: content,
         });
+        previewAgentId = result?.agent_id ?? null;
         if (result?.task_id) {
           pollPreviewTask(result.task_id);
         } else if (result) {
@@ -333,14 +412,24 @@
       elapsed += 10000;
       try {
         const status = await api.taskStatus(taskId);
-        if (status?.status === 'completed') {
+        // A preview task completes when its agent finishes: the task lands
+        // in Review (agent called complete → MR created) or Done. The wire
+        // vocabulary is exactly what GET /api/v1/tasks/{id} serializes via
+        // task_status_str: backlog/in_progress/review/done/blocked/
+        // cancelled — any other value keeps polling until the timeout.
+        const s = status?.status;
+        if (s === 'review' || s === 'done') {
           applyPreviewResult(status);
+          // §3 thorough tier: the agent really implemented the spec on a
+          // throwaway branch — resolve its completion MR and render the
+          // real line-level diff in the Code Diff tab.
+          await loadPreviewMrDiff(taskId);
           finishPreview();
           return;
         }
-        if (status?.status === 'failed') {
+        if (s === 'blocked' || s === 'cancelled') {
           failPreview(
-            $t('editor_split.preview_failed', { values: { error: status?.error ?? 'agent execution failed' } }),
+            $t('editor_split.preview_failed', { values: { error: status?.error ?? s ?? 'agent execution failed' } }),
           );
           return;
         }
@@ -351,6 +440,42 @@
         failPreview($t('editor_split.preview_timeout'));
       }
     }, 10000);
+  }
+
+  /**
+   * Resolve the MR the completed preview agent created (author agent or
+   * linked task) and map its real diff — files + hunks from
+   * GET /merge-requests/:id/diff — onto the Code Diff tab's
+   * [{ path, diff: [{op,text}] }] shape. Best-effort: a preview result
+   * that already carries code_diff (or no resolvable MR) keeps what the
+   * task status reported.
+   */
+  async function loadPreviewMrDiff(taskId) {
+    try {
+      const mrs = await api.mergeRequests({ repository_id: repoId });
+      const mr = (mrs ?? []).find(
+        (m) =>
+          m?.task_id === taskId ||
+          (previewAgentId && m?.author_agent_id === previewAgentId),
+      );
+      if (!mr) return;
+      const diff = await api.mrDiff(mr.id);
+      const files = (diff?.files ?? [])
+        .map((f) => ({
+          path: f.path ?? '',
+          diff: (f.hunks ?? []).flatMap((h) =>
+            (h.lines ?? []).map((l) => ({
+              op: l.line_type === 'delete' ? 'remove' : l.line_type === 'add' ? 'add' : 'context',
+              text: l.content ?? '',
+            })),
+          ),
+        }))
+        .filter((f) => f.path);
+      if (files.length) codeDiffFiles = files;
+    } catch {
+      // MR diff unavailable — the completed state still renders whatever
+      // the task status reported; never fabricate a diff.
+    }
   }
 
   function pollPreviewPersona(previewId, initial) {
@@ -407,26 +532,11 @@
     // Structural delta → ghost overlays on the Architecture tab.
     const preds = result.predictions ?? [];
     if (Array.isArray(preds) && preds.length) {
-      derivedOverlays = preds
-        .map((p) => ({
-          nodeId: p.node_id ?? p.nodeId ?? p.name ?? p.qualified_name,
-          type: p.change_type ?? p.type ?? p.action ?? 'modified',
-        }))
-        .filter((p) => p.nodeId);
-      // Unmatched prediction-only nodes get appended in loadGraph; for the
-      // thorough result, append synthetic nodes so the delta is visible even
-      // without a graph linkage.
-      if (graphNodes.length) {
-        const byName = new Set(graphNodes.map((n) => n.name ?? n.id));
-        const synthetic = derivedOverlays
-          .filter((p) => p.type !== 'removed' && !byName.has(p.nodeId))
-          .map((p) => ({ id: p.nodeId, name: p.nodeId, node_type: 'type' }));
-        if (synthetic.length) graphNodes = [...graphNodes, ...synthetic];
-      } else {
-        graphNodes = derivedOverlays
-          .filter((p) => p.type !== 'removed')
-          .map((p) => ({ id: p.nodeId, name: p.nodeId, node_type: 'type' }));
-      }
+      // §3 ghost model: normalized predictions keep action, confidence and
+      // reason so the overlay renders the full visual language. The ghost
+      // layer positions prediction-only nodes itself (near the predicted
+      // parent or in free space) — no synthetic graph nodes needed.
+      derivedGhosts = normalizeGhosts(preds);
     }
     // Line-level diff → Code Diff tab.
     const files = result.code_diff ?? result.specs_diff ?? [];
@@ -591,6 +701,10 @@
         return;
       }
       specConflict = null;
+      // §3: "Ghost overlay clears when the spec is saved" — editing ended;
+      // suppress re-prediction of the unchanged draft until the next edit.
+      derivedGhosts = [];
+      lastPredictedContent = content;
       toastSuccess($t('editor_split.spec_saved', { values: { mr_id: result.mr_id } }));
     } catch (e) {
       toastError($t('editor_split.save_failed', { values: { error: e.message } }));
@@ -769,6 +883,34 @@
       {#if context === 'spec' && specPath && workspaceId}
         <ConcurrentEditBanner {specPath} {workspaceId} {wsStore} {selfUserId} />
       {/if}
+      {#if context === 'spec' && specPath}
+        <!-- Instant tier (§3 "Link graph impact"): connected specs, repos
+             implementing this spec, governed node count — computed the
+             moment editing begins, before any prediction returns. -->
+        <div
+          class="impact-bar"
+          role="status"
+          aria-label={$t('editor_split.impact_bar_aria')}
+          data-testid="impact-bar">
+          {#if impact}
+            <span class="impact-seg" data-testid="impact-connected-specs">
+              {$t('editor_split.impact_connected_specs', { values: { count: impact.connectedSpecs.length } })}
+            </span>
+            <span class="impact-seg" data-testid="impact-repos">
+              {$t('editor_split.impact_repos_implementing', { values: { count: impact.reposImplementing.length } })}
+            </span>
+            <span class="impact-seg" data-testid="impact-governed-nodes">
+              {#if impact.governedNodes == null}
+                {$t('editor_split.impact_governed_nodes_unknown')}
+              {:else}
+                {$t('editor_split.impact_governed_nodes', { values: { count: impact.governedNodes } })}
+              {/if}
+            </span>
+          {:else}
+            <span class="impact-seg impact-loading">{$t('editor_split.impact_loading')}</span>
+          {/if}
+        </div>
+      {/if}
       {#if previewState === 'preview_running'}
         <!-- Editor locked during preview (§9 State 2). With a baseline
              available the pane shows the diff of pending changes (draft vs.
@@ -864,7 +1006,11 @@
         </div>
       {/if}
       {#if previewState === 'preview_running'}
-        <!-- Preview Running (§9 State 2): per-spec progress indicators -->
+        <!-- Preview Running (§9 State 2): per-spec progress indicators,
+             rendered as a strip ABOVE the Architecture/Code Diff tabs (not
+             instead of them) so the §3 ghost overlays stay on the canvas
+             while the agent runs — pulsing borders (GhostOverlay
+             mode="previewing"). -->
         <div class="preview-progress" data-testid="preview-running" aria-live="polite">
           <div class="progress-header" role="status">{$t('editor_split.preview_running')}</div>
           <div class="progress-list">
@@ -879,8 +1025,8 @@
           <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => p.status === 'complete').length, total: previewProgress.length } })}</div>
           <button class="dismiss-btn-sm cancel-preview" onclick={cancelPreview} data-testid="cancel-preview">{$t('editor_split.cancel_preview')}</button>
         </div>
-      {:else}
-        {#if context === 'meta-spec' && previewState === 'editing'}
+      {/if}
+      {#if context === 'meta-spec' && previewState === 'editing'}
         <!-- Target spec selector (§9 State 1) — always shown in the meta-spec
              editing state, with an empty-state message when the workspace
              has no non-meta specs. After §9 Iterate the last preview result
@@ -940,8 +1086,12 @@
           </div>
           {#if graphLoading}
             <span class="loading-chip" aria-live="polite">{$t('editor_split.loading_graph')}</span>
+          {:else if predicting}
+            <!-- Fast tier in flight (§3): the debounced graphPredict call is
+                 running — subtle indicator, never blocking. -->
+            <span class="loading-chip" aria-live="polite" data-testid="predicting-chip">{$t('editor_split.predicting')}</span>
           {:else if overlays.length}
-            <span class="overlay-chip">{$t('editor_split.predicted_changes', { values: { count: overlays.length } })}</span>
+            <span class="overlay-chip" data-testid="overlay-chip">{$t('editor_split.predicted_changes', { values: { count: overlays.length } })}</span>
           {/if}
         </div>
         {#if activeImpactTab === 'architecture'}
@@ -985,6 +1135,11 @@
                 nodes={graphNodes}
                 edges={graphEdges}
                 ghostOverlays={overlays}
+                ghostMode={previewState === 'preview_running'
+                  ? 'previewing'
+                  : previewState === 'preview_complete'
+                    ? 'confirmed'
+                    : 'predicted'}
                 size="full"
               />
             {/if}
@@ -1030,7 +1185,6 @@
           </div>
         {/if}
         {/if}
-      {/if}
     </div>
   </div>
 </div>
@@ -1236,6 +1390,31 @@
   .locked-diff-add .locked-diff-text { color: var(--color-success, #2e9e5b); }
   .locked-diff-remove .locked-diff-marker { color: var(--color-danger, #cc3340); font-weight: 600; }
   .locked-diff-remove .locked-diff-text { color: var(--color-danger, #cc3340); text-decoration: line-through; }
+
+  /* Instant tier impact bar (§3 "Link graph impact") */
+  .impact-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-primary, #60a5fa) 4%, transparent);
+    flex-shrink: 0;
+    min-height: 26px;
+  }
+
+  .impact-seg {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono, monospace);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .impact-loading {
+    font-style: italic;
+  }
 
   /* Markdown toolbar (ui-layout.md §2) */
   .md-toolbar {
@@ -1456,8 +1635,14 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    padding: var(--space-4);
+    padding: var(--space-3);
     overflow: auto;
+    /* §3: a strip above the Architecture/Code Diff tabs — the canvas (and
+       its pulsing ghost overlays) stays visible below while the preview
+       agent runs. */
+    flex-shrink: 0;
+    max-height: 40%;
+    border-bottom: 1px solid var(--color-border);
   }
 
   .progress-header {
