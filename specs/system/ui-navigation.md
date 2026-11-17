@@ -84,7 +84,7 @@ Same as `ui-layout.md` §1. Trust level, budget usage, WebSocket status, presenc
 
 ## 1a. Collapsible Navigation Rail (Optional)
 
-> **Implementation status: specified, not yet shipped.** As of this amendment the shipped UI is the two-mode model with no rail; `web/src/__tests__/NoSidebar.test.js` guards the absence of a *permanent* sidebar and remains correct under this section. Implementation tasks are decomposed only after this amendment merges (task-246). Nothing in this section claims shipped behavior.
+> **Implementation status: shipped (task-082).** The rail ships as `web/src/components/NavRail.svelte`, rendered by `App.svelte` on workspace home and repo mode (without an open entity detail); the narrow-viewport drawer offers the same per-mode item set. Covered by `web/src/__tests__/NavRail.test.js`; `web/src/__tests__/NoSidebar.test.js` still guards the absence of a *permanent* sidebar (this section's "never a permanent global sidebar" rule).
 
 Added by operator decision `16871182b1370b61693fc691` (2026-11-16, option_c — decision record at the end of this section). This section adds a third navigation pattern **alongside** the two-mode model. It does not replace the two-mode model: the workspace-home dashboard, the repo horizontal tabs, ⌘K search, and the keyboard shortcuts (§6) remain the base navigation and must stay fully functional without the rail.
 

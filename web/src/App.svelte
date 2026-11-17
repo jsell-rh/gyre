@@ -14,6 +14,8 @@
   import PublicUserProfile from './components/PublicUserProfile.svelte';
   import InvitationAccept from './components/InvitationAccept.svelte';
   import NotificationBell from './components/NotificationBell.svelte';
+  import NavRail from './components/NavRail.svelte';
+  import { REPO_TAB_IDS } from './lib/repoTabs.js';
   import NotificationSettings from './components/NotificationSettings.svelte';
   import CrossWorkspaceHome from './components/CrossWorkspaceHome.svelte';
   import TenantSettings from './components/TenantSettings.svelte';
@@ -261,7 +263,10 @@
   // /invite/:workspaceId                       → pending invitation accept page (§UI Pages)
   // /invite/:token (64-hex magic link)         → token-form accept page (task-110)
 
-  const REPO_TABS = ['specs', 'tasks', 'mrs', 'agents', 'architecture', 'decisions', 'code', 'settings'];
+  // Repo tab ids for URL parsing — derived from the repo tab strip
+  // (web/src/lib/repoTabs.js, the single source of truth shared with
+  // RepoMode's tab bar, the navigation rail, and the mobile drawer), so a
+  // tab added to the strip is deep-linkable the moment it ships.
   const ENTITY_TABS = ['mrs', 'tasks', 'agents'];
 
   // ── Entity detail state ─────────────────────────────────────────────
@@ -351,7 +356,7 @@
           return { mode: 'repo', slug, repoName, tab: 'specs', entityType: 'spec', entityId: specPath };
         }
 
-        const tab = tabOrType && REPO_TABS.includes(tabOrType) ? tabOrType : 'specs';
+        const tab = tabOrType && REPO_TAB_IDS.includes(tabOrType) ? tabOrType : 'specs';
         return { mode: 'repo', slug, repoName, tab, entityType: null, entityId: null };
       }
 
@@ -808,7 +813,7 @@
     // (HSI §1.5 Meta-specs row — meta-specs are workspace-scoped).
     if (view === 'meta-specs') { goToAgentRules(); return; }
     // In repo mode, tab names switch the active tab instead of navigating away
-    if (mode === 'repo' && REPO_TABS.includes(view)) { goToRepoTab(view); return; }
+    if (mode === 'repo' && REPO_TAB_IDS.includes(view)) { goToRepoTab(view); return; }
     // Everything else lands on workspace home
     goToWorkspaceHome(currentWorkspace);
   });
@@ -1107,7 +1112,7 @@
       if (repoTab === 'architecture' || repoTab === 'dependencies' || repoTab === 'code' || repoTab === 'mrs' || repoTab === 'agents') return 'repos';
       if (repoTab === 'decisions') return 'decisions';
       if (repoTab === 'settings') return 'settings';
-      return 'repos'; // exhaustive-state:ok — all REPO_TABS enumerated above; defensive fallback
+      return 'repos'; // exhaustive-state:ok — all REPO_TAB_IDS enumerated above; defensive fallback
     }
     return 'decisions';
   });
@@ -1176,7 +1181,22 @@
           scrollWorkspaceSection(sectionId);
           return;
         case 'agent-rules':
-          goToAgentRules();
+          // §1a: section items scroll to their dashboard section on the
+          // workspace home (Settings is the only navigation exception);
+          // section-agent-rules is a real §2 dashboard section. The
+          // section's own "Manage rules" action still navigates to the
+          // full agent-rules page.
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'agent-rules';
+          scrollWorkspaceSection('agent-rules');
+          return;
+        case 'architecture':
+          // §1a rail item: scroll to AND expand the Architecture section
+          // (collapsed by default on the dashboard, §2).
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'architecture';
+          archExpandSignal++;
+          scrollWorkspaceSection('architecture');
           return;
         case 'settings':
           goToWorkspaceSettings();
@@ -1184,6 +1204,100 @@
       }
     }
   }
+
+  // ── Navigation rail (ui-navigation.md §1a, task-082) ─────────────────
+  // Optional, collapsible, scope-labelled left panel on navigation-heavy
+  // screens only: workspace home and repo mode. Focused editor/canvas
+  // surfaces (Editor Split, popped-out detail panels, full-screen modals)
+  // keep full content width — the rail is simply not rendered there. It is
+  // never load-bearing: every destination below stays reachable via the
+  // dashboard sections, the repo tab strip, ⌘K search, and the g-shortcuts.
+
+  // Workspace-home rail item set: the §2 dashboard sections in canonical
+  // order, then workspace Settings (§1a "Item set per mode").
+  const WORKSPACE_RAIL_SECTION_IDS = [
+    'decisions', 'specs', 'architecture', 'repos', 'briefing', 'agent-rules', 'settings',
+  ];
+  // Repo-mode rail item set: the repo tab strip exactly (§3), in canonical
+  // tab order. The tab strip is the source of truth, so this is a
+  // derivation from web/src/lib/repoTabs.js (the same list RepoMode
+  // renders its tab bar from) — never a hand-maintained copy that could
+  // drift from the strip.
+  const REPO_RAIL_TAB_IDS = REPO_TAB_IDS;
+
+  function workspaceRailLabel(id) {
+    switch (id) {
+      case 'agent-rules': return $t('topbar.agent_rules_label');
+      case 'settings':    return $t('common.settings');
+      default:            return $t(`workspace_home.sections.${id}`);
+    }
+  }
+
+  function repoRailLabel(id) {
+    return id === 'settings' ? $t('common.settings') : $t(`repo_mode.tabs.${id}`);
+  }
+
+  // The rail (and, below, the narrow-viewport drawer) renders only on the
+  // navigation-heavy screens: workspace home and repo mode without an open
+  // entity detail (the full-page entity detail is a focused surface).
+  let showNavRail = $derived(
+    (mode === 'workspace_home' && currentWorkspace) ||
+    (mode === 'repo' && currentRepo && !entityDetail)
+  );
+  let railMode = $derived(mode === 'repo' ? 'repo' : 'workspace-home');
+  let railScopeLabel = $derived(
+    mode === 'repo'
+      ? `${currentWorkspace?.name ?? 'Workspace'} / ${currentRepo?.name ?? ''}`
+      : (currentWorkspace?.name ?? $t('topbar.select_workspace'))
+  );
+  let railItems = $derived(
+    railMode === 'repo'
+      ? REPO_RAIL_TAB_IDS.map((id) => ({ id, label: repoRailLabel(id) }))
+      : WORKSPACE_RAIL_SECTION_IDS.map((id) => ({ id, label: workspaceRailLabel(id) }))
+  );
+  let railActiveId = $derived.by(() => {
+    if (mode === 'repo') return repoTab;
+    const s = workspaceActiveSection;
+    if (s === 'inbox') return 'decisions'; // legacy section id for Decisions
+    return WORKSPACE_RAIL_SECTION_IDS.includes(s) ? s : 'decisions';
+  });
+
+  function handleRailSelect(itemId) {
+    if (mode === 'repo') {
+      // Same route as clicking the tab (§1a): the rail is a switcher, not a
+      // second source of truth.
+      goToRepoTab(itemId);
+      return;
+    }
+    handleSectionNavigate(itemId);
+  }
+
+  // §1a "Narrow viewports (<768px)": the hamburger drawer offers the
+  // rail's per-mode item set — workspace-home sections (canonical order +
+  // Settings) at workspace scope, the repo tab strip exactly in repo mode.
+  // At tenant scope (/all) there is no rail; the drawer keeps its §10
+  // cross-workspace section semantics.
+  let drawerItems = $derived.by(() => {
+    if (mode === 'repo') {
+      return REPO_RAIL_TAB_IDS.map((id) => ({ id, label: repoRailLabel(id) }));
+    }
+    if (mode === 'cross_workspace') {
+      return [
+        { id: 'decisions', label: $t('workspace_home.sections.decisions') },
+        { id: 'repos', label: $t('workspace_home.sections.repos') },
+        { id: 'briefing', label: $t('workspace_home.sections.briefing') },
+        { id: 'specs', label: $t('workspace_home.sections.specs') },
+        { id: 'agent-rules', label: $t('topbar.agent_rules_label') },
+      ];
+    }
+    return WORKSPACE_RAIL_SECTION_IDS.map((id) => ({ id, label: workspaceRailLabel(id) }));
+  });
+  let drawerActiveId = $derived(mode === 'repo' ? repoTab : activeSection);
+  let drawerScopeLabel = $derived(
+    mode === 'repo'
+      ? `${currentWorkspace?.name ?? 'Navigation'} / ${currentRepo?.name ?? ''}`
+      : (currentWorkspace?.name ?? 'Navigation')
+  );
 
 
   // ── Page title ────────────────────────────────────────────────────────
@@ -1519,9 +1633,12 @@
 
 {#if !$isLoading}
 <div class="app">
-  <!-- No persistent sidebar (ui-navigation.md Principle 5): the shell is
-      topbar + content + status bar; navigation is workspace-home sections
-      and repo-mode tabs. Mobile drawer (§8) links to home sections. -->
+  <!-- No persistent sidebar (ui-navigation.md Principle 5: "no permanent
+      sidebar"): the shell is topbar + content + status bar; navigation is
+      workspace-home sections and repo-mode tabs. The optional collapsible
+      navigation rail (§1a, task-082) renders per-mode on navigation-heavy
+      screens only - collapsed icon-only by default, never a global fixed
+      menu. Mobile drawer (§8) offers the rail's per-mode item set. -->
   <div class="main">
 
     <!-- ── Topbar (always visible) ──────────────────────────────────── -->
@@ -1930,40 +2047,31 @@
         data-testid="mobile-drawer"
       >
         <div class="drawer-header">
-          <span class="drawer-title">{currentWorkspace?.name ?? 'Navigation'}</span>
+          <span class="drawer-title">{drawerScopeLabel}</span>
           <button
             class="drawer-close"
             onclick={() => (mobileDrawerOpen = false)}
             aria-label={$t('topbar.close_drawer')}
           >✕</button>
         </div>
+        <!-- §1a narrow viewports: the drawer offers the rail's per-mode item
+            set (workspace-home sections / repo tab strip); at tenant scope
+            (/all) it keeps the §10 cross-workspace sections. -->
         <ul class="drawer-links" role="list">
-          {#each [
-            { id: 'decisions', label: 'Decisions' },
-            { id: 'repos', label: 'Repos' },
-            { id: 'briefing', label: 'Briefing' },
-            { id: 'specs', label: 'Specs' },
-            { id: 'agent-rules', label: 'Agent Rules' },
-          ] as item (item.id)}
+          {#each drawerItems as item (item.id)}
             <li>
               <button
                 class="drawer-link"
-                class:active={activeSection === item.id}
-                onclick={() => { mobileDrawerOpen = false; handleSectionNavigate(item.id); }}
+                class:active={drawerActiveId === item.id}
+                onclick={() => {
+                  mobileDrawerOpen = false;
+                  if (mode === 'repo') goToRepoTab(item.id);
+                  else handleSectionNavigate(item.id);
+                }}
                 data-testid={`drawer-item-${item.id}`}
               >{item.label}</button>
             </li>
           {/each}
-          {#if currentWorkspace}
-            <li>
-              <button
-                class="drawer-link"
-                class:active={mode === 'analytics'}
-                onclick={() => { mobileDrawerOpen = false; goToAnalytics(); }}
-                data-testid="drawer-item-analytics"
-              >Analytics</button>
-            </li>
-          {/if}
         </ul>
       </nav>
     {/if}
@@ -1971,6 +2079,22 @@
     <!-- ── Content area + detail panel ──────────────────────────────── -->
     <div class="content-split">
     <main class="content" id="main-content" tabindex="-1">
+      <!-- ui-navigation.md §1a: optional collapsible navigation rail on
+          navigation-heavy screens (workspace home, repo mode without an
+          open entity detail). Collapsed icon-only 48px by default; toggle
+          expands to 240px; preference persisted per user per mode. Never
+          rendered on focused editor/canvas surfaces. -->
+      <div class="content-row">
+      {#if showNavRail}
+        <NavRail
+          mode={railMode}
+          scopeLabel={railScopeLabel}
+          items={railItems}
+          activeId={railActiveId}
+          onSelect={handleRailSelect}
+          userKey={selfUserId ?? 'anonymous'}
+        />
+      {/if}
       <div class="content-inner" class:faded={!contentVisible}>
         {#if mode === 'workspace_home'}
           <WorkspaceHome
@@ -2053,6 +2177,7 @@
         {:else if mode === 'notification_settings'}
           <NotificationSettings />
         {/if}
+      </div>
       </div>
     </main>
 
@@ -2698,6 +2823,15 @@
     display: flex;
     overflow: hidden;
     min-height: 0;
+  }
+
+  /* §1a rail row: optional nav rail beside the mode content. The row only
+     exists to host the rail; without it the content keeps full width. */
+  .content-row {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    min-width: 0;
   }
 
   .content {

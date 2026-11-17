@@ -2167,6 +2167,7 @@
     "refresh": "Refresh",
     "expand": "Expand",
     "collapse": "Collapse",
+    "settings": "Settings",
     "time_just_now": "just now",
     "time_minutes_ago": "{count}m ago",
     "time_hours_ago": "{count}h ago",

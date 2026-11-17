@@ -2,9 +2,9 @@
 
 The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localhost:3000`.
 
-> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. The permanent sidebar described by `human-system-interface.md` §1.3 is **not shipped** — the canonical navigation is `specs/system/ui-navigation.md` (Principle 5: no *permanent* sidebar). On narrow viewports a hamburger toggles a drawer that links to the workspace-home sections.
+> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. The permanent sidebar described by `human-system-interface.md` §1.3 is **not shipped** — the canonical navigation is `specs/system/ui-navigation.md` (Principle 5: no *permanent* sidebar). On narrow viewports a hamburger toggles a drawer that offers the per-mode navigation-rail item set.
 >
-> **Spec amendment (2026-11-16, decision `16871182b1370b61693fc691`):** `ui-navigation.md` §1a now specifies an optional, collapsible, scope-labelled **navigation rail** on navigation-heavy screens (workspace home and repo mode): per-mode item sets mirroring the dashboard sections / repo tab strip, stable ordering within each mode, collapsed (icon-only) by default, and a narrow-viewport drawer. This is **specified but not yet shipped** — the shipped UI remains the two-mode model with no sidebar, and `web/src/__tests__/NoSidebar.test.js` (which asserts the absence of a *permanent* sidebar) remains the guard. Implementation is decomposed after amendment task-246 merges.
+> **Spec amendment (2026-11-16, decision `16871182b1370b61693fc691`):** `ui-navigation.md` §1a specifies (and the UI now ships) an optional, collapsible, scope-labelled **navigation rail** on navigation-heavy screens (workspace home and repo mode): per-mode item sets mirroring the dashboard sections / repo tab strip, stable ordering within each mode, collapsed (icon-only) by default, and a narrow-viewport drawer. `web/src/__tests__/NoSidebar.test.js` still guards the absence of a *permanent* sidebar; `web/src/__tests__/NavRail.test.js` covers the rail.
 
 ---
 
@@ -12,9 +12,18 @@ The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localho
 
 ### Shell Layout (no persistent sidebar)
 
-There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5: no *permanent* sidebar). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, notification bell), the workspace-home sections, and the repo-mode horizontal tabs. On narrow viewports, the hamburger (`[≡]`) opens a drawer linking to the workspace-home sections.
+There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5: no *permanent* sidebar). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, notification bell), the workspace-home sections, and the repo-mode horizontal tabs. On narrow viewports, the hamburger (`[≡]`) opens a drawer offering the per-mode navigation-rail item set (workspace-home sections / repo tab strip).
 
-`specs/system/ui-navigation.md` §1a (2026-11-16 amendment) specifies an optional, collapsible, scope-labelled navigation rail for workspace home and repo mode — **not yet implemented**; when implemented it will mirror the dashboard sections / repo tab strip per mode, default to collapsed icon-only, and become the narrow-viewport drawer on mobile.
+#### Navigation Rail (optional, collapsible — `ui-navigation.md` §1a)
+
+On navigation-heavy screens an optional **navigation rail** renders as a narrow left panel (`web/src/components/NavRail.svelte`, task-082):
+
+- **Where:** workspace home and repo mode (without an open entity detail) only. It is never rendered on focused editor/canvas surfaces — Editor Split, popped-out (full-page) detail panels, full-screen modals — and never becomes a global fixed menu.
+- **Scope-labelled per mode:** the rail header shows the workspace name at workspace home, and the `workspace / repo` path in repo mode. Item sets are per-mode; there is no global menu shared across modes.
+- **Item sets:** the workspace-home rail mirrors the dashboard sections in canonical order — Decisions, Specs, Architecture, Repos, Briefing, Agent Rules — then Settings (navigates to workspace settings). The repo-mode rail mirrors the repo tab strip exactly (Specs, Tasks, MRs, Agents, Architecture, Dependencies, Decisions, Code, Settings); selecting an item activates the corresponding tab, same route as clicking the tab. Item order is stable within each mode.
+- **Collapsed by default:** icon-only at 48px; the toggle expands it to the labelled 240px form. The preference is persisted per user per mode in `localStorage` (key `gyre_nav_rail_expanded.<mode>.<user-id>`); first use defaults to collapsed.
+- **Never load-bearing:** every rail destination remains reachable without the rail — dashboard sections, repo tab strip, `⌘K` search, and the `g`-prefixed shortcuts all keep working with the rail collapsed or absent.
+- **Narrow viewports (<768px):** no persistent rail; the hamburger drawer offers the same per-mode item set (workspace-home sections / repo tab strip) and dismisses on selection or `Esc`.
 
 ### Top Bar (always visible)
 
