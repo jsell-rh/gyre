@@ -89,8 +89,8 @@ impl TrustLevel {
     pub fn suppressed_notification_types(&self) -> Vec<&'static str> {
         let suppressed: &[NotificationType] = match self {
             TrustLevel::Supervised | TrustLevel::Custom => &[],
-            TrustLevel::Guided => &GUIDED_SUPPRESSED,
-            TrustLevel::Autonomous => &AUTONOMOUS_SUPPRESSED,
+            TrustLevel::Guided => GUIDED_SUPPRESSED,
+            TrustLevel::Autonomous => AUTONOMOUS_SUPPRESSED,
         };
         suppressed.iter().map(|t| t.as_str()).collect()
     }

@@ -46,6 +46,7 @@ pub trait WorkspaceRepository: Send + Sync {
 }
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait PersonaRepository: Send + Sync {
     async fn create(&self, persona: &Persona) -> Result<()>;
     async fn find_by_id(&self, id: &Id) -> Result<Option<Persona>>;
