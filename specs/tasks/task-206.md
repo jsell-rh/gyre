@@ -2,7 +2,7 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 commits: ["05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
@@ -124,3 +124,34 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
 - Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
+
+## Shipped
+
+Preview mode is a real agent run path, not an estimate (meta-spec-reconciliation.md §5):
+
+- **Spawn** — `POST /api/v1/meta-specs/preview` (Admin/Developer; global route, per-spec) validates every target up front (repo exists, caller passes repo ABAC + tenant containment, spec_path exists on the default branch), then provisions per target a real `Active` agent row, a `preview/{preview_id}/{slug}` branch pinned to the default-branch tip, a real git worktree, and a short-lived preview JWT (`GYRE_PREVIEW_JWT_TTL_SECS`, default 1800 s). Response is exactly the spec shape: `202 {preview_id, agents:[{agent_id, repo_id, spec_path, branch}]}`. Provisioning is all-or-nothing per request.
+- **Draft delivery** — the draft travels out-of-band in the agent process environment (`GYRE_PREVIEW_ID`, `GYRE_META_SPEC_DRAFT_KIND`, `GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_TARGET_SPEC_PATH`; `GYRE_TASK_ID` deliberately absent). `docker/gyre-agent/agent-runner.mjs` reads those vars and builds the prompt itself: draft meta-spec as governing "how to build" context over the target spec, task-mutating MCP tools withheld, push to the preview branch as the entire deliverable.
+- **Skip-ceremony enforced, not just skipped** — the MCP dispatch refuses task/MR/provenance mutations for preview agents, and the REST surface does too: `POST /api/v1/agents/{id}/complete`, `POST /api/v1/merge-requests`, and `POST /api/v1/merge-queue/enqueue` return 403 for preview-agent callers. No spec-approval gate, no quality gates, no MR, no merge queue, no provenance, no `refs/agents/*`/`refs/tasks/*` writes, never `Idle`. Budget: workspace budget by default, `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` caps preview spawns independently when set (429 on overflow).
+- **Completion** — every compute-target monitor routes exits through `spawn::on_agent_process_exit` → `finish_preview_agent`: token revoked, worktree removed, budget slot released (idempotent), agent row lands `Stopped` — never `Idle`. The branch survives for diffing.
+- **Status + diff** — `GET /api/v1/meta-specs/preview/{preview_id}` reports per-agent state derived from the real agent rows and the produced `diff` (preview branch vs. pinned base sha, same git plumbing as MR diffs) once the branch exists.
+- **Cleanup** — `DELETE /api/v1/meta-specs/preview/{preview_id}` kills agents, force-removes worktrees, closes open MRs on `preview/{id}/*` branches, deletes every preview branch, revokes tokens, drops the kv records; 404 on unknown id. Background job `meta_spec_preview_gc` (interval `GYRE_META_SPEC_PREVIEW_GC_INTERVAL_SECS`, default 1 h; TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) tears down expired runs and reclaims orphaned agent entries. No refs, no provenance, no audit trail.
+- **Clean cutover** — the hollow structural-impact preview and the workspace-scoped routes are gone; docs updated (`docs/api-reference.md`, `docs/server-config.md`, `docker/gyre-agent/README.md`).
+
+### Repair rounds
+
+- **Round 01195dea (69488298)** — the preview launch's started check guessed from the handle's shape (`pid.is_some()`), but SshDocker and Kubernetes handles carry `pid: None` by design: a successful remote launch was always reported "process never started". `dispatch_agent_launch`'s own `launched` flag is now propagated through `launch_taskless_agent_process` and the preview check reads it; `mark_preview_agent_failed` kills through the recorded handle/backend pair before reclaiming the row/token/worktree. Also collapsed a duplicated paragraph in `docs/api-reference.md`. New regression tests: `preview_launch_on_ssh_docker_target_is_not_failed`, `preview_launch_on_kubernetes_target_is_not_failed`, `mark_preview_agent_failed_kills_registered_process`.
+- **Round f0e8b9dc (cc3080ff)** — three test regressions from the preview-agent auth extractors, all test-side (no production behavior changed): the merge_queue.rs test module's enqueue probes now send `Bearer test-token` (the `AuthenticatedAgent` extractor on `enqueue` answered 401 before the handler); rbac.rs sub-case 2 retargeted from the removed workspace-scoped preview route to the global `POST /api/v1/meta-specs/preview` with a well-formed body (Json extraction must succeed so the role guard is the surface that fires) and the expected route string updated; rbac.rs sub-case 5's MR seed now sends `Bearer test-token` (`create_mr` gained the extractor). Merge resolution of base 9f446d0 dropped the workspace-scoped preview exemption lines and the now-stale `orchestrator/spawn` exemption (resolver covers it) — the frozen exemption file shrank, never grew.
+- **Round 0d041435 (05c06fde)** — the verification round's clippy and whitespace findings: the two env-mutating test helpers (`with_agent_command`, `with_path_prepend`) carry documented `#[allow(clippy::await_holding_lock)]` (the lock must span the awaited body; the tests are serialized on it process-wide), the single-use `format!` in the `agent-commit.sh` fixture is collapsed to a plain literal, the `needless_borrow` in `launch_taskless_agent_process` is removed, and the trailing blank line in `docs/server-config.md` is gone. This round completed the verification the terminated run could not: `cargo clippy -p gyre-server --lib --tests` finishes with **zero warnings on any line this branch introduces** (every remaining warning — `explorer_ws.rs`, `git_http.rs`, `gyre-common` `view_query.rs:823`, etc. — is pre-existing on base 9f446d0e and outside the branch's diff hunks), `cargo fmt -- --check` is clean, and every mechanical check script passes. Evidence: `/tmp/stage/review-evidence/repair-round.txt` + `clippy-gyre-server-lib-tests.log`.
+
+### Test evidence
+
+In-sandbox on head `18c14c8f` (checkpoint `05c06fde`; evidence at `/tmp/stage/review-evidence/repair-round.txt`):
+
+- `cargo clippy -p gyre-server --lib --tests` — finished clean for every branch-introduced line (full log retained); `cargo fmt -p gyre-server -- --check` clean; `bash scripts/check-arch.sh` passed; `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-mcp-write-tools.sh` and the other mechanical check scripts all passed (sweep recorded in the evidence file).
+- The build wrapper blocks gyre-server test codegen in this stage, so execution is deferred to the independent verifier. Required probes:
+  - `cargo test -p gyre-server --lib -- merge_queue` (authorized enqueue probes)
+  - `cargo test -p gyre-server --lib -- uninstrumented_role_guards` (retargeted preview guard + authorized MR seed)
+  - `cargo test -p gyre-server --lib -- preview_` (full preview suite, incl. the earlier rounds' spawn/draft/authz/skip-ceremony/DELETE/GC-TTL/diff and compute-backend regression tests)
+  - `cd web && npm ci && npm test` (MetaSpecs/EditorSplit surfaces; unchanged since the last reviewed round)
+
+Sandbox limitation: TCP listener probes are unsupported here (capabilities.json), so no live HTTP/browser verification; the REST surface is exercised through the production `build_router` via `tower::ServiceExt::oneshot` against real git + real processes, and exact-head GitHub CI checks remain mandatory after review.
