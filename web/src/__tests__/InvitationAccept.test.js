@@ -24,7 +24,7 @@
  *   - Decline calls the matching token decline endpoint
  *   - A terminal-status or unknown token renders no accept action
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 vi.mock('../lib/api.js', () => ({
@@ -44,6 +44,16 @@ vi.mock('../lib/api.js', () => ({
 
 import InvitationAccept from '../components/InvitationAccept.svelte';
 import { api } from '../lib/api.js';
+
+// Frozen wall clock for the whole-minute expiry assertions: without it, any
+// >=1s gap between seeding expires_at from a live Date.now() and the render
+// flips floor((expires_at - now)/60) from 30 to 29 (flaky 29m/30m race).
+let dateNowSpy = null;
+
+afterEach(() => {
+  dateNowSpy?.mockRestore();
+  dateNowSpy = null;
+});
 
 const WS = { id: 'ws-9', name: 'Payments', description: 'Payment processing', slug: 'payments' };
 
@@ -77,9 +87,12 @@ describe('InvitationAccept', () => {
 
   it('renders the workspace preview with the invited role and expiry', async () => {
     // Sub-hour pending invitation: the expiry countdown must render whole
-    // minutes, not raw seconds with a minutes unit.
+    // minutes, not raw seconds with a minutes unit. Date.now() is frozen so
+    // the seeded expiry and the render-time computation agree exactly.
+    const nowMs = 1735689600000;
+    dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(nowMs);
     api.myInvitations.mockResolvedValue({
-      invitations: [pendingInvitation({ expires_at: Math.floor(Date.now() / 1000) + 30 * 60 })],
+      invitations: [pendingInvitation({ expires_at: Math.floor(nowMs / 1000) + 30 * 60 })],
     });
     const { findByText, container } = render(InvitationAccept, { props: { inviteId: 'ws-9' } });
     expect(await findByText('Workspace invitation')).toBeTruthy();
@@ -185,8 +198,11 @@ describe('InvitationAccept (magic-link token flow, /invite/{token})', () => {
 
   it('previews via the token endpoint with the invited email, role, and workspace preview', async () => {
     // Sub-hour pending link: the expiry countdown must render whole
-    // minutes, not raw seconds with a minutes unit.
-    api.invitationPreview.mockResolvedValue(tenantPreview({ expires_at: Math.floor(Date.now() / 1000) + 30 * 60 }));
+    // minutes, not raw seconds with a minutes unit. Date.now() is frozen so
+    // the seeded expiry and the render-time computation agree exactly.
+    const nowMs = 1735689600000;
+    dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+    api.invitationPreview.mockResolvedValue(tenantPreview({ expires_at: Math.floor(nowMs / 1000) + 30 * 60 }));
     const { findByText, container } = render(InvitationAccept, { props: { token: TOKEN } });
     expect(await findByText('Platform')).toBeTruthy();
     expect(await findByText('invitee@example.com')).toBeTruthy();
