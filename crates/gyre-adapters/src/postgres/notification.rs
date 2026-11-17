@@ -235,6 +235,9 @@ impl NotificationRepository for PgStorage {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id,
+        // same as list_for_user (this is its active-only twin).
+        let tenant = self.tenant_id.clone();
         // Owned copy for the spawn_blocking closure; empty set matches
         // nothing (port contract), handled explicitly below so the SQL
         // never depends on `IN ()` semantics — same as list_for_user.
@@ -246,6 +249,7 @@ impl NotificationRepository for PgStorage {
             // Same surface as list_for_user plus the active guard
             // (resolved_at/dismissed_at IS NULL) — the drawer's listing.
             let mut query = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())

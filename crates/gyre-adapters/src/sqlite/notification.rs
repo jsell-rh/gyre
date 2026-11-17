@@ -235,6 +235,9 @@ impl NotificationRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
+        // Spec hierarchy-enforcement.md §3: every read filters by tenant_id,
+        // same as list_for_user (this is its active-only twin).
+        let tenant = self.tenant_id.clone();
         // Owned copy for the spawn_blocking closure; empty set matches
         // nothing (port contract), handled explicitly below so the SQL
         // never depends on `IN ()` semantics — same as list_for_user.
@@ -246,6 +249,7 @@ impl NotificationRepository for SqliteStorage {
             // Same surface as list_for_user plus the active guard
             // (resolved_at/dismissed_at IS NULL) — the drawer's listing.
             let mut query = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::resolved_at.is_null())
                 .filter(notifications::dismissed_at.is_null())
@@ -1161,6 +1165,45 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(all.len(), 4, "list_for_user keeps the Inbox contract");
+    }
+
+    /// hierarchy-enforcement.md §3: the active-only drawer listing is a read
+    /// like any other: a same-user, same-workspace row filed under ANOTHER
+    /// tenant must not leak into tenant-1's drawer. The handle is scoped to
+    /// tenant-1, so the §3 tenant filter must exclude it even though
+    /// user_id, workspace_id and the active guard all match. Remove the
+    /// tenant_id filter from list_active_for_user and this row leaks.
+    #[tokio::test]
+    async fn list_active_for_user_excludes_other_tenants() {
+        let (_tmp, s) = setup();
+        let user1 = Id::new("user-1");
+        NotificationRepository::create(&s, &make("n-active-home", 1000, false))
+            .await
+            .unwrap();
+        let cross_tenant = Notification::new(
+            Id::new("n-active-cross-tenant"),
+            Id::new("ws-1"),
+            Id::new("user-1"),
+            NotificationType::GateFailure,
+            "cross-tenant active".to_string(),
+            "tenant-2",
+            1001,
+        );
+        NotificationRepository::create(&s, &cross_tenant)
+            .await
+            .unwrap();
+
+        let active = NotificationRepository::list_active_for_user(
+            &s, &user1, None, None, None, None, None, 50, 0,
+        )
+        .await
+        .unwrap();
+        let ids: Vec<&str> = active.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["n-active-home"],
+            "the tenant-2 row is excluded even though user_id and workspace_id match"
+        );
     }
 
     /// The four-level `?priority=` filter pushes down as a type-string set
