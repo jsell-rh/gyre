@@ -25,7 +25,7 @@ The vision ("What Humans Do" §1-§5) defines what humans do: decide what to bui
 
 3. **GitHub muscle memory.** Repo list → click repo → horizontal tabs. Developers already know this flow. Adapt the pattern; don't invent a new one.
 
-4. **Decisions are always visible.** The notification bell in the top bar shows the count globally. Workspace home leads with decisions. Repo view has a Decisions tab. Human judgment is never more than one click away.
+4. **Decisions are always visible.** The notification bell in the top bar shows the unread notification count globally and opens the notification drawer (user-management.md §In-App Notification UI; amended, see §1 note). Workspace home leads with decisions. Repo view has a Decisions tab. Human judgment is never more than one click away.
 
 5. **No permanent sidebar.** The workspace home is a dashboard. The repo view has horizontal tabs. There is no persistent, global sidebar that needs to morph between scopes — the two contexts are visually distinct pages. Navigation-heavy screens MAY additionally offer the optional, collapsible, scope-labelled navigation rail defined in §1a; that rail is per-mode, collapsed by default, and never a global fixed menu. (Amended 2026-11-16, decision `16871182b1370b61693fc691`: the original blanket "No sidebar" wording is superseded by "no permanent sidebar".)
 
@@ -44,7 +44,18 @@ The vision ("What Humans Do" §1-§5) defines what humans do: decide what to bui
 - **[≡] Hamburger** (mobile only): Toggles the workspace home sections on narrow viewports.
 - **Workspace selector** (`Payments ▾`): Dropdown to switch workspaces. Shows workspace name. Clicking the name (not the arrow) navigates to the workspace home. Clicking the arrow opens the switcher dropdown.
 - **Search** (`⌘K`): Global search — specs, types, concepts, agents, repos. Opens a command palette overlay. Same as HSI §1.
-- **Decisions badge** (`🔔 3`): Count of unresolved items requiring human judgment across all repos in this workspace. Clicking navigates to the workspace home with the Decisions section expanded. Uses the notification system (not raw MR/spec counts).
+- **Notification bell** (`🔔 3`): Unread notification count (user-management.md §In-App Notification UI). Clicking opens the notification drawer — recent active notifications grouped by priority with deep links to the acting surface. Uses the notification system (not raw MR/spec counts).
+
+> **Bell amendment (2026-11, task-127):** The top-bar bell was previously
+> specced here as a *decisions-count* badge whose click navigated to the
+> workspace home with the Decisions section expanded (repo mode: the
+> Decisions tab). `user-management.md` §In-App Notification UI and §UI Pages
+> (Notification Drawer — "slide-out panel from bell icon", "notification
+> bell in top nav with unread count badge") supersede that behavior: the
+> bell shows the **unread** count and opens the notification drawer.
+> Decisions remain one click away — the drawer's items deep-link to the
+> acting surface — and the workspace home still leads with the Decisions
+> section (§2), which continues to show the active-decisions count.
 - **User avatar**: Dropdown with Profile (HSI §12), Sign out.
 
 **In repo mode**, the top bar adds a back arrow and repo context:
@@ -57,7 +68,7 @@ The vision ("What Humans Do" §1-§5) defines what humans do: decide what to bui
 
 - **[←] Back arrow**: Returns to workspace home. Always visible in repo mode.
 - **Workspace / Repo path**: Shows context. Clicking "Payments" returns to workspace home (same as back arrow). The repo name is not clickable (you're already there).
-- **Decisions badge**: In repo mode, shows count for THIS repo only (excludes workspace-scoped notifications with `repo_id: NULL` per HSI §1). This is intentional — workspace-scoped items are visible on the workspace home, which the user sees first on every app open. Clicking opens the Decisions tab.
+- **Notification bell**: Shows the same unread count as workspace mode (the unread-count endpoint does not yet support repo-scoped filtering; workspace-scoped items are visible on the workspace home, which the user sees first on every app open). Clicking opens the notification drawer, same as workspace mode (2026-11, task-127 amendment above).
 
 ### Status Bar (bottom, always visible)
 
@@ -485,7 +496,7 @@ This is the **creative surface** for encoding organizational judgment (vision §
 ### Daily Flow
 
 1. Open app → **always workspace home first** (even if last repo is stored). This ensures workspace-scoped decisions (with `repo_id: NULL`) are never missed. The last-used repo is remembered and highlighted in the workspace home Repos section, one click away. If there are zero unresolved decisions, the user can click their repo immediately.
-2. Glance at Decisions count in top bar — any urgent items?
+2. Glance at the unread count on the top-bar bell — any urgent items?
 3. If decisions exist: handle them (approve specs, retry gates)
 4. Click repo to focus → Specs tab shows implementation progress
 5. Write or edit specs as needed
@@ -494,9 +505,9 @@ This is the **creative surface** for encoding organizational judgment (vision §
 
 ### Exception Flow
 
-1. Decision badge shows `🔔 3`
-2. Click badge → workspace home, Decisions section expanded
-3. "Gate failure in payment-api" → click → enters repo mode, Decisions tab, gate failure detail
+1. Notification bell shows `🔔 3`
+2. Click bell → notification drawer opens, grouped by priority
+3. "Gate failure in payment-api" → click the notification → its deep link enters repo mode, Decisions tab, gate failure detail
 4. Review diff, gate output → Retry or Override
 5. Back arrow → workspace home
 

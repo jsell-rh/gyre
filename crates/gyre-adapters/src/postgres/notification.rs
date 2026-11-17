@@ -221,6 +221,68 @@ impl NotificationRepository for PgStorage {
         .await?
     }
 
+    async fn list_active_for_user(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_types: Option<&[&str]>,
+        repo_id: Option<&Id>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Notification>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.clone();
+        let ws_id = workspace_id.cloned();
+        // Owned copy for the spawn_blocking closure; empty set matches
+        // nothing (port contract), handled explicitly below so the SQL
+        // never depends on `IN ()` semantics — same as list_for_user.
+        let ntypes: Option<Vec<String>> =
+            notification_types.map(|ts| ts.iter().map(|s| s.to_string()).collect());
+        let rid = repo_id.cloned();
+        tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // Same surface as list_for_user plus the active guard
+            // (resolved_at/dismissed_at IS NULL) — the drawer's listing.
+            let mut query = notifications::table
+                .filter(notifications::user_id.eq(uid.as_str()))
+                .filter(notifications::resolved_at.is_null())
+                .filter(notifications::dismissed_at.is_null())
+                .order(notifications::priority.asc())
+                .then_order_by(notifications::created_at.desc())
+                .into_boxed();
+            if let Some(ref ws) = ws_id {
+                query = query.filter(notifications::workspace_id.eq(ws.as_str()));
+            }
+            if let Some(min_p) = min_priority {
+                query = query.filter(notifications::priority.ge(min_p as i32));
+            }
+            if let Some(max_p) = max_priority {
+                query = query.filter(notifications::priority.le(max_p as i32));
+            }
+            if let Some(ref ts) = ntypes {
+                if ts.is_empty() {
+                    return Ok(Vec::new());
+                }
+                query = query
+                    .filter(notifications::notification_type.eq_any(ts.iter().map(String::as_str)));
+            }
+            if let Some(ref r) = rid {
+                query = query.filter(notifications::repo_id.eq(r.as_str()));
+            }
+            let rows = query
+                .limit(limit as i64)
+                .offset(offset as i64)
+                .load::<NotificationRow>(&mut *conn)
+                .context("list active notifications")?;
+            rows.into_iter()
+                .map(NotificationRow::into_notification)
+                .collect()
+        })
+        .await?
+    }
+
     async fn update_body_by_entity_ref(
         &self,
         entity_ref: &str,
