@@ -5,7 +5,7 @@ depends_on: [task-165]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §Supply Chain (supply-chain.md)"
-commits: ["ad473d3c0846cbdb5888f4973b3ea8e406f09586", "a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5", "4bec0af594c555ae9dd807eacaa967cb3118722f"]
+commits: ["4bec0af594c555ae9dd807eacaa967cb3118722f", "ad473d3c0846cbdb5888f4973b3ea8e406f09586", "a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5"]
 ---
 
 ## Spec Excerpt
