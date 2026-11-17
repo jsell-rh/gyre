@@ -5435,6 +5435,590 @@ mod tests {
         .await;
     }
 
+    /// Review-round F1 regression (repair 898642fe): the §5 skip-ceremony
+    /// must also hold on the remaining control surfaces a live preview-agent
+    /// JWT can reach. The preview agent's token is a valid Agent-role
+    /// credential: it passes require_auth everywhere, the registry-exempt
+    /// stop/fail routes run with NO policy evaluation at all, and the
+    /// builtin agent-scoped-access Allow (write on '*') grants the
+    /// non-repo-addressed compose routes. Without per-handler guards it
+    /// could stop or fail ANY agent in ANY tenant (revoking tokens and task
+    /// secrets, decrementing budgets, firing orchestrator death handling
+    /// with replacement spawns), forge usage reports against other agents
+    /// (triggering their budget enforcement), emit production
+    /// SpecApprovalEvents, create task/agent rows via compose (bypassing
+    /// the guarded POST /api/v1/tasks), tear down other runs' compose
+    /// sessions, and mint a workspace orchestrator. Every probe drives the
+    /// live JWT through the production router, asserts the ledger did not
+    /// mutate, and carries an authorized positive control so each 403 is
+    /// the guard, not a broken route.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_agent_control_routes_are_refused() {
+        use crate::auth::test_helpers::{make_jwt_config, sign_test_jwt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A JWT-enabled twin of the same state (Arc-shared port stores), so
+        // minted JWTs — a foreign-tenant Admin and an in-tenant Agent-role
+        // caller — authenticate against the production router too.
+        let mut jwt_state = (*state).clone();
+        jwt_state.jwt_config = Some(make_jwt_config());
+        let jwt_state = std::sync::Arc::new(jwt_state);
+
+        // The orchestrator-spawn positive control needs the fail-closed
+        // persona layers (platform-model §4.3): the built-in meta-spec set
+        // and the pre-approved built-in personas, exactly like startup
+        // seeding.
+        crate::seed_builtin_meta_specs(&jwt_state).await;
+        crate::seed_builtin_personas_for_tenant(&jwt_state, &gyre_common::Id::new("default")).await;
+
+        // A spec ledger entry resolving to the preview's target repo, so
+        // the spec/approve ABAC resource resolution points at the repo the
+        // preview agent is scoped to (the finding's exact shape).
+        let spec_sha = "b".repeat(40);
+        jwt_state
+            .spec_ledger
+            .save(&gyre_domain::SpecLedgerEntry {
+                path: "system/search.md".to_string(),
+                title: "Search".to_string(),
+                owner: "user:admin".to_string(),
+                kind: None,
+                current_sha: spec_sha.clone(),
+                approval_mode: "human_only".to_string(),
+                approval_status: gyre_domain::ApprovalStatus::Pending,
+                linked_tasks: vec![],
+                linked_mrs: vec![],
+                drift_status: "unknown".to_string(),
+                created_at: 1_700_000_000,
+                updated_at: 1_700_000_000,
+                repo_id: Some(repo_id.clone()),
+                workspace_id: Some(ws_id.to_string()),
+            })
+            .await
+            .unwrap();
+
+        // Active victims in the preview workspace (a real workspace row in
+        // tenant "default"), so tenant containment passes for in-tenant
+        // callers and only the preview guard can refuse the preview agent.
+        let now = chrono_now_secs();
+        let mut victims = Vec::new();
+        for name in ["stop-victim", "fail-victim", "containment-victim"] {
+            let mut agent = gyre_domain::Agent::new(
+                gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                name,
+                now,
+            );
+            agent.workspace_id = ws_id.clone();
+            agent
+                .transition_status(gyre_domain::AgentStatus::Active)
+                .unwrap();
+            state.agents.create(&agent).await.unwrap();
+            victims.push(agent.id.to_string());
+        }
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+
+            crate::abac_middleware::seed_builtin_policies(&jwt_state)
+                .await
+                .expect("seed built-in policies");
+            let prod = crate::build_router(jwt_state.clone());
+            let jwt = state
+                .kv_store
+                .kv_get("agent_tokens", &agent_id)
+                .await
+                .unwrap()
+                .expect("preview agent token must be live");
+
+            // Minted probe credentials: an Admin in a foreign tenant (for
+            // the stop route's cross-tenant containment) and an in-tenant
+            // Agent-role caller that is NOT a preview agent (for the
+            // orchestrator-spawn role gate).
+            let foreign_admin = sign_test_jwt(
+                &serde_json::json!({
+                    "tenant_id": "tenant-b",
+                    "sub": "admin-tenant-b",
+                    "preferred_username": "admin-tenant-b",
+                    "realm_access": { "roles": ["admin"] }
+                }),
+                3600,
+            );
+            let plain_agent = sign_test_jwt(
+                &serde_json::json!({
+                    "tenant_id": "default",
+                    "sub": "plain-worker",
+                    "preferred_username": "plain-worker",
+                    "realm_access": { "roles": ["agent"] }
+                }),
+                3600,
+            );
+
+            // ── 1. POST /api/v1/agents/{id}/stop + /fail (registry-exempt:
+            //    no middleware policy evaluation, the handler guards are the
+            //    only authorization surface) ───────────────────────────
+            for (verb, victim) in [("stop", &victims[0]), ("fail", &victims[1])] {
+                let uri = format!("/api/v1/agents/{}/{}", victim, verb);
+                let resp = prod
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(&uri)
+                            .header("authorization", format!("Bearer {jwt}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "preview agent must not {verb} agents via REST"
+                );
+                let row = state
+                    .agents
+                    .find_by_id(&gyre_common::Id::new(victim))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    row.status,
+                    gyre_domain::AgentStatus::Active,
+                    "the refused {verb} must not have mutated the victim"
+                );
+            }
+
+            // Cross-tenant containment: an Admin JWT from tenant B cannot
+            // stop tenant-default's agent — the per-handler comparison is
+            // the only guard on this exempt route.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/agents/{}/stop", victims[2]))
+                        .header("authorization", format!("Bearer {foreign_admin}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "a foreign-tenant caller must not stop an agent outside its tenant"
+            );
+
+            // Usage self-report contract: the preview agent may not forge a
+            // usage report against another agent (it would charge the
+            // victim's budget and trigger its ≥100% enforcement).
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/agents/{}/usage", victims[2]))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "tokens_input": 1,
+                                "tokens_output": 1,
+                                "cost_usd": 0.0
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "a preview agent must not report usage for another agent"
+            );
+
+            // Positive controls: the operator (global Admin token, same
+            // tenant) stops/fails the victims and reports usage on an
+            // agent's behalf — the guards scope to preview/cross-tenant
+            // callers, not the routes.
+            for (verb, victim) in [("stop", &victims[0]), ("fail", &victims[1])] {
+                let resp = prod
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("/api/v1/agents/{}/{}", victim, verb))
+                            .header("authorization", "Bearer test-token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "admin {verb} must still work"
+                );
+            }
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/agents/{}/usage", victims[2]))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "tokens_input": 1,
+                                "tokens_output": 1,
+                                "cost_usd": 0.0
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "admin usage reporting on behalf of an agent must still work"
+            );
+
+            // ── 2. POST /api/v1/specs/{path}/approve — §5 skip-ceremony row
+            //    1 ("Spec approval check — Skipped") ──────────────────
+            // Driven on the bare api_router (no ABAC middleware) so the
+            // handler guard itself is the only refusal layer, and on the
+            // production router for the realistic path.
+            for router in [app.clone(), prod.clone()] {
+                let resp = router
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/specs/system%2Fsearch.md/approve")
+                            .header("authorization", format!("Bearer {jwt}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({ "sha": spec_sha }).to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "preview agent must not approve specs"
+                );
+            }
+            assert!(
+                state
+                    .spec_approval_history
+                    .list_by_path("system/search.md")
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "the refused approval must not have recorded an event"
+            );
+            let entry = state
+                .spec_ledger
+                .find_by_path("system/search.md")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                entry.approval_status,
+                gyre_domain::ApprovalStatus::Pending,
+                "the refused approval must not have transitioned the ledger"
+            );
+            // Positive control: the admin approves the same spec version.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/specs/system%2Fsearch.md/approve")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "sha": spec_sha }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin spec approval must still work"
+            );
+
+            // ── 3. POST /api/v1/compose/apply — task/agent row creation is
+            //    exactly the ceremony POST /api/v1/tasks already refuses
+            //    for preview callers ─────────────────────────────────
+            let compose_body = serde_json::json!({
+                "version": "1",
+                "repo_id": repo_id,
+                "agents": [{
+                    "name": "preview-compose-worker",
+                    "role": "developer",
+                    "parent": null,
+                    "capabilities": [],
+                    "task": {
+                        "title": "preview compose task",
+                        "description": null,
+                        "priority": "Medium"
+                    },
+                    "branch": null,
+                    "lifetime_secs": null
+                }]
+            });
+            let agents_before = state.agents.list().await.unwrap().len();
+            let tasks_before = state.tasks.list().await.unwrap().len();
+            // Production router (realistic surface) and the bare api_router
+            // (no ABAC middleware — the handler guard is the only refusal
+            // layer), so the guard itself is proven, not just the policy set.
+            for router in [prod.clone(), app.clone()] {
+                let resp = router
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/compose/apply")
+                            .header("authorization", format!("Bearer {jwt}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(compose_body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "preview agent must not apply compose specs"
+                );
+            }
+            assert_eq!(
+                state.agents.list().await.unwrap().len(),
+                agents_before,
+                "the refused compose apply must not have created agent rows"
+            );
+            assert_eq!(
+                state.tasks.list().await.unwrap().len(),
+                tasks_before,
+                "the refused compose apply must not have created task rows"
+            );
+
+            // Positive control: the admin applies the compose for real —
+            // this is also the teardown target below.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/compose/apply")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(compose_body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin compose apply must still work"
+            );
+            let compose_json = body_json(resp).await;
+            let compose_id = compose_json["compose_id"].as_str().unwrap().to_string();
+            let compose_agent_id = compose_json["agents"][0]["agent_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            // ── 4. POST /api/v1/compose/teardown — killing another run's
+            //    agents ────────────────────────────────────────────
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/compose/teardown")
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "compose_id": compose_id }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not tear down compose sessions via the production router"
+            );
+            // And on the bare api_router (no ABAC middleware) — the handler
+            // guard itself is the only refusal layer.
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/compose/teardown")
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "compose_id": compose_id }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not tear down compose sessions via the bare router"
+            );
+            let compose_agent = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&compose_agent_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                compose_agent.status,
+                gyre_domain::AgentStatus::Idle,
+                "the refused teardown must not have killed the compose agents"
+            );
+            // Positive control: the operator tears the session down.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/compose/teardown")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "compose_id": compose_id }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NO_CONTENT,
+                "admin compose teardown must still work"
+            );
+
+            // ── 5. POST /api/v1/workspaces/{id}/orchestrator/spawn ──────
+            //    (ABAC-mapped to workspace/write — not repo-addressed, so the
+            //    agent-repo-scope containment cannot fire and the builtin
+            //    Agent-role Allow grants; the handler role gate is what refuses)
+            let orch_uri = format!("/api/v1/workspaces/{}/orchestrator/spawn", ws_id);
+            // The preview agent through the production router (realistic
+            // surface), and the plain Agent-role caller through a bare
+            // api_router built from the JWT twin (no ABAC middleware) so
+            // the handler role gate itself is the only refusal layer.
+            let bare_jwt_router = crate::api::api_router().with_state(jwt_state.clone());
+            for (router, token, label) in [
+                (&prod, &jwt, "preview agent"),
+                (&bare_jwt_router, &plain_agent, "agent-role caller"),
+            ] {
+                let resp = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(&orch_uri)
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({ "name": "should-not-spawn" }).to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::FORBIDDEN,
+                    "an {label} must not spawn a workspace orchestrator"
+                );
+            }
+            assert!(
+                state
+                    .agents
+                    .list_by_workspace(&ws_id)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|a| a.orchestrator_type
+                        != gyre_domain::OrchestratorType::WorkspaceOrchestrator),
+                "neither refusal may have minted a workspace orchestrator"
+            );
+            // Positive control: the operator spawns one, then kills it
+            // (terminating the launched process) so the test leaves nothing
+            // behind.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&orch_uri)
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "name": "control-ws-orch" }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin workspace-orchestrator spawn must still work"
+            );
+            let orch_json = body_json(resp).await;
+            let orch_id = orch_json["agent"]["id"].as_str().unwrap().to_string();
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/admin/agents/{orch_id}/kill"))
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NO_CONTENT,
+                "admin kill cleanup must work"
+            );
+
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
     /// F3 regression: the default workspace-budget path must reserve every
     /// requested slot up front — a single POST with more targets than the
     /// workspace's max_concurrent_agents is 429, not an over-admitted run.

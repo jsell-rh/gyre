@@ -3109,6 +3109,40 @@ pub async fn complete_agent(
 
 // ── Agent lifecycle endpoints ─────────────────────────────────────────────────
 
+/// Per-handler tenant containment for the registry-exempt per-agent control
+/// routes (`POST /api/v1/agents/:id/stop`, `POST /api/v1/agents/:id/fail`):
+/// the target agent's workspace tenant must match the caller's authenticated
+/// tenant. These routes run without middleware ABAC (no resolver mapping, no
+/// exemption-file policy evaluation), so this comparison is the only
+/// cross-tenant guard — without it any authenticated principal in any tenant
+/// could stop or fail any agent (task-206 review F1). Fail-closed when the
+/// agent's workspace row is missing: the tenant scope cannot be determined,
+/// and proceeding would act on an agent whose scope is unverifiable.
+async fn assert_agent_tenant_contained(
+    state: &AppState,
+    agent: &Agent,
+    auth: &crate::auth::AuthenticatedAgent,
+) -> Result<(), ApiError> {
+    let ws_tenant = match state.workspaces.find_by_id(&agent.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            return Err(ApiError::Forbidden(format!(
+                "agent {} references workspace {} which does not exist — the tenant scope \
+                 cannot be determined, refusing the request",
+                agent.id, agent.workspace_id
+            )));
+        }
+        Err(e) => return Err(ApiError::Internal(e)),
+    };
+    if ws_tenant != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "agent {} belongs to tenant {ws_tenant}, not the caller's tenant {}",
+            agent.id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RecordUsageRequest {
     pub tokens_input: u64,
@@ -3119,14 +3153,33 @@ pub struct RecordUsageRequest {
 /// POST /api/v1/agents/:id/usage
 ///
 /// Agent reports its token/cost usage for the current session.
-/// Auth: agent-scoped JWT — the reporting agent must match :id.
+/// Auth: agent-scoped JWT — the reporting agent must match :id (the
+/// documented contract); Admin/global principals may report on behalf of an
+/// agent (operator tooling and the task-190 budget-accounting flow).
 /// Returns 200 OK, or 429 if workspace budget is exhausted (best-effort check).
-#[instrument(skip(state), fields(agent_id = %id))]
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn record_agent_usage(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<RecordUsageRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // Per-handler authorization (registry-exempt route — no middleware ABAC
+    // runs, so this check is the only authorization surface). The usage
+    // report is the budget-enforcement input: a report against ANOTHER
+    // agent's id would charge that agent's workspace, push it over its
+    // budget and trigger the ≥100% enforcement action (graceful stop / hard
+    // kill) against the victim — the same cross-agent escape class the
+    // task-206 review closed on stop/fail. The cred-proxy sidecar always
+    // reports with the agent's own token, so the self-match branch is the
+    // production path; the Admin branch covers operator tooling.
+    if auth.agent_id != id && !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(format!(
+            "usage reports are self-reported: caller '{}' may not record usage for agent '{id}'",
+            auth.agent_id
+        )));
+    }
+
     let agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -3215,16 +3268,46 @@ pub async fn record_agent_usage(
 /// POST /api/v1/agents/:id/fail
 ///
 /// Marks an agent as Failed (non-recoverable error). Idempotent.
-#[instrument(skip(state), fields(agent_id = %id))]
+///
+/// Per-handler authorization (registry-exempt route — no middleware ABAC
+/// runs): preview-agent callers are refused (meta-spec reconciliation §5 —
+/// a preview agent's live JWT is a valid credential whose Agent role would
+/// otherwise reach this handler with no policy evaluation at all), and every
+/// remaining caller is tenant-contained against the target agent's
+/// workspace.
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn fail_agent(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // meta-spec reconciliation §5 (task-206 review F1): failing an agent is
+    // a durable production effect — it revokes the victim's token and
+    // task-scoped secrets, decrements its workspace budget and fires
+    // orchestrator death handling (replacement spawns). Throwaway preview
+    // scratch must not reach it: the preview agent's JWT is a live Agent-role
+    // credential, and this route is registry-exempt so no ABAC policy is
+    // evaluated anywhere between require_auth and this branch.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not fail agents — preview runs leave no production footprint"
+                .to_string(),
+        ));
+    }
+
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    // Per-handler tenant containment: this route runs without middleware
+    // ABAC, so the comparison below is the only cross-tenant guard between
+    // a caller in tenant A and a kill of an agent in tenant B. Holds for
+    // EVERY caller — the global token included (its tenant is the bootstrap
+    // principal "default", same as the workspace-orchestrator spawn route's
+    // no-bypass containment).
+    assert_agent_tenant_contained(&state, &agent, &auth).await?;
 
     // Already-terminal guard (task-093 review): a failed/stopped/dead agent
     // is a corpse — re-failing it must not re-run the budget decrement,
@@ -3354,16 +3437,38 @@ pub async fn fail_agent(
 /// POST /api/v1/agents/:id/stop
 ///
 /// Marks an agent as Stopped (operator/orchestrator initiated). Idempotent.
-#[instrument(skip(state), fields(agent_id = %id))]
+///
+/// Per-handler authorization (registry-exempt route — no middleware ABAC
+/// runs): preview-agent callers are refused (meta-spec reconciliation §5),
+/// and every remaining caller is tenant-contained against the target
+/// agent's workspace.
+#[instrument(skip(state, auth), fields(agent_id = %id))]
 pub async fn stop_agent(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // meta-spec reconciliation §5 (task-206 review F1): stopping an agent is
+    // a durable production effect — token/task-secret revocation, budget
+    // decrement, orchestrator death handling with replacement spawns.
+    // Preview scratch must not reach it (same escape class as fail_agent
+    // above: live Agent-role JWT, registry-exempt route, no policy
+    // evaluation anywhere).
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not stop agents — preview runs leave no production footprint"
+                .to_string(),
+        ));
+    }
+
     let mut agent = state
         .agents
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    // Per-handler tenant containment — same no-bypass rule as fail_agent.
+    assert_agent_tenant_contained(&state, &agent, &auth).await?;
 
     if matches!(
         agent.status,
@@ -5030,6 +5135,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5462,6 +5568,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/stop"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5582,6 +5689,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

@@ -49,11 +49,30 @@ pub struct TeardownRequest {
 
 /// POST /api/v1/compose/apply
 /// Accepts AgentCompose as JSON or YAML. Creates all agents in topological order.
+///
+/// Authorization: the route is ABAC-mapped (`compose/write`, not
+/// repo-addressed), so the builtin agent-scoped-access policy's Agent-role
+/// `write`-on-`*` Allow grants for ANY agent JWT — a preview agent's
+/// included. Preview-agent callers are refused per-handler (meta-spec
+/// reconciliation §5): compose_apply creates task and agent rows, a direct
+/// bypass of the guarded `POST /api/v1/tasks` route that would leave durable
+/// ledger footprint from throwaway preview scratch.
 pub async fn compose_apply(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    auth: crate::auth::AuthenticatedAgent,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ComposeApplyResponse>), ApiError> {
+    // meta-spec reconciliation §5 (task-206 review F1): preview agents may
+    // not mint task/agent rows — the same ceremony the guarded
+    // POST /api/v1/tasks route already refuses for them.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not apply compose specs — preview runs leave no \
+             production footprint"
+                .to_string(),
+        ));
+    }
     // non-atomic-create:ok - per-item task+agent creation with compensating
     // rollback: if the agent create fails, the already-created task for that
     // item is deleted (see the rollback below), so a failed item leaves no
@@ -196,10 +215,24 @@ pub async fn compose_status(
 }
 
 /// POST /api/v1/compose/teardown -- stop all agents in the compose session.
+///
+/// Authorization: same per-handler preview-agent refusal as compose_apply —
+/// the guard runs BEFORE the session lookup so a preview caller cannot
+/// teardown any compose session (killing its agents) nor probe session ids.
 pub async fn compose_teardown(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<TeardownRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // meta-spec reconciliation §5 (task-206 review F1): preview agents may
+    // not kill other runs' agents.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not tear down compose sessions — preview runs leave \
+             no production footprint"
+                .to_string(),
+        ));
+    }
     let mut sessions = state.compose_sessions.lock().await;
     let agent_ids = sessions.remove(&req.compose_id).ok_or_else(|| {
         ApiError::NotFound(format!("compose session {} not found", req.compose_id))
@@ -335,6 +368,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -385,6 +419,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -450,6 +485,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -467,6 +503,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/teardown")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&teardown_body).unwrap()))
                     .unwrap(),
@@ -544,6 +581,7 @@ agents:
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/yaml")
                     .body(Body::from(yaml))
                     .unwrap(),
@@ -581,6 +619,7 @@ agents:
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -625,6 +664,7 @@ agents:
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/apply")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&compose).unwrap()))
                     .unwrap(),
@@ -656,6 +696,7 @@ agents:
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/compose/teardown")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&teardown_body).unwrap()))
                     .unwrap(),

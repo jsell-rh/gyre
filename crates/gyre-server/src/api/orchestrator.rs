@@ -854,8 +854,12 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
 /// Spawn the single workspace orchestrator for a workspace.
 /// Returns 409 Conflict when a live workspace orchestrator already exists.
 ///
-/// Per-handler authorization: the workspace's tenant must match the
-/// caller's tenant (the route runs without middleware ABAC, so this is the
+/// Authorization: Admin or Developer role required (operator surface —
+/// the builtin agent-scoped-access policy would otherwise grant the
+/// Agent-role `write` on this non-repo-addressed route), preview-agent
+/// callers are refused (meta-spec reconciliation §5), and the workspace's
+/// tenant must match the caller's tenant (the route runs without
+/// middleware ABAC, so this is the
 /// only cross-tenant containment) — for EVERY caller, including the
 /// global system token. Unlike the repo-tier spawn route below, no
 /// bootstrap flow spawns a workspace orchestrator (platform-model.md §8
@@ -873,6 +877,37 @@ pub async fn spawn_workspace_orchestrator(
     Path(workspace_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
+    // Role gate (task-206 review F1): spawning the workspace orchestrator is
+    // an operator action — it decomposes specs into tasks and spawns worker
+    // agents, durable ledger footprint. The route is not repo-addressed, so
+    // the agent-repo-scope containment cannot fire, and the builtin
+    // agent-scoped-access policy grants `write` on `*` to the Agent role —
+    // without this gate any agent JWT (a preview agent's included) could
+    // mint a workspace orchestrator.
+    if !(auth.roles.contains(&gyre_domain::UserRole::Admin)
+        || auth.roles.contains(&gyre_domain::UserRole::Developer))
+    {
+        crate::rbac::record_rbac_denied(
+            state.as_ref(),
+            &auth,
+            "Admin or Developer",
+            "POST /api/v1/workspaces/:id/orchestrator/spawn",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "Admin or Developer role required to spawn a workspace orchestrator".to_string(),
+        ));
+    }
+    // meta-spec reconciliation §5 (task-206 review F1): preview agents may
+    // not spawn orchestrators — throwaway preview scratch must leave no
+    // task/agent ledger footprint.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not spawn orchestrators — preview runs leave no \
+             production footprint"
+                .to_string(),
+        ));
+    }
     // Tenant containment: load the workspace, compare its tenant against
     // the caller's resolved tenant. No system-principal bypass: the global
     // token's tenant is the bootstrap principal ("default"), and no
@@ -2360,10 +2395,13 @@ mod tests {
                 .await
                 .unwrap();
 
-        let code =
-            crate::api::spawn::fail_agent(State(state.clone()), Path(repo_orch.id.to_string()))
-                .await
-                .unwrap();
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            auth_in_tenant("t1"),
+            Path(repo_orch.id.to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let replacement = state
@@ -2402,9 +2440,13 @@ mod tests {
                 .await
                 .unwrap();
 
-        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(agent.id.to_string()))
-            .await
-            .unwrap();
+        let code = crate::api::spawn::stop_agent(
+            State(state.clone()),
+            auth_in_tenant("t1"),
+            Path(agent.id.to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let stopped = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
@@ -2526,13 +2568,21 @@ mod tests {
                 .unwrap();
 
         let id = agent.id.to_string();
-        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(id.clone()))
-            .await
-            .unwrap();
+        let code = crate::api::spawn::stop_agent(
+            State(state.clone()),
+            auth_in_tenant("t1"),
+            Path(id.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
-        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(id.clone()))
-            .await
-            .unwrap();
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            auth_in_tenant("t1"),
+            Path(id.clone()),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         // Exactly one live workspace orchestrator (§3.2) — the stop-path
@@ -2594,9 +2644,13 @@ mod tests {
         state.agents.update(&aged).await.unwrap();
         crate::stale_agents::run_once(&state).await.unwrap();
 
-        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(agent.id.to_string()))
-            .await
-            .unwrap();
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            auth_in_tenant("t1"),
+            Path(agent.id.to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let peers = state
