@@ -17,6 +17,7 @@ vi.mock('../components/RepoSettings.svelte', () => ({
 }));
 
 import RepoMode from '../components/RepoMode.svelte';
+import { REPO_TAB_IDS } from '../lib/repoTabs.js';
 
 describe('RepoMode', () => {
   const ws = { id: 'ws-1', name: 'Payments' };
@@ -26,10 +27,17 @@ describe('RepoMode', () => {
     expect(() => render(RepoMode, { props: { workspace: ws, repo } })).not.toThrow();
   });
 
-  it('renders tab bar with all nine tabs', () => {
+  it('renders tab bar with all nine tabs, in the shared strip order', () => {
     const { container } = render(RepoMode, { props: { workspace: ws, repo } });
     const tabs = container.querySelectorAll('[role="tab"]');
     expect(tabs.length).toBe(9);
+    // The tab strip is the single source of truth (ui-navigation.md §1a):
+    // the rendered tab order must match lib/repoTabs.js exactly — the same
+    // list App's navigation rail and drawer derive from. If RepoMode ever
+    // re-hardcodes a local tab list, this fails while the rail keeps
+    // following the shared one.
+    const ids = Array.from(tabs).map(t => t.id.replace('tab-', ''));
+    expect(ids).toEqual(REPO_TAB_IDS);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('Specs');
     expect(labels).toContain('Tasks');

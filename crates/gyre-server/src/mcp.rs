@@ -4218,29 +4218,74 @@ fn prompt_result(description: &str, text: String) -> Value {
 /// from the spawn-time record (pinned versions, not a re-render). The
 /// system-managed protocol section is served separately via
 /// `system://protocol`.
+///
+/// Attestation metadata (platform-model.md §8: the persona prompt comes
+/// from the persona entity — versioned, approved): when the calling agent
+/// has a persona bound, the result carries its slug, version,
+/// content_hash, and approval status, so a consumer can attest exactly
+/// which approved persona content styles the agent. The persona entity's
+/// own prompt is injected at spawn as `GYRE_PROMPT_PERSONA` (with the same
+/// version/content_hash as `GYRE_PERSONA_VERSION` /
+/// `GYRE_PERSONA_CONTENT_HASH`).
 async fn prompt_persona(state: &AppState, auth: &AuthenticatedAgent) -> Value {
-    match crate::prompt_assembly::load_prompt_set_record(state, &auth.agent_id).await {
-        Some(record) => match record.rendered_prompt {
-            Some(rendered) => {
-                prompt_result("Assembled meta-spec prompt set (pinned at spawn)", rendered)
-            }
+    let metadata = persona_attestation_metadata(state, auth).await;
+    let mut result =
+        match crate::prompt_assembly::load_prompt_set_record(state, &auth.agent_id).await {
+            Some(record) => match record.rendered_prompt {
+                Some(rendered) => {
+                    prompt_result("Assembled meta-spec prompt set (pinned at spawn)", rendered)
+                }
+                None => prompt_result(
+                    "Assembled meta-spec prompt set (pinned at spawn)",
+                    format!(
+                        "# Meta-spec set {set_sha}\n(assembled {assembled_at}; \
+                     pre-task-119 record — the rendered text was not retained)",
+                        set_sha = record.set_sha,
+                        assembled_at = record.assembled_at,
+                    ),
+                ),
+            },
             None => prompt_result(
                 "Assembled meta-spec prompt set (pinned at spawn)",
-                format!(
-                    "# Meta-spec set {set_sha}\n(assembled {assembled_at}; \
-                     pre-task-119 record — the rendered text was not retained)",
-                    set_sha = record.set_sha,
-                    assembled_at = record.assembled_at,
-                ),
-            ),
-        },
-        None => prompt_result(
-            "Assembled meta-spec prompt set (pinned at spawn)",
-            "No meta-spec prompt set was assembled for this agent (no \
+                "No meta-spec prompt set was assembled for this agent (no \
              required meta-specs and no spec-level bindings applied at spawn)."
-                .to_string(),
-        ),
+                    .to_string(),
+            ),
+        };
+    if let Some(metadata) = metadata {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("metadata".to_string(), metadata);
+        }
     }
+    result
+}
+
+/// Resolve the persona-entity attestation metadata for the calling agent:
+/// the persona bound to the agent row (`Agent.persona_id`, bound
+/// fail-closed to an Approved persona at spawn). `None` when the agent has
+/// no persona bound or the record is unresolvable — absence is truthful,
+/// never a fabricated persona identity.
+async fn persona_attestation_metadata(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+) -> Option<Value> {
+    let agent = state
+        .agents
+        .find_by_id(&Id::new(auth.agent_id.clone()))
+        .await
+        .ok()
+        .flatten()?;
+    let persona_id = agent.persona_id.as_ref()?;
+    let persona = state.personas.find_by_id(persona_id).await.ok().flatten()?;
+    Some(json!({
+        "persona": {
+            "id": persona.id.to_string(),
+            "slug": persona.slug,
+            "version": persona.version,
+            "content_hash": persona.content_hash,
+            "approval_status": format!("{:?}", persona.approval_status),
+        }
+    }))
 }
 
 /// `system://context` — task details, spec ref, branch/repo context, gate
@@ -4317,6 +4362,11 @@ async fn prompt_context(state: &AppState, auth: &AuthenticatedAgent) -> Value {
         _ => text.push_str("(none)\n"),
     }
 
+    // platform-model.md §8: the context document includes the agent's
+    // budget limits (remaining tokens/cost for the day). Shared renderer
+    // with the spawn-time context injection, so both deliveries agree.
+    text.push_str(&crate::api::prompts::budget_snapshot_section(state, &agent.workspace_id).await);
+
     prompt_result("Task context", text)
 }
 
@@ -4344,6 +4394,10 @@ async fn prompt_constraints(state: &AppState, auth: &AuthenticatedAgent) -> Valu
     if let Some(task_id) = agent.current_task_id.as_ref() {
         text.push_str(&format!("- Task: {}\n", task_id.as_str()));
     }
+
+    // platform-model.md §8: workspace trust level affects agent autonomy.
+    // Shared renderer with the spawn-time constraints injection.
+    text.push_str(&crate::api::prompts::trust_level_section(state, &agent.workspace_id).await);
 
     text.push_str("\n## Workspace budget\n");
     let ws_key = crate::api::budget::workspace_key(&agent.workspace_id.to_string());
@@ -5764,12 +5818,26 @@ mod tests {
             "protocol must cover heartbeat: {text}"
         );
         assert!(
-            text.contains("agent.complete"),
+            text.contains("gyre_agent_complete"),
             "protocol must cover completion: {text}"
         );
         assert!(
             text.contains("escalate"),
             "protocol must cover escalation: {text}"
+        );
+        // platform-model.md §8 protocol norms: MCP tool usage patterns and
+        // the handoff protocol are part of the injected norms.
+        assert!(
+            text.contains("## MCP tools"),
+            "protocol must carry the MCP tool catalog: {text}"
+        );
+        assert!(
+            text.contains("gyre_message_poll"),
+            "tool catalog must name real tools with usage patterns: {text}"
+        );
+        assert!(
+            text.contains("## Handoff protocol"),
+            "protocol must carry the handoff protocol: {text}"
         );
     }
 
