@@ -376,20 +376,31 @@ describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
     });
   }
 
-  it('clicking Briefing in repo mode opens the repo-scope Briefing sub-tab', async () => {
-    // ui-navigation.md §3 "Sub-tabs in the control bar": Briefing at repo
-    // scope is the Architecture tab's Briefing sub-tab (?repo_id= narrative).
-    // The drawer must stay in the repo's scope, not escape to workspace home.
+  it('repo-mode drawer mirrors the tab strip exactly and switches tabs (§1a narrow viewports)', async () => {
+    // ui-navigation.md §1a "Narrow viewports": the drawer offers the rail's
+    // per-mode item set; in repo mode that set mirrors the repo tab strip
+    // exactly (the tab strip is the source of truth - no 'briefing' item,
+    // it is a sub-tab of Architecture, not a tab). Selecting a drawer item
+    // activates the corresponding tab, same route as clicking the tab.
     window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
     const { container } = render(App);
     // RepoMode is stubbed in jsdom; the document title proves repo mode.
     await waitFor(() => expect(document.title).toBe('core — Payments | Gyre'), { timeout: 3000 });
     await openDrawer(container);
-    await fireEvent.click(container.querySelector('[data-testid="drawer-item-briefing"]'));
-    // Stays in repo mode on the Architecture tab (the Briefing sub-tab's
-    // parent tab), with the subTab deep-link param for ExplorerView.
+    const drawer = container.querySelector('[data-testid="mobile-drawer"]');
+    const itemIds = Array.from(drawer.querySelectorAll('.drawer-link')).map(
+      (el) => el.getAttribute('data-testid').replace('drawer-item-', '')
+    );
+    // Canonical tab order (RepoMode TABS / App REPO_RAIL_TAB_IDS).
+    expect(itemIds).toEqual([
+      'specs', 'tasks', 'mrs', 'agents', 'architecture', 'dependencies', 'decisions', 'code', 'settings',
+    ]);
+    // Briefing is an Architecture sub-tab, never a drawer/tab item.
+    expect(container.querySelector('[data-testid="drawer-item-briefing"]')).toBeNull();
+    // Selecting Architecture activates the Architecture tab (same route as
+    // clicking the tab).
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-architecture"]'));
     await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/r/core/architecture'), { timeout: 3000 });
-    await waitFor(() => expect(window.location.search).toBe('?subTab=briefing'), { timeout: 3000 });
   });
 
 
