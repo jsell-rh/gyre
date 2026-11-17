@@ -2883,6 +2883,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn approve_spec_emits_spec_approved_and_triggers_chain() {
         let state = test_state();
+        // Production parity: startup seeds the built-in persona meta-specs
+        // (seed_builtin_meta_specs); the spawn core's persona meta-spec
+        // layer is fail-closed, so the chain's orchestrator spawn needs
+        // the approved meta-specs in addition to the entity-layer personas
+        // seeded below.
+        crate::seed_builtin_meta_specs(&state).await;
 
         // Seed a workspace + repo so the spec is workspace-scoped and the
         // chain has a repo to delegate to.
@@ -3045,6 +3051,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn reject_spec_cancels_chain_created_delegation_task() {
         let state = test_state();
+        // Production parity: same meta-spec seeding as the approve chain
+        // test — the chain's orchestrator spawn fails closed without the
+        // approved persona meta-specs (see above).
+        crate::seed_builtin_meta_specs(&state).await;
 
         // Same seed as the approve chain test: workspace, repo, Pending
         // spec entry so approval triggers the signal chain.

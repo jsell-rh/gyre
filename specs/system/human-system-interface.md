@@ -1,6 +1,8 @@
 # Human-System Interface
 
 > This spec defines how humans interact with a fully autonomous software development system. It **supersedes `ui-journeys.md`** (which is deprecated — its navigation model, journeys, and keyboard shortcuts are replaced by this spec). It extends `system-explorer.md` with concrete interaction patterns for trust calibration, agent interrogation, scoped communication, and LLM-driven architectural exploration.
+>
+> **§1 (Navigation Model) is superseded by `ui-navigation.md`** (two-mode model: workspace home + repo horizontal tabs), which §1.3 below records for the stable-sidebar subsection, including the 2026-11-16 amendment (decision `16871182b1370b61693fc691`) toward a context-dependent collapsible navigation rail (`ui-navigation.md` §1a). All other sections of this spec remain valid.
 
 ## The Novel Problem
 
@@ -21,7 +23,11 @@ Every surface in this spec exists to serve one of those five activities. If it d
 
 ### Stable Sidebar, Adaptive Content
 
-The sidebar is **permanent and unchanging** regardless of scope. Users build muscle memory for nav item positions. The *content area* adapts to the current scope (tenant, workspace, repo), not the sidebar.
+> **SUPERSEDED — do not implement.** The permanent six-item sidebar described below is no longer the navigation contract. It was superseded by `ui-navigation.md` (two-mode model: workspace home dashboard + repo horizontal tabs, Principle 5 "no permanent sidebar"), and then — by operator decision `16871182b1370b61693fc691` (2026-11-16, option_c, recorded by jsell; see `specs/tasks/task-246.md`) — amended toward a **context-dependent collapsible navigation rail** on navigation-heavy screens. The current requirement is `ui-navigation.md` §1a (Collapsible Navigation Rail): optional, scope-labelled, per-mode item sets with stable ordering, collapsed by default to preserve canvas/editor space, and a drawer on narrow viewports. The historical text is preserved below for intent only.
+
+**Historical text (superseded — preserved for intent, not for implementation):**
+
+The sidebar was specified as **permanent and unchanging** regardless of scope. Users build muscle memory for nav item positions. The *content area* adapts to the current scope (tenant, workspace, repo), not the sidebar.
 
 ```
 Sidebar (always visible, always these items):
@@ -36,6 +42,8 @@ Sidebar (always visible, always these items):
 Six items. That's it.
 
 **Why not scope-dependent sidebar?** Changing the sidebar when the user navigates between scopes is disorienting — the same navigation item moves position or disappears. Notion, Backstage, and VS Code all keep the primary nav stable. The content area is where scope manifests.
+
+*(Superseding note: the 2026-11-16 operator decision accepted the muscle-memory argument in scoped form — stable ordering **within each mode** of `ui-navigation.md` §1a — while rejecting the fixed global menu, which the two-mode rework had shown to be scope-ambiguous.)*
 
 ### Scope Indicator (Breadcrumb)
 
@@ -930,7 +938,7 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 |---|---|---|
 | 1 | Agent clarification | Synchronous in `agent.complete` handler (reliability-critical) |
 | 2 | Spec pending approval | Synchronous in `specs/save` handler (human spec-edit MRs). For agent-authored specs: the `agent.complete` handler creates the notification when the agent's MR enters the merge queue with a pending spec approval gate (the gate evaluation detects the unapproved spec and creates the notification). Note: spec lifecycle's default-branch push handler creates *approval-invalidation* notifications, not *pending-approval* notifications. |
-| 3 | Gate failure | Synchronous in gate evaluation handler |
+| 3 | Gate failure | Via `MessageConsumer` consuming `GateFailure` events (amended by message-bus.md §Relationship to Notifications — the gate executor emits the `GateFailure` Event-tier message; the notification bridge derives the priority-3 Inbox item from it. Single creation path, off the gate hot path.) |
 | 4 | Cross-workspace spec change | Synchronous in spec lifecycle push handler (the push hook must query `spec_links` for inbound cross-workspace links and create notifications for dependent workspace members — amend `spec-lifecycle.md` to add this notification step alongside the existing task creation). One notification is created per dependent repo (the one that has the inbound link), so each repo-scope Inbox shows its own notification. The notification's `repo_id` is set to the dependent repo, not the changed repo. |
 | 5 | Conflicting interpretations | Synchronous in post-extraction divergence check |
 | 6 | Meta-spec drift | Via `MessageConsumer` consuming `ReconciliationCompleted` events |
@@ -1494,7 +1502,7 @@ CREATE TABLE user_notification_preferences (
 | `hierarchy-enforcement.md` §4 ABAC-exempt additions | Add `GET /api/v1/trace-spans/:span_id/payload` to the ABAC-exempt list (per-handler auth — resolves MR → workspace from span's gate run). |
 | `hierarchy-enforcement.md` §4 | ABAC bypass must match by `subject.id == "gyre-system-token"`, not by `subject.type == "system"`. Internal services (merge processor) are `system` type but subject to ABAC. Add to ABAC-exempt endpoint list (per-handler auth, like git HTTP): `GET /api/v1/conversations/:sha`, `GET /api/v1/users/me/notifications`, `POST /api/v1/notifications/:id/dismiss`, `POST /api/v1/notifications/:id/resolve`, `GET /api/v1/users/me/judgments`, `GET /api/v1/users/me/tokens`, `POST /api/v1/users/me/tokens`, `DELETE /api/v1/users/me/tokens/:id`. Add `user_workspace_state` and `user_notification_preferences` to `check-tenant-filter.sh` skip list. |
 | `api-conventions.md` §6 | Acknowledge per-handler auth as a third authorization mechanism alongside "no auth (public)" and "ABAC middleware." Per-handler auth is used for endpoints where the resource key is not a UUID (e.g., conversations by SHA) or where the resource is implicitly the authenticated user (e.g., `/users/me/*`). These endpoints are listed in the ABAC-exempt endpoint list in `hierarchy-enforcement.md` §4. |
-| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Add `ReconciliationCompleted` (Event tier, server-only — migrated from domain event in `meta-spec-reconciliation.md` §11; consumed by `MessageConsumer` to create priority-6 Inbox notifications). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. |
+| `message-bus.md` `MessageKind` | Add `AgentCompleted` (Event tier, server-only, payload schema defined in §4 of this spec). Add `ReconciliationCompleted` (Event tier, server-only — migrated from domain event in `meta-spec-reconciliation.md` §11; consumed by `MessageConsumer` to create priority-6 Inbox notifications). Extend `SpecChanged` payload with optional `dependent_workspace_id` and `source_workspace_slug` fields for cross-workspace notifications — the same kind reused with extra context, no new kind needed. `GateFailure` (already Event tier) is consumed by `MessageConsumer` to create priority-3 Inbox notifications — the gate executor's synchronous p3 creation path is removed (single creation path via the notification bridge, per message-bus.md §Relationship to Notifications). |
 | `abac-policy-engine.md` §"Resource attributes" | Add `explorer_view` (attributes: `workspace_id`, `created_by`), `message` (attributes: `workspace_id`, `to_agent_id`), and `conversation` (attributes: `workspace_id`, `agent_id`) to the resource type list. The `explorer-views/generate` endpoint uses `resource_type: "explorer_view"`. |
 | `abac-policy-engine.md` §"Action attributes" | Add `generate` action (used by `explorer-views/generate`, `specs/assist`, and `prompts/save` endpoints — distinct from `write` to allow policies that permit LLM generation while restricting CRUD). Applies to resource types: `explorer_view`, `spec`. |
 | `abac-policy-engine.md` §"Built-In Policies" or `hierarchy-enforcement.md` §"Built-In Policies" | Add `developer-generate-access` (Allow, priority 800): Developer and Admin roles can perform `generate` action on `explorer_view` and `spec` resource types. Without this policy, `default-deny` blocks all LLM generation and prompt editing. |

@@ -2308,6 +2308,15 @@ mod tests {
     /// `specs/system/api.md` to it.
     async fn chain_state() -> Arc<crate::AppState> {
         let state = test_state();
+        // Production parity: server startup seeds the built-in meta-specs
+        // (main.rs → seed_builtin_meta_specs), and the task-093 spawn
+        // cores enforce the persona meta-spec layer fail-closed
+        // (validate_persona in api/orchestrator.rs) — without an approved
+        // "workspace-orchestrator"/"repo-orchestrator" meta-spec every
+        // orchestrator spawn in the chain below fails closed and no phase
+        // past Phase 2 ever runs. Mirror startup here (the same seeding
+        // the mcp orchestrator fixture, orch_state, already uses).
+        crate::seed_builtin_meta_specs(&state).await;
         let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
         state.workspaces.create(&ws).await.unwrap();
         for rid in ["r-1", "r-2"] {

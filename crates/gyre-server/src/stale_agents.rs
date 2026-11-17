@@ -188,18 +188,12 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                     .await;
                 }
 
-                // TASK-093 (§3.3): auto-restart dead orchestrators. Dead
-                // orchestrators free their scope slot, so a fresh replacement
-                // keeps exactly one live orchestrator per scope.
-                if agent.is_orchestrator() && agent.restart_on_failure {
-                    restart_orchestrator(state, &agent, now).await;
-                }
-                // TASK-093 (§3.3): when a repo orchestrator dies, escalate
-                // to the workspace orchestrator so it can react (e.g. spawn
-                // a replacement or reschedule work).
-                if agent.orchestrator_type == gyre_domain::OrchestratorType::RepoOrchestrator {
-                    escalate_repo_orchestrator_death(state, &agent).await;
-                }
+                // TASK-093 (§3.3, F6): orchestrator death handling — restart
+                // (when restart_on_failure is set) and escalate to the
+                // workspace orchestrator (repo tier). Shared with the
+                // fail/stop handlers so every terminal transition of an
+                // orchestrator gets identical treatment.
+                handle_orchestrator_death(state, &agent, now, "heartbeat timeout (abort)").await;
             }
 
             DisconnectedBehavior::Pause => {
@@ -248,10 +242,70 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
 /// TASK-093 (§3.3): spawn a replacement for a dead orchestrator. Fresh id,
-/// unique name suffix, same scope/tier, new scoped JWT. No task, no worktree.
-async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, now: u64) {
+/// unique name suffix, same scope/tier/lifecycle config, new scoped JWT. No
+/// task, no worktree. Returns None (leaving the orchestrator dead) when a
+/// live orchestrator already holds the scope, the workspace spawn budget is
+/// exhausted, or persistence fails. The Arc handle relaunches the replacement
+/// process (launch_orchestrator_process) like the spawn cores do.
+async fn restart_orchestrator(
+    state: &Arc<AppState>,
+    dead: &gyre_domain::Agent,
+    now: u64,
+) -> Option<gyre_domain::Agent> {
+    // Exactly-one-live (§3.2), the same check the spawn cores run: never
+    // mint a replacement while a live orchestrator holds the scope. Without
+    // this, a second entry into the shared death handling (a second terminal
+    // transition — stop after fail, fail on an agent the stale detector
+    // already killed) spawned a second live replacement with its own scoped
+    // JWT. A scope-listing failure is conservative: no replacement rather
+    // than a guessed-free scope.
+    match state.agents.list_by_workspace(&dead.workspace_id).await {
+        Ok(peers) => {
+            let occupied = peers.iter().any(|a| {
+                a.orchestrator_type == dead.orchestrator_type
+                    && match dead.orchestrator_type {
+                        gyre_domain::OrchestratorType::RepoOrchestrator => {
+                            a.repo_id == dead.repo_id
+                        }
+                        _ => true,
+                    }
+                    && crate::api::orchestrator::is_live(a)
+            });
+            if occupied {
+                warn!(
+                    agent_id = %dead.id,
+                    workspace_id = %dead.workspace_id,
+                    "restart: live orchestrator already holds the scope; skipping replacement"
+                );
+                return None;
+            }
+        }
+        Err(e) => {
+            warn!(
+                agent_id = %dead.id,
+                "restart: cannot verify scope occupancy, leaving orchestrator unreplaced: {e}"
+            );
+            return None;
+        }
+    }
+
+    // Budget symmetry (task-093 F4): a replacement must pass the same spawn
+    // budget check as a fresh spawn. If the workspace is at its limit, leave
+    // the orchestrator dead and let the escalation surface it — restarting
+    // unconditionally would both exceed the configured limit and spin (die →
+    // restart → die) without a slot.
+    if let Err(e) =
+        crate::api::budget::check_spawn_budget(state, &dead.workspace_id.to_string()).await
+    {
+        warn!(
+            agent_id = %dead.id,
+            workspace_id = %dead.workspace_id,
+            "restart: budget exhausted, leaving dead orchestrator unreplaced: {e}"
+        );
+        return None;
+    }
+
     // Unique replacement name: append a restart counter suffix.
     let base = dead.name.split("-restart-").next().unwrap_or(&dead.name);
     let mut n = 1;
@@ -268,20 +322,25 @@ async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, 
     replacement.workspace_id = dead.workspace_id.clone();
     replacement.repo_id = dead.repo_id.clone();
     replacement.orchestrator_type = dead.orchestrator_type.clone();
+    // Inherit the full lifecycle configuration (task-093 F5): the replacement
+    // must behave exactly like the agent it replaces — including how it should
+    // itself be treated on disconnect — or the second death silently degrades
+    // to Pause.
+    replacement.disconnected_behavior = dead.disconnected_behavior.clone();
     replacement.restart_on_failure = true;
     // F2: keep the persona binding across restarts — the replacement must
     // run with the same persona as the orchestrator it replaces.
     replacement.persona_id = dead.persona_id.clone();
     if let Err(e) = replacement.transition_status(AgentStatus::Active) {
         warn!("restart: failed to activate replacement: {e}");
-        return;
+        return None;
     }
     if let Err(e) = state.agents.create(&replacement).await {
         warn!(
             "restart: failed to persist replacement for orchestrator {}: {e}",
             dead.id
         );
-        return;
+        return None;
     }
 
     // Scoped JWT for the replacement (same tier and scope as the dead one).
@@ -306,7 +365,10 @@ async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, 
                 "restart: tenant scope cannot be determined (workspace unresolvable); \
                  skipping orchestrator JWT re-mint"
             );
-            return;
+            // The replacement row exists (Active, budget claimed) but cannot
+            // authenticate — report it as the replacement so escalation stays
+            // truthful about scope occupancy.
+            return Some(replacement);
         }
     };
     let repo_name = if let Some(rid) = dead.repo_id.as_ref() {
@@ -391,11 +453,48 @@ async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, 
         orchestrator_type = %dead.orchestrator_type,
         "orchestrator auto-restarted (task-093)"
     );
+    Some(replacement)
 }
 
-/// TASK-093 (§3.3): notify the live workspace orchestrator that a repo
-/// orchestrator died (Directed-tier Escalation message).
-async fn escalate_repo_orchestrator_death(state: &Arc<AppState>, dead: &gyre_domain::Agent) {
+/// TASK-093 (§3.3, F6): shared orchestrator death handling. Called from the
+/// stale-agent Abort path, the fail handler, and the stop handler so every
+/// terminal transition of an orchestrator gets the same treatment: restart a
+/// replacement when `restart_on_failure` is set (subject to the spawn budget)
+/// and escalate repo-tier deaths to the live workspace orchestrator.
+///
+/// Exactly-once contract: callers must invoke this only on the FIRST terminal
+/// transition of the agent — the fail/stop handlers early-return on an
+/// already-terminal agent, and `run_once` skips terminal agents, so the
+/// shared handling (replacement spawn, budget increment, escalation) runs
+/// exactly once per death. `restart_orchestrator` additionally refuses to
+/// mint a replacement while a live orchestrator holds the scope (§3.2), so a
+/// stray second entry cannot produce two live orchestrators.
+pub(crate) async fn handle_orchestrator_death(
+    state: &Arc<AppState>,
+    dead: &gyre_domain::Agent,
+    now: u64,
+    cause: &str,
+) {
+    let mut replacement = None;
+    if dead.is_orchestrator() && dead.restart_on_failure {
+        replacement = restart_orchestrator(state, dead, now).await;
+    }
+    if dead.orchestrator_type == gyre_domain::OrchestratorType::RepoOrchestrator {
+        escalate_repo_orchestrator_death(state, dead, replacement.as_ref(), cause).await;
+    }
+}
+
+/// TASK-093 (§3.3, F8): notify the live workspace orchestrator that a repo
+/// orchestrator died (Directed-tier Escalation message). When a replacement
+/// was already spawned the message is informational and names the
+/// replacement, so the recipient does not react as if the repo is
+/// unorchestrated.
+async fn escalate_repo_orchestrator_death(
+    state: &Arc<AppState>,
+    dead: &gyre_domain::Agent,
+    replacement: Option<&gyre_domain::Agent>,
+    cause: &str,
+) {
     use gyre_common::message::Destination;
 
     let peers = match state.agents.list_by_workspace(&dead.workspace_id).await {
@@ -420,17 +519,23 @@ async fn escalate_repo_orchestrator_death(state: &Arc<AppState>, dead: &gyre_dom
         return;
     };
 
+    let mut payload = serde_json::json!({
+        "event": "repo_orchestrator_dead",
+        "agent_id": dead.id.to_string(),
+        "repo_id": dead.repo_id.as_ref().map(|r| r.to_string()),
+        "reason": format!("repo orchestrator '{}' died ({cause})", dead.name),
+    });
+    if let Some(repl) = replacement {
+        payload["replacement_agent_id"] = serde_json::json!(repl.id.to_string());
+        payload["informational"] = serde_json::json!(true);
+    }
+
     state
         .emit_event(
             dead.workspace_id.clone(),
             Destination::Agent(ws_orch.id.clone()),
             MessageKind::Escalation,
-            Some(serde_json::json!({
-                "event": "repo_orchestrator_dead",
-                "agent_id": dead.id.to_string(),
-                "repo_id": dead.repo_id.as_ref().map(|r| r.to_string()),
-                "reason": format!("repo orchestrator '{}' died (heartbeat timeout)", dead.name),
-            })),
+            Some(payload),
         )
         .await;
 }
