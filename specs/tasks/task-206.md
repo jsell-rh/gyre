@@ -2,10 +2,10 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -124,35 +124,3 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
 - Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
-
-## Shipped
-
-Preview mode is a real agent run path, not an estimate (meta-spec-reconciliation.md §5):
-
-- **Spawn** — `POST /api/v1/meta-specs/preview` (Admin/Developer; global route, per-spec) validates every target up front (repo exists, caller passes repo ABAC + tenant containment, spec_path exists on the default branch), then provisions per target a real `Active` agent row, a `preview/{preview_id}/{slug}` branch pinned to the default-branch tip, a real git worktree, and a short-lived preview JWT (`GYRE_PREVIEW_JWT_TTL_SECS`, default 1800 s). Response is exactly the spec shape: `202 {preview_id, agents:[{agent_id, repo_id, spec_path, branch}]}`. Provisioning is all-or-nothing per request.
-- **Draft delivery** — the draft travels out-of-band in the agent process environment (`GYRE_PREVIEW_ID`, `GYRE_META_SPEC_DRAFT_KIND`, `GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_TARGET_SPEC_PATH`; `GYRE_TASK_ID` deliberately absent). `docker/gyre-agent/agent-runner.mjs` reads those vars and builds the prompt itself: draft meta-spec as governing "how to build" context over the target spec, task-mutating MCP tools withheld, push to the preview branch as the entire deliverable.
-- **Skip-ceremony enforced, not just skipped** — the MCP dispatch refuses task/MR/provenance mutations for preview agents, and the REST surface does too: `POST /api/v1/agents/{id}/complete`, `POST /api/v1/merge-requests`, and `POST /api/v1/merge-queue/enqueue` return 403 for preview-agent callers. No spec-approval gate, no quality gates, no MR, no merge queue, no provenance, no `refs/agents/*`/`refs/tasks/*` writes, never `Idle`. Budget: workspace budget by default, `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` caps preview spawns independently when set (429 on overflow).
-- **Completion** — every compute-target monitor routes exits through `spawn::on_agent_process_exit` → `finish_preview_agent`: token revoked, worktree removed, budget slot released (idempotent), agent row lands `Stopped` — never `Idle`. The branch survives for diffing.
-- **Status + diff** — `GET /api/v1/meta-specs/preview/{preview_id}` reports per-agent state derived from the real agent rows and the produced `diff` (preview branch vs. pinned base sha, same git plumbing as MR diffs) once the branch exists.
-- **Cleanup** — `DELETE /api/v1/meta-specs/preview/{preview_id}` kills agents, force-removes worktrees, closes open MRs on `preview/{id}/*` branches, deletes every preview branch, revokes tokens, drops the kv records; 404 on unknown id. Background job `meta_spec_preview_gc` (interval `GYRE_META_SPEC_PREVIEW_GC_INTERVAL_SECS`, default 1 h; TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) tears down expired runs and reclaims orphaned agent entries. No refs, no provenance, no audit trail.
-- **Clean cutover** — the hollow structural-impact preview and the workspace-scoped routes are gone; docs updated (`docs/api-reference.md`, `docs/server-config.md`, `docker/gyre-agent/README.md`).
-
-### Merge round 169313da (this checkpoint)
-
-Reconciled the task-206 source with base `e8f73c06` (task-082 navigation rail, task-101 persona attestation / protocol-prompt single source). This round repaired the retained verification failure from candidate `e3f727e1`: base had added the two removed workspace-scoped preview routes to `scripts/abac-route-registry-exemptions.txt`, so `check-abac-route-registry.sh`/`check-abac-exempt-handlers.sh` failed with stale-exemption errors on the pre-merge candidate. The merge drops those two exemption lines (the routes no longer exist); both checks now pass. The base-side server changes (async `context_prompt_for_spawn` signature, `GYRE_PERSONA_*` attestation env, protocol-prompt single source in `prompt_assembly`) compile and coexist with the preview machinery; web merge conflicts (EditorSplit.svelte, MetaSpecs.svelte, en.json) keep both features — the §5 real preview loop and task-082's navigation rail.
-
-### Test evidence
-
-In-sandbox on merge head `169313da` (evidence at `/tmp/stage/review-evidence/merge-round-169313da.txt`):
-
-- `cd web && npm ci && npm test` — **125 files, 2510 passed, 41 skipped, 0 failed** (task-206 §5 preview suites and task-082 nav-rail suites, including the merge-conflicted files: EditorSplit, MetaSpecs, AppShell, NavRail, RepoMode).
-- `cargo check -p gyre-server --lib --tests` — clean (13m 33s, no errors).
-- `bash scripts/check-arch.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-mem-port-contracts.sh`, `check-migration-versions.sh`, `check-dead-message-kinds.sh`, `check-byte-slice-truncation.sh`, `check-mcp-write-tools.sh`, `check-inert-enforcement.sh`, `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-forwarded-header-trust.sh`, `check-in-memory-state-stores.sh`, `check-unbounded-external-http.sh`, `check-fail-open-ref-resolution.sh`, `check-relative-path-defaults.sh`, `check-forged-scope-fields.sh` — all pass. `check-task-commit-attribution.sh` passes with this task file's commits list restored.
-- The build wrapper blocks gyre-server test codegen in this stage, so server test execution is deferred to the independent verifier. Required probes:
-  - `cargo test -p gyre-server --lib -- preview_` (full preview suite: spawn/draft/authz/skip-ceremony/DELETE/GC-TTL/diff, compute-backend launch regressions, budget cap, persist/worktree/agent-row failure rollbacks, cross-tenant containment)
-  - `cargo test -p gyre-server --lib -- merge_queue` (authorized enqueue probes)
-  - `cargo test -p gyre-server --lib -- uninstrumented_role_guards` (retargeted preview guard + authorized MR seed)
-  - `cargo test -p gyre-server --lib -- prompt` (merged-base persona-attestation and protocol-prompt single-source tests that now share files with the preview code)
-  - `cd web && npm ci && npm test`
-
-Sandbox limitation: TCP listener probes are unsupported here (capabilities.json), so no live HTTP/browser verification; the REST surface is exercised through the production `api_router` via `tower::ServiceExt::oneshot` against real git + real processes, and exact-head GitHub CI checks remain mandatory after review.
