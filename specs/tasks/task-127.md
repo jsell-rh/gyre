@@ -4,10 +4,10 @@ spec_ref: "user-management.md §UI Pages"
 depends_on:
   - task-124
   - task-125
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §UI Pages"
-commits: ["193727227472ea00bc07d26068506f6e51a89023", "7d598cc9d7e5b4211fdb2821409475defa2549e1", "ed9cdd578be1db26eb850244d953805375bf8447", "72a4bd097379b58fb05fdb843ae79649b0390d3b", "770378cc0687b56bf37abb52faf823de8f0670fd", "6d71565c5cb4a691d7ea0eddfdaeb50f59cba348", "1ed61cf1a71249c007a2dcf0bb59316e812b6d76", "94f6eb357ceb0f055283ec96453dae0b20826b68", "80641b880eb540870f63bbba7d9a1c78faa986f1", "14f27ab5f4ed0ca56d6d59dd4f2503157b4f8a19", "f5aee7dab7577d13d3698e29818a837de63adad0", "b02f8f185cf6fecddee1470c779c1dd1d38b39a5", "e468155e73374c55968e7ea3b956c8b80227bf2f", "c5902874c8d6692ed9ab6c1544ffd1daf2380839", "d577374a98ca345672978b2b8a9763b618a6af31", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f", "2f40c5b426bd3d476a4058a18a61f9528fce3667"]
+commits: ["193727227472ea00bc07d26068506f6e51a89023", "7d598cc9d7e5b4211fdb2821409475defa2549e1", "ed9cdd578be1db26eb850244d953805375bf8447", "72a4bd097379b58fb05fdb843ae79649b0390d3b", "770378cc0687b56bf37abb52faf823de8f0670fd", "6d71565c5cb4a691d7ea0eddfdaeb50f59cba348", "1ed61cf1a71249c007a2dcf0bb59316e812b6d76", "94f6eb357ceb0f055283ec96453dae0b20826b68", "80641b880eb540870f63bbba7d9a1c78faa986f1", "14f27ab5f4ed0ca56d6d59dd4f2503157b4f8a19", "f5aee7dab7577d13d3698e29818a837de63adad0", "b02f8f185cf6fecddee1470c779c1dd1d38b39a5", "e468155e73374c55968e7ea3b956c8b80227bf2f", "c5902874c8d6692ed9ab6c1544ffd1daf2380839", "d577374a98ca345672978b2b8a9763b618a6af31", "8d72ffecacb20fe2c436a0736fecec3ad39cbc3e", "4aa5a87ada50825ab676317fd030220dc814d01e", "64c85ec9c91d105a34196ce0d370036ca70b801a", "50f338e93383f6a4d59c408a3676d63aac85b45b", "1deff0b561bed7e78f2a0ece63bf2d79ac593dc2", "b696609378236716366ce85ef42a9b9a2c65d92c", "fe84485b4da230b8e3ace0840e68898cdcab5a7c", "0f127bc0e111c65ace292e45231ab585242aad99", "4de47315cc28796662ba04fb99cc36403390979a", "1a32b4e6422a0533c5a5075b4991a2163918a76f", "2f40c5b426bd3d476a4058a18a61f9528fce3667", "5977034803865ccf44f54b20c7d677924213a009"]
 ---
 
 ## Spec Excerpt
@@ -113,54 +113,37 @@ Preferences, and the `/invite/{token}` magic-link accept page
 displayed once; disjoint from the authenticated `/invite/{workspaceId}`
 flow by token shape).
 
-### Rebase-repair round (merge 39d59028)
+### Rebase-repair round (merge 59770348)
 
-Resolved the assigned rebase onto base e8f73c06 (task-082 navigation
-rail). The only content conflict was the `docs/ui.md` shell-layout
-paragraph; resolved by combining this task's notification-bell top-bar
-wording with task-082's per-mode navigation-rail drawer model. The
-auto-merged `App.svelte` was verified to render both the NavRail
-(task-082) and the NotificationBell (task-127) with `REPO_TAB_IDS` as
-the shared repo-tab source of truth; `ui-navigation.md` keeps both the
-bell amendment (§1) and the rail shipped-status amendment (§1a).
-
-### Verification-repair round (commit 19372722)
-
-The verification full-suite run (attempt ed736d08) failed one test:
-`api::invitations::tests::preview_resolves_tenant_invitation_with_
-preassigned_workspaces` panicked unwrapping a missing `invite_url`.
-Root cause was a test bug, not a production regression: the test
-invited with `workspace_roles: ["Maintainer"]`, a role that exists
-nowhere in the spec (user-management.md §Roles: Owner/Admin/Developer/
-Viewer) nor in `WorkspaceRole::parse_role`, so `POST /api/v1/tenant/
-invite` correctly rejected it with 400 InvalidInput. The Rust code on
-this branch is byte-identical to the previously verified state
-(`git diff 1489f740 39d59028 -- crates/` is empty). The test now uses
-the spec-real `Admin` role (the spec's own invite example) with the
-same exact round-trip assertion, plus an assert that the invite
-response is 201 with the body in the failure message so a rejected
-invite fails diagnosably. The `InvitationAccept` frontend mock fixture
-used the same fictional role and now uses `Admin` — the preview API
-can only ever emit real workspace roles.
+Resolved the assigned rebase onto base 876c77b7 (task-077 HSI Trust
+Gradient). The only source conflict was
+`crates/gyre-server/src/api/users.rs` `get_notifications`: this branch
+added the `?active=true` drawer listing (`list_active_for_user`, paired
+with the `count_unread` bell badge) while main added the HSI §2
+trust-derived exclusion set (`trust_inbox_excluded_types`) to the
+default Inbox listing. The resolution is the union that keeps each
+surface consistent with its badge: the `?active=true` drawer branch
+applies no exclusion set (its `count_unread` badge counts every active
+notification), and the default Inbox branch applies preference-disabled
+plus trust-excluded types — the same combined set as the cleanly merged
+`count_unresolved` badge, so the Inbox and its badge still agree. Both
+branches share one `type_filter` derivation. All other paths
+(adapters, domain, workspace/trust machinery, web/src components and
+tests, docs) merged cleanly; `web/dist` was resolved verbatim to the
+assignment base (876c77b7) for remote rebuild and publication.
 
 ### Test evidence
 
-- Post-merge focused vitest (locked deps, `npm ci`): AppShell, NavRail,
-  NoSidebar, NotificationBell, NotificationDrawer (120/120);
-  InvitationAccept, InvitationDeclineNavigate, UserProfile,
-  PublicUserProfile, TenantSettings, WorkspaceSettings, Inbox,
-  BidirectionalNav (290/290); WorkspaceDrawerSectionNav,
-  WorkspaceHome, WorkspaceHomeSections, CrossWorkspaceHome (85 passed,
-  41 pre-existing skipped). Evidence:
-  `/tmp/stage/review-evidence/probe-task127-rebase-merge.md`.
-- Verification-repair round: `npx vitest run
-  src/__tests__/InvitationAccept.test.js` — 15/15 passed after the
-  fixture role fix; `cargo check -p gyre-server --lib --tests` clean;
-  `cargo fmt --check -p gyre-server` clean. Evidence:
-  `/tmp/stage/review-evidence/probe-task127-test-repair.md`.
-- Full web suite and `cargo test --all` belong to independent
-  verification. The verifier must run
-  `cargo test -p gyre-server --lib api::invitations::tests::preview`
-  (the repaired test is
-  `preview_resolves_tenant_invitation_with_preassigned_workspaces`)
-  before the full suite.
+- Post-merge focused vitest (locked deps, `npm ci`): Inbox, Briefing,
+  NotificationDrawer, NotificationBell — 124/124 passed. Evidence:
+  `/tmp/stage/review-evidence/probe-task127-rebase-876c77b7.md`.
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --lib` clean (no
+  warnings) and `--lib --tests` clean; `cargo fmt --check -p
+  gyre-server` clean. gyre-server test compilation exceeds this
+  sandbox's 4 GiB budget, so the verifier must execute the full
+  `cargo test --all`, plus the focused merge-surface tests:
+  `cargo test -p gyre-server --lib inbox_trust_filter`,
+  `spec_path_notifications_active_filter_excludes_resolved_and_dismissed`,
+  `spec_path_notifications_list_with_filters`,
+  `spec_path_unread_count_and_mark_all_read`, and
+  `disabled_preference_excludes_type_from_inbox_and_count`.
