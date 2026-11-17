@@ -7,7 +7,7 @@ coverage_sections:
   - "supply-chain.md §AIBOM Contents"
   - "supply-chain.md §SLSA Provenance Integration"
   - "supply-chain.md §The Laptop Problem"
-commits: ["da1432739b4c912f2d0de1eca7eed70dd606184c", "39a0aaec029ffbfa9025bc0b2d766ca391a15fc1"]
+commits: ["39a0aaec029ffbfa9025bc0b2d766ca391a15fc1", "da1432739b4c912f2d0de1eca7eed70dd606184c", "edfb0ac8fd0ec757e17453a896332b58a084491f"]
 ---
 
 ## Spec Excerpt
@@ -52,7 +52,8 @@ Read `specs/system/supply-chain.md` §"AIBOM Contents", §"SLSA Provenance Integ
 ## Shipped
 
 All three coverage sections are implemented in production code: the
-original feature work in `39a0aaec`, repaired in `da143273` after review.
+original feature work in `39a0aaec`, review repairs in `da143273`, and a
+verification-repair formatting pass in `edfb0ac8`.
 
 ### AIBOM release artifacts (§AIBOM Contents)
 
@@ -93,34 +94,27 @@ acceptance requires `X-Gyre-Stack-Override-Reason` (sent by `gyre push
 --stack-override-reason`). `GET /api/v1/repos/:id/stack-drift` queries the
 repo-scoped history, newest-first, `?limit` default 100 cap 500.
 
-### Review repair (da143273)
+### Verification repair (edfb0ac8)
 
-- `git_rev_list` placed `--` before the range argument, so git treated the
-  range as a pathspec and exited 129 for every input — `?format=release`
-  always 404'd. Fixed (separator dropped; the range is a single argv
-element that cannot occupy an option position) and verified against a real
-  bare repo with git 2.43.0.
-- `get_slsa_provenance` attributed every agent commit ever recorded for
-  the repo; now scoped to the subject's history (finding 2 above).
-- `get_stack_drift` applied no default limit when `?limit` was omitted,
-  returning up to the internal 1000-event query cap while the docs claimed
-  default 100/cap 500; behavior now matches the documented bounds.
-- Two latent test defects fixed by hand-tracing (the release tests never
-  got past their first assertion while rev-list was broken): the release
-  fixture's tip tree lacked `gyre-stack.lock` (`commit_files` builds each
-  tree from only the given files), and the SLSA subject-name assertion
-  checked for a repo name the fixture never creates.
+The prior verification round failed only `check-rustfmt-diff.py`
+(changed lines needing formatting in six server files touched by this
+task). `edfb0ac8` applies rustfmt to those changed lines; the check now
+passes against base `7be265f`, `cargo check -p gyre-server` is clean, and
+no behavior changed (formatting-only diff).
 
 ### Test evidence
 
-- `cargo check -p gyre-server --all-targets` passes (this sandbox's build
-  wrapper defers gyre-server test execution to the independent verifier).
-- Real-git probe of the rev-list defect and fix: exit 129 before, correct
-  commit sets after (single-SHA and `from..to` forms) — recorded in
-  `/tmp/stage/review-evidence/probe-rev-list.md`.
-- Verifier must run: `cargo test --all` (acceptance criterion), plus the
-  focused `aibom` / `slsa` / `drift` gyre-server test filters listed in
-  `/tmp/stage/review-evidence/task-166-repair.md` — including the updated
-  `slsa_provenance_statement_shape_and_level_mapping` (asserts an
-  unreachable-ref record is scoped out) and the new
-  `slsa_weakest_link_among_reachable_commits`.
+- `cargo check -p gyre-server` (build wrapper, SKIP_WEB_BUILD=1): clean.
+- `cargo test -p gyre-domain` (build wrapper): 572 tests pass (564 + 8),
+  including
+  the 9 stack lockfile/drift tests (`lockfile_flags_drift_with_component_names`,
+  `lockfile_detects_tampered_components`, ...) behind the drift detection.
+- `check-rustfmt-diff.py` against base `7be265f`: clean (this round's fix).
+- clippy changed-lines analysis (gate logic replicated on a scoped
+  `-p gyre-cli -p gyre-domain -p gyre-server --all-targets` JSON run,
+  evidence in /tmp/stage/review-evidence/clippy-task166.json): 0 failures.
+- Server-module behavior tests for the endpoints live in aibom.rs,
+  provenance.rs, stack_attest.rs, and git_http.rs test modules; this
+  round's diff is formatting-only, so `cargo test --all` (acceptance
+  criterion) and `cargo test -p gyre-server -- aibom|slsa|stack_drift`
+  are deferred to the independent verifier per the 4 GiB build budget.
