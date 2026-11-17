@@ -5,7 +5,7 @@ depends_on: [task-165]
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §Supply Chain (supply-chain.md)"
-commits: ["ad473d3c0846cbdb5888f4973b3ea8e406f09586", "a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5"]
+commits: ["ad473d3c0846cbdb5888f4973b3ea8e406f09586", "a4c24fc16aed345da6f4b1d446aef66ab9a8d8e5", "4bec0af594c555ae9dd807eacaa967cb3118722f"]
 ---
 
 ## Spec Excerpt
@@ -85,59 +85,54 @@ current version from the approval event history — `approved_at` (earliest),
   `git rev-parse` (path validated against injection); reported `null` when
   there is no manifest — never fabricated.
 - Spec-to-code binding status: every repo MR carrying a `spec_ref`, with
-  `approved_at_merge_time` evaluated against the same per-SHA approval ledger
-  the merge gate (`verify_spec_ref`) enforces — an approval counts only when
-  granted at or before the merge and not revoked/rejected at or before it.
-  Merged-then-reverted MRs report merge-time approval as indeterminable
-  (`null`) because the MR record's `updated_at` is the revert time; evaluating
-  against it would misjudge approvals withdrawn between merge and revert.
-  A `bindings_summary` totals bindings, merges, and merge-time approvals.
+  `approved_at_merge_time` evaluated three-valued against the same per-SHA
+  approval ledger the merge gate (`verify_spec_ref`) enforces — `true` when a
+  row was determinably active at the merge moment, `false` for grants after
+  the merge and withdrawals at/before it, `null` when indeterminable
+  (unmerged or merged-then-reverted MR, unpinned ref, or approvals withdrawn
+  only after the merge — withdrawal clears the grant timestamp). A
+  `bindings_summary` totals bindings, merges, and merge-time approvals.
 
 Storage failures propagate (`anyhow::Result` → `ApiError::Internal`) so the
 section cannot silently under-report spec provenance; only genuine absence
 (no manifest, no events, no MRs) is reported as empty/null.
 
-### Resume-round verification (merged head 8b9c0e55 = candidate + base ce336114)
+### Review repair (commit 4bec0af5)
 
-The prior candidate (PR #854, head `d100b576`) failed the "Development
-controller" CI check (run 44076006080, logs never published). Investigation
-at the merged head found no code defect: the controller suites
-(`test_dev*.py`, `test_pipeline*.py`) fail identically at the BASE commit
-`ce336114` in this sandbox — the failures are environmental (cargo-wrapper
-shims exit 64, network-restricted pipeline tests), and none of the failing
-tests touch the candidate's diff (gyre-server Rust files + markdown). Node
-controller tests (`scripts/dashboard/test`, `scripts/test`) pass. The Go
-dispatcher suite could not run locally (go not installed). Evidence recorded
-in `/tmp/stage/review-evidence/task-169-probes.md`.
+Round-2 review finding: the original `approved_at_merge_time` predicate
+required `approved_at` to be set, but `SpecApproval::revoke()`/`reject()`
+clear it (mutual exclusivity), so an approval granted before the merge and
+withdrawn after it — the systematic case, since every push modifying a spec
+file auto-revokes that path's approvals — was misreported as
+`approved_at_merge_time: false`. Replaced with the three-valued
+`merge_time_approval` helper: post-merge withdrawals now report `null`
+(indeterminable), withdrawals at/before the merge keep `false`, and a
+determinably-active row still reports `true`. Documented in
+`docs/api-reference.md`.
 
-Local probes at the merged head: `cargo check -p gyre-server` PASS,
-`cargo check -p gyre-server --tests` PASS, `cargo fmt --check -p gyre-server`
-PASS, `cargo clippy -p gyre-server --lib` — no new warnings in changed files
-(pre-existing `sort_by_key` advisory at `api/aibom.rs:244` is an unchanged
-line). Mechanical guards PASS: check-arch, in-memory-state-stores,
-fail-open-ref-resolution, unwired-port-methods, inert-enforcement,
-relative-path-defaults, scope-literal-defaults, mem-port-contracts,
-task-commit-attribution (after restoring this file's `commits:` list).
+### Test evidence
 
-### Tests the independent verifier must execute
+Local probes at this head (recorded in
+`/tmp/stage/review-evidence/task-169-repair.md`):
 
-The sandbox build wrapper blocks gyre-server test compilation ("exceeds
-4 GiB") — an infrastructure limit, not a code defect.
+- `cargo check -p gyre-server --tests` — PASS (type-checks lib + tests).
+- `cargo fmt --check -p gyre-server` — clean.
+- Behavioral probe against the real `gyre-domain` `SpecApproval`
+  transitions (scratch crate under review-evidence, predicate verbatim-
+  identical to the shipped helper): 8/8 pass, including the reviewer's
+  exact case approved@900 / merged@1000 / revoked@2000 → `null`, and the
+  proof that `revoke()`/`reject()` clear `approved_at`.
 
-- `cargo test -p gyre-server --lib aibom_spec_registry` — 3 tests, including
-  ones that fail on real defects: an approval granted after the merge and an
-  approval revoked before the merge both yield `approved_at_merge_time: false`
-  (a "currently approved" check would wrongly say true); stale/revoked approval
-  events are excluded from approval chains; cross-repo ledger entries do not
-  leak; `manifest_version` equals `git rev-parse HEAD:specs/manifest.yaml` in
-  a real temp git repo.
-- `cargo test -p gyre-server --lib api::aibom` — includes the e2e
-  `aibom_includes_spec_registry_section` (router-level: section present with
-  counts, chain, and a merged MR bound to an approved spec).
-- `cargo test -p gyre-server --lib api::release` — includes
+The sandbox build wrapper blocks gyre-server test compilation (4 GiB
+budget) — an infrastructure limit, not a code defect. The independent
+verifier must execute:
+
+- `cargo test -p gyre-server --lib aibom_spec_registry` — unit tests,
+  including `bindings_report_merge_time_approval_truthfully` with the
+  revoked-after-merge, rejected-after-merge, determinable-true-wins, and
+  indeterminate-dominates-false cases.
+- `cargo test -p gyre-server --lib api::aibom` — e2e
+  `aibom_includes_spec_registry_section`.
+- `cargo test -p gyre-server --lib api::release` — e2e
   `release_prepare_includes_spec_registry_metadata`.
-- `cargo test --all` — acceptance criterion; deferred to the verifier per the
-  sandbox memory budget.
-- CI "Development controller" job: `go test -race ./...` in
-  `tools/fullsend-dispatcher` (go not available in this sandbox) plus the
-  Python/Node controller suites.
+- `cargo test --all` — acceptance criterion.
