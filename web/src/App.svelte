@@ -12,6 +12,7 @@
   import MetaSpecs from './components/MetaSpecs.svelte';
   import UserProfile from './components/UserProfile.svelte';
   import PublicUserProfile from './components/PublicUserProfile.svelte';
+  import InvitationAccept from './components/InvitationAccept.svelte';
   import NotificationBell from './components/NotificationBell.svelte';
   import NavRail from './components/NavRail.svelte';
   import { REPO_TAB_IDS } from './lib/repoTabs.js';
@@ -29,8 +30,24 @@
   import { toast as showToast } from './lib/toast.svelte.js';
 
   // ── Navigation mode ──────────────────────────────────────────────────
-  // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' | 'notification_settings'
+  // 'workspace_home' | 'workspace_settings' | 'analytics' | 'repo' | 'profile' |
+  // 'user_profile' (@username) | 'invite_accept' (/invite/:id) | 'notification_settings'
   let mode = $state('workspace_home');
+
+  // ── Public profile / invitation accept state ────────────────────────
+  // /@username — tenant-public profile (user-management.md §User Profile
+  // Page); the shared route state also serves the drawer's deep links.
+  // /invite/:workspaceId — the authenticated invitee's pending workspace
+  // invitation accept page (GET /users/me/invitations → POST
+  // /workspaces/{id}/invite/accept|decline).
+  // /invite/:token — the magic-link form (task-110): a 64-hex-char
+  // CSPRNG token is the auth factor (no session needed); the page
+  // previews via GET /invite/{token}/preview and accepts/declines via
+  // the token endpoints. The two shapes are disjoint — workspace ids
+  // are UUIDs (36 chars with dashes), invitation tokens are 64 hex
+  // chars — so the segment alone disambiguates.
+  let inviteWorkspaceId = $state(null);
+  let inviteToken = $state(null);
 
   // ── Workspace / repo state ───────────────────────────────────────────
   let workspaces = $state([]);
@@ -212,6 +229,13 @@
     } catch { /* ignore */ }
   }
 
+  // ── Notification bell (user-management.md §In-App Notification UI) ─────
+  // The bell + drawer are the NotificationBell component (single top-bar
+  // notification surface per the amended ui-navigation.md §1): its badge is
+  // the UNREAD notification count (GET /notifications/unread-count), kept
+  // live by the NotificationPush realtime stream wired above and a 60s
+  // resync — see components/NotificationBell.svelte.
+
   // ── Slug helpers ──────────────────────────────────────────────────────
   /** Get URL slug for a workspace. Uses ws.slug if present, else ws.id. */
   function wsSlug(ws) {
@@ -234,7 +258,10 @@
   // /workspaces/:slug/r/:repo/tasks/:id        → task detail page
   // /workspaces/:slug/r/:repo/agents/:id       → agent detail page
   // /workspaces/:slug/r/:repo/specs/*path      → spec detail page
-  // /profile                                   → user profile
+  // /profile                                   → user profile (self)
+  // /@username                                 → tenant-public profile (user-management.md §UI Pages)
+  // /invite/:workspaceId                       → pending invitation accept page (§UI Pages)
+  // /invite/:token (64-hex magic link)         → token-form accept page (task-110)
 
   // Repo tab ids for URL parsing — derived from the repo tab strip
   // (web/src/lib/repoTabs.js, the single source of truth shared with
@@ -276,6 +303,21 @@
         entityType: null,
         entityId: null,
         username: raw[0].slice(1),
+      };
+    }
+
+    // /invite/:workspaceId OR /invite/:token — pending invitation accept
+    // page (user-management.md §UI Pages > Pending Invitation Accept
+    // Page). A 64-char lowercase-hex segment is a task-110 magic-link
+    // token (CSPRNG, auth factor in the URL); anything else is the
+    // authenticated flow's workspace id (a UUID). The shapes are
+    // disjoint, so the segment alone disambiguates.
+    if (raw[0] === 'invite' && raw.length === 2) {
+      const isToken = /^[0-9a-f]{64}$/.test(raw[1]);
+      return {
+        mode: 'invite_accept', slug: null, repoName: null, tab: null, entityType: null, entityId: null,
+        inviteId: isToken ? null : raw[1],
+        inviteToken: isToken ? raw[1] : null,
       };
     }
 
@@ -342,9 +384,15 @@
 
   export function urlFor(parsed) {
     if (!parsed) return '/';
-    const { mode: m, slug, repoName, tab, entityType, entityId, username } = parsed;
+    const { mode: m, slug, repoName, tab, entityType, entityId, username, inviteId, inviteToken } = parsed;
     if (m === 'profile') return '/profile';
     if (m === 'user_profile') return `/@${encodeURIComponent(username ?? '')}`;
+    if (m === 'invite_accept') {
+      // Token form takes precedence: the magic-link URL must round-trip
+      // byte-for-byte through the canonical-URL rewrite on page load.
+      const seg = inviteToken ?? inviteId ?? '';
+      return `/invite/${encodeURIComponent(seg)}`;
+    }
     if (m === 'notification_settings') return '/settings/notifications';
     if (m === 'cross_workspace') {
       return tab ? `/all/${encodeURIComponent(tab)}` : '/all';
@@ -610,6 +658,7 @@
     fadeContent();
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
   }
+
   // /@{username} — tenant-scoped public profile (user-management.md
   // §User Profile Page). Exposed as a context so any surface rendering a
   // user reference (@mentions, activity feeds, reviewer attribution) can
@@ -623,6 +672,82 @@
     fadeContent();
     pushState({ mode: 'user_profile', slug: null, repoName: null, tab: null, username });
   }
+
+  function goToInviteAccept(workspaceId) {
+    mode = 'invite_accept';
+    inviteWorkspaceId = workspaceId;
+    inviteToken = null;
+    currentRepo = null;
+    fadeContent();
+    window.history.pushState(
+      { mode: 'invite_accept', inviteId: workspaceId },
+      '',
+      `/invite/${encodeURIComponent(workspaceId)}`,
+    );
+  }
+
+  /** Apply a parsed URL to the app state. Used by drawer deep links
+   *  (action_url paths) — the same transitions the popstate handler
+   *  performs, without duplicating its history handling. */
+  function applyParsed(p) {
+    if (!p) return;
+    currentRepo = null;
+    entityDetail = null;
+    if (p.mode === 'user_profile') {
+      mode = 'user_profile';
+      userProfileUsername = p.username;
+    } else if (p.mode === 'invite_accept') {
+      mode = 'invite_accept';
+      inviteWorkspaceId = p.inviteId ?? null;
+      inviteToken = p.inviteToken ?? null;
+    } else if (p.mode === 'profile') {
+      mode = 'profile';
+    } else if (p.mode === 'notification_settings') {
+      mode = 'notification_settings';
+    } else if (p.mode === 'cross_workspace') {
+      mode = 'cross_workspace';
+      crossWorkspaceTab = (p.tab === 'settings' || p.tab === 'agent-rules') ? p.tab : null;
+    } else if (p.slug) {
+      const ws = findWorkspaceBySlug(p.slug);
+      if (ws) {
+        currentWorkspace = ws;
+        try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
+        loadWorkspaceData(ws.id);
+        if (p.mode === 'workspace_settings') mode = 'workspace_settings';
+        else if (p.mode === 'agent_rules') mode = 'agent_rules';
+        else if (p.mode === 'repo' && p.repoName) {
+          mode = 'repo';
+          repoTab = p.tab ?? 'specs';
+          currentRepo = { id: null, name: p.repoName };
+          if (p.entityType && p.entityId) {
+            entityDetail = { type: p.entityType, id: p.entityId, data: {} };
+          }
+          api.repos({ workspaceId: ws.id }).then(repos => {
+            const found = (Array.isArray(repos) ? repos : []).find(r => r.name === p.repoName);
+            if (found && currentRepo?.name === p.repoName) {
+              currentRepo = { id: found.id, name: found.name };
+              repoIdCache.set(`${ws.id}:${found.name}`, found.id);
+            }
+          }).catch(() => { /* keep name-only ref */ });
+        } else mode = 'workspace_home';
+      } else {
+        mode = 'workspace_home';
+      }
+    } else {
+      mode = 'workspace_home';
+    }
+    loadDecisionsCount();
+  }
+
+  /** Navigate to an SPA path (notification action_url deep links). */
+  function navigateToPath(path) {
+    const parsed = parseUrl(path);
+    if (!parsed) return;
+    window.history.pushState({ ...window.history.state, path }, '', path);
+    applyParsed(parsed);
+    fadeContent();
+  }
+
   function goToNotificationSettings() {
     mode = 'notification_settings';
     fadeContent();
@@ -703,8 +828,11 @@
   setContext('goToAgentRules', () => goToAgentRules());
   setContext('goToWorkspaceSettings', () => goToWorkspaceSettings());
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
-  setContext('goToNotificationSettings', () => goToNotificationSettings());
+  setContext('goToCrossWorkspace', () => goToCrossWorkspace());
   setContext('goToUserProfile', (username) => goToUserProfile(username));
+  setContext('goToInviteAccept', (workspaceId) => goToInviteAccept(workspaceId));
+  setContext('navigateToPath', (path) => navigateToPath(path));
+  setContext('goToNotificationSettings', () => goToNotificationSettings());
   setContext('goToRepo', (repo, tab) => goToRepo(repo, tab));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
@@ -1180,6 +1308,8 @@
       document.title = 'Profile | Gyre';
     } else if (mode === 'user_profile') {
       document.title = userProfileUsername ? `@${userProfileUsername} | Gyre` : 'User | Gyre';
+    } else if (mode === 'invite_accept') {
+      document.title = 'Workspace Invitation | Gyre';
     } else if (mode === 'notification_settings') {
       document.title = 'Notification Settings | Gyre';
     } else if (mode === 'cross_workspace') {
@@ -1242,6 +1372,10 @@
     } else if (parsed?.mode === 'user_profile') {
       mode = 'user_profile';
       userProfileUsername = parsed.username ?? null;
+    } else if (parsed?.mode === 'invite_accept') {
+      mode = 'invite_accept';
+      inviteWorkspaceId = parsed.inviteId ?? null;
+      inviteToken = parsed.inviteToken ?? null;
     } else if (parsed?.mode === 'notification_settings') {
       mode = 'notification_settings';
     } else if (parsed?.mode === 'cross_workspace') {
@@ -1332,7 +1466,12 @@
       tab: mode === 'cross_workspace' ? crossWorkspaceTab : repoTab,
       entityType: entityDetail?.type ?? null,
       entityId: entityDetail?.id ?? null,
+      // Path-parameterized modes: keep the route parameter in the canonical
+      // URL, or a page load at /invite/{ws} / /@{username} rewrites the URL
+      // to /invite/ / /@ and a later refresh loses the deep link entirely.
       username: mode === 'user_profile' ? userProfileUsername : null,
+      inviteId: mode === 'invite_accept' ? inviteWorkspaceId : null,
+      inviteToken: mode === 'invite_accept' ? inviteToken : null,
     });
     window.history.replaceState(
       { mode, wsId: currentWorkspace?.id ?? null, repoName: currentRepo?.name ?? null, repoTab, crossWorkspaceTab, entityType: entityDetail?.type ?? null, entityId: entityDetail?.id ?? null },
@@ -1348,7 +1487,9 @@
       selfUsername = me?.username ?? null;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
-    const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
+    const decisionsInterval = setInterval(() => {
+      loadDecisionsCount();
+    }, 60_000);
 
     // 4. Popstate (browser back/forward)
     function handlePopstate(e) {
@@ -1371,11 +1512,15 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: histUsername } = e.state;
-        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'user_profile' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId, username: histUsername, inviteId: pInviteId, inviteToken: pInviteToken } = e.state;
+        mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'user_profile' || m === 'invite_accept' || m === 'cross_workspace' || m === 'agent_rules' || m === 'notification_settings' || m === 'analytics')
           ? m : 'workspace_home';
         if (m === 'user_profile') {
           userProfileUsername = histUsername ?? parseUrl(window.location.pathname)?.username ?? null;
+        }
+        if (m === 'invite_accept') {
+          inviteWorkspaceId = pInviteId ?? parseUrl(window.location.pathname)?.inviteId ?? null;
+          inviteToken = pInviteToken ?? parseUrl(window.location.pathname)?.inviteToken ?? null;
         }
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
@@ -1386,7 +1531,7 @@
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
-        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'notification_settings') {
+        } else if (m !== 'cross_workspace' && m !== 'profile' && m !== 'user_profile' && m !== 'invite_accept' && m !== 'notification_settings') {
           // Try to recover workspace from URL slug if state doesn't have wsId
           const p2 = parseUrl(window.location.pathname);
           if (p2?.slug) {
@@ -1425,6 +1570,10 @@
         } else if (p.mode === 'user_profile') {
           mode = 'user_profile';
           userProfileUsername = p.username ?? null;
+        } else if (p.mode === 'invite_accept') {
+          mode = 'invite_accept';
+          inviteWorkspaceId = p.inviteId ?? null;
+          inviteToken = p.inviteToken ?? null;
         } else if (p.mode === 'notification_settings') {
           mode = 'notification_settings';
         } else if (p.mode === 'cross_workspace') {
@@ -1433,7 +1582,7 @@
         } else if (p.slug) {
           const ws = findWorkspaceBySlug(p.slug);
           if (ws) currentWorkspace = ws;
-          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'analytics')
+          mode = (p.mode === 'workspace_settings' || p.mode === 'workspace_home' || p.mode === 'repo' || p.mode === 'agent_rules' || p.mode === 'user_profile' || p.mode === 'invite_accept' || p.mode === 'analytics')
             ? p.mode
             : 'workspace_home';
           if (p.repoName && p.mode === 'repo') {
@@ -1813,44 +1962,13 @@
         </button>
       </div>
 
-      <!-- Right: decisions badge + user avatar -->
+      <!-- Right: notification bell + user avatar -->
       <div class="topbar-right">
-        <!-- Decisions badge (🔔) -->
-        <button
-          class="decisions-badge-btn"
-          onclick={async () => {
-            if (mode === 'repo') {
-              goToRepoTab('decisions');
-            } else {
-              // Ensure workspace home is rendered before attempting scroll
-              if (mode !== 'workspace_home') {
-                goToWorkspaceHome(currentWorkspace);
-                await tick();
-              }
-              document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
-          }}
-          aria-label={decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : $t('topbar.no_decisions')}
-          title={$t('workspace_home.sections.decisions')}
-          data-testid="decisions-badge"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="16" height="16" aria-hidden="true">
-            <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-            <path d="M13.73 21a2 2 0 01-3.46 0"/>
-          </svg>
-          {#if decisionsCount > 0}
-            <span class="decisions-count" aria-hidden="true">{decisionsCount > 99 ? '99+' : decisionsCount}</span>
-          {/if}
-        </button>
-        <span class="sr-only" aria-live="polite" aria-atomic="true">
-          {decisionsCount > 0 ? $t('topbar.decisions_pending', { values: { count: decisionsCount } }) : ''}
-        </span>
-
-        <!-- Notification bell (user-management.md §In-App Notification UI):
-            unread count badge + slide-out drawer. Distinct from the Decisions
-            badge (HSI §1.1): that one tracks unresolved items needing judgment
-            and navigates to the Decisions section; this one tracks read state
-            across ALL notifications. -->
+        <!-- Notification bell (user-management.md §In-App Notification UI;
+            amended ui-navigation.md §1 — the single top-bar notification
+            surface, superseding the old decisions-count badge click):
+            unread count badge + slide-out drawer (§UI Pages > Notification
+            Drawer — active-only, grouped by priority). -->
         <NotificationBell {workspaces} currentWorkspaceId={currentWorkspace?.id ?? null} />
 
         <!-- User avatar dropdown -->
@@ -2054,6 +2172,8 @@
           <UserProfile workspaceId={currentWorkspace?.id ?? null} repoId={null} scope="tenant" />
         {:else if mode === 'user_profile'}
           <PublicUserProfile username={userProfileUsername} workspaces={workspaces} />
+        {:else if mode === 'invite_accept'}
+          <InvitationAccept inviteId={inviteWorkspaceId} token={inviteToken} />
         {:else if mode === 'notification_settings'}
           <NotificationSettings />
         {/if}
@@ -2153,6 +2273,8 @@
   else if (v === 'specs') { workspaceActiveSection = 'specs'; tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
   else goToWorkspaceHome(currentWorkspace);
 }} />
+<!-- Notification drawer (user-management.md §UI Pages): slide-out panel
+    from the bell with priority grouping, deep links, and read/unread. -->
 <Toast />
 
 <!-- Keyboard shortcut overlay -->
@@ -2604,49 +2726,6 @@
     align-items: center;
     gap: var(--space-2);
     flex-shrink: 0;
-  }
-
-  .decisions-badge-btn {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    background: transparent;
-    border: none;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    border-radius: var(--radius);
-    transition: color var(--transition-fast), background var(--transition-fast);
-  }
-
-  .decisions-badge-btn:hover {
-    color: var(--color-text);
-    background: var(--color-surface-elevated);
-  }
-
-  .decisions-badge-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-  }
-
-  .decisions-count {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    min-width: 14px;
-    height: 14px;
-    padding: 0 3px;
-    background: var(--color-danger);
-    color: var(--color-text-inverse);
-    border-radius: var(--radius-full);
-    font-size: var(--text-xs);
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
   }
 
   .user-btn {
@@ -3118,7 +3197,6 @@
   @media (prefers-reduced-motion: reduce) {
     .content-inner,
     .search-trigger,
-    .decisions-badge-btn,
     .user-btn,
     .auth-dot,
     .user-dropdown-item,

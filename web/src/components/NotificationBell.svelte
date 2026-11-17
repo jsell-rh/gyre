@@ -4,12 +4,15 @@
   import { notificationState, refreshUnreadCount } from '../lib/notifications.svelte.js';
   import NotificationDrawer from './NotificationDrawer.svelte';
 
-  // NotificationBell (user-management.md §In-App Notification UI): bell in
-  // the top nav with an unread-count badge. The count comes from
-  // GET /api/v1/notifications/unread-count and is kept live by the
-  // NotificationPush messages on the app's shared /ws connection
-  // (§API > Notifications: real-time push — wired in App.svelte).
-  // Clicking opens the notification drawer.
+  // NotificationBell (user-management.md §In-App Notification UI): the
+  // top-nav bell — per the amended ui-navigation.md §1 it is the single
+  // top-bar notification surface (the old decisions-count badge click is
+  // superseded). The count comes from GET /api/v1/notifications/unread-count
+  // and is kept live by the NotificationPush messages on the app's shared
+  // /ws connection (§API > Notifications: real-time push — wired in
+  // App.svelte), plus a 60s full-resync interval so the badge can never
+  // drift from the server. Clicking opens the notification drawer
+  // (§UI Pages > Notification Drawer — active-only, grouped by priority).
 
   let { workspaces = [], currentWorkspaceId = null } = $props();
 
@@ -17,6 +20,10 @@
 
   onMount(() => {
     void refreshUnreadCount(null);
+    // Periodic full resync: realtime pushes bump the count incrementally;
+    // this interval re-reads the server's truth (drift guard).
+    const interval = setInterval(() => { void refreshUnreadCount(null); }, 60_000);
+    return () => clearInterval(interval);
   });
 
   // Refresh the badge when the drawer closes (reads/unread changes inside).

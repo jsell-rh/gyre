@@ -33,12 +33,16 @@ async function request(path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const { headers: customHeaders, ...restOptions } = options;
+    // skipAuth: magic-link token flows — the 256-bit token in the URL is
+    // the auth factor, and a logged-in session of a DIFFERENT user must
+    // not be presented on those calls (the server rejects a mismatched
+    // authenticated identity, and an anonymous accept is the normal path).
+    const { headers: customHeaders, skipAuth = false, ...restOptions } = options;
     const res = await fetch(`${API_BASE}${path}`, {
       ...restOptions,
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${getAuthToken()}`,
+        ...(skipAuth ? {} : { 'Authorization': `Bearer ${getAuthToken()}` }),
         ...customHeaders,
       },
       signal: controller.signal,
@@ -50,7 +54,12 @@ async function request(path, options = {}) {
       if (res.status === 401) {
         throw new Error('Session expired — please re-authenticate.');
       }
-      throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
+      const err = new Error(`API ${path}: ${res.status} ${res.statusText}`);
+      // Attach the HTTP status so callers can branch on it (e.g. the
+      // invitation accept page's 404 not-found state) instead of
+      // parsing the message string.
+      err.status = res.status;
+      throw err;
     }
     if (res.status === 204) return null;
     return res.json();
@@ -534,6 +543,63 @@ export const api = {
     request(`/workspaces/${id}/members`, { method: 'POST', body: JSON.stringify(data) }),
   removeWorkspaceMember: (id, userId) =>
     request(`/workspaces/${id}/members/${userId}`, { method: 'DELETE' }),
+  // Workspace membership management (user-management.md §API > Workspace
+  // Membership): role change incl. ownership transfer. Invitation paths
+  // are task-110's WorkspaceInvitation model: invite, listing (status +
+  // expiry), authenticated invitee accept/decline, and revoke.
+  updateMemberRole: (id, userId, { role, reason } = {}) =>
+    request(`/workspaces/${id}/members/${userId}/role`, { method: 'PUT', body: JSON.stringify({ role, reason }) }),
+  inviteWorkspaceMember: (id, data) =>
+    request(`/workspaces/${id}/invite`, { method: 'POST', body: JSON.stringify(data) }),
+  workspaceInvitations: (id) => request(`/workspaces/${id}/invitations`),
+  // Invitee-facing pending workspace invitations (task-110):
+  // { invitations: [{ id, workspace_id, user_id, role, status,
+  // expires_at, created_at, accepted_at }] }
+  myInvitations: () => request('/users/me/invitations'),
+  acceptWorkspaceInvitation: (id) =>
+    request(`/workspaces/${id}/invite/accept`, { method: 'POST' }),
+  declineWorkspaceInvitation: (id) =>
+    request(`/workspaces/${id}/invite/decline`, { method: 'POST' }),
+  revokeWorkspaceInvitation: (id, invitationId) =>
+    request(`/workspaces/${id}/invitations/${invitationId}`, { method: 'DELETE' }),
+  // Tenant invitation management (user-management.md §UI Pages > Tenant
+  // Invitation Management; task-110 endpoints): TenantAdmin-gated list
+  // (status filter), single + bulk invite (create responses carry the
+  // one-time magic-link invite_url), and revoke.
+  tenantInvitations: (status) =>
+    request(`/tenant/invitations${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  inviteToTenant: (data) =>
+    request('/tenant/invite', { method: 'POST', body: JSON.stringify(data) }),
+  bulkInviteToTenant: (data) =>
+    request('/tenant/invite/bulk', { method: 'POST', body: JSON.stringify(data) }),
+  revokeTenantInvitation: (id) =>
+    request(`/tenant/invitations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // Magic-link token surface for the /invite/{token} accept page
+  // (task-110): the 256-bit token in the URL is the auth factor, so these
+  // skip the Bearer header. The preview is read-only (kind, status,
+  // invited email/role, workspace names); accept returns the local-mode
+  // account's first API key exactly once.
+  invitationPreview: (token) =>
+    request(`/invite/${encodeURIComponent(token)}/preview`, { skipAuth: true }),
+  acceptTenantInvitationByToken: (token, data = {}) =>
+    request(`/invite/${encodeURIComponent(token)}/accept`, { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
+  declineTenantInvitationByToken: (token) =>
+    request(`/invite/${encodeURIComponent(token)}/decline`, { method: 'POST', body: JSON.stringify({}), skipAuth: true }),
+  acceptWorkspaceInvitationByToken: (token) =>
+    request(`/workspaces/invitations/${encodeURIComponent(token)}/accept`, { method: 'POST', skipAuth: true }),
+  declineWorkspaceInvitationByToken: (token) =>
+    request(`/workspaces/invitations/${encodeURIComponent(token)}/decline`, { method: 'POST', skipAuth: true }),
+  // Teams (user-management.md §API > Teams, task-122/125)
+  createTeam: (id, data) =>
+    request(`/workspaces/${id}/teams`, { method: 'POST', body: JSON.stringify(data) }),
+  updateTeam: (id, teamId, data) =>
+    request(`/workspaces/${id}/teams/${teamId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteTeam: (id, teamId) =>
+    request(`/workspaces/${id}/teams/${teamId}`, { method: 'DELETE' }),
+  addTeamMember: (id, teamId, userId) =>
+    request(`/workspaces/${id}/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
+  removeTeamMember: (id, teamId, userId) =>
+    request(`/workspaces/${id}/teams/${teamId}/members/${userId}`, { method: 'DELETE' }),
   // Personas (M22.5)
   personas: () => request('/personas'),
   persona: (id) => request(`/personas/${id}`),
@@ -562,6 +628,35 @@ export const api = {
   me: () => request('/users/me'),
   updateMe: (data) =>
     request('/users/me', { method: 'PUT', body: JSON.stringify(data) }),
+  // Tenant-public profile by username (user-management.md §API > User
+  // Management, task-124): { id, username, display_name, avatar_url,
+  // timezone, created_at, memberships: [...] }
+  userByUsername: (username) => request(`/users/${encodeURIComponent(username)}`),
+  // Tenant user management (task-124): TenantAdmin-only paginated listing,
+  // soft deactivation, and admin user provisioning.
+  listUsers: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/users${qs ? '?' + qs : ''}`);
+  },
+  deactivateUser: (id, reason) =>
+    request(`/users/${id}/deactivate`, { method: 'PUT', body: JSON.stringify({ reason }) }),
+  // Inline global-role management (user-management.md §UI Pages > Tenant
+  // User Management "role management (TenantAdmin only)"): role is the
+  // tenant-level GlobalRole ("Member" | "TenantAdmin"), same vocabulary
+  // as the invitation API.
+  updateUserGlobalRole: (id, { role, reason } = {}) =>
+    request(`/users/${encodeURIComponent(id)}/role`, { method: 'PUT', body: JSON.stringify({ role, reason }) }),
+  provisionUser: (data) =>
+    request('/users', { method: 'POST', body: JSON.stringify(data) }),
+  // Active sessions (user-management.md §UI Pages > Session Management;
+  // endpoints from task-111 §Session Management): list is active-only and
+  // never exposes token hashes; revoke-all is "sign out everywhere" —
+  // every session revoked also invalidates the API key itself.
+  listMySessions: () => request('/users/me/sessions'),
+  revokeMySession: (id) =>
+    request(`/users/me/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  revokeAllMySessions: () =>
+    request('/users/me/sessions/revoke-all', { method: 'POST' }),
   myNotifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/users/me/notifications${qs ? '?' + qs : ''}`);
@@ -570,8 +665,9 @@ export const api = {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/users/me/notifications/count${qs}`).then(r => r?.count ?? 0);
   },
-  // Task-113 (user-management.md §In-App Notification UI / §API >
-  // Notifications): spec-path listing, unread count, read/unread marking.
+  // Spec notification paths (user-management.md §API > Notifications and
+  // §In-App Notification UI; task-125 endpoints, task-113 UI consumers):
+  // listing with filters, unread count, read/unread, bulk read, preferences.
   notifications: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/notifications${qs ? '?' + qs : ''}`);
@@ -580,19 +676,22 @@ export const api = {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/notifications/unread-count${qs}`).then(r => r?.count ?? 0);
   },
+  // PUT is the spec method for mark-read (user-management.md §API >
+  // Notifications; the server keeps POST as a legacy alias).
   markNotificationRead: (id) =>
     request(`/notifications/${id}/read`, { method: 'PUT' }),
   markNotificationUnread: (id) =>
     request(`/notifications/${id}/unread`, { method: 'POST' }),
-  markAllNotificationsRead: (workspaceId) => {
-    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
-    return request(`/notifications/mark-all-read${qs}`, { method: 'POST' });
-  },
+  // Spec-path preferences (task-125): GET/PUT /notifications/preferences.
   notificationChannels: () => request('/notifications/preferences'),
   updateNotificationChannels: (body) =>
     request('/notifications/preferences', { method: 'PUT', body: JSON.stringify(body) }),
   dismissNotification: (id) =>
     request(`/notifications/${id}/dismiss`, { method: 'POST' }),
+  markAllNotificationsRead: (workspaceId) => {
+    const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+    return request(`/notifications/mark-all-read${qs}`, { method: 'POST' });
+  },
   resolveNotification: (id) =>
     request(`/notifications/${id}/resolve`, { method: 'POST' }),
   // Notification preferences (HSI §12)
