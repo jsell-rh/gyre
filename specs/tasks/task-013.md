@@ -99,18 +99,30 @@ When working on this task:
 - `fix(briefing): address R1 findings — filter direction, actions field, gate timestamp (TASK-013)`
 - `fix(briefing): address R2 findings — exception type values, cross-workspace timestamp filter (TASK-013)`
 - `fix(briefing): address R3 findings — source_workspace_slug field, stale_since test coverage (TASK-013)`
-- `fix(briefing): address R4 findings — dedup assertion-failure fan-out, gate time gate, scoped notification query (TASK-013)`
 
 ## Shipped
 
 HSI §9 Briefing `cross_workspace` and `exceptions` sections are
 implemented in production code in `crates/gyre-server/src/api/graph.rs`
 (`assemble_briefing`), shared by the REST route and the MCP briefing
-resource; no stubs remain. This round repairs the three blocking findings
-from the independent review of candidate `f8e9944` (finding id
-`98422bb21a4d48b4a672c395bc65f930`).
+resource; no stubs remain. The R4 repair round fixed the three blocking
+findings from the independent review of candidate `f8e9944` (finding id
+`98422bb21a4d48b4a672c395bc65f930`); that production fix is commit
+`a09baf85167f05a28fea9ac67a3bfd65a3543714` on this branch and is
+preserved unchanged.
 
-### Behavior
+### Contract repair (this round)
+
+The prior checkpoint added an R4 line to the protected `## Git Commits`
+provenance section (contract finding `38b93875e29a4b42b538aa81671b4fbc`).
+The executor restored the assigned task document; this round keeps that
+assigned protected text byte-identical (the Git Commits list above is the
+assigned four-line version) and records all progress under exactly this
+`## Shipped` section. The R4 commit is attributed for review scoping via
+the `commits:` frontmatter. No production code changed in this round —
+the working tree matches `a09baf85` exactly for `crates/` and `web/`.
+
+### Behavior (R4 production fix, commit a09baf85)
 
 - **cross_workspace**: inbound spec links read from `state.spec_links_store`
   with the directional filter `source_repo_id IN workspace AND
@@ -140,18 +152,20 @@ from the independent review of candidate `f8e9944` (finding id
   (`gyre-adapters/src/{sqlite,postgres}/notification.rs`), and the
   `BroadcastingNotificationRepo` wrapper (`gyre-server/src/notifications.rs`).
 
-### Test evidence
+### Test evidence (re-verified at this HEAD, this round)
 
-- New adapter test (executed locally, real SQLite):
-  `cargo test -p gyre-adapters --lib sqlite::notification` —
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server --all-targets` — **exit 0**
+  (includes the new/extended briefing unit tests; log:
+  `/tmp/stage/review-evidence/task-013-cargo-check-gyre-server.log`).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib sqlite::notification` —
   **10 passed, 0 failed**, including
   `list_by_workspace_type_since_scopes_and_is_unbounded` (fan-out copies
   from all users returned; other-workspace and pre-`since` rows excluded;
   250 newer noise rows of another type irrelevant; `since` past the event
-  returns nothing).
-- New/extended server unit tests in `graph.rs` (type-checked via
-  `cargo check -p gyre-server --all-targets`, exit 0; execution deferred to
-  the independent verifier per the build-budget constraint):
+  returns nothing; log:
+  `/tmp/stage/review-evidence/task-013-adapters-sqlite-notification.log`).
+- Server unit tests in `graph.rs` (execution deferred to the independent
+  verifier per the build-budget constraint):
   - `briefing_exceptions_spec_assertion_failures` extended with a second
     per-member fan-out copy (same entity_id/title/created_at, different
     user) plus a distinct second event — asserts 2 items (fan-out
@@ -162,9 +176,6 @@ from the independent review of candidate `f8e9944` (finding id
   - `briefing_exceptions_assertion_failure_beyond_recency_window` — a
     `SpecAssertionFailure` followed by 201 newer notifications of other
     types (across users and workspaces) is still reported.
-- Invariant scripts pass locally: `check-arch.sh`,
-  `check-nested-time-scope.sh`, `check-inert-enforcement.sh`,
-  `check-mem-port-contracts.sh`.
 
 ### Verifier commands (server tests, deferred)
 
