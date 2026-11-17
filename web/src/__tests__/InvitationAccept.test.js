@@ -76,13 +76,19 @@ describe('InvitationAccept', () => {
   });
 
   it('renders the workspace preview with the invited role and expiry', async () => {
+    // Sub-hour pending invitation: the expiry countdown must render whole
+    // minutes, not raw seconds with a minutes unit.
+    api.myInvitations.mockResolvedValue({
+      invitations: [pendingInvitation({ expires_at: Math.floor(Date.now() / 1000) + 30 * 60 })],
+    });
     const { findByText, container } = render(InvitationAccept, { props: { inviteId: 'ws-9' } });
     expect(await findByText('Workspace invitation')).toBeTruthy();
     expect(await findByText('Payments')).toBeTruthy();
     expect(container.querySelector('[data-testid="invite-workspace-preview"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="invite-accept-btn"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="invite-decline-btn"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="invite-expiry"]')).toBeTruthy();
+    // "expires in 30m", never "expires in 1800m".
+    expect(container.querySelector('[data-testid="invite-expiry"]').textContent).toBe('expires in 30m');
     expect(api.workspace).toHaveBeenCalledWith('ws-9');
     expect(api.myInvitations).toHaveBeenCalledWith();
   });
@@ -178,6 +184,9 @@ describe('InvitationAccept (magic-link token flow, /invite/{token})', () => {
   });
 
   it('previews via the token endpoint with the invited email, role, and workspace preview', async () => {
+    // Sub-hour pending link: the expiry countdown must render whole
+    // minutes, not raw seconds with a minutes unit.
+    api.invitationPreview.mockResolvedValue(tenantPreview({ expires_at: Math.floor(Date.now() / 1000) + 30 * 60 }));
     const { findByText, container } = render(InvitationAccept, { props: { token: TOKEN } });
     expect(await findByText('Platform')).toBeTruthy();
     expect(await findByText('invitee@example.com')).toBeTruthy();
@@ -187,7 +196,8 @@ describe('InvitationAccept (magic-link token flow, /invite/{token})', () => {
     expect(api.myInvitations).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="invite-accept-btn"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="invite-decline-btn"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="invite-expiry"]')).toBeTruthy();
+    // "expires in 30m", never "expires in 1800m".
+    expect(container.querySelector('[data-testid="invite-expiry"]').textContent).toBe('expires in 30m');
   });
 
   it('tenant accept calls the token accept endpoint and displays the minted first API key', async () => {

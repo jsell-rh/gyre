@@ -70,7 +70,8 @@
     if (days >= 1) return `expires in ${days}d`;
     const hours = Math.floor(secs / 3600);
     if (hours >= 1) return `expires in ${hours}h`;
-    return `expires in ${secs}m`;
+    const minutes = Math.floor(secs / 60);
+    return `expires in ${minutes}m`;
   }
 
   async function copyKey() {
