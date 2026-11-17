@@ -15,11 +15,12 @@
 //!   PUT  /api/v1/repos/:id/stack-policy   — set repo policy (Admin only)
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
 use gyre_common::Id;
+use gyre_domain::stack::StackDriftEvent;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -361,6 +362,103 @@ pub async fn set_stack_policy(
 }
 
 // ---------------------------------------------------------------------------
+// Handlers — Stack drift history (supply-chain.md §The Laptop Problem)
+// ---------------------------------------------------------------------------
+
+/// Query the repo's `stack_drift_detected` audit events, newest-first.
+/// Shared by `GET /repos/:id/stack-drift` and the AIBOM release artifact's
+/// `stack_policy.policy_violations` block.
+pub(crate) async fn stack_drift_events_for_repo(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+) -> Result<Vec<StackDriftEvent>, ApiError> {
+    let filter = gyre_ports::AuditQueryFilter {
+        event_type: Some("stack_drift_detected".to_string()),
+        workspace_id: Some(repo.workspace_id.to_string()),
+        resource_type: Some("repo".to_string()),
+        repo_id: Some(repo.id.to_string()),
+        limit: 1000,
+        ..Default::default()
+    };
+    let events = state
+        .audit
+        .query(&filter)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(events
+        .into_iter()
+        .filter_map(|e| serde_json::from_value(e.detail).ok())
+        .collect())
+}
+
+#[derive(Deserialize)]
+pub struct StackDriftQuery {
+    /// Maximum number of events to return (default 100, cap 500).
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct StackDriftListResponse {
+    pub repo_id: String,
+    /// Total drift events on record for the repo (before `limit`
+    /// truncation) — computed by a storage-level count query, so it is
+    /// never bounded by the list query's internal cap.
+    pub total: usize,
+    /// Newest-first drift events with full override context.
+    pub events: Vec<StackDriftEvent>,
+}
+
+/// GET /api/v1/repos/:id/stack-drift — query the repo's gyre-stack.lock
+/// drift history (supply-chain.md §The Laptop Problem: "detect this drift
+/// and maintain an audit trail of overrides").
+///
+/// Events are recorded at push time by `enforce_stack_policy` (git_http.rs):
+/// every drift finding — blocked rejections and accepted warn-mode
+/// overrides alike — becomes a `stack_drift_detected` audit event whose
+/// detail is the full `StackDriftEvent` (lockfile vs attested fingerprints,
+/// enforcement mode, override reason, outcome).
+pub async fn get_stack_drift(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    Query(params): Query<StackDriftQuery>,
+) -> Result<Json<StackDriftListResponse>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Honest total: a storage-level count of the repo's drift events, not
+    // the length of the (capped) list query — a repo with more drift
+    // events than the internal query cap must not report a truncated
+    // total (task-166 review round 3).
+    let total = state
+        .audit
+        .count_filtered(&gyre_ports::AuditQueryFilter {
+            event_type: Some("stack_drift_detected".to_string()),
+            workspace_id: Some(repo.workspace_id.to_string()),
+            resource_type: Some("repo".to_string()),
+            repo_id: Some(repo.id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .map_err(ApiError::Internal)? as usize;
+
+    let mut events = stack_drift_events_for_repo(&state, &repo).await?;
+    // Default 100, cap 500 — matches the documented bounds of the endpoint
+    // (docs/api-reference.md): omitting `?limit` must not silently return
+    // the internal 1000-event query cap.
+    let limit = params.limit.unwrap_or(100).min(500);
+    events.truncate(limit);
+
+    Ok(Json(StackDriftListResponse {
+        repo_id,
+        total,
+        events,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -443,6 +541,7 @@ mod tests {
 
         // GET stack
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents/agent-1/stack")
@@ -461,6 +560,7 @@ mod tests {
     async fn get_stack_not_found() {
         let (app, _state) = app_with_agent_and_repo();
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/agents/agent-1/stack")
@@ -501,6 +601,7 @@ mod tests {
 
         // GET returns same policy
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -547,6 +648,7 @@ mod tests {
 
         // GET returns Level 3 policy
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -605,6 +707,7 @@ mod tests {
 
         // GET returns null
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -784,6 +887,7 @@ mod tests {
 
         // GET returns the same policy.
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/stack-policy")
@@ -828,6 +932,7 @@ mod tests {
             "enforcement": "ignore"
         });
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -840,5 +945,209 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Stack drift history endpoint (supply-chain.md §The Laptop Problem) ─
+
+    use gyre_domain::stack::StackDriftEvent;
+
+    /// Record a `stack_drift_detected` audit event the way
+    /// `enforce_stack_policy` does at push time.
+    async fn record_drift_audit_event(
+        state: &std::sync::Arc<AppState>,
+        id: &str,
+        repo_id: &str,
+        workspace_id: &str,
+        agent_id: &str,
+        outcome: &str,
+        override_reason: Option<&str>,
+    ) {
+        let event = gyre_domain::AuditEvent::new(
+            Id::new(id),
+            gyre_domain::AuditEventType::StackDriftDetected,
+            Some(Id::new(agent_id)),
+            None,
+            None,
+            Some(Id::new(workspace_id)),
+            Some(Id::new(repo_id)),
+            "repo".to_string(),
+            Some(repo_id.to_string()),
+            if outcome == "blocked" {
+                gyre_domain::AuditOutcome::Blocked
+            } else {
+                gyre_domain::AuditOutcome::Success
+            },
+            serde_json::to_value(&StackDriftEvent {
+                id: id.to_string(),
+                repo_id: repo_id.to_string(),
+                workspace_id: workspace_id.to_string(),
+                agent_id: agent_id.to_string(),
+                branch: "main".to_string(),
+                lockfile_fingerprint: Some("lock-fp".to_string()),
+                attested_stack_fingerprint: "stack-fp".to_string(),
+                integrity_verified: true,
+                reason: "stack drift: model differs".to_string(),
+                mode: "warn".to_string(),
+                outcome: outcome.to_string(),
+                override_reason: override_reason.map(str::to_string),
+                timestamp: 1_700_000_000,
+            })
+            .unwrap(),
+            None,
+            None,
+            1_700_000_000,
+        );
+        state.audit.record(&event).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stack_drift_endpoint_lists_repo_events_only() {
+        let (app, state) = app_with_agent_and_repo();
+
+        // Two drift events for repo-1 (one accepted with an override
+        // reason, one blocked) and one for a different repo in the same
+        // workspace — the endpoint must scope to the path repo.
+        record_drift_audit_event(
+            &state,
+            "drift-a",
+            "repo-1",
+            "proj-1",
+            "agent-1",
+            "accepted",
+            Some("approved hotfix"),
+        )
+        .await;
+        record_drift_audit_event(
+            &state, "drift-b", "repo-1", "proj-1", "agent-1", "blocked", None,
+        )
+        .await;
+        record_drift_audit_event(
+            &state,
+            "drift-other",
+            "repo-other",
+            "proj-1",
+            "agent-1",
+            "accepted",
+            None,
+        )
+        .await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["repo_id"], "repo-1");
+        assert_eq!(json["total"], 2);
+        let events = json["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        let ids: Vec<&str> = events.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"drift-a") && ids.contains(&"drift-b"));
+        assert!(!ids.contains(&"drift-other"), "cross-repo leak");
+
+        // Full override context is present for compliance review.
+        let accepted = events.iter().find(|e| e["id"] == "drift-a").unwrap();
+        assert_eq!(accepted["outcome"], "accepted");
+        assert_eq!(accepted["override_reason"], "approved hotfix");
+        assert_eq!(accepted["lockfile_fingerprint"], "lock-fp");
+        assert_eq!(accepted["attested_stack_fingerprint"], "stack-fp");
+        assert_eq!(accepted["agent_id"], "agent-1");
+
+        // `?limit=1` truncates the list but keeps the honest total.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift?limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 2);
+        assert_eq!(json["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stack_drift_total_exceeds_list_query_cap() {
+        // task-166 review round 3: `total` used to be the length of the
+        // (internally capped at 1000) list query, so a repo with more
+        // drift events than that reported a truncated total. The total is
+        // now a storage-level count — this test fails with total == 1000
+        // against the old implementation.
+        let (app, state) = app_with_agent_and_repo();
+        for i in 0..=1000 {
+            record_drift_audit_event(
+                &state,
+                &format!("drift-{i}"),
+                "repo-1",
+                "proj-1",
+                "agent-1",
+                "accepted",
+                Some("approved"),
+            )
+            .await;
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["total"], 1001,
+            "total must not be bounded by the list query cap"
+        );
+        // Default limit 100 still bounds the returned page.
+        assert_eq!(json["events"].as_array().unwrap().len(), 100);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stack_drift_endpoint_empty_and_not_found() {
+        let (app, _state) = app_with_agent_and_repo();
+
+        // No drift events → empty list, not an error.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 0);
+        assert!(json["events"].as_array().unwrap().is_empty());
+
+        // Unknown repo → 404.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/no-such-repo/stack-drift")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

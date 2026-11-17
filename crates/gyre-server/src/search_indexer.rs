@@ -953,6 +953,7 @@ pub async fn reindex_all(state: &AppState) -> Result<u64> {
         event_type: None,
         workspace_id: None,
         user_id: None,
+        repo_id: None,
         resource_type: None,
         outcome: None,
         since: None,

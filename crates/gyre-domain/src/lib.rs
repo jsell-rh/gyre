@@ -139,7 +139,10 @@ pub use spec_assertions::{
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use spec_policy::SpecPolicy;
-pub use stack::{AgentStack, HookEntry, McpServerEntry, StackLockfile};
+pub use stack::{
+    attestation_level_from_label, AgentStack, HookEntry, McpServerEntry, StackDriftEvent,
+    StackLockfile,
+};
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
 pub use team::{Team, TeamMembership};
 pub use tenant::Tenant;

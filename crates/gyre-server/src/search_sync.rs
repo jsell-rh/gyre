@@ -496,6 +496,10 @@ impl AuditRepository for IndexingAuditRepository {
         self.inner.count().await
     }
 
+    async fn count_filtered(&self, filter: &gyre_ports::audit::AuditQueryFilter) -> Result<u64> {
+        self.inner.count_filtered(filter).await
+    }
+
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
         self.inner.stats_by_type().await
     }

@@ -17,6 +17,11 @@ gyre clone myproject/myrepo --dir /tmp/work
 # Push current branch (uses token from ~/.gyre/config)
 gyre push                              # pushes to origin
 gyre push --remote gyre
+
+# Push through warn-mode gyre-stack.lock drift with a recorded override reason
+# (supply-chain.md §The Laptop Problem — the reason lands in the repo's
+# stack-drift audit trail; without it the forge rejects warn-mode drift)
+gyre push --stack-override-reason "security hotfix: model upgrade approved on-call"
 ```
 
 Config file is stored at `~/.gyre/config` (JSON):
