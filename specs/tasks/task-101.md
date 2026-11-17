@@ -3,7 +3,7 @@ title: "Platform Model Protocol Injection at Agent Spawn"
 spec_ref: "platform-model.md §8 Protocol Injection"
 depends_on:
   - task-093
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §8 Dev Mode (No OIDC)"
 commits: ["78d7774d7e9f37ca632122e39cad49bd6de0890e"]
