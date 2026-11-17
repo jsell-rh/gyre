@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
 use gyre_common::Id;
 use gyre_domain::{
-    BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, Policy, TrustLevel, Workspace,
+    BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, Policy, Task, TrustLevel, Workspace,
 };
 use gyre_ports::{PersonaRepository, WorkspaceRepository};
 use std::sync::Arc;
@@ -565,6 +566,81 @@ impl PersonaRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn apply_approval_reset_with_task(&self, persona: &Persona, task: &Task) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let p = persona.clone();
+        let t = task.clone();
+        let tenant = self.tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            conn.transaction::<_, anyhow::Error, _>(|conn| {
+                upsert_persona_txn(conn, &p)?;
+                crate::sqlite::task::upsert_task_txn(conn, &t, &tenant)?;
+                Ok(())
+            })
+            .context("apply persona approval reset with approval task")?;
+            Ok(())
+        })
+        .await?
+    }
+}
+
+/// Insert-or-update a persona row on an existing connection — the write
+/// half of `PersonaRepository::create`, shared with the transactional
+/// `apply_approval_reset_with_task` (the persona approval reset and its
+/// human-approval task persist in ONE transaction).
+fn upsert_persona_txn(conn: &mut SqliteConnection, p: &Persona) -> Result<()> {
+    let approval_status = serde_json::to_string(&p.approval_status)?
+        .trim_matches('"')
+        .to_string();
+    let row = NewPersonaRow {
+        id: p.id.as_str().to_string(),
+        name: p.name.clone(),
+        slug: p.slug.clone(),
+        scope: serde_json::to_string(&p.scope)?,
+        system_prompt: p.system_prompt.clone(),
+        capabilities: serde_json::to_string(&p.capabilities)?,
+        protocols: serde_json::to_string(&p.protocols)?,
+        model: p.model.clone(),
+        temperature: p.temperature,
+        max_tokens: p.max_tokens.map(|v| v as i32),
+        budget: p.budget.as_ref().map(serde_json::to_string).transpose()?,
+        created_at: p.created_at as i64,
+        version: p.version as i32,
+        content_hash: p.content_hash.clone(),
+        owner: p.owner.clone(),
+        approval_status,
+        approved_by: p.approved_by.clone(),
+        approved_at: p.approved_at.map(|v| v as i64),
+        updated_at: p.updated_at as i64,
+    };
+    diesel::insert_into(personas::table)
+        .values(&row)
+        .on_conflict(personas::id)
+        .do_update()
+        .set((
+            personas::name.eq(&row.name),
+            personas::slug.eq(&row.slug),
+            personas::scope.eq(&row.scope),
+            personas::system_prompt.eq(&row.system_prompt),
+            personas::capabilities.eq(&row.capabilities),
+            personas::protocols.eq(&row.protocols),
+            personas::model.eq(&row.model),
+            personas::temperature.eq(row.temperature),
+            personas::max_tokens.eq(row.max_tokens),
+            personas::budget.eq(&row.budget),
+            personas::version.eq(row.version),
+            personas::content_hash.eq(&row.content_hash),
+            personas::owner.eq(&row.owner),
+            personas::approval_status.eq(&row.approval_status),
+            personas::approved_by.eq(&row.approved_by),
+            personas::approved_at.eq(row.approved_at),
+            personas::updated_at.eq(row.updated_at),
+        ))
+        .execute(conn)
+        .context("upsert persona")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -652,6 +728,54 @@ mod persona_tests {
         }
         let after = storage.list_by_scope(&scope).await.unwrap();
         assert_eq!(after.len(), 4, "re-seed must not duplicate rows");
+    }
+
+    /// Port contract (PersonaRepository::apply_approval_reset_with_task):
+    /// the persona approval reset and its human-approval task land in ONE
+    /// transaction — both rows are visible after the call, through the
+    /// normal repositories. (The rollback half of the contract is enforced
+    /// by the diesel transaction; the mem adapter's test hook exercises the
+    /// rollback behavior directly.)
+    #[tokio::test]
+    async fn persona_approval_reset_with_task_persists_both_rows() {
+        let (_tmp, storage) = tmp_storage();
+        let ws_id = Id::new("ws-persona-push");
+        let scope = PersonaScope::Workspace(ws_id.clone());
+
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-sqlite-atomic"),
+            "backend-dev".to_string(),
+            "backend-dev".to_string(),
+            scope.clone(),
+            "system prompt".to_string(),
+            1000,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Pending;
+        let task = gyre_domain::Task::new(
+            Id::new("task-sqlite-atomic"),
+            "Persona change requires human approval: backend-dev",
+            1000,
+        );
+
+        PersonaRepository::apply_approval_reset_with_task(&storage, &persona, &task)
+            .await
+            .unwrap();
+
+        // Both halves are readable through the normal repositories.
+        let found_persona = storage
+            .find_by_slug_and_scope("backend-dev", &scope)
+            .await
+            .unwrap()
+            .expect("persona row must persist");
+        assert_eq!(
+            found_persona.approval_status,
+            gyre_domain::PersonaApprovalStatus::Pending
+        );
+        let found_task = gyre_ports::TaskRepository::find_by_id(&storage, &task.id)
+            .await
+            .unwrap()
+            .expect("approval task row must persist");
+        assert!(found_task.title.contains("backend-dev"));
     }
 }
 

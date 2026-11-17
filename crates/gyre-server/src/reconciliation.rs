@@ -2165,6 +2165,22 @@ mod tests {
     }
 
     async fn make_workspace(state: &Arc<AppState>, id: &str) -> gyre_domain::Workspace {
+        make_workspace_at_trust(state, id, gyre_domain::TrustLevel::Autonomous).await
+    }
+
+    /// Like [`make_workspace`] but at an explicit trust level. The channel
+    /// fan-out guards must run at a level that DELIVERS the notification
+    /// type under test — the trust gradient governs every delivery channel
+    /// (HSI §2 Notifications row), and `MetaSpecDrift` is suppressed at
+    /// Guided/Autonomous, so an Autonomous scaffold would exercise trust
+    /// filtering instead of the dispatch wiring the guard exists to pin.
+    /// Trust-based dispatch suppression has its own suite in
+    /// `notification_dispatcher` (`dispatch_to_channels_suppresses_by_workspace_trust_level`).
+    async fn make_workspace_at_trust(
+        state: &Arc<AppState>,
+        id: &str,
+        trust_level: gyre_domain::TrustLevel,
+    ) -> gyre_domain::Workspace {
         let ws = Workspace {
             id: Id::new(id),
             tenant_id: Id::new("default"),
@@ -2174,7 +2190,7 @@ mod tests {
             budget: None,
             max_repos: None,
             max_agents_per_repo: None,
-            trust_level: gyre_domain::TrustLevel::Autonomous,
+            trust_level,
             llm_model: None,
             created_at: 1_000_000,
             compute_target_id: None,
@@ -3665,7 +3681,12 @@ mod tests {
         // dispatch_to_channels (review finding: fan-out wiring is easy to
         // drop on new notification-creation paths).
         let state = test_state();
-        let ws = make_workspace(&state, "ws-sweep-chan").await;
+        // Supervised: every state change is delivered on every channel
+        // (HSI §2), so the fan-out assertion pins dispatch wiring — see
+        // `make_workspace_at_trust`.
+        let ws =
+            make_workspace_at_trust(&state, "ws-sweep-chan", gyre_domain::TrustLevel::Supervised)
+                .await;
         let repo = make_repo(&state, "repo-chan", "ws-sweep-chan").await;
 
         let set = make_set("ws-sweep-chan", vec![pin("backend-developer", "a1")]);

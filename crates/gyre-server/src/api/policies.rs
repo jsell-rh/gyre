@@ -87,6 +87,20 @@ pub async fn create_policy(
              these are managed by the server"
         )));
     }
+    // HSI §2 policy naming conventions: user-created (no-prefix) policies
+    // occupy the 200-299 priority band — above trust presets (100-199) so
+    // user intent overrides preset defaults, below built-ins (400-1000) so
+    // system invariants (tenant isolation, membership, default deny) stay
+    // unoverridable. A caller-supplied priority outside the band would let
+    // a user-created policy override non-immutable built-ins, contradicting
+    // the convention the section states — reject with 400.
+    if !(200..=299).contains(&req.priority) {
+        return Err(ApiError::InvalidInput(format!(
+            "user-created policy priority must be in the 200-299 band (above trust \
+             presets, below built-in policies); got {}",
+            req.priority
+        )));
+    }
 
     let policy = Policy {
         id: Id::new(uuid::Uuid::new_v4().to_string()),
@@ -191,6 +205,14 @@ pub async fn update_policy(
         policy.description = desc;
     }
     if let Some(priority) = req.priority {
+        // Same 200-299 band rule as create_policy (HSI §2): an update must
+        // not smuggle a user-created policy into the built-in band.
+        if !(200..=299).contains(&priority) {
+            return Err(ApiError::InvalidInput(format!(
+                "user-created policy priority must be in the 200-299 band (above trust \
+                 presets, below built-in policies); got {priority}"
+            )));
+        }
         policy.priority = priority;
     }
     if let Some(effect) = req.effect {
@@ -712,7 +734,7 @@ mod tests {
         let body = serde_json::json!({
             "name": "test-allow",
             "scope": "tenant",
-            "priority": 50,
+            "priority": 250,
             "effect": "allow",
             "conditions": [],
             "actions": ["read"],
@@ -758,7 +780,7 @@ mod tests {
         let body = serde_json::json!({
             "name": "allow-all",
             "scope": "tenant",
-            "priority": 10,
+            "priority": 250,
             "effect": "allow",
             "conditions": [],
             "actions": ["*"],
@@ -882,7 +904,7 @@ mod tests {
                 "name": "ws-a-allow",
                 "scope": "workspace",
                 "scope_id": "ws-A",
-                "priority": 900,
+                "priority": 290,
                 "effect": "allow",
                 "conditions": [],
                 "actions": ["*"],
@@ -927,7 +949,7 @@ mod tests {
                 "name": "t1-allow",
                 "scope": "tenant",
                 "scope_id": "t-1",
-                "priority": 890,
+                "priority": 280,
                 "effect": "allow",
                 "conditions": [],
                 "actions": ["*"],
@@ -958,7 +980,7 @@ mod tests {
         let body = serde_json::json!({
             "name": "to-delete",
             "scope": "repo",
-            "priority": 5,
+            "priority": 250,
             "effect": "deny",
             "conditions": [],
             "actions": ["delete"],
@@ -1091,7 +1113,7 @@ mod tests {
             "name": "ws-case-allow",
             "scope": "workspace",
             "scope_id": "ws-CASE",
-            "priority": 10,
+            "priority": 250,
             "effect": "allow",
             "conditions": [],
             "actions": ["read"],
@@ -1333,13 +1355,140 @@ mod tests {
         assert_eq!(read["decision"], "allow");
     }
 
+    /// HSI §2 policy naming conventions: user-created (no-prefix) policies
+    /// occupy the 200-299 priority band — above trust presets, below the
+    /// built-in band. Out-of-band priorities are rejected with 400 naming
+    /// the band; the boundaries are inclusive.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_policy_rejects_out_of_band_priority() {
+        let app = app();
+        for (priority, expect_created) in [
+            (199u32, false),
+            (200, true),
+            (299, true),
+            (300, false),
+            (900, false),
+        ] {
+            let body = serde_json::json!({
+                "name": format!("band-probe-{priority}"),
+                "scope": "tenant",
+                "priority": priority,
+                "effect": "allow",
+                "conditions": [],
+                "actions": ["read"],
+                "resource_types": ["repo"]
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/policies")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if expect_created {
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::CREATED,
+                    "priority {priority} is inside the 200-299 band and must be accepted"
+                );
+            } else {
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::BAD_REQUEST,
+                    "priority {priority} is outside the 200-299 band and must be rejected"
+                );
+                let json = body_json(resp).await;
+                let msg = json["error"].as_str().unwrap_or_default();
+                assert!(
+                    msg.contains("200-299"),
+                    "the 400 must name the band, got: {msg}"
+                );
+            }
+        }
+    }
+
+    /// The same band rule holds on UPDATE: a caller must not smuggle an
+    /// existing user-created policy into the built-in band.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_policy_rejects_out_of_band_priority() {
+        let app = app();
+        let body = serde_json::json!({
+            "name": "band-update-probe",
+            "scope": "tenant",
+            "priority": 250,
+            "effect": "allow",
+            "conditions": [],
+            "actions": ["read"],
+            "resource_types": ["repo"]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+        let update = serde_json::json!({ "priority": 900 });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/policies/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "updating a user-created policy into the built-in band must 400"
+        );
+
+        // In-band update still works.
+        let update = serde_json::json!({ "priority": 260 });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/policies/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["priority"], 260);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn create_policy_rejects_trust_prefix() {
         let app = app();
         let body = serde_json::json!({
             "name": "trust:my-policy",
             "scope": "tenant",
-            "priority": 50,
+            "priority": 250,
             "effect": "deny",
             "conditions": [],
             "actions": ["merge"],
@@ -1396,7 +1545,7 @@ mod tests {
         let policy_body = serde_json::json!({
             "name": "allow-attested-push",
             "scope": "tenant",
-            "priority": 50,
+            "priority": 250,
             "effect": "allow",
             "conditions": [],
             "actions": ["push"],
@@ -1451,7 +1600,7 @@ mod tests {
         let deny_body = serde_json::json!({
             "name": "deny-deep-chains",
             "scope": "tenant",
-            "priority": 100,
+            "priority": 260,
             "effect": "deny",
             "conditions": [{
                 "attribute": "subject.chain_depth",
@@ -1478,7 +1627,7 @@ mod tests {
         let allow_body = serde_json::json!({
             "name": "allow-attestation",
             "scope": "tenant",
-            "priority": 10,
+            "priority": 250,
             "effect": "allow",
             "conditions": [],
             "actions": ["push", "merge"],
@@ -1560,7 +1709,7 @@ mod tests {
         let allow_body = serde_json::json!({
             "name": "allow-trusted-signer",
             "scope": "tenant",
-            "priority": 50,
+            "priority": 250,
             "effect": "allow",
             "conditions": [{
                 "attribute": "subject.root_signer",
