@@ -69,3 +69,73 @@ F1–F5 remain resolved in the current implementation (`064a94fe`) — verified 
 F1–F6 remain resolved at HEAD — verified in code and by test run. Task suites pass: `WorkspaceSidebarSectionNav.test.js` + `WorkspaceHomeSections.test.js` + `WorkspaceHomeArchitecture.test.js` 47 passed / 51 skipped (skips are the pre-existing old-layout suites: Repos/Decisions/Agent Rules/Error handling), `AppShell.test.js` + `Sidebar.test.js` 101/101. Structural verification of the F6 fix (`79323318` + `9561ee86`): `section-briefing`, `section-specs`, and `section-architecture` render unconditionally at workspace scope inside `ws-main-content` (outside any wsTab/conditional guard beyond the `{#if !workspace}` outer guard and the decisions `{:else}` branch); the `archExpandSignal` effect expands the Architecture section and lazily loads the graph without a reactive loop; the ExplorerCanvas is fed `nodes`/`edges` from `api.workspaceGraph`, matching both the component's prop contract and the `KnowledgeGraphResponse` shape; locale keys for all four section headings plus `decisions_empty` (exact docs/ui.md copy) and `show/hide_workspace_graph` are present in `en.json`.
 
 No new findings. Two observations considered and rejected as below the relevance bar: (1) the F6-resolution text attributes the regression tests to `79323318` while the un-skipped test suites actually land in `9561ee86` (both are task-082 commits listed in frontmatter, and the tests do fail against the pre-fix code, so the coverage claim holds); (2) the specs table status cell displays `approval_status ?? status` while the icon lookup keys on `spec.status` alone — the same pattern the tenant-scope twin (`CrossWorkspaceHome.svelte`) uses, so it is consistent with existing code and cosmetic at most.
+## R11 — Rail review (retargeted requirement, ui-navigation.md §1a)
+
+Candidate `62a51e86c735b43d77373e62d4f4ddb3997b4b97` against base `e69fd990`.
+Independently reviewed the retargeted §1a deliverable (rail + drawer + docs +
+tests); the R1–R10 rounds above cover the superseded sidebar and are record only.
+
+**Verified against the §1a acceptance criteria:**
+
+- **Surfaces:** rail renders only on workspace home (with a selected workspace)
+  and repo mode without an open entity detail (`showNavRail`, App.svelte).
+  Sub-pages (settings/analytics/agent-rules/profile), full-page entity detail,
+  and Editor Split (opens only inside full-page detail, where `entityDetail` is
+  set) never render it. Mutation probe (removing the `!entityDetail` guard)
+  fails `NavRail.test.js` "never renders on focused surfaces" — the suppression
+  is enforced, not incidental.
+- **Scope-labelled per mode:** workspace name at workspace home; `ws / repo`
+  path in repo mode; item sets per mode, no global menu.
+- **Item sets:** workspace rail = `['decisions','specs','architecture','repos',
+  'briefing','agent-rules','settings']` — exactly §1a's enumerated canonical
+  order plus Settings. Repo rail = `REPO_TAB_IDS` derived from
+  `web/src/lib/repoTabs.js`, the same single source of truth RepoMode's tab
+  strip, URL parsing, and the drawer use (the old hand-maintained `REPO_TABS`
+  in App.svelte and local TABS copy in RepoMode.svelte were both removed).
+  Ordering is static per mode.
+- **Collapsed by default / persistence:** icon-only 48px default, 240px
+  expanded, `localStorage` key `gyre_nav_rail_expanded.<mode>.<user-id>`.
+  Mutation probe (default-expanded `readPersistedExpanded`) fails 6 tests
+  across NavRail/NoSidebar — the default is genuinely enforced. (Mutation of
+  the `$state(false)` initializer alone is neutralized by the hydration
+  `$effect`, which is correct behavior, not a test gap — the real default
+  logic is mutation-covered.)
+- **Never load-bearing:** dashboard sections, repo tab strip, ⌘K, and
+  g-shortcuts unchanged; rail selection reuses `handleSectionNavigate` /
+  `goToRepoTab` (no second source of truth). `NoSidebar.test.js` was updated,
+  not deleted: it now asserts the rail is not a permanent sidebar and is
+  absent on focused sub-page surfaces.
+- **Narrow viewports:** `@media (max-width: 767px) { .nav-rail { display:none } }`
+  (not jsdom-observable, but present); the hamburger drawer offers the
+  per-mode item set (workspace sections + Settings / repo tab strip exactly),
+  asserted in NoSidebar/AppShell/NavRail tests. The removed drawer Analytics
+  item is not a reachability regression — Analytics remains reachable via the
+  always-visible topbar `ws-analytics-btn`.
+- **docs/ui.md** updated with a dedicated Navigation Rail subsection matching
+  the shipped behavior; ui-navigation.md §1a implementation-status note and
+  coverage row 1a accurately reflect the shipped state.
+
+**Probe evidence** (retained under `/tmp/stage/review-evidence/`):
+`npm ci` then focused vitest run of NavRail/NoSidebar/AppShell/RepoMode/
+WorkspaceDrawerSectionNav — 116/116 passed (task-082-focused-vitest.log);
+full `npx vitest run` — 123 files, 2453 passed / 41 skipped / 0 failed
+(task-082-full-vitest.log); mutation logs task-082-mutation-B.log (6 failures)
+and task-082-mutation-C.log (1 failure), sources restored after each; all 17
+regenerated explorer-visual baselines are exactly 48px narrower than their
+base versions with small reflow height deltas (task-082-baseline-shift-probe.log)
+— dimensionally genuine rail-shifted renders, not stale copies. No Rust files
+changed; `check-dead-components.sh` violations identical at base (pre-existing).
+
+**Verdict: approved.** No findings.
+
+**Non-blocking process observations (record only):**
+- Branch history contains `b1d754a4` ("record independent approval") flipping
+  `progress: complete` with no corresponding review record, and the F7–F10
+  repair rounds referenced in commit messages are not recorded in this file
+  (it covered only the superseded-sidebar rounds). Both were superseded by the
+  later honest `ready-for-review` state; this R11 review is the actual gate.
+- The e2e visual baselines can only be authoritatively validated by the pinned
+  CI runner (this sandbox's canvas rasterization differs by a measured
+  sub-threshold noise class, and the e2e webServer needs a gyre-server build,
+  which is verifier domain). The remote verifier must confirm the GitHub
+  "E2E Tests" check is green at the integrated head, plus `cd web && npm test`.
