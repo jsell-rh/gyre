@@ -785,6 +785,135 @@ pub async fn deactivate_user(
     Ok(Json(UserProfileResponse::from(user)))
 }
 
+#[derive(Deserialize)]
+pub struct UpdateUserRoleRequest {
+    /// Target GlobalRole: "Member" or "TenantAdmin" (the invitation
+    /// API's role vocabulary — the tenant-level role, not a workspace
+    /// membership role).
+    pub role: String,
+    /// Optional reason, recorded in the audit trail.
+    pub reason: Option<String>,
+}
+
+/// PUT /api/v1/users/:id/role — change an existing user's GlobalRole,
+/// TenantAdmin only (user-management.md §UI Pages > Tenant User
+/// Management: "role management (TenantAdmin only)").
+///
+/// The stored record is authoritative for authorization decisions
+/// (`is_tenant_admin` re-reads it on every call), so the change is
+/// effective immediately for API-key callers; a lagging JWT role claim
+/// cannot keep a demoted admin elevated.
+pub async fn update_user_role(
+    auth: AuthenticatedAgent,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateUserRoleRequest>,
+) -> Result<Json<UserProfileResponse>, ApiError> {
+    if !is_tenant_admin(&state, &auth).await? {
+        crate::rbac::record_rbac_denied(&state, &auth, "TenantAdmin", "PUT /api/v1/users/:id/role")
+            .await;
+        return Err(ApiError::Forbidden(
+            "changing user roles requires the TenantAdmin role".to_string(),
+        ));
+    }
+    let new_role = match req.role.as_str() {
+        "Member" => gyre_domain::GlobalRole::Member,
+        "TenantAdmin" => gyre_domain::GlobalRole::TenantAdmin,
+        other => {
+            return Err(ApiError::InvalidInput(format!(
+                "unknown role: {other} (expected TenantAdmin or Member)"
+            )))
+        }
+    };
+    let uid = Id::new(user_id);
+    let mut user = state
+        .users
+        .find_by_id(&uid)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    // Tenant containment: a TenantAdmin may only manage users of their
+    // own tenant (the system principal is exempt — bootstrap path).
+    if !auth.is_system_principal() {
+        let same_tenant = user
+            .tenant_id
+            .as_ref()
+            .map(|t| t.as_str() == auth.tenant_id)
+            .unwrap_or(false);
+        if !same_tenant {
+            return Err(ApiError::Forbidden(
+                "cannot change the role of a user of another tenant".to_string(),
+            ));
+        }
+    }
+    // Self-change guard: an admin demoting themselves would orphan the
+    // tenant's admin capability exactly like self-deactivation (no
+    // self-service undo), and a self-promotion is a no-op for a caller
+    // who already passed the TenantAdmin gate.
+    if auth.user_id.as_ref() == Some(&uid) {
+        return Err(ApiError::Conflict(
+            "cannot change your own global role".to_string(),
+        ));
+    }
+    // A deactivated account is terminal (no reactivation path exists);
+    // a role change on it can never take effect, so reject instead of
+    // letting the UI imply otherwise.
+    if user.is_deactivated() {
+        return Err(ApiError::Conflict(
+            "user account is deactivated; its role can no longer be changed".to_string(),
+        ));
+    }
+    if user.global_role == new_role {
+        // Idempotent no-op: nothing changes, nothing to audit.
+        return Ok(Json(UserProfileResponse::from(user)));
+    }
+
+    let previous_role = user.global_role;
+    let now = now_secs();
+    // GlobalRole ↔ UserRole stay in lockstep, same mapping as the
+    // invitation-acceptance and provisioning paths (an invited
+    // TenantAdmin is Admin + TenantAdmin; a Member is Developer).
+    user.global_role = new_role.clone();
+    user.roles = match new_role {
+        gyre_domain::GlobalRole::TenantAdmin => vec![UserRole::Admin],
+        gyre_domain::GlobalRole::Member => vec![UserRole::Developer],
+    };
+    user.updated_at = now;
+    state.users.update(&user).await?;
+
+    // Audit trail (role changes are privilege changes — actor + previous
+    // + new role + reason, same class as the deactivation event).
+    use gyre_domain::audit::{AuditEvent, AuditEventType, AuditOutcome};
+    let event = AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        AuditEventType::Custom("user_global_role_changed".to_string()),
+        Some(Id::new(auth.agent_id.clone())),
+        auth.user_id.clone(),
+        None,
+        None,
+        None,
+        "user".to_string(),
+        Some(user.id.to_string()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "user_id": user.id.to_string(),
+            "username": user.username,
+            "tenant_id": user.tenant_id.as_ref().map(|t| t.to_string()),
+            "previous_role": previous_role.as_str(),
+            "new_role": new_role.as_str(),
+            "reason": req.reason,
+            "actor": auth.agent_id,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        tracing::warn!(user_id = %user.id, "user_global_role_changed audit event recording failed: {e}");
+    }
+
+    Ok(Json(UserProfileResponse::from(user)))
+}
+
 // ─── Notifications ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -805,6 +934,11 @@ pub struct NotificationParams {
     /// filters by the type-derived band (same derivation as the response's
     /// `priority_level` field).
     pub priority: Option<String>,
+    /// Active-only listing (user-management.md §In-App Notification UI:
+    /// the notification drawer shows recent notifications; rows the user
+    /// has resolved or dismissed elsewhere are excluded by the query).
+    /// `?active=true`.
+    pub active: Option<bool>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
@@ -939,14 +1073,15 @@ async fn list_my_notifications_impl(
         .map(|ts| ts.iter().map(String::as_str).collect());
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
-    // HSI §12: types the user disabled via notification preferences are
-    // excluded from the inbox (before limit/offset).
     let disabled = disabled_notification_types(&state, &user_id).await?;
-    // HSI §2 "Inbox shows" / "Notifications" / "Inbox priorities shown"
-    // rows: trust-derived exclusion set, server-side so the contract holds
-    // for every client (web, CLI, API). Explicit `?min_priority=`/
-    // `?max_priority=` rank filters from the caller are still honored
-    // verbatim — the trust set only supplies the DEFAULT view.
+    // HSI §12: types the user disabled via notification preferences are
+    // excluded from the inbox (before limit/offset), so a page never
+    // comes back short. HSI §2 "Inbox shows" / "Notifications" /
+    // "Inbox priorities shown" rows add the trust-derived exclusion set,
+    // server-side so the contract holds for every client (web, CLI,
+    // API). Explicit `?min_priority=`/`?max_priority=` rank filters from
+    // the caller are still honored verbatim — the trust set only supplies
+    // the DEFAULT view.
     let trust_excluded = trust_inbox_excluded_types(&state, &user_id, workspace_id.as_ref()).await;
     let mut excluded: Vec<&str> = disabled.iter().map(String::as_str).collect();
     for t in &trust_excluded {
@@ -954,20 +1089,47 @@ async fn list_my_notifications_impl(
             excluded.push(t.as_str());
         }
     }
-    let notifications = state
-        .notifications
-        .list_for_user(
-            &user_id,
-            workspace_id.as_ref(),
-            params.min_priority,
-            params.max_priority,
-            type_filter.as_deref(),
-            repo_id.as_ref(),
-            &excluded,
-            limit,
-            offset,
-        )
-        .await?;
+    // `?active=true` routes to the active-only listing (drawer surface);
+    // the default keeps the full listing the Inbox depends on (its
+    // show-dismissed toggle needs resolved/dismissed rows client-side).
+    // Both branches share the same `type_filter` derivation above, so the
+    // drawer and the Inbox can never disagree on a priority band. The
+    // drawer branch deliberately applies no exclusion set: it is paired
+    // with the unread-count bell badge (`count_unread`), which counts
+    // every active notification regardless of toggles; the drawer and
+    // the badge that opens it must agree on what they count/show, while
+    // the Inbox (and its own badge via count_unresolved) hides disabled
+    // and trust-suppressed types.
+    let notifications = if params.active.unwrap_or(false) {
+        state
+            .notifications
+            .list_active_for_user(
+                &user_id,
+                workspace_id.as_ref(),
+                params.min_priority,
+                params.max_priority,
+                type_filter.as_deref(),
+                repo_id.as_ref(),
+                limit,
+                offset,
+            )
+            .await?
+    } else {
+        state
+            .notifications
+            .list_for_user(
+                &user_id,
+                workspace_id.as_ref(),
+                params.min_priority,
+                params.max_priority,
+                type_filter.as_deref(),
+                repo_id.as_ref(),
+                &excluded,
+                limit,
+                offset,
+            )
+            .await?
+    };
     let items: Vec<NotificationResponse> = notifications.into_iter().map(Into::into).collect();
     Ok(Json(serde_json::json!({
         "notifications": items,
@@ -3537,6 +3699,83 @@ mod tests {
         assert_eq!(notifs.len(), 1);
         assert_eq!(json["limit"], 1);
         assert_eq!(json["offset"], 1);
+    }
+
+    /// `?active=true` (user-management.md §In-App Notification UI): the
+    /// notification drawer's listing excludes rows the user has already
+    /// resolved or dismissed, while the default listing still returns them
+    /// (the Inbox's show-dismissed toggle depends on the full listing).
+    #[tokio::test]
+    async fn spec_path_notifications_active_filter_excludes_resolved_and_dismissed() {
+        let state = test_state();
+        let seed = |id: &str| {
+            Notification::new(
+                Id::new(id),
+                Id::new("ws-default"),
+                Id::new("system"),
+                NotificationType::GatePassed,
+                id,
+                "default",
+                1_700_000_000,
+            )
+        };
+        state
+            .create_notification(&seed("notif-active"))
+            .await
+            .unwrap();
+        let resolved = seed("notif-resolved");
+        state.create_notification(&resolved).await.unwrap();
+        state
+            .notifications
+            .resolve(&Id::new("notif-resolved"), &Id::new("system"), None)
+            .await
+            .unwrap();
+        let dismissed = seed("notif-dismissed");
+        state.create_notification(&dismissed).await.unwrap();
+        state
+            .notifications
+            .dismiss(&Id::new("notif-dismissed"), &Id::new("system"))
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        // Default listing: all three (Inbox surface contract unchanged).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            3,
+            "default listing still returns resolved and dismissed rows"
+        );
+
+        // Active-only listing: just the untouched row.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications?active=true")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "resolved and dismissed rows are excluded");
+        assert_eq!(notifs[0]["id"], "notif-active");
     }
 
     /// Spec path (user-management.md §API > Notifications): unread-count
@@ -7749,5 +7988,255 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "type={t} must be valid");
         }
+    }
+
+    // ─── PUT /api/v1/users/:id/role (inline global-role management) ─────────
+
+    /// The TenantAdmin role-change surface for the Users tab
+    /// (user-management.md §UI Pages > Tenant User Management: "role
+    /// management (TenantAdmin only)"). Covers the full contract: a
+    /// Developer may not change roles; an invalid role is a 400; an admin
+    /// promotion flips GlobalRole AND the UserRole vec in lockstep; a
+    /// demotion back to Member flips both back; the response reports the
+    /// stored record (which `is_tenant_admin` reads on every call, so the
+    /// change is effective immediately, not cosmetic).
+    #[tokio::test]
+    async fn update_user_role_changes_global_and_user_roles_in_lockstep() {
+        let state = test_state();
+        let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&tenant).await.unwrap();
+        let (target_id, _target_key) = seed_keyed_user(
+            &state,
+            "role-target",
+            vec![gyre_domain::UserRole::Developer],
+        )
+        .await;
+        let (admin_id, admin_key) =
+            seed_keyed_user(&state, "role-admin", vec![gyre_domain::UserRole::Admin]).await;
+        let (_, dev_key) =
+            seed_keyed_user(&state, "role-dev", vec![gyre_domain::UserRole::Developer]).await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A plain Developer may not change roles.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {dev_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // An unknown role is a 400, not a silent default.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::json!({"role": "Bogus"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Self-change is rejected (same rationale as self-deactivation).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{admin_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Admin promotes the target to TenantAdmin.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin", "reason": "promotion"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["global_role"], "TenantAdmin");
+        assert_eq!(json["roles"], serde_json::json!(["Admin"]));
+
+        // The stored record carries both fields (what is_tenant_admin reads).
+        let stored = state
+            .users
+            .find_by_id(&Id::new(target_id.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.global_role, gyre_domain::GlobalRole::TenantAdmin);
+        assert!(stored.roles.contains(&gyre_domain::UserRole::Admin));
+        assert!(!stored.roles.contains(&gyre_domain::UserRole::Developer));
+
+        // The audit trail records the privilege change.
+        let filter = gyre_ports::AuditQueryFilter {
+            event_type: Some("user_global_role_changed".to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+        let events = state.audit.query(&filter).await.unwrap();
+        assert_eq!(events.len(), 1, "exactly one role-change audit event");
+        assert_eq!(
+            events[0].detail["previous_role"],
+            serde_json::json!("Member")
+        );
+        assert_eq!(
+            events[0].detail["new_role"],
+            serde_json::json!("TenantAdmin")
+        );
+        assert_eq!(events[0].detail["reason"], serde_json::json!("promotion"));
+
+        // Demotion back to Member flips both fields back.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["global_role"], "Member");
+        assert_eq!(json["roles"], serde_json::json!(["Developer"]));
+
+        // A no-op change (same role) is idempotent and emits no extra audit.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{target_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let events = state.audit.query(&filter).await.unwrap();
+        assert_eq!(events.len(), 2, "promotion + demotion only");
+    }
+
+    /// Cross-tenant and deactivated-target guards on the role surface.
+    #[tokio::test]
+    async fn update_user_role_guards_cross_tenant_and_deactivated() {
+        let state = test_state();
+        let now = 1_700_000_000u64;
+        let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&tenant).await.unwrap();
+        let (deact_id, _dk) =
+            seed_keyed_user(&state, "role-deact", vec![gyre_domain::UserRole::Developer]).await;
+        let (_, admin_key) =
+            seed_keyed_user(&state, "role-admin2", vec![gyre_domain::UserRole::Admin]).await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Deactivate the first target through the real endpoint.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{deact_id}/deactivate"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Role change on the deactivated account is rejected.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/users/{deact_id}/role"))
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Cross-tenant target is rejected.
+        let beta = gyre_domain::Tenant::new(Id::new("t-2"), "Beta", "beta", 0);
+        state.tenants.create(&beta).await.unwrap();
+        let mut foreign = User::new(
+            Id::new("foreign-role"),
+            "foreign-role-ext",
+            "foreign-role",
+            now,
+        );
+        foreign.tenant_id = Some(Id::new("t-2"));
+        state.users.create(&foreign).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/foreign-role/role")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
