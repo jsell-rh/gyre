@@ -1941,8 +1941,11 @@ pub async fn preview_invitation(
         .find_by_token_hash(&token_hash)
         .await?
     {
-        let workspaces =
-            resolve_preview_workspaces(&state, inv.workspace_ids.iter().zip(inv.workspace_roles.iter())).await;
+        let workspaces = resolve_preview_workspaces(
+            &state,
+            inv.workspace_ids.iter().zip(inv.workspace_roles.iter()),
+        )
+        .await;
         let role = inv.role_as_str().to_string();
         return Ok(Json(InvitationPreviewResponse {
             kind: "tenant".to_string(),
@@ -1963,7 +1966,8 @@ pub async fn preview_invitation(
         .await?
     {
         let workspaces =
-            resolve_preview_workspaces(&state, std::iter::once((&inv.workspace_id, &inv.role))).await;
+            resolve_preview_workspaces(&state, std::iter::once((&inv.workspace_id, &inv.role)))
+                .await;
         return Ok(Json(InvitationPreviewResponse {
             kind: "workspace".to_string(),
             status: effective_status(inv.status, inv.is_expired(now))
@@ -2328,10 +2332,7 @@ mod tests {
                 "/api/v1/invite/:token/decline",
                 post(decline_tenant_invitation),
             )
-            .route(
-                "/api/v1/invite/:token/preview",
-                get(preview_invitation),
-            )
+            .route("/api/v1/invite/:token/preview", get(preview_invitation))
             .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
             .route(
                 "/api/v1/workspaces/:id/invite/accept",
@@ -6133,192 +6134,196 @@ mod tests {
             .is_none());
     }
 
-// ─── Magic-link preview (GET /api/v1/invite/:token/preview) ─────────────────
+    // ─── Magic-link preview (GET /api/v1/invite/:token/preview) ─────────────────
 
-/// The preview is the /invite/{token} page's workspace preview: it must
-/// resolve a tenant invitation (created through the API so the token is a
-/// real generated one) to its invited email, role, and pre-assigned
-/// workspace names — with NO Authorization header, proving the
-/// unauthenticated magic-link path works (the token is the auth factor).
-#[tokio::test]
-async fn preview_resolves_tenant_invitation_with_preassigned_workspaces() {
-    let state = test_state();
-    let ws = gyre_domain::Workspace::new(
-        Id::new("ws-preview"),
-        Id::new("default"),
-        "Preview WS",
-        "preview-ws",
-        now_secs(),
-    );
-    state.workspaces.create(&ws).await.unwrap();
-    let app = app_with_state(state.clone());
+    /// The preview is the /invite/{token} page's workspace preview: it must
+    /// resolve a tenant invitation (created through the API so the token is a
+    /// real generated one) to its invited email, role, and pre-assigned
+    /// workspace names — with NO Authorization header, proving the
+    /// unauthenticated magic-link path works (the token is the auth factor).
+    #[tokio::test]
+    async fn preview_resolves_tenant_invitation_with_preassigned_workspaces() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-preview"),
+            Id::new("default"),
+            "Preview WS",
+            "preview-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let app = app_with_state(state.clone());
 
-    // Create the invitation through the API (Bearer test-token = admin).
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/tenant/invite")
-                .header("authorization", "Bearer test-token")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "email": "preview@example.com",
-                        "role": "TenantAdmin",
-                        "workspace_ids": ["ws-preview"],
-                        "workspace_roles": ["Maintainer"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let invite_url = json["invite_url"].as_str().unwrap().to_string();
-    let token = invite_url.rsplit('/').next().unwrap().to_string();
+        // Create the invitation through the API (Bearer test-token = admin).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "preview@example.com",
+                            "role": "TenantAdmin",
+                            "workspace_ids": ["ws-preview"],
+                            "workspace_roles": ["Maintainer"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let invite_url = json["invite_url"].as_str().unwrap().to_string();
+        let token = invite_url.rsplit('/').next().unwrap().to_string();
 
-    // Preview with NO Authorization header — the magic-link trust model.
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/api/v1/invite/{token}/preview"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(preview["kind"], "tenant");
-    assert_eq!(preview["status"], "Pending");
-    assert_eq!(preview["email"], "preview@example.com");
-    assert_eq!(preview["role"], "TenantAdmin");
-    assert_eq!(preview["workspaces"].as_array().unwrap().len(), 1);
-    assert_eq!(preview["workspaces"][0]["name"], "Preview WS");
-    assert_eq!(preview["workspaces"][0]["id"], "ws-preview");
-    assert_eq!(preview["workspaces"][0]["role"], "Maintainer");
-    // No credential or token material in the preview.
-    assert!(preview.get("invite_url").is_none());
-    assert!(preview.get("token").is_none());
-}
+        // Preview with NO Authorization header — the magic-link trust model.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/invite/{token}/preview"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(preview["kind"], "tenant");
+        assert_eq!(preview["status"], "Pending");
+        assert_eq!(preview["email"], "preview@example.com");
+        assert_eq!(preview["role"], "TenantAdmin");
+        assert_eq!(preview["workspaces"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["workspaces"][0]["name"], "Preview WS");
+        assert_eq!(preview["workspaces"][0]["id"], "ws-preview");
+        assert_eq!(preview["workspaces"][0]["role"], "Maintainer");
+        // No credential or token material in the preview.
+        assert!(preview.get("invite_url").is_none());
+        assert!(preview.get("token").is_none());
+    }
 
-/// A workspace invitation token previews to its single invited workspace
-/// with the invited role, and the tenant email/role fields are absent
-/// (null) — the two flows are distinguishable by `kind` in the UI.
-#[tokio::test]
-async fn preview_resolves_workspace_invitation() {
-    let state = test_state();
-    let ws = gyre_domain::Workspace::new(
-        Id::new("ws-preview-ws"),
-        Id::new("default"),
-        "Workspace Flow WS",
-        "workspace-flow-ws",
-        now_secs(),
-    );
-    state.workspaces.create(&ws).await.unwrap();
-    let invitation = WorkspaceInvitation {
-        id: Id::new("ws-inv-preview"),
-        tenant_id: Id::new("default"),
-        workspace_id: ws.id.clone(),
-        user_id: Id::new("u-preview"),
-        invited_by: Id::new("someadmin"),
-        role: WorkspaceRole::Developer,
-        status: InvitationStatus::Pending,
-        token_hash: hash_token("preview-ws-token"),
-        expires_at: now_secs() + 86_400,
-        created_at: now_secs(),
-        accepted_at: None,
-    };
-    state.workspace_invitations.create(&invitation).await.unwrap();
+    /// A workspace invitation token previews to its single invited workspace
+    /// with the invited role, and the tenant email/role fields are absent
+    /// (null) — the two flows are distinguishable by `kind` in the UI.
+    #[tokio::test]
+    async fn preview_resolves_workspace_invitation() {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-preview-ws"),
+            Id::new("default"),
+            "Workspace Flow WS",
+            "workspace-flow-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let invitation = WorkspaceInvitation {
+            id: Id::new("ws-inv-preview"),
+            tenant_id: Id::new("default"),
+            workspace_id: ws.id.clone(),
+            user_id: Id::new("u-preview"),
+            invited_by: Id::new("someadmin"),
+            role: WorkspaceRole::Developer,
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("preview-ws-token"),
+            expires_at: now_secs() + 86_400,
+            created_at: now_secs(),
+            accepted_at: None,
+        };
+        state
+            .workspace_invitations
+            .create(&invitation)
+            .await
+            .unwrap();
 
-    let app = app_with_state(state);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/invite/preview-ws-token/preview")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(preview["kind"], "workspace");
-    assert_eq!(preview["status"], "Pending");
-    assert!(preview["email"].is_null());
-    assert!(preview["role"].is_null());
-    assert_eq!(preview["workspaces"][0]["name"], "Workspace Flow WS");
-    assert_eq!(preview["workspaces"][0]["role"], "Developer");
-}
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/invite/preview-ws-token/preview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(preview["kind"], "workspace");
+        assert_eq!(preview["status"], "Pending");
+        assert!(preview["email"].is_null());
+        assert!(preview["role"].is_null());
+        assert_eq!(preview["workspaces"][0]["name"], "Workspace Flow WS");
+        assert_eq!(preview["workspaces"][0]["role"], "Developer");
+    }
 
-/// An expired-but-still-Pending row previews as Expired WITHOUT the GET
-/// persisting the transition — the accept/decline handlers and the expiry
-/// job own that write (a read must not mutate audit-relevant state).
-#[tokio::test]
-async fn preview_reports_expired_pending_without_persisting() {
-    let state = test_state();
-    let invitation = TenantInvitation {
-        id: Id::new("expired-preview-inv"),
-        tenant_id: Id::new("default"),
-        email: "gone@example.com".to_string(),
-        invited_by: Id::new("someadmin"),
-        role: GlobalRole::Member,
-        workspace_ids: vec![],
-        workspace_roles: vec![],
-        status: InvitationStatus::Pending,
-        token_hash: hash_token("expired-preview-token"),
-        expires_at: now_secs() - 10,
-        created_at: now_secs() - 100,
-        accepted_at: None,
-    };
-    state.tenant_invitations.create(&invitation).await.unwrap();
+    /// An expired-but-still-Pending row previews as Expired WITHOUT the GET
+    /// persisting the transition — the accept/decline handlers and the expiry
+    /// job own that write (a read must not mutate audit-relevant state).
+    #[tokio::test]
+    async fn preview_reports_expired_pending_without_persisting() {
+        let state = test_state();
+        let invitation = TenantInvitation {
+            id: Id::new("expired-preview-inv"),
+            tenant_id: Id::new("default"),
+            email: "gone@example.com".to_string(),
+            invited_by: Id::new("someadmin"),
+            role: GlobalRole::Member,
+            workspace_ids: vec![],
+            workspace_roles: vec![],
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("expired-preview-token"),
+            expires_at: now_secs() - 10,
+            created_at: now_secs() - 100,
+            accepted_at: None,
+        };
+        state.tenant_invitations.create(&invitation).await.unwrap();
 
-    let app = app_with_state(state.clone());
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/v1/invite/expired-preview-token/preview")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(preview["status"], "Expired", "effective status is Expired");
+        let app = app_with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/invite/expired-preview-token/preview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(preview["status"], "Expired", "effective status is Expired");
 
-    // The stored row is untouched: still Pending, not transitioned by a GET.
-    let stored = state
-        .tenant_invitations
-        .find_by_id(&Id::new("expired-preview-inv"))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.status, InvitationStatus::Pending);
-}
+        // The stored row is untouched: still Pending, not transitioned by a GET.
+        let stored = state
+            .tenant_invitations
+            .find_by_id(&Id::new("expired-preview-inv"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Pending);
+    }
 
-/// An unknown token 404s — the page renders its not-found state.
-#[tokio::test]
-async fn preview_unknown_token_is_not_found() {
-    let app = app_with_state(test_state());
-    let resp = app
+    /// An unknown token 404s — the page renders its not-found state.
+    #[tokio::test]
+    async fn preview_unknown_token_is_not_found() {
+        let app = app_with_state(test_state());
+        let resp = app
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -6328,6 +6333,6 @@ async fn preview_unknown_token_is_not_found() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }

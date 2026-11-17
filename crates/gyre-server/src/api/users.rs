@@ -810,13 +810,8 @@ pub async fn update_user_role(
     Json(req): Json<UpdateUserRoleRequest>,
 ) -> Result<Json<UserProfileResponse>, ApiError> {
     if !is_tenant_admin(&state, &auth).await? {
-        crate::rbac::record_rbac_denied(
-            &state,
-            &auth,
-            "TenantAdmin",
-            "PUT /api/v1/users/:id/role",
-        )
-        .await;
+        crate::rbac::record_rbac_denied(&state, &auth, "TenantAdmin", "PUT /api/v1/users/:id/role")
+            .await;
         return Err(ApiError::Forbidden(
             "changing user roles requires the TenantAdmin role".to_string(),
         ));
@@ -7655,7 +7650,9 @@ mod tests {
                     .uri(format!("/api/v1/users/{target_id}/role"))
                     .header("Authorization", format!("Bearer {dev_key}"))
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::json!({"role": "TenantAdmin"}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7687,7 +7684,9 @@ mod tests {
                     .uri(format!("/api/v1/users/{admin_id}/role"))
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::json!({"role": "Member"}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7704,7 +7703,8 @@ mod tests {
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"role": "TenantAdmin", "reason": "promotion"}).to_string(),
+                        serde_json::json!({"role": "TenantAdmin", "reason": "promotion"})
+                            .to_string(),
                     ))
                     .unwrap(),
             )
@@ -7734,8 +7734,14 @@ mod tests {
         };
         let events = state.audit.query(&filter).await.unwrap();
         assert_eq!(events.len(), 1, "exactly one role-change audit event");
-        assert_eq!(events[0].detail["previous_role"], serde_json::json!("Member"));
-        assert_eq!(events[0].detail["new_role"], serde_json::json!("TenantAdmin"));
+        assert_eq!(
+            events[0].detail["previous_role"],
+            serde_json::json!("Member")
+        );
+        assert_eq!(
+            events[0].detail["new_role"],
+            serde_json::json!("TenantAdmin")
+        );
         assert_eq!(events[0].detail["reason"], serde_json::json!("promotion"));
 
         // Demotion back to Member flips both fields back.
@@ -7747,7 +7753,9 @@ mod tests {
                     .uri(format!("/api/v1/users/{target_id}/role"))
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::json!({"role": "Member"}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7766,7 +7774,9 @@ mod tests {
                     .uri(format!("/api/v1/users/{target_id}/role"))
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::json!({"role": "Member"}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"role": "Member"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7783,12 +7793,8 @@ mod tests {
         let now = 1_700_000_000u64;
         let tenant = gyre_domain::Tenant::new(Id::new("t-1"), "Acme", "acme", 0);
         state.tenants.create(&tenant).await.unwrap();
-        let (deact_id, _dk) = seed_keyed_user(
-            &state,
-            "role-deact",
-            vec![gyre_domain::UserRole::Developer],
-        )
-        .await;
+        let (deact_id, _dk) =
+            seed_keyed_user(&state, "role-deact", vec![gyre_domain::UserRole::Developer]).await;
         let (_, admin_key) =
             seed_keyed_user(&state, "role-admin2", vec![gyre_domain::UserRole::Admin]).await;
 
@@ -7819,7 +7825,9 @@ mod tests {
                     .uri(format!("/api/v1/users/{deact_id}/role"))
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::json!({"role": "TenantAdmin"}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -7845,7 +7853,9 @@ mod tests {
                     .uri("/api/v1/users/foreign-role/role")
                     .header("Authorization", format!("Bearer {admin_key}"))
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::json!({"role": "TenantAdmin"}).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({"role": "TenantAdmin"}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await

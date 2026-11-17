@@ -112,8 +112,7 @@ use users::{
     mark_all_read_notifications, mark_notification_read, mark_notification_unread,
     notification_stream, remove_member, remove_team_member, resolve_notification,
     revoke_all_my_sessions, revoke_all_user_sessions, revoke_my_session, revoke_user_session,
-    update_me, update_member_role, update_notification_preferences, update_team,
-    update_user_role,
+    update_me, update_member_role, update_notification_preferences, update_team, update_user_role,
 };
 
 use crate::AppState;
