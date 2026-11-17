@@ -341,38 +341,16 @@ pub fn render_system_prompt(sections: &[PromptSection]) -> String {
 }
 
 /// Render the system-managed PROTOCOL section of the agent prompt
-/// (agent-runtime.md §5): Ralph loop rules, MCP tool usage, heartbeat,
-/// escalation, and completion signaling. Not user-editable and not part of
+/// (agent-runtime.md §5 / platform-model.md §8): Ralph loop rules, the MCP
+/// tool catalog with usage patterns, heartbeat, escalation, handoff
+/// protocol, and completion signaling. Not user-editable and not part of
 /// the meta-spec registry — it defines how agents interact with Gyre
-/// infrastructure. Delivered at spawn (GYRE_PROTOCOL_PROMPT) and on demand
-/// via the MCP `system://protocol` prompt.
+/// infrastructure. Delegates to [`crate::api::prompts::protocol_prompt`]
+/// (the single source of truth) so the spawn-time
+/// `GYRE_PROTOCOL_PROMPT` / `GYRE_PROMPT_PROTOCOL` injections and the MCP
+/// `system://protocol` prompt all serve identical protocol norms.
 pub fn render_protocol_prompt() -> String {
-    let mut out = String::new();
-    out.push_str("# Gyre Agent Protocol (system-managed)\n\n");
-    out.push_str("## Ralph loop rules\n");
-    out.push_str("- Read your task via the MCP tools, implement the change, run focused tests.\n");
-    out.push_str("- Commit with conventional commit messages; push your branch.\n");
-    out.push_str("- Signal completion with `agent.complete` — never leave work uncommitted.\n");
-    out.push_str(
-        "- On gate failure, read the failure messages, fix, commit, push, complete again.\n\n",
-    );
-    out.push_str("## MCP tools\n");
-    out.push_str("- `gyre_task_read` / task context: your task, spec ref, acceptance criteria.\n");
-    out.push_str("- `gyre_agent_complete`: create the completion MR and start review.\n");
-    out.push_str("- `gyre_agent_escalate`: ask a human when blocked on a decision.\n");
-    out.push_str("- See `tools/list` for the full set (resources, specs, graph, inbox).\n\n");
-    out.push_str("## Heartbeat\n");
-    out.push_str("- Send a heartbeat every 60 seconds; missing heartbeats mark you Dead.\n\n");
-    out.push_str("## Escalation\n");
-    out.push_str(
-        "- Escalate when: the spec is ambiguous after reading the referenced spec blob,\n",
-    );
-    out.push_str("  a decision requires human judgment, or infrastructure blocks progress.\n\n");
-    out.push_str("## Completion\n");
-    out.push_str(
-        "- `agent.complete` creates the MR, revokes your token, and hands off to gates.\n",
-    );
-    out
+    crate::api::prompts::protocol_prompt().to_string()
 }
 
 /// Stored prompt-set record (kv namespace "agent_meta_spec_sets"), keyed by
@@ -1184,8 +1162,9 @@ mod tests {
         assert_eq!(loaded.rendered_prompt, rec.rendered_prompt);
     }
 
-    /// The protocol section is system-managed content (§5): it must cover
-    /// the Ralph loop, MCP tools, heartbeat, escalation, and completion.
+    /// The protocol section is system-managed content (§5 / platform-model
+    /// §8): it must cover the Ralph loop, the MCP tool catalog, heartbeat,
+    /// escalation, completion, and the handoff protocol.
     #[test]
     fn protocol_prompt_covers_the_five_protocol_areas() {
         let p = render_protocol_prompt();
@@ -1195,5 +1174,20 @@ mod tests {
         assert!(p.contains("Escalation"));
         assert!(p.contains("Completion"));
         assert!(p.contains("60 seconds"));
+        assert!(p.contains("Handoff protocol"));
+        assert!(p.contains("gyre_agent_complete"));
+        assert!(p.contains("gyre_message_poll"));
+    }
+
+    /// The protocol norms are a single source: the prompt_assembly render
+    /// and the api::prompts template must be byte-identical, so the MCP
+    /// `system://protocol` prompt and both spawn-time env injections never
+    /// diverge.
+    #[test]
+    fn protocol_prompt_is_the_single_source() {
+        assert_eq!(
+            render_protocol_prompt(),
+            crate::api::prompts::protocol_prompt()
+        );
     }
 }

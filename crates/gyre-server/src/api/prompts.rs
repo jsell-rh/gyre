@@ -140,9 +140,13 @@ pub async fn persona_prompt(
     Ok(persona.system_prompt)
 }
 
-/// `system://protocol` — interaction norms, Ralph loop definition,
-/// escalation rules (platform-model.md §3/§4). Static platform norms,
-/// identical for every agent: a built-in template.
+/// `system://protocol` — protocol norms (platform-model.md §8): Ralph loop
+/// definition, MCP tool usage patterns (tool catalog with usage examples),
+/// escalation rules, and handoff protocol. Static platform norms, identical
+/// for every agent and stored as a system-level resource (not per-persona):
+/// a built-in template. This is the single source of truth — the spawn-time
+/// `GYRE_PROTOCOL_PROMPT` / `GYRE_PROMPT_PROTOCOL` injections and the MCP
+/// `system://protocol` prompt all serve this text.
 pub fn protocol_prompt() -> &'static str {
     r#"# Gyre Agent Protocol
 
@@ -152,21 +156,49 @@ pub fn protocol_prompt() -> &'static str {
 - Signal liveness with `gyre_agent_heartbeat` while you work.
 - When your task is done, commit to your branch, push, and signal completion with `gyre_agent_complete` — this creates a merge request and moves your task to review. Never merge your own work: merging is decided by the merge queue and its gates.
 
-## Ralph loop
-Your work runs inside the repo orchestrator's loop — observe, plan, dispatch, monitor, reconcile:
+## Ralph loop rules
+Your work runs inside the repo orchestrator's loop — observe, plan, act, monitor, reconcile:
 1. **Observe** — read the current state: your task (`system://context`), the spec it implements, the code it touches.
 2. **Plan** — decide the smallest real change that moves the task toward its acceptance criteria.
-3. **Act** — implement, run the repo's quality gates, commit.
+3. **Act** — implement, run the repo's quality gates, commit with a conventional commit message, push your branch.
 4. **Monitor** — verify the result against the acceptance criteria and the spec.
 5. **Reconcile** — repeat until the task is genuinely done, then signal completion.
 
-A task is done when its acceptance criteria hold — not when the code compiles.
+A task is done when its acceptance criteria hold — not when the code compiles. On gate failure, read the failure messages (carried in `system://context`), fix, commit, push, complete again.
+
+## MCP tools
+Tool catalog with usage patterns (`tools/list` is the authoritative list with schemas):
+- `gyre_list_tasks` / `gyre_update_task` — find and update tasks in your scope. Usage: list with `{"status": "in_progress"}`; keep your task's status/labels current as you make progress.
+- `gyre_message_poll` / `gyre_message_ack` — your inbox: orchestrator directives, gate results, budget warnings. Usage: poll `{"limit": 20}` at the top of every loop iteration; ack a message once you have acted on it.
+- `gyre_message_send` — message your orchestrator or another agent (escalations, handoffs).
+- `gyre_agent_heartbeat` — signal liveness every 60 seconds.
+- `gyre_agent_complete` — signal task completion: creates the MR, moves the task to review, revokes your token.
+- `gyre_create_mr` / `gyre_list_mrs` — create or inspect merge requests (`gyre_agent_complete` does this for you on task completion).
+- `gyre_search` — search code and specs within your scope.
+- `gyre_record_activity` — record what you did; feeds the activity feed and analytics.
+- `gyre_analytics_query` / `gyre_analytics_decide` — query usage events; ask for a data-driven decision.
+- `gyre_spawn_worker` / `gyre_spawn_repo_orchestrator` / `gyre_list_repo_orchestrators` — orchestrator only: spawn scoped workers and repo orchestrators.
+- `gyre_create_task` / `gyre_decompose_spec` / `gyre_cross_repo_task` — orchestrator only: create tasks, decompose specs, request cross-repo work.
+- Resources: `spec://<path>` serves spec content; the `system://` prompts serve your persona, this protocol, your context, and your constraints.
+
+## Heartbeat
+- Send a heartbeat every 60 seconds; missing heartbeats mark you Dead and trigger re-spawn or cleanup.
 
 ## Escalation rules
 - Blocked on another repo, a missing spec, or an ambiguity you cannot resolve? Escalate to your orchestrator via `gyre_message_send` — never work around a spec.
 - Cross-repo needs are routed by the workspace orchestrator; cross-repo spec changes always require human approval.
 - A spec you disagree with is a design decision: propose a change through the spec lifecycle, never silently implement around it.
-- Budget or scope exhaustion: stop and escalate. `system://constraints` defines your limits."#
+- Budget or scope exhaustion: stop and escalate. `system://constraints` defines your limits.
+
+## Handoff protocol
+Work moves between agents and loops through defined handoffs — never through shared mutable state:
+- **Completion handoff** — `gyre_agent_complete` creates the MR, revokes your token, and hands the work to the merge queue and its gates. Everything a reviewer or gate needs must be in your commits and MR: commit and push everything before completing.
+- **Re-spawn handoff** — if gates fail, you are re-spawned on the next iteration (`GYRE_ITERATION`); gate failure messages and unacknowledged inbox messages from previous iterations are carried in `system://context`. Read them before acting again.
+- **Orchestrator directives** — your orchestrator's directives arrive in your inbox (`gyre_message_poll`); acknowledge and act on them inside the loop.
+- **Budget-exhaustion handoff** — at budget exhaustion you receive `BudgetExhausted` and get 60 seconds to hand off: commit what you have, push, and message your orchestrator with the state of the work.
+
+## Completion
+- `gyre_agent_complete` is the only completion signal: it creates the MR, revokes your token, and hands off to the gates. Never leave work uncommitted."#
 }
 
 /// Worktree info rendered into the context prompt.
@@ -232,9 +264,81 @@ fn format_context_prompt(
     out
 }
 
+/// Budget snapshot section rendered into the context prompt
+/// (platform-model.md §8: the context document includes the agent's budget
+/// limits — remaining tokens/cost for the day). Reads the same stores the
+/// constraints prompt and spawn-time enforcement read (`budget_configs` /
+/// `budget_usages`, keyed `workspace:{id}`), so the context never disagrees
+/// with what is enforced.
+pub(crate) async fn budget_snapshot_section(state: &AppState, workspace_id: &Id) -> String {
+    let mut out = String::from("\n## Budget\n");
+    let ws_key = format!("workspace:{workspace_id}");
+    let config = state
+        .budget_configs
+        .get_config(&ws_key)
+        .await
+        .ok()
+        .flatten();
+    let usage = state.budget_usages.get_usage(&ws_key).await.ok().flatten();
+    match config {
+        Some(config) => {
+            if let Some(max) = config.max_tokens_per_day {
+                let used = usage.as_ref().map(|u| u.tokens_used_today).unwrap_or(0);
+                out.push_str(&format!(
+                    "- Tokens: {used} used today of {max} ({} remaining)\n",
+                    max.saturating_sub(used)
+                ));
+            }
+            if let Some(max) = config.max_cost_per_day {
+                let spent = usage.as_ref().map(|u| u.cost_today).unwrap_or(0.0);
+                out.push_str(&format!(
+                    "- Cost: ${spent:.4} spent today of ${max:.4} (${:.4} remaining)\n",
+                    (max - spent).max(0.0)
+                ));
+            }
+            if config.max_tokens_per_day.is_none() && config.max_cost_per_day.is_none() {
+                out.push_str("- No token or cost limits are configured for this workspace.\n");
+            }
+        }
+        None => out.push_str("- No budget limits are configured for this workspace.\n"),
+    }
+    out
+}
+
+/// Workspace trust-level section rendered into the constraints prompt
+/// (platform-model.md §8: workspace trust level affects agent autonomy).
+/// Loaded from the governing workspace row; empty when the workspace is
+/// unresolvable (the caller's scope enforcement already failed closed
+/// there — no scope is fabricated).
+pub(crate) async fn trust_level_section(state: &AppState, workspace_id: &Id) -> String {
+    let ws = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws,
+        _ => return String::new(),
+    };
+    let mut out = String::from("\n## Trust Level\n");
+    out.push_str(&format!("- Workspace trust level: {}\n", ws.trust_level));
+    out.push_str(match ws.trust_level {
+        gyre_domain::TrustLevel::Supervised => {
+            "  A human reviews everything before merge; you never merge your own work.\n"
+        }
+        gyre_domain::TrustLevel::Guided => {
+            "  Agents merge when gates pass; gate failures alert humans.\n"
+        }
+        gyre_domain::TrustLevel::Autonomous => {
+            "  You operate with autonomy; interrupt humans only for exceptions.\n"
+        }
+        gyre_domain::TrustLevel::Custom => {
+            "  Autonomy is governed by the workspace's custom ABAC policy.\n"
+        }
+    });
+    out
+}
+
 /// `system://context` for an MCP caller: resolves the task (explicit
 /// `task_id` argument wins, then the task bound to the caller's identity),
 /// the caller's worktree, and the governing repo, then renders the prompt.
+/// The context document closes with the budget snapshot (§8: context
+/// includes budget limits).
 ///
 /// Containment (repo invariant): the loaded task must live inside the
 /// caller's scope — workspace mismatch always denies, and a repo mismatch
@@ -303,17 +407,20 @@ pub async fn context_prompt_for_caller(
         _ => None,
     };
 
-    Ok(format_context_prompt(
-        task.as_ref(),
-        repo.as_ref(),
-        worktree.as_ref(),
-    ))
+    Ok(
+        format_context_prompt(task.as_ref(), repo.as_ref(), worktree.as_ref())
+            + &budget_snapshot_section(state, &scope.workspace_id).await,
+    )
 }
 
 /// `system://context` for a spawn: the task being assigned, the repo it
-/// lives in, and the worktree the spawn just created. Interrogation agents
-/// have no worktree — pass `None`.
-pub fn context_prompt_for_spawn(
+/// lives in, the worktree the spawn just created, and the budget snapshot
+/// (platform-model.md §8: the context document includes budget limits —
+/// remaining tokens/cost for the day). Interrogation agents have no
+/// worktree — pass `None`.
+pub async fn context_prompt_for_spawn(
+    state: &AppState,
+    scope: &PromptScope,
     task: &Task,
     repo: &Repository,
     worktree: Option<(&str, &str)>,
@@ -327,14 +434,19 @@ pub fn context_prompt_for_spawn(
                 path: path.to_string(),
             })
             .as_ref(),
-    )
+    ) + &budget_snapshot_section(state, &scope.workspace_id).await
 }
 
 /// `system://context` for an orchestrator launch: orchestrators are not
 /// task-bound and have no worktree — the prompt records that honestly plus
-/// the repo (repo tier) and its default branch.
-pub fn context_prompt_for_orchestrator(repo: Option<&Repository>) -> String {
+/// the repo (repo tier), its default branch, and the budget snapshot.
+pub async fn context_prompt_for_orchestrator(
+    state: &AppState,
+    scope: &PromptScope,
+    repo: Option<&Repository>,
+) -> String {
     format_context_prompt(None, repo, None)
+        + &budget_snapshot_section(state, &scope.workspace_id).await
 }
 
 /// `system://constraints` — budget limits, remaining budget, agent lifetime
@@ -369,9 +481,13 @@ pub async fn constraints_prompt(state: &AppState, scope: &PromptScope) -> String
     }
     out.push_str(
         "\nYour agent token is scoped to the entities above. Work only inside your \
-         repo's worktree; cross-repo or cross-workspace needs must be escalated to \
+         repo's worktree; you cannot access other repos or workspaces — \
+         cross-repo or cross-workspace needs must be escalated to \
          your orchestrator, never fetched directly.\n",
     );
+
+    // §8: workspace trust level affects agent autonomy.
+    out.push_str(&trust_level_section(state, &scope.workspace_id).await);
 
     out.push_str("\n## Budget Limits (workspace)\n");
     match (&ws_config, &ws_usage) {

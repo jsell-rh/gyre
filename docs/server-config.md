@@ -16,6 +16,8 @@ cargo build --release -p gyre-server && ./target/release/gyre-server
 
 Access at `http://localhost:3000`. Default token `gyre-dev-token` works against a local dev server.
 
+**Dev mode vs production (protocol injection parity):** `gyre bootstrap --dev` skips OIDC and uses static-token auth (single tenant/workspace). Agent spawn and prompt injection are identical in both modes — the four system prompts (persona, protocol norms, context, constraints) and the persona attestation variables are assembled from the task/repo/workspace/budget state at spawn time, not from the caller's OIDC claims, so dev-mode agents receive the full protocol injection. The only difference is caller authentication (static token vs OIDC JWT); there are no protocol-injection gaps in dev mode. The spawn-injection tests run under exactly the dev-mode server configuration (static-token auth, no JWT/OIDC config), so this parity is regression-tested.
+
 ---
 
 ## Environment Variables
