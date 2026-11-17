@@ -320,7 +320,7 @@ async fn run_rebase(
             // Notify the agent: baseline moved, here is the new base.
             state
                 .emit_event(
-                    Some(repo.workspace_id.clone()),
+                    repo.workspace_id.clone(),
                     gyre_common::message::Destination::Agent(agent.agent_id.clone()),
                     gyre_common::message::MessageKind::Custom("baseline_moved".to_string()),
                     Some(serde_json::json!({
@@ -375,7 +375,7 @@ async fn run_rebase(
 
             state
                 .emit_event(
-                    Some(repo.workspace_id.clone()),
+                    repo.workspace_id.clone(),
                     gyre_common::message::Destination::Workspace(repo.workspace_id.clone()),
                     gyre_common::message::MessageKind::SpeculativeConflict,
                     Some(serde_json::json!({
@@ -389,7 +389,7 @@ async fn run_rebase(
                 .await;
             state
                 .emit_event(
-                    Some(repo.workspace_id.clone()),
+                    repo.workspace_id.clone(),
                     gyre_common::message::Destination::Agent(agent.agent_id.clone()),
                     gyre_common::message::MessageKind::Escalation,
                     Some(serde_json::json!({
@@ -1798,7 +1798,7 @@ async fn rollback_atomic_group(
     // Step 5: Emit AtomicGroupFailed event.
     state
         .emit_event(
-            Some(ws_id.clone()),
+            ws_id.clone(),
             gyre_common::message::Destination::Workspace(ws_id),
             gyre_common::MessageKind::AtomicGroupFailed,
             Some(serde_json::json!({
@@ -2190,7 +2190,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                             record_stale_spec_advisory(state, &mr, path, sha, &current_sha).await;
                             state
                                 .emit_event(
-                                    Some(mr.workspace_id.clone()),
+                                    mr.workspace_id.clone(),
                                     gyre_common::message::Destination::Workspace(
                                         mr.workspace_id.clone(),
                                     ),
@@ -2344,7 +2344,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                         );
                         state
                             .emit_event(
-                                Some(mr.workspace_id.clone()),
+                                mr.workspace_id.clone(),
                                 gyre_common::message::Destination::Workspace(
                                     mr.workspace_id.clone(),
                                 ),
@@ -2455,8 +2455,8 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     .load_chain(&chain_att.id)
                     .await
                     .unwrap_or_default();
-                // Review round 6 (task-129): a store-read failure inside the
-                // attestation gate FAILS CLOSED (requeue) — the evaluation
+                // Review round 6 (task-129): a store-read failure inside
+                // the attestation gate FAILS CLOSED (requeue) — the evaluation
                 // result cannot be determined, and proceeding would let a
                 // merge through that a tenant-scoped Deny would have
                 // blocked. Same hold-then-retry semantics as
@@ -2488,6 +2488,12 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                         return Ok(());
                     }
                 };
+                // Task-077 F5: record the decision in the policy-decision
+                // audit trail, then enforce it — an evaluation whose result
+                // is neither recorded nor consumed gates nothing. Recording
+                // is best-effort (see record_abac_decision); enforcement is
+                // the denial arm below plus the shared post-loop fail.
+                record_abac_decision(state, &decision, &chain_att.id, &mr, "merge").await;
                 if decision.effect == gyre_domain::policy::PolicyEffect::Deny {
                     denial = Some(format!(
                         "attestation ABAC policy denied merge (matched policy: {:?})",
@@ -2543,6 +2549,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                         return Ok(());
                                     }
                                 };
+                                // Task-077 F5, same as the branch-head path:
+                                // record the decision, then enforce it via
+                                // the shared post-loop denial arm.
+                                record_abac_decision(state, &decision, &leaf.id, &mr, "merge")
+                                    .await;
                                 if decision.effect == gyre_domain::policy::PolicyEffect::Deny {
                                     denial = Some(format!(
                                         "attestation ABAC policy denied merge (matched policy: {:?})",
@@ -3105,7 +3116,7 @@ async fn report_spec_policy_violation(
 ) {
     state
         .emit_event(
-            Some(mr.workspace_id.clone()),
+            mr.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(mr.workspace_id.clone()),
             gyre_common::message::MessageKind::GateFailure,
             Some(serde_json::json!({
@@ -3217,7 +3228,7 @@ pub(crate) async fn pause_merge_queue(
     }
     state
         .emit_event(
-            Some(repo.workspace_id.clone()),
+            repo.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(repo.workspace_id.clone()),
             gyre_common::message::MessageKind::MergeQueuePaused,
             Some(serde_json::json!({
@@ -3251,7 +3262,7 @@ pub(crate) async fn resume_merge_queue(state: &AppState, repo: &gyre_domain::Rep
     }
     state
         .emit_event(
-            Some(repo.workspace_id.clone()),
+            repo.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(repo.workspace_id.clone()),
             gyre_common::message::MessageKind::MergeQueueResumed,
             Some(serde_json::json!({
@@ -3415,7 +3426,7 @@ pub(crate) async fn apply_revert_side_effects(
         });
         state
             .emit_event(
-                Some(updated.workspace_id.clone()),
+                updated.workspace_id.clone(),
                 gyre_common::message::Destination::Agent(author_agent_id.clone()),
                 gyre_common::message::MessageKind::MrReverted,
                 Some(payload.clone()),
@@ -3769,7 +3780,7 @@ pub(crate) async fn trigger_cascade_tests(
 
         state
             .emit_event(
-                Some(dep_workspace_id.clone()),
+                dep_workspace_id.clone(),
                 gyre_common::message::Destination::Workspace(dep_workspace_id.clone()),
                 gyre_common::MessageKind::Custom("cascade_test_triggered".to_string()),
                 Some(payload),
@@ -3845,7 +3856,7 @@ pub(crate) async fn report_cascade_test_result(
         // Emit cascade_test_passed activity event.
         state
             .emit_event(
-                Some(task.workspace_id.clone()),
+                task.workspace_id.clone(),
                 gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
                 gyre_common::MessageKind::Custom("cascade_test_passed".to_string()),
                 Some(serde_json::json!({
@@ -3900,7 +3911,7 @@ pub(crate) async fn report_cascade_test_result(
 
         state
             .emit_event(
-                Some(task.workspace_id.clone()),
+                task.workspace_id.clone(),
                 gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
                 gyre_common::MessageKind::Custom("cascade_test_failed".to_string()),
                 Some(payload),
@@ -3943,6 +3954,47 @@ pub(crate) async fn report_cascade_test_result(
             task_id = task.id.as_str(),
             repo_id = task.repo_id.as_str(),
             "cascade test failed, follow-up task created"
+        );
+    }
+}
+
+/// Append a merge-time attestation ABAC evaluation to the policy decision
+/// audit trail — the same `record_decision` store the ABAC middleware writes
+/// for every HTTP request, so merge-time evaluations are queryable via
+/// `list_decisions` instead of living only in log output.
+///
+/// Best-effort: a failed audit append is logged and the merge proceeds. The
+/// decision trail must never gate a merge; merge-time enforcement semantics
+/// are owned by the task-077 revision round (specs/reviews/task-077.md F5).
+async fn record_abac_decision(
+    state: &AppState,
+    result: &crate::policy_engine::EvalResult,
+    attestation_id: &str,
+    mr: &MergeRequest,
+    action: &str,
+) {
+    // Subject: the MR author whose attestation chain was evaluated. When the
+    // author is unknown, use the merge-processor system identity HSI §2
+    // assigns to merge-time ABAC evaluation.
+    let subject_id = mr
+        .author_agent_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(|| "merge-processor".to_string());
+    let decision = crate::policy_engine::build_decision(
+        result,
+        &subject_id,
+        "agent",
+        action,
+        "attestation",
+        attestation_id,
+    );
+    if let Err(e) = state.policies.record_decision(&decision).await {
+        tracing::warn!(
+            mr_id = %mr.id,
+            attestation_id = %attestation_id,
+            error = %e,
+            "failed to append merge-time attestation ABAC decision to the audit log"
         );
     }
 }
@@ -4227,8 +4279,7 @@ async fn selection_meta_spec_drift_hold(
 /// Builds an `AttributeContext` from the attestation chain (chain_depth,
 /// root_signer, constraint_count, tenant_id) and evaluates policies with the
 /// given action and resource_type=attestation. The result GATES the merge
-/// (callers fail the queue entry on Deny). Returns the evaluation result
-/// for testability.
+/// (callers fail the queue entry on Deny).
 ///
 /// Returns `Err` when the workspace or policy store cannot be READ (review
 /// round 6, task-129): the caller FAILS CLOSED (requeues the merge entry).
@@ -4238,6 +4289,15 @@ async fn selection_meta_spec_drift_hold(
 /// still granted — a store error could let a merge through that a
 /// tenant-scoped Deny would have blocked. This is the same fail-closed
 /// treatment the sibling `evaluate_merge_abac` already gives store errors.
+///
+/// Audit-trail recording is the CALLER's duty (task-077 F5): `process_next`
+/// appends every Ok decision to the policy-decision audit trail via
+/// `record_abac_decision` — subject = the MR author (falling back to the
+/// merge-processor system identity), resource_id = the attestation id —
+/// so merge-time decisions are queryable via `list_decisions` exactly like
+/// the middleware's HTTP decisions. An Err result is never recorded: the
+/// evaluation outcome could not be determined, only the fail-closed requeue
+/// happened.
 async fn evaluate_attestation_abac(
     state: &AppState,
     chain: &[gyre_common::Attestation],
@@ -4301,21 +4361,11 @@ async fn evaluate_attestation_abac(
         .context("attestation ABAC gate: policy store read failed")?;
     let eval_result = crate::policy_engine::evaluate(policies, &ctx, action, "attestation");
 
-    // Record the decision in the policy-decision audit trail, exactly as the
-    // ABAC middleware does for HTTP requests, so merge-time authorization
-    // decisions are queryable via /api/v1/policies/decisions.
-    let decision = crate::policy_engine::build_decision(
-        &eval_result,
-        mr.author_agent_id
-            .as_ref()
-            .map(|a| a.as_str())
-            .unwrap_or("unknown-agent"),
-        "agent",
-        action,
-        "attestation",
-        repo.id.as_str(),
-    );
-    crate::policy_engine::record_decision_audit(state, &decision).await;
+    // Audit-trail recording is the caller's duty (see the doc comment):
+    // process_next records the Ok decision via `record_abac_decision` with
+    // the MR author as subject and the attestation id as resource — richer
+    // identity than the "unknown-agent"/repo-id shape this function could
+    // build locally, and never duplicated.
 
     // §Audit Integration log-level contract (review round 6, task-129):
     // denials at warn, allowances at debug — the same contract as the
@@ -4375,26 +4425,10 @@ mod tests {
         name: &str,
         workspace_id: &str,
     ) -> Repository {
-        // Seed the workspace record (idempotent): emissions resolve the
-        // tenant scope from it and skip when it does not exist (task-099 F1),
-        // so the workspace a fixture references must be real for event and
-        // notification assertions to observe anything.
-        if state
-            .workspaces
-            .find_by_id(&Id::new(workspace_id))
-            .await
-            .unwrap()
-            .is_none()
-        {
-            let ws = gyre_domain::Workspace::new(
-                Id::new(workspace_id),
-                Id::new("t1"),
-                workspace_id,
-                workspace_id,
-                0,
-            );
-            state.workspaces.create(&ws).await.unwrap();
-        }
+        // The workspace must exist: events emitted while processing merges
+        // resolve their tenant from the workspace record and are dropped when
+        // it is missing.
+        crate::mem::ensure_test_workspace(state, workspace_id).await;
         let repo = Repository::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new(workspace_id),
@@ -8081,6 +8115,95 @@ mod tests {
                  degrade to a tenant-scope-less evaluation — got {:?}",
                 result.map(|r| r.effect)
             );
+        }
+
+        /// Merge-time attestation ABAC evaluations must land in the policy
+        /// decision audit trail (`list_decisions`) — not only in log output —
+        /// with the MR author as subject, falling back to the
+        /// merge-processor system identity when the MR has no author agent.
+        /// Guards the task-160 round-8 repair: the evaluation results were
+        /// previously discarded at both merge-processor call sites. The
+        /// evaluation itself records nothing (see the fn doc comment) — the
+        /// call-site `record_abac_decision` is the single audit-trail append,
+        /// which is exactly what the `decisions.len() == 1` assertions pin.
+        #[tokio::test]
+        async fn merge_attestation_abac_decision_recorded_in_audit_trail() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-audit"),
+                Id::new("tenant-audit"),
+                "ws-audit",
+                "ws-audit",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-audit"),
+                Id::new("ws-audit"),
+                "audit-repo",
+                "/tmp/audit-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            // Chain: root (depth=0) + derived (depth=1).
+            let chain = vec![root_attestation("user:test-signer"), derived_attestation(1)];
+            let leaf = chain[1].clone();
+
+            // No author agent: the subject must fall back to the
+            // merge-processor system identity, never a fabricated scope.
+            let mut mr = MergeRequest::new(
+                Id::new("mr-audit"),
+                repo.id.clone(),
+                Id::new("ws-audit"),
+                "audit MR",
+                "feat/audit",
+                "main",
+                1000,
+            );
+            let entry = MergeQueueEntry::new(Id::new("entry-audit"), mr.id.clone(), 50, 1000);
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, &leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
+            record_abac_decision(&state, &result, &leaf.id, &mr, "merge").await;
+
+            let decisions = state
+                .policies
+                .list_decisions(None, Some("attestation"), 10)
+                .await
+                .unwrap();
+            assert_eq!(decisions.len(), 1, "exactly one decision record expected");
+            let d = &decisions[0];
+            assert_eq!(d.subject_id, "merge-processor");
+            assert_eq!(d.subject_type, "agent");
+            assert_eq!(d.action, "merge");
+            assert_eq!(d.resource_type, "attestation");
+            assert_eq!(d.resource_id, leaf.id.as_str());
+            assert_eq!(d.decision, result.effect);
+            assert_eq!(
+                d.matched_policy.as_ref().map(|i| i.as_str()),
+                result.matched_policy.as_deref()
+            );
+
+            // With an author agent, the recorded subject is the author.
+            mr.author_agent_id = Some(Id::new("agent:worker-audit"));
+            let result =
+                evaluate_attestation_abac(&state, &chain, &leaf, &mr, &entry, &repo, "merge")
+                    .await
+                    .unwrap();
+            record_abac_decision(&state, &result, &leaf.id, &mr, "merge").await;
+
+            let decisions = state
+                .policies
+                .list_decisions(Some("agent:worker-audit"), Some("attestation"), 10)
+                .await
+                .unwrap();
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(decisions[0].subject_id, "agent:worker-audit");
+            assert_eq!(decisions[0].decision, result.effect);
         }
     }
 
