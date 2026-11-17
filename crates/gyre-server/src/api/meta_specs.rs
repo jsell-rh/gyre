@@ -5317,10 +5317,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("PUT")
-                        .uri(format!(
-                            "/api/v1/merge-requests/{}/status",
-                            mr.id.to_string()
-                        ))
+                        .uri(format!("/api/v1/merge-requests/{}/status", mr.id))
                         .header("authorization", format!("Bearer {jwt}"))
                         .header("content-type", "application/json")
                         .body(Body::from(
@@ -5353,10 +5350,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("PUT")
-                        .uri(format!(
-                            "/api/v1/merge-requests/{}/status",
-                            mr.id.to_string()
-                        ))
+                        .uri(format!("/api/v1/merge-requests/{}/status", mr.id))
                         .header("authorization", "Bearer test-token")
                         .header("content-type", "application/json")
                         .body(Body::from(
