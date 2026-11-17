@@ -1280,7 +1280,9 @@ mod tests {
             "tenant-2",
             1000,
         );
-        NotificationRepository::create(&s, &cross_tenant).await.unwrap();
+        NotificationRepository::create(&s, &cross_tenant)
+            .await
+            .unwrap();
 
         let rows = NotificationRepository::list_by_workspace_type_since(
             &s,
