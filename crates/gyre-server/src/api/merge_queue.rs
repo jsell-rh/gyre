@@ -248,6 +248,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -277,6 +278,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -298,6 +300,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -324,6 +327,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(body.clone()))
                     .unwrap(),
@@ -338,6 +342,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -380,6 +385,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "merge_request_id": "mr-1" }))
@@ -540,6 +546,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/merge-queue/enqueue")
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
