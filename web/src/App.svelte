@@ -1049,7 +1049,14 @@
           scrollWorkspaceSection(sectionId);
           return;
         case 'agent-rules':
-          goToAgentRules();
+          // §1a: section items scroll to their dashboard section on the
+          // workspace home (Settings is the only navigation exception);
+          // section-agent-rules is a real §2 dashboard section. The
+          // section's own "Manage rules" action still navigates to the
+          // full agent-rules page.
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'agent-rules';
+          scrollWorkspaceSection('agent-rules');
           return;
         case 'architecture':
           // §1a rail item: scroll to AND expand the Architecture section

@@ -242,6 +242,37 @@ describe('Navigation rail in the app shell (ui-navigation.md §1a)', () => {
     expect(container.querySelector('[data-testid="nav-rail"]').classList.contains('expanded')).toBe(false);
   });
 
+  it('renders resolved i18n labels in the expanded rail and the mobile drawer (no raw keys)', async () => {
+    // F7 regression guard: the Settings item label must be the resolved
+    // translation ("Settings"), never the raw fallback key
+    // ("common.settings") — svelte-i18n silently falls back to the key
+    // when it is missing from en.json, which id/order assertions cannot
+    // catch. Component-level tests pass hand-written labels, so this must
+    // be asserted against the real App label functions.
+    window.history.pushState({}, '', '/workspaces/payments');
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="nav-rail-toggle"]')).toBeTruthy();
+    }, { timeout: 5000 });
+    await fireEvent.click(container.querySelector('[data-testid="nav-rail-toggle"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="nav-rail"]').classList.contains('expanded')).toBe(true);
+    });
+    const labels = Array.from(container.querySelectorAll('.nav-rail-item .nav-rail-label')).map(
+      (el) => el.textContent
+    );
+    expect(labels).toEqual(['Decisions', 'Specs', 'Architecture', 'Repos', 'Briefing', 'Agent Rules', 'Settings']);
+    // No raw i18n key may surface as user-visible label text.
+    expect(labels.some((l) => l.includes('common.') || l.includes('topbar.') || l.includes('repo_mode.'))).toBe(false);
+
+    // The narrow-viewport drawer always shows labels (no collapsed
+    // icon-only form) — assert the Settings label there too.
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    const drawer = container.querySelector('[data-testid="mobile-drawer"]');
+    expect(drawer).toBeTruthy();
+    expect(drawer.querySelector('[data-testid="drawer-item-settings"]').textContent).toBe('Settings');
+  });
+
   it('selecting a workspace-home rail item scrolls to the section (Architecture expands it)', async () => {
     window.history.pushState({}, '', '/workspaces/payments');
     const { container } = render(App);
@@ -255,6 +286,36 @@ describe('Navigation rail in the app shell (ui-navigation.md §1a)', () => {
     // The active rail item follows the selection.
     await waitFor(() => {
       expect(container.querySelector('[data-testid="nav-rail-item-architecture"]').getAttribute('aria-current')).toBe('page');
+    });
+  });
+
+  it('selecting Agent Rules scrolls to the section on the workspace home and highlights it (§1a)', async () => {
+    // §1a: section items scroll to their dashboard section — Settings is
+    // the only navigation exception. At the review candidate this item
+    // escaped to the agent-rules sub-page, so it could never show its
+    // active highlight on the workspace home.
+    window.history.pushState({}, '', '/workspaces/payments');
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="nav-rail-item-agent-rules"]')).toBeTruthy();
+    }, { timeout: 5000 });
+    // Entering the workspace home already scrolls to the default section
+    // (App.svelte 'inbox' → section-decisions), so the assertion must pin
+    // the actual scroll target of THIS click, not just that a scroll
+    // happened.
+    Element.prototype.scrollIntoView.mockClear();
+    await fireEvent.click(container.querySelector('[data-testid="nav-rail-item-agent-rules"]'));
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    }, { timeout: 3000 });
+    const targets = Element.prototype.scrollIntoView.mock.contexts;
+    expect(targets.some((el) => el?.getAttribute?.('data-testid') === 'section-agent-rules')).toBe(true);
+    // Stays on the workspace home — no escape to the agent-rules sub-page
+    // (where the rail would not render at all).
+    expect(window.location.pathname).toBe('/workspaces/payments');
+    // The active rail item follows the selection.
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="nav-rail-item-agent-rules"]').getAttribute('aria-current')).toBe('page');
     });
   });
 

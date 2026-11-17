@@ -404,12 +404,20 @@ describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
   });
 
 
-  it('clicking Agent Rules navigates to agent-rules page', async () => {
+  it('clicking Agent Rules at workspace scope scrolls to the dashboard section, not the sub-page (§1a)', async () => {
+    // ui-navigation.md §1a: section items scroll to their dashboard
+    // section on the workspace home; Settings is the only navigation
+    // exception. Agent Rules must not escape to the agent-rules sub-page
+    // (WorkspaceHome is stubbed here, so the observable is the URL: the
+    // workspace home is preserved; the scroll itself is covered by
+    // NavRail.test.js against the real WorkspaceHome).
     window.history.pushState({}, '', '/workspaces/payments');
     const { container } = render(App);
     await openDrawer(container);
     await fireEvent.click(container.querySelector('[data-testid="drawer-item-agent-rules"]'));
-    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/agent-rules'), { timeout: 3000 });
+    await new Promise(r => setTimeout(r, 100));
+    expect(window.location.pathname).toBe('/workspaces/payments');
+    expect(window.history.state?.mode).toBe('workspace_home');
   });
 
   it('repo mode drawer click on Specs switches to the Specs repo tab', async () => {
