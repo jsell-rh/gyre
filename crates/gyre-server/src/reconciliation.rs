@@ -315,7 +315,7 @@ pub async fn maybe_emit_drift_resolved(state: &Arc<AppState>, workspace_id: &Id)
     );
     state
         .emit_event(
-            Some(workspace_id.clone()),
+            workspace_id.clone(),
             gyre_common::message::Destination::Workspace(workspace_id.clone()),
             gyre_common::message::MessageKind::Custom("meta_spec_drift_resolved".to_string()),
             Some(serde_json::json!({
@@ -350,7 +350,7 @@ pub async fn emit_meta_spec_changed(
         Some(ws_id) => {
             state
                 .emit_event(
-                    Some(ws_id.clone()),
+                    ws_id.clone(),
                     gyre_common::message::Destination::Workspace(ws_id.clone()),
                     gyre_common::message::MessageKind::Custom("meta_spec_changed".to_string()),
                     Some(payload),
@@ -378,7 +378,7 @@ pub async fn emit_meta_spec_changed(
                     emitted = true;
                     state
                         .emit_event(
-                            Some(ws.id.clone()),
+                            ws.id.clone(),
                             gyre_common::message::Destination::Workspace(ws.id.clone()),
                             gyre_common::message::MessageKind::Custom(
                                 "meta_spec_changed".to_string(),
@@ -389,17 +389,19 @@ pub async fn emit_meta_spec_changed(
                 }
             }
             if !emitted {
-                // No workspace binds this spec — the change is still an
-                // observable registry event. Emit once unscoped (stored
-                // without a workspace destination by the message repository).
-                state
-                    .emit_event(
-                        None,
-                        gyre_common::message::Destination::Broadcast,
-                        gyre_common::message::MessageKind::Custom("meta_spec_changed".to_string()),
-                        Some(payload),
-                    )
-                    .await;
+                // No workspace binds this spec. The change is still an
+                // observable registry event, but the event bus requires a
+                // workspace scope to resolve the owning tenant: a
+                // server-originated message never rides a fabricated scope
+                // identity (see AppState::emit_event and
+                // emit_reconciliation_completed), so the unscoped emission
+                // is skipped and logged rather than defaulted to a
+                // fabricated "default" tenant.
+                tracing::warn!(
+                    meta_spec = %meta_spec.name,
+                    "meta_spec_changed: no workspace binds this meta-spec and no \
+                     workspace scope exists; skipping unscoped event emission"
+                );
             }
         }
     }
@@ -415,7 +417,7 @@ pub async fn emit_meta_spec_set_updated(
 ) {
     state
         .emit_event(
-            Some(workspace_id.clone()),
+            workspace_id.clone(),
             gyre_common::message::Destination::Workspace(workspace_id.clone()),
             gyre_common::message::MessageKind::Custom("meta_spec_set_updated".to_string()),
             Some(serde_json::json!({
@@ -699,7 +701,7 @@ pub async fn run_reconciliation(
         // §11 ReconciliationStarted: controller created tasks for a workspace.
         state
             .emit_event(
-                Some(ws_id.clone()),
+                ws_id.clone(),
                 gyre_common::message::Destination::Workspace(ws_id.clone()),
                 gyre_common::message::MessageKind::Custom("reconciliation_started".to_string()),
                 Some(serde_json::json!({
@@ -810,7 +812,7 @@ async fn create_reconciliation_task(
             info!(title = %cand.title, repo_id = %cand.repo_id, "reconciliation: created reconciliation task");
             state
                 .emit_event(
-                    Some(ws_id.clone()),
+                    ws_id.clone(),
                     gyre_common::message::Destination::Workspace(ws_id.clone()),
                     gyre_common::message::MessageKind::TaskCreated,
                     Some(serde_json::json!({
@@ -1493,17 +1495,19 @@ pub fn diff_tenant_meta_spec_set(old: &TenantMetaSpecSet, new: &TenantMetaSpecSe
 
 /// Emit the `tenant_meta_spec_set_updated` domain event (§11): a tenant's
 /// meta-spec set binding changed. Fired by the tenant set-update handler on
-/// every successful PUT that changes the binding. Unscoped broadcast (the
-/// audience — the tenant's workspaces — is enumerated by the propagation
-/// run that follows; per-workspace events come from `run_reconciliation`).
+/// every successful PUT that changes the binding. Tenant-scoped (the scope
+/// is the authenticated caller's tenant, carried directly — no fabricated
+/// workspace identity): the audience — the tenant's workspaces — is
+/// enumerated by the propagation run that follows; per-workspace events
+/// come from `run_reconciliation`.
 pub async fn emit_tenant_meta_spec_set_updated(
     state: &Arc<AppState>,
     tenant_id: &Id,
     changed_paths: &[String],
 ) {
     state
-        .emit_event(
-            None,
+        .emit_tenant_event(
+            tenant_id.clone(),
             gyre_common::message::Destination::Broadcast,
             gyre_common::message::MessageKind::Custom("tenant_meta_spec_set_updated".to_string()),
             Some(serde_json::json!({
@@ -1804,7 +1808,7 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
         // superseded meta-spec.
         state
             .emit_event(
-                Some(ws.id.clone()),
+                ws.id.clone(),
                 gyre_common::message::Destination::Workspace(ws.id.clone()),
                 gyre_common::message::MessageKind::Custom("meta_spec_drift_detected".to_string()),
                 Some(serde_json::json!({

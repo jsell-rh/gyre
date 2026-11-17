@@ -764,7 +764,7 @@ mod tests {
         // (the exact §Gate Failure Feedback message shape).
         state
             .emit_event(
-                Some(gyre_common::Id::new("ws-live-agents")),
+                gyre_common::Id::new("ws-live-agents"),
                 gyre_common::message::Destination::Agent(gyre_common::Id::new("agent-ws-live")),
                 gyre_common::message::MessageKind::GateResult,
                 Some(serde_json::json!({
