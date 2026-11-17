@@ -1375,7 +1375,11 @@ pub async fn assemble_briefing(
         let mut items = Vec::new();
 
         // 1. Gate failures: failed gate results for workspace MRs since `since`.
-        for mr in mrs.iter().filter(|mr| mr.updated_at >= since) {
+        //    The gate result's finished_at is the time gate — gates run
+        //    asynchronously after MR enqueue and the failure path never
+        //    touches mr.updated_at, so requiring mr.updated_at >= since
+        //    would silently drop fresh failures on stale-MR records.
+        for mr in mrs.iter() {
             let results = state
                 .gate_results
                 .list_by_mr_id(&mr.id.to_string())
@@ -1409,19 +1413,35 @@ pub async fn assemble_briefing(
             }
         }
 
-        // 2. Spec assertion failures: recent notifications of type SpecAssertionFailure.
-        let recent_notifications = state
+        // 2. Spec assertion failures: SpecAssertionFailure notifications in this
+        //    workspace since `since`. Sourced via the workspace+type+since-scoped
+        //    query (NOT list_recent's globally-truncated recency window, which
+        //    silently drops the failure once 200 newer notifications exist
+        //    anywhere). The notification fan-out creates one copy per notified
+        //    member with an identical source event, so dedup by
+        //    (entity_id, title, created_at) — one failure event must yield one
+        //    exception item regardless of how many members were notified.
+        let assertion_failures = state
             .notifications
-            .list_recent(200)
+            .list_by_workspace_type_since(
+                &ws_id,
+                gyre_common::NotificationType::SpecAssertionFailure.as_str(),
+                since as i64,
+            )
             .await
             .unwrap_or_default();
-        for n in recent_notifications.iter().filter(|n| {
-            n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
-                && n.workspace_id == ws_id
-                && n.created_at >= since as i64
-                && repo_filter
-                    .is_none_or(|f| n.source.repo_id.as_ref().map(|r| r.as_str()) == Some(f))
+        let mut seen_assertion_events: std::collections::HashSet<(String, String, i64)> =
+            std::collections::HashSet::new();
+        for n in assertion_failures.iter().filter(|n| {
+            repo_filter.is_none_or(|f| n.source.repo_id.as_ref().map(|r| r.as_str()) == Some(f))
         }) {
+            if !seen_assertion_events.insert((
+                n.source.entity_id.clone(),
+                n.title.clone(),
+                n.created_at,
+            )) {
+                continue; // per-member fan-out copy of an already-emitted failure event
+            }
             items.push(BriefingItem {
                 title: n.title.clone(),
                 description: n.body.clone().unwrap_or_default(),
@@ -4727,6 +4747,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn briefing_exceptions_gate_failure_on_stale_mr_record() {
+        // F2 regression: gates run asynchronously after MR enqueue and the
+        // failure path never touches mr.updated_at. A gate failure that
+        // finished after `since` on an MR whose updated_at precedes `since`
+        // MUST still appear — the gate result's finished_at is the time gate.
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // MR approved days ago (updated_at before since); never touched since.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-stale"),
+            Id::new("repo-1"),
+            Id::new("ws-briefing"),
+            "Approved long ago, enqueued today",
+            "feat/stale-mr",
+            "main",
+            1000,
+        );
+        mr.updated_at = 1000; // BEFORE since=1500
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Gate failed AFTER since (enqueued today, failed today).
+        let gr = gyre_domain::GateResult {
+            id: Id::new("gr-fresh-fail"),
+            gate_id: Id::new("gate-tests"),
+            mr_id: Id::new("mr-stale"),
+            status: GateStatus::Failed,
+            output: Some("cargo test failed (3 tests)".to_string()),
+            started_at: Some(1900),
+            finished_at: Some(2000), // AFTER since=1500
+        };
+        state.gate_results.save(&gr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let gate_failures: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "gate_failure")
+            .collect();
+        assert_eq!(
+            gate_failures.len(),
+            1,
+            "fresh gate failure on a stale MR record must appear in exceptions"
+        );
+        assert_eq!(gate_failures[0].timestamp, 2000);
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_assertion_failure_beyond_recency_window() {
+        // F3 regression: the exceptions section must not be subject to a
+        // globally-truncated recency window. Seed a SpecAssertionFailure,
+        // then 201 newer notifications of other types (across users and
+        // workspaces) — the failure must still be reported.
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        let notif = gyre_common::Notification::new(
+            Id::new("notif-buried"),
+            Id::new("ws-briefing"),
+            Id::new("user-1"),
+            gyre_common::NotificationType::SpecAssertionFailure,
+            "Spec assertion failed: payment.md §2",
+            "tenant-1",
+            2000,
+        );
+        state.notifications.create(&notif).await.unwrap();
+
+        // 201 newer notifications: mix of other workspaces and this workspace,
+        // other types, other users — all created after the assertion failure.
+        for i in 0..201 {
+            let (ws, tenant) = if i % 2 == 0 {
+                (Id::new("ws-other"), "tenant-2")
+            } else {
+                (Id::new("ws-briefing"), "tenant-1")
+            };
+            let n = gyre_common::Notification::new(
+                Id::new(format!("notif-noise-{i}")),
+                ws,
+                Id::new(format!("user-noise-{i}")),
+                gyre_common::NotificationType::MrMerged,
+                "MR merged noise",
+                tenant,
+                2100 + i as i64,
+            );
+            state.notifications.create(&n).await.unwrap();
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let assertions: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "spec_assertion_failure")
+            .collect();
+        assert_eq!(
+            assertions.len(),
+            1,
+            "assertion failure older than 200 newer notifications must still be reported"
+        );
+        assert!(assertions[0].title.contains("payment.md"));
+    }
+
+    #[tokio::test]
     async fn briefing_exceptions_spec_assertion_failures() {
         let state = test_state();
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
@@ -4743,6 +4871,34 @@ mod tests {
         );
         state.notifications.create(&notif).await.unwrap();
 
+        // The notification fan-out (graph_extraction.rs) delivers one copy per
+        // notified Admin/Developer/Owner member: identical source event
+        // (entity_id, title, created_at), distinct notification/user ids.
+        // One failure event must yield ONE exception item, not one per member.
+        let member_copy = gyre_common::Notification::new(
+            Id::new("notif-1-member-2"),
+            Id::new("ws-briefing"),
+            Id::new("user-2"),
+            gyre_common::NotificationType::SpecAssertionFailure,
+            "Spec assertion failed: auth.md §3",
+            "tenant-1",
+            2000,
+        );
+        state.notifications.create(&member_copy).await.unwrap();
+
+        // A distinct failure event (different created_at) must still get its
+        // own exception item — dedup is per source event, not per entity.
+        let second_event = gyre_common::Notification::new(
+            Id::new("notif-2"),
+            Id::new("ws-briefing"),
+            Id::new("user-1"),
+            gyre_common::NotificationType::SpecAssertionFailure,
+            "Spec assertion failed: auth.md §3",
+            "tenant-1",
+            2200,
+        );
+        state.notifications.create(&second_event).await.unwrap();
+
         let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
@@ -4752,7 +4908,11 @@ mod tests {
             .iter()
             .filter(|e| e.entity_type == "spec_assertion_failure")
             .collect();
-        assert_eq!(assertions.len(), 1);
+        assert_eq!(
+            assertions.len(),
+            2,
+            "per-member fan-out copies must be deduplicated; distinct events kept"
+        );
         assert!(assertions[0].title.contains("Spec assertion failed"));
         assert_eq!(
             assertions[0].actions,
