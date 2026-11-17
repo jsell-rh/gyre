@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["9a91f0cd96ca1dafc35df7457461704596c54e97", "fe9ea725903e8038442914b170ea7786bd5b5761", "c964e54a414819bbd54cb3cd69602919a1a88006", "3b8b0eb6d4596edfeb900a3f7fe74db04733376c", "0c0a0ff17f541581acfa753a849f760eb0ba575a", "32a42f7e5590b6f700478739a5f690d588cb8c39", "531f1bcfe1263ffec480597b838b5eb1ac7a1615", "06b13c0defde8a92f3dfcc1c333774e448e0c77a", "1724c6a3d38c6086c0d01f198783cd860d4a7787", "55a6c1f2bee9a8c856e6576f6d7c91d6d2ce80c9", "8458f699df0b4b075eea35a31c2a3e32107c1884", "d162c56d01c9b742d17fc1626e2095adb0d64a47", "c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["9a91f0cd96ca1dafc35df7457461704596c54e97", "fe9ea725903e8038442914b170ea7786bd5b5761", "c964e54a414819bbd54cb3cd69602919a1a88006", "3b8b0eb6d4596edfeb900a3f7fe74db04733376c", "0c0a0ff17f541581acfa753a849f760eb0ba575a", "32a42f7e5590b6f700478739a5f690d588cb8c39", "531f1bcfe1263ffec480597b838b5eb1ac7a1615", "06b13c0defde8a92f3dfcc1c333774e448e0c77a", "1724c6a3d38c6086c0d01f198783cd860d4a7787", "55a6c1f2bee9a8c856e6576f6d7c91d6d2ce80c9", "8458f699df0b4b075eea35a31c2a3e32107c1884", "d162c56d01c9b742d17fc1626e2095adb0d64a47", "c7ea6ab05b7221f327ea006b94bae12a88b5a412", "45cd250d7655a2661f1cd7488ea4ab91ade1819e", "9dc6ffd47bf8f52f5b4ec656317c944c563aa756", "b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3", "0029b3f4b86d0ca6344ca233b346c19b1493e4e0"]
 ---
 
 ## Spec Excerpt
@@ -78,57 +78,33 @@ usage comments, and are wired into `.pre-commit-config.yaml` and
   route↔`RouteResourceMapping` cross-reference delegated to the
   frozen-baseline `check-abac-route-registry.sh` (spec §7).
 
-### CI repair on this round (`9a91f0cd`)
+### Rebase repair onto task-077 HSI base (`0029b3f4`)
 
-The reconciled candidate `15fe9a5b` failed the CI "Architecture lint"
-job (run 44086888872) on `check-tenant-filter.sh` — the only blocking
-step that did not pass locally. The task-013 briefing merge (base
-`ce336114`) introduced `NotificationRepository::list_by_workspace_type_since`
-in both the SQLite and PostgreSQL adapters without a `tenant_id`
-filter, and this task's now-blocking lint correctly flagged the two
-methods.
+Rebased the saved source onto base `876c77b` and resolved the
+`crates/gyre-server/src/git_http.rs` conflict in the persona-push
+flow: kept the base's atomic `apply_approval_reset_with_task`
+persistence (persona approval reset + human-approval task in one
+transaction) while adopting the merged `emit_event(Id)` signature
+(tenant scope resolved from the workspace record — the F1 remediation
+in the saved source's `lib.rs`). `web/dist` was restored to the
+assignment base; regenerated assets are owned by remote integration.
 
-- Added `.filter(notifications::tenant_id.eq(&tenant))` (handle-tenant
-  scope, cloned into the `spawn_blocking` closure) to both adapters —
-  the same contract as every sibling notification read on the same
-  handle (`get`, `list_for_user`, `count_unread`, `list_recent`,
-  `has_recent_dismissal`), the pattern round-4 review verified as real
-  enforcement.
-- Strengthened the existing adapter test
-  `sqlite::notification::tests::list_by_workspace_type_since_scopes_and_is_unbounded`
-  with a same-workspace, same-type, qualifying row filed under
-  `tenant-2`: it must not leak into the tenant-1-scoped query.
-  Mutation-checked on this head: removing the filter makes the test
-  fail with `n-saf-cross-tenant` in the result (log:
-  `mutation-check-test-fails.log`).
+### Verification on this round
 
-### Evidence on this head (`9a91f0cd`, logs under /tmp/stage/review-evidence/)
-
-- `cargo-check-gyre-adapters.log` — `SKIP_WEB_BUILD=1 cargo check -p
-  gyre-adapters` → exit 0.
-- `cargo-test-sqlite-notification-final.log` — focused sqlite
-  notification adapter tests → 10 passed, 0 failed.
-- `cargo-test-tenant-isolation.log` — `--test tenant_isolation` →
-  2 passed, 0 failed.
-- `cargo-test-gyre-adapters-lib.log` — full `-p gyre-adapters --lib`
-  → 575 passed, 0 failed (6 ignored).
-- All blocking steps of the CI "Architecture lint" job pass on this
-  head under mawk (scripts are POSIX-awk; GitHub runners' gawk is a
-  superset for these constructs): `check-arch.sh`,
-  `check-api-auth.sh`, `check-tenant-filter.sh` (126 read methods
-  checked, 0 violations), `GYRE_CHECK_HIERARCHY=1 check-hierarchy.sh`,
-  `check-sandbox-sweep-artifacts.sh`, `check-abac-route-registry.sh`,
-  `check-migration-versions.sh`, `check-byte-slice-truncation.sh`,
-  `check-dead-message-kinds.sh`,
-  `check-notification-toggle-coverage.sh`.
-- `bash scripts/check-task-commit-attribution.sh` → exit 0 (the
-  frontmatter commit list above includes this round's repair commit).
+- `cargo check -p gyre-server` — clean at head `0029b3f4`.
+- All three scripts pass at head: check-hierarchy (exit 0),
+  check-tenant-filter (126 read query methods checked, exit 0),
+  check-api-auth (exit 0).
+- Negative probes (files restored after each): making
+  `Task.workspace_id` `Option<Id>` fails check-hierarchy (exit 1);
+  removing the `tenant_id` filter from a sqlite notification read
+  fails check-tenant-filter (exit 1, 1 violation of 126 methods).
+- Focused test: `cargo test -p gyre-adapters --lib sqlite::notification`
+  — 10 passed, 0 failed (includes
+  `list_by_workspace_type_since_scopes_and_is_unbounded`).
 
 ### Deferred to the independent verifier
 
-`cargo test --all` (acceptance criterion) — the sandbox build wrapper
-reserves large server builds for the verifier. On head `9a91f0cd`
-please run the full `cargo test --all` plus the GitHub checks; the
-adapters crate is fully covered above, and the changed code paths
-(sqlite/pg notification adapters) have no other dependents in the
-server test suite beyond the mem-mode tests (mem adapter unchanged).
+- `cargo test --all` (full workspace suites) and the Architecture lint
+  CI job on the exact PR head — server test compilation exceeds this
+  sandbox's build budget.
