@@ -7,7 +7,7 @@ coverage_sections:
   - "supply-chain.md §AIBOM Contents"
   - "supply-chain.md §SLSA Provenance Integration"
   - "supply-chain.md §The Laptop Problem"
-commits: ["39a0aaec029ffbfa9025bc0b2d766ca391a15fc1", "da1432739b4c912f2d0de1eca7eed70dd606184c", "edfb0ac8fd0ec757e17453a896332b58a084491f", "e7d8c215b30105da21112f2a91efc9fce9c0398c"]
+commits: ["e7d8c215b30105da21112f2a91efc9fce9c0398c", "edfb0ac8fd0ec757e17453a896332b58a084491f", "da1432739b4c912f2d0de1eca7eed70dd606184c", "39a0aaec029ffbfa9025bc0b2d766ca391a15fc1"]
 ---
 
 ## Spec Excerpt
