@@ -2,7 +2,7 @@
 title: "Supply chain — SLSA provenance mapping, AIBOM release artifacts, laptop problem"
 spec_ref: "supply-chain.md §SLSA Provenance Integration"
 depends_on: [task-165]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "supply-chain.md §AIBOM Contents"
   - "supply-chain.md §SLSA Provenance Integration"
