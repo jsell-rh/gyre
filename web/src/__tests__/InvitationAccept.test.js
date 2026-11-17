@@ -173,7 +173,7 @@ function tenantPreview(overrides = {}) {
     email: 'invitee@example.com',
     role: 'TenantAdmin',
     workspaces: [
-      { id: 'ws-1', name: 'Platform', description: 'The platform workspace', role: 'Maintainer' },
+      { id: 'ws-1', name: 'Platform', description: 'The platform workspace', role: 'Admin' },
     ],
     ...overrides,
   };

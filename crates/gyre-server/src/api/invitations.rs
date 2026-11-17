@@ -6168,7 +6168,10 @@ mod tests {
                             "email": "preview@example.com",
                             "role": "TenantAdmin",
                             "workspace_ids": ["ws-preview"],
-                            "workspace_roles": ["Maintainer"]
+                            // A real workspace role from user-management.md
+                            // §Roles (Owner/Admin/Developer/Viewer) — the
+                            // invite API rejects unknown role strings.
+                            "workspace_roles": ["Admin"]
                         })
                         .to_string(),
                     ))
@@ -6176,10 +6179,16 @@ mod tests {
             )
             .await
             .unwrap();
+        let invite_status = resp.status();
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            invite_status,
+            StatusCode::CREATED,
+            "tenant invite must succeed: {json}"
+        );
         let invite_url = json["invite_url"].as_str().unwrap().to_string();
         let token = invite_url.rsplit('/').next().unwrap().to_string();
 
@@ -6206,7 +6215,7 @@ mod tests {
         assert_eq!(preview["workspaces"].as_array().unwrap().len(), 1);
         assert_eq!(preview["workspaces"][0]["name"], "Preview WS");
         assert_eq!(preview["workspaces"][0]["id"], "ws-preview");
-        assert_eq!(preview["workspaces"][0]["role"], "Maintainer");
+        assert_eq!(preview["workspaces"][0]["role"], "Admin");
         // No credential or token material in the preview.
         assert!(preview.get("invite_url").is_none());
         assert!(preview.get("token").is_none());
