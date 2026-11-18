@@ -329,7 +329,7 @@ pub async fn enforce_push_constraints(
         // Emit ConstraintViolation event for observability.
         state
             .emit_event(
-                Some(workspace_id.clone()),
+                workspace_id.clone(),
                 Destination::Workspace(workspace_id.clone()),
                 MessageKind::ConstraintViolation,
                 Some(serde_json::json!({
@@ -1585,7 +1585,7 @@ async fn emit_constraint_violations(
         // Broadcast to workspace.
         state
             .emit_event(
-                Some(workspace_id.clone()),
+                workspace_id.clone(),
                 Destination::Workspace(workspace_id.clone()),
                 MessageKind::ConstraintViolation,
                 Some(payload.clone()),
@@ -1596,7 +1596,7 @@ async fn emit_constraint_violations(
         if !agent_id.is_empty() {
             state
                 .emit_event(
-                    Some(workspace_id.clone()),
+                    workspace_id.clone(),
                     Destination::Agent(Id::new(agent_id)),
                     MessageKind::ConstraintViolation,
                     Some(payload),
@@ -2024,9 +2024,9 @@ mod tests {
         let repo_path = tmp.path().to_str().unwrap();
 
         let state = crate::mem::test_state();
-        // Emissions resolve the tenant scope from the workspace record and
-        // skip when it does not exist (task-099 F1) — seed ws-1.
-        seed_ws(&state, "ws-1").await;
+        // The workspace must exist: violation events resolve their tenant
+        // from the workspace record and are dropped when it is missing.
+        crate::mem::ensure_test_workspace(&state, "ws-1").await;
 
         // Seed workspace meta-spec set and agent persona so build_agent_context
         // produces valid values matching the InputContent.
@@ -2110,6 +2110,9 @@ mod tests {
         // skip when it does not exist (task-099 F1) — seed ws-1.
         seed_ws(&state, "ws-1").await;
         let ws_id = Id::new("ws-1");
+        // The workspace must exist: violation events resolve their tenant
+        // from the workspace record and are dropped when it is missing.
+        crate::mem::ensure_test_workspace(&state, "ws-1").await;
 
         // Subscribe to broadcast before emitting.
         let mut rx = state.message_broadcast_tx.subscribe();
@@ -2293,9 +2296,10 @@ mod tests {
         let repo_path = tmp.path().to_str().unwrap();
 
         let state = crate::mem::test_state();
-        // Emissions resolve the tenant scope from the workspace record and
-        // skip when it does not exist (task-099 F1) — seed ws-1.
-        seed_ws(&state, "ws-1").await;
+        // The workspace must exist: violation events resolve their tenant
+        // from the workspace record and are dropped when it is missing.
+        crate::mem::ensure_test_workspace(&state, "ws-1").await;
+
         // Seed workspace meta-spec set and agent persona.
         let meta_sha = seed_agent_context(&state, "ws-1", "agent-merge-2").await;
 

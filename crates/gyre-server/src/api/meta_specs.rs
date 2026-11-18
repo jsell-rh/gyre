@@ -627,7 +627,7 @@ pub async fn put_rollout_policy(
     // §11-style observability: policy change is an auditable workspace event.
     state
         .emit_event(
-            Some(Id::new(workspace_id.clone())),
+            Id::new(workspace_id.clone()),
             gyre_common::message::Destination::Workspace(Id::new(workspace_id.clone())),
             gyre_common::message::MessageKind::Custom("rollout_policy_updated".to_string()),
             Some(serde_json::json!({

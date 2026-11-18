@@ -19,16 +19,20 @@ use super::{new_id, now_secs};
 
 // ─── Analytics Events ────────────────────────────────────────────────────────
 
-/// Inbound analytics event (client-side push). The identity fields
-/// `agent_id`/`user_id` are accepted for backward compatibility but
-/// IGNORED — the caller identity from auth is always recorded (task-146
-/// review F1, same anti-forgery rule as audit events / NEW-31).
-/// `workspace_id`/`repo_id` are validated against the caller's tenant;
-/// cross-tenant or unknown scope attribution rejects the write.
+/// Inbound analytics event (client-side push). The identity field
+/// `agent_id` is validated against the verified caller
+/// (hierarchy-enforcement.md §5: agents record only their own events;
+/// Admin may record on behalf of any agent) and `user_id` is always
+/// derived from auth (task-146 review F1, same anti-forgery rule as
+/// audit events / NEW-31). `workspace_id`/`repo_id` are validated
+/// against the caller's tenant; cross-tenant or unknown scope
+/// attribution rejects the write.
 #[derive(Deserialize)]
 pub struct RecordEventRequest {
     pub event_name: String,
-    /// Ignored: derived from the verified caller identity.
+    /// Validated against the verified caller identity: must match the
+    /// authenticated agent subject (403 otherwise); honored as the
+    /// recorded identity for Admin on-behalf recording.
     pub agent_id: Option<String>,
     /// Ignored: derived from the verified caller identity.
     pub user_id: Option<String>,
@@ -254,19 +258,17 @@ pub async fn record_event(
     auth: AuthenticatedAgent,
     Json(req): Json<RecordEventRequest>,
 ) -> Result<(StatusCode, Json<AnalyticsEventResponse>), ApiError> {
-    // Bind the identity fields to the verified caller (task-146 review F1):
-    // the request-body agent_id/user_id fields are ignored — the recorded
-    // event always reflects who actually made the call, not what the caller
-    // claims, so an authenticated caller cannot attribute analytics events
-    // to an arbitrary user or agent. Agent JWT callers carry an agent
-    // identity; user/API-key callers carry user_id; impersonation sessions
-    // attribute to the impersonator (identity-security.md §Impersonation) —
-    // the same rule the audit trail enforces (NEW-31).
-    let agent_id = if auth.agent_id.is_empty() {
-        None
-    } else {
-        Some(auth.agent_id.clone())
-    };
+    // Bind the identity fields to the verified caller, with the
+    // hierarchy-enforcement.md §5 recording gate: agent subjects record
+    // their own events only (a payload `agent_id` naming anyone else is
+    // rejected — the task-146 review F1 anti-forgery rule, now enforced
+    // as a rejection instead of a silent rebind), Admin may record on
+    // behalf of any agent (backfill/correction), and every other
+    // subject is rejected. Impersonation sessions attribute to the
+    // impersonator (identity-security.md §Impersonation) — the same
+    // rule the audit trail enforces (NEW-31). See
+    // `audit::resolve_recording_agent_id`.
+    let agent_id = super::audit::resolve_recording_agent_id(&auth, req.agent_id.as_deref())?;
     let user_id = auth
         .impersonation
         .as_ref()
@@ -1205,11 +1207,21 @@ impl From<CostEntry> for CostEntryResponse {
 
 pub async fn record_cost(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Json(req): Json<RecordCostRequest>,
 ) -> Result<(StatusCode, Json<CostEntryResponse>), ApiError> {
+    // hierarchy-enforcement.md §5 (Audit/Analytics/Cost Recording): cost
+    // entries are agent-self-recorded telemetry. This handler previously
+    // took NO auth extractor — any authenticated caller could attribute
+    // costs to an arbitrary agent. Now the same gate as audit/analytics
+    // recording applies: agent subjects may record only their own
+    // agent_id, Admin may record on behalf of any agent, every other
+    // subject is rejected. See `audit::resolve_recording_agent_id`.
+    let agent_id = super::audit::resolve_recording_agent_id(&auth, Some(req.agent_id.as_str()))?
+        .ok_or_else(|| ApiError::InvalidInput("agent_id is required".to_string()))?;
     let entry = CostEntry::new(
         new_id(),
-        Id::new(req.agent_id),
+        Id::new(agent_id),
         req.task_id.map(Id::new),
         req.cost_type,
         req.amount,
@@ -1428,6 +1440,94 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["total"], 200.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn record_cost_enforces_agent_self_recording() {
+        // hierarchy-enforcement.md §5: cost entries are agent-self-recorded
+        // telemetry. This handler previously took no auth extractor — any
+        // authenticated caller could attribute costs to an arbitrary agent.
+        // Now: an agent subject recording another agent's id is rejected
+        // (403), its own id is accepted, and a Developer user subject is
+        // rejected outright. The global token (Admin) on-behalf path is
+        // covered by `record_and_query_costs` above.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
+        });
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "cost-agent-sub",
+                "preferred_username": "cost-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+        let developer_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "cost-dev-sub",
+                "preferred_username": "cost-dev",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let post_cost = |token: String, agent_id: &str| {
+            let state = state.clone();
+            let body = serde_json::json!({
+                "agent_id": agent_id,
+                "cost_type": "llm_tokens",
+                "amount": 1.0,
+                "currency": "tokens"
+            });
+            async move {
+                crate::api::api_router()
+                    .with_state(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/costs")
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Agent subject + another agent's id: rejected.
+        let resp = post_cost(agent_token.clone(), "somebody-else").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "an agent subject must not record costs for another agent"
+        );
+
+        // Agent subject + own id: accepted.
+        let resp = post_cost(agent_token, "cost-agent").await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["agent_id"].as_str().unwrap(), "cost-agent");
+
+        // Developer user subject: rejected outright.
+        let resp = post_cost(developer_token, "cost-agent").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-agent, non-admin subject must not record costs"
+        );
     }
 
     // ─── M23 Analytics Decision API tests ──────────────────────────────────────
@@ -1679,17 +1779,20 @@ mod tests {
 
     #[tokio::test]
     async fn record_event_binds_identity_to_caller_not_request_body() {
-        // F1 regression: agent_id/user_id in the request body are ignored —
-        // the recorded event carries the verified caller identity (the
-        // global test token authenticates as the "system" agent with no
-        // user), so a caller cannot attribute analytics events to an
-        // arbitrary user or agent.
+        // F1 + hierarchy-enforcement.md §5 regression. The global test
+        // token authenticates as the system principal (Admin role): it may
+        // record on behalf of any agent, so the payload agent_id IS the
+        // recorded identity — with user_id still bound to the caller
+        // (null: the system principal has no user identity). The
+        // agent-subject counterpart (a non-admin agent CANNOT record
+        // another agent's id) is asserted in
+        // `record_event_agent_subject_rejects_mismatched_agent_id` below.
         let app = app();
         let (status, json) = post_event(
             &app,
             serde_json::json!({
                 "event_name": "feature.used",
-                "agent_id": "forged-agent",
+                "agent_id": "backfilled-agent",
                 "user_id": "forged-user",
                 "session_id": "sess-1",
                 "properties": {},
@@ -1699,10 +1802,9 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
             json["agent_id"].as_str().unwrap(),
-            "system",
-            "agent_id must be the caller identity, not the forged body value"
+            "backfilled-agent",
+            "Admin on-behalf recording must honor the payload agent_id"
         );
-        assert_ne!(json["agent_id"].as_str().unwrap(), "forged-agent");
         assert!(
             json["user_id"].is_null(),
             "user_id must come from the caller identity, not the body"
@@ -1710,13 +1812,133 @@ mod tests {
         // session_id is not an identity/scope field and stays caller-supplied.
         assert_eq!(json["session_id"].as_str().unwrap(), "sess-1");
 
-        // The persisted event (not just the response) carries the caller
+        // The persisted event (not just the response) carries the same
         // identity — query it back through the API.
         let events = get_events(&app, "event_name=feature.used").await;
         let arr = events.as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["agent_id"].as_str().unwrap(), "system");
+        assert_eq!(arr[0]["agent_id"].as_str().unwrap(), "backfilled-agent");
         assert!(arr[0]["user_id"].is_null());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn record_event_agent_subject_rejects_mismatched_agent_id() {
+        // hierarchy-enforcement.md §5: agent subjects record their own
+        // events only. A payload agent_id naming anyone else is rejected
+        // (403, stronger than the old silent rebind), a matching or absent
+        // one is bound to the verified caller. A Developer user subject is
+        // rejected outright — recording requires an agent or Admin
+        // subject.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
+        });
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "rec-agent-sub",
+                "preferred_username": "rec-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+        let developer_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "rec-dev-sub",
+                "preferred_username": "rec-dev",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let post_as = |token: String, body: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                crate::api::api_router()
+                    .with_state(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/analytics/events")
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Agent subject + forged agent_id: rejected.
+        let resp = post_as(
+            agent_token.clone(),
+            serde_json::json!({
+                "event_name": "feature.used",
+                "agent_id": "somebody-else",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "an agent subject must not record another agent's id"
+        );
+
+        // Agent subject + own agent_id: recorded as the verified identity.
+        let resp = post_as(
+            agent_token.clone(),
+            serde_json::json!({
+                "event_name": "feature.used",
+                "agent_id": "rec-agent",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["agent_id"].as_str().unwrap(), "rec-agent");
+
+        // Agent subject, absent agent_id: bound to the caller identity.
+        let resp = post_as(
+            agent_token,
+            serde_json::json!({ "event_name": "feature.used", "properties": {} }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["agent_id"].as_str().unwrap(), "rec-agent");
+
+        // Developer user subject: rejected outright (not an agent, not
+        // Admin) even though ABAC's developer-write-access allows the
+        // route — the recording gate is handler-level by design.
+        let resp = post_as(
+            developer_token,
+            serde_json::json!({
+                "event_name": "feature.used",
+                "agent_id": "any-agent",
+                "properties": {},
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-agent, non-admin subject must not record telemetry"
+        );
     }
 
     #[tokio::test]

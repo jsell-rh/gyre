@@ -2230,7 +2230,7 @@ async fn handle_agent_complete(state: &std::sync::Arc<AppState>, args: &Value) -
             let ws_dest = gyre_common::Destination::Workspace(ws_id.clone());
             state
                 .emit_event(
-                    Some(ws_id.clone()),
+                    ws_id.clone(),
                     ws_dest,
                     gyre_common::MessageKind::AgentCompleted,
                     Some(payload),

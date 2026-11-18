@@ -542,7 +542,7 @@ async fn escalate_repo_orchestrator_death(
 
     state
         .emit_event(
-            Some(dead.workspace_id.clone()),
+            dead.workspace_id.clone(),
             Destination::Agent(ws_orch.id.clone()),
             MessageKind::Escalation,
             Some(payload),

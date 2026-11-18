@@ -21,8 +21,11 @@ use super::{new_id, now_secs};
 
 // ─── Audit Events ─────────────────────────────────────────────────────────────
 
-/// Inbound audit event (agent-side push). `agent_id` is accepted but ignored -
-/// the caller identity from auth is always used (NEW-31).
+/// Inbound audit event (agent-side push). `agent_id` is validated
+/// against the verified caller (hierarchy-enforcement.md §5: agents
+/// record only their own events — a mismatched id is rejected; Admin
+/// may record on behalf of any agent); an absent id is bound to the
+/// caller identity from auth (NEW-31).
 #[derive(Deserialize)]
 pub struct RecordAuditEventRequest {
     pub agent_id: Option<String>,
@@ -112,6 +115,61 @@ pub async fn emit_server_audit_event(state: &AppState, event: AuditEvent) {
     }
     if let Ok(json) = serde_json::to_string(&AuditEventResponse::from(event)) {
         let _ = state.audit_broadcast_tx.send(json);
+    }
+}
+
+/// hierarchy-enforcement.md §5 (Audit/Analytics/Cost Recording): the
+/// telemetry recording endpoints (`POST /api/v1/audit/events`,
+/// `POST /api/v1/analytics/events`, `POST /api/v1/costs`) accept
+/// agent-side pushes, not arbitrary authenticated writes. Resolves the
+/// agent identity the record may carry:
+///
+/// - Agent subjects (`subject.type == agent`) record their OWN events:
+///   a payload `agent_id` naming anyone else is rejected (403), and an
+///   absent one is bound to the verified caller (NEW-31 anti-forgery —
+///   the record always reflects who actually made the call).
+/// - Admin subjects may record on behalf of ANY agent
+///   (backfill/correction): the payload `agent_id` is honored as the
+///   recorded identity while `user_id` stays bound to the caller, so
+///   the operating admin remains attributable on the record.
+/// - Every other subject (Developer/ReadOnly users, membership-less
+///   API keys) is rejected with 403: recording requires an agent or
+///   Admin subject.
+///
+/// Enforced handler-level rather than as an ABAC policy because the
+/// binding rule compares a request-BODY field (`agent_id`) against the
+/// verified subject identity — the policy condition language evaluates
+/// subject/resource/action attributes and cannot see payload fields.
+/// Shared by the audit, analytics, and cost record handlers.
+pub(crate) fn resolve_recording_agent_id(
+    auth: &AuthenticatedAgent,
+    payload_agent_id: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let is_agent = auth.roles.contains(&gyre_domain::UserRole::Agent);
+    let is_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+    if !is_agent && !is_admin {
+        return Err(ApiError::Forbidden(
+            "recording requires an agent subject; Admin may record on behalf of any agent"
+                .to_string(),
+        ));
+    }
+    match payload_agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(named) => {
+            if is_admin || named == auth.agent_id {
+                Ok(Some(named.to_string()))
+            } else {
+                Err(ApiError::Forbidden(
+                    "agent_id does not match the authenticated subject".to_string(),
+                ))
+            }
+        }
+        None => {
+            if auth.agent_id.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(auth.agent_id.clone()))
+            }
+        }
     }
 }
 
@@ -217,18 +275,19 @@ pub async fn record_audit_event(
     headers: axum::http::HeaderMap,
     Json(req): Json<RecordAuditEventRequest>,
 ) -> Result<(StatusCode, Json<AuditEventResponse>), ApiError> {
-    // Bind agent_id to the verified caller identity to prevent audit trail forgery
-    // (NEW-31). The request body agent_id field is ignored - the audit record always
-    // reflects who actually made the call, not what the caller claims.
-    // Agent JWT callers carry an agent identity; user/API-key callers carry user_id.
-    let agent_id = if auth.agent_id.is_empty() {
-        None
-    } else {
-        Some(gyre_common::Id::new(auth.agent_id.clone()))
-    };
+    // hierarchy-enforcement.md §5 (Audit/Analytics/Cost Recording):
+    // agent subjects record their own events only — a payload agent_id
+    // naming anyone else is rejected, an absent one is bound to the
+    // verified caller (NEW-31 anti-forgery) — and Admin may record on
+    // behalf of any agent (backfill/correction). Every other subject is
+    // rejected. See `resolve_recording_agent_id`.
+    let agent_id =
+        resolve_recording_agent_id(&auth, req.agent_id.as_deref())?.map(gyre_common::Id::new);
     // Identity-security.md §Impersonation: events pushed during an
     // impersonation session are attributed to the impersonator (the admin
     // acting as the target), with the attribution context in detail.
+    // On Admin on-behalf recording this stays bound to the caller so the
+    // operating admin remains attributable on the record.
     let user_id = auth
         .impersonation
         .as_ref()
@@ -509,9 +568,16 @@ mod tests {
     #[tokio::test]
     async fn record_audit_event_returns_201() {
         let app = app();
-        // agent_id in body is ignored - caller identity from token is used (NEW-31).
+        // The global test token authenticates as the system principal
+        // (Admin role). hierarchy-enforcement.md §5: an Admin may record on
+        // behalf of any agent, so the payload agent_id IS the recorded
+        // identity — with the operator still attributable via user_id
+        // (null here: the system principal carries no user identity).
+        // The agent-subject counterpart (a non-admin agent CANNOT record
+        // another agent's id) is asserted in
+        // `audit_event_agent_id_rejects_mismatched_subject` below.
         let body = serde_json::json!({
-            "agent_id": "forged-agent-id",
+            "agent_id": "backfilled-agent-id",
             "event_type": "file_access",
             "detail": { "mode": "read", "path": "/etc/hosts", "pid": 1234 },
             "resource_type": "agent"
@@ -540,11 +606,17 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        // Verify the recorded agent_id reflects the token identity, not the forged body value.
-        assert_ne!(
+        // Verify the recorded agent_id reflects the on-behalf recording,
+        // with operator attribution preserved (no user identity on the
+        // system principal).
+        assert_eq!(
             json["agent_id"].as_str().unwrap(),
-            "forged-agent-id",
-            "audit event must not allow caller to forge agent_id (NEW-31)"
+            "backfilled-agent-id",
+            "Admin on-behalf recording must honor the payload agent_id"
+        );
+        assert!(
+            json["user_id"].is_null(),
+            "user_id must come from the caller identity, not the body"
         );
         // F3: caller-controlled forwarded headers are never trusted without a
         // socket peer + trusted-proxy gate.
@@ -862,7 +934,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn audit_event_agent_id_bound_to_caller() {
-        // NEW-31 regression: verify agent_id comes from auth, not request body.
+        // NEW-31 + hierarchy-enforcement.md §5 regression: an agent subject
+        // can record only its own events. A payload agent_id naming anyone
+        // else is REJECTED (403) — stronger than the old silent rebind —
+        // and an absent one is bound to the verified caller identity.
         use crate::abac_middleware::seed_builtin_policies;
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
@@ -883,31 +958,105 @@ mod tests {
             3600,
         );
 
+        let post = |body: &'static str| {
+            let state = state.clone();
+            let token = agent_token.clone();
+            async move {
+                crate::api::api_router()
+                    .with_state(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/audit/events")
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Forged agent_id: rejected, never recorded.
+        let resp = post(r#"{"agent_id":"evil-agent","event_type":"file_access"}"#).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "an agent subject must not record another agent's id (NEW-31 / hierarchy-enforcement §5)"
+        );
+
+        // Own agent_id: accepted and recorded as the verified identity.
+        let resp = post(r#"{"agent_id":"known-agent","event_type":"file_access"}"#).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["agent_id"].as_str().unwrap(),
+            "known-agent",
+            "a matching payload agent_id must record the verified subject identity"
+        );
+
+        // Absent agent_id: bound to the verified caller identity.
+        let resp = post(r#"{"event_type":"file_access"}"#).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["agent_id"].as_str().unwrap(),
+            "known-agent",
+            "an absent payload agent_id must bind to the caller identity (NEW-31)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_event_agent_id_rejects_mismatched_subject() {
+        // hierarchy-enforcement.md §5: recording requires an agent (or
+        // Admin) subject. A Developer user JWT — allowed through ABAC by
+        // the developer-write-access role Allow — must still be rejected
+        // by the recording gate: users do not record agent telemetry.
+        use crate::abac_middleware::seed_builtin_policies;
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
+        });
+
+        let developer_token = sign_test_jwt(
+            &serde_json::json!({
+                "tenant_id": "default",
+                "sub": "dev-sub",
+                "preferred_username": "dev-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
         let resp = crate::api::api_router()
             .with_state(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/audit/events")
-                    .header("authorization", format!("Bearer {agent_token}"))
+                    .header("authorization", format!("Bearer {developer_token}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"agent_id":"evil-agent","event_type":"file_access"}"#,
+                        r#"{"agent_id":"some-agent","event_type":"file_access"}"#,
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        // Must NOT be the forged value.
-        assert_ne!(
-            json["agent_id"].as_str().unwrap(),
-            "evil-agent",
-            "audit trail forgery must be prevented (NEW-31)"
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a non-agent, non-admin subject must not record telemetry"
         );
     }
 

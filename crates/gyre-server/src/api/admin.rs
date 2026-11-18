@@ -1036,7 +1036,6 @@ mod tests {
     fn admin_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
-                "tenant_id": "default",
                 "sub": "admin-sub",
                 "preferred_username": "admin-user",
                 "realm_access": { "roles": ["admin"] }
@@ -1048,7 +1047,6 @@ mod tests {
     fn developer_jwt() -> String {
         sign_test_jwt(
             &serde_json::json!({
-                "tenant_id": "default",
                 "sub": "dev-sub",
                 "preferred_username": "dev-user",
                 "realm_access": { "roles": ["developer"] }
@@ -1170,23 +1168,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// Create a workspace in the test state and return its id, so emitted
+    /// telemetry carries a resolvable scope (its tenant is loaded from the
+    /// workspace record — never fabricated).
+    async fn test_workspace(state: &std::sync::Arc<crate::AppState>) -> gyre_common::Id {
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-test"),
+            gyre_common::Id::new("tenant-test"),
+            "Test Workspace",
+            "ws-test",
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        ws.id.clone()
+    }
+
     #[tokio::test]
     async fn admin_audit_returns_events() {
         let state = test_state();
-        // emit_telemetry resolves the tenant scope from the workspace
-        // record (task-099 F1) and skips the emission when the workspace
-        // does not exist — seed it so the event is actually emitted.
-        let ws = gyre_domain::Workspace::new(
-            gyre_common::Id::new("default"),
-            gyre_common::Id::new("default"),
-            "Default",
-            "default",
-            0,
-        );
-        state.workspaces.create(&ws).await.unwrap();
+        let ws_id = test_workspace(&state).await;
         state
             .emit_telemetry(
-                gyre_common::Id::new("default"),
+                ws_id,
                 gyre_common::message::MessageKind::StateChanged,
                 Some(serde_json::json!({
                     "event_id": "test-event-1",
@@ -1216,21 +1219,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_audit_filters_by_agent_id() {
+    async fn admin_audit_drops_telemetry_with_unresolvable_scope() {
+        // The workspace does not exist, so its tenant cannot be resolved: the
+        // telemetry must be dropped (skip-and-log), never re-targeted to a
+        // fabricated "default" identity (task-099 F1 flaw class).
         let state = test_state();
-        // Same as admin_audit_returns_events: seed the workspace so the
-        // telemetry emission resolves a tenant scope (task-099 F1).
-        let ws = gyre_domain::Workspace::new(
-            gyre_common::Id::new("default"),
-            gyre_common::Id::new("default"),
-            "Default",
-            "default",
-            0,
-        );
-        state.workspaces.create(&ws).await.unwrap();
         state
             .emit_telemetry(
-                gyre_common::Id::new("default"),
+                gyre_common::Id::new("ghost-workspace"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "ghost-event",
+                    "agent_id": "agent-1",
+                    "event_type": "state_changed",
+                    "description": "Must not be recorded",
+                    "timestamp": 1000u64,
+                })),
+            )
+            .await;
+
+        let app = api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/audit")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 0, "telemetry with an unresolvable workspace scope must be dropped, not recorded under a fabricated tenant");
+    }
+
+    #[tokio::test]
+    async fn admin_audit_filters_by_agent_id() {
+        let state = test_state();
+        let ws_id = test_workspace(&state).await;
+        state
+            .emit_telemetry(
+                ws_id.clone(),
                 gyre_common::message::MessageKind::StateChanged,
                 Some(serde_json::json!({
                     "event_id": "e1",
@@ -1243,7 +1273,7 @@ mod tests {
             .await;
         state
             .emit_telemetry(
-                gyre_common::Id::new("default"),
+                ws_id,
                 gyre_common::message::MessageKind::StateChanged,
                 Some(serde_json::json!({
                     "event_id": "e2",
