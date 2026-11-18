@@ -228,6 +228,29 @@ class SpecBacklogTests(unittest.TestCase):
         self.assertEqual(again['generation'],new['generation']);self.assertEqual(again['data']['status'],'pending')
         self.assertNotIn('publication_rejections',again['data']);self.assertNotIn('plan_feedback',again['data'])
 
+    def test_transport_failure_cannot_readopt_a_rejected_report_but_keeps_draft_and_new_valid_receipts(self):
+        from pipeline.fullsend import adopt
+        from pipeline.spec_backlog import previous_report
+        plan=self.planned();task=self.store.task(self.name)
+        report={'plan':digest(plan),'approved':True,'findings':['Omitted containment requirement'],
+                'checks':[{'id':k,'detail':'Inspected source.'} for k in task['data']['sections']]}
+        work=self.run_stage('plan_review',report,expected_state='retry');inputs=json.loads(work['input'])
+        old=self.store.directory/'attempts'/work['id']/str(work['token']);(old/'bundle').mkdir(exist_ok=True)
+        job={'stage':'plan_review','task':self.name,'input':inputs,'branch':'private'}
+        (old/'bundle/job.json').write_text(json.dumps(job))
+        receipt={'valid':True,'source_valid':True,'agent_exit':0,'published':True,'head':self.base,'planning':report}
+        (old/'outcome.json').write_text(json.dumps(receipt))
+        self.store.db.execute("UPDATE work SET result=?,retry_at=0 WHERE id=?",(json.dumps({'category':'gateway_transport','message':'collection failed'}),work['id']))
+        claim=self.store.claim('plan_review','retry',eligible=lambda w:eligible(self.store,w));execution=Execution(self.store,claim)
+        self.assertIsNone(adopt(execution,task))
+        draft=previous_report(execution);self.assertEqual(draft['draft'],report)
+        self.assertIn('unresolved findings',draft['error'])
+        # Recovery of a later, different, valid report is still permitted.
+        (execution.directory/'bundle').mkdir();(execution.directory/'bundle/job.json').write_text(json.dumps(job))
+        corrected=receipt|{'planning':report|{'findings':[]}}
+        (execution.directory/'outcome.json').write_text(json.dumps(corrected))
+        self.assertEqual(adopt(execution,task)['planning'],corrected['planning'])
+
     def test_third_backlog_semantic_rejection_requires_attention_instead_of_unbounded_replanning(self):
         self.reviewed();self.run_stage('backlog');task=self.store.task(self.name)
         self.store.put_task(self.name,task['generation'],task['body'],task['data']|{'publication_rejections':2})

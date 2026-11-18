@@ -329,7 +329,14 @@ def run_model(execution, task):
                 updates={'plan_review':report,'status':'reviewed' if data['spec_audit']['gaps'] else 'observed'}
     except (ValueError,TypeError,KeyError) as exc:
         key=f"spec_report_failures:{task['name']}:{task['generation']}:{stage}:"+digest(execution.claim['input'])
-        count=execution.store.setting(key,0)+1;execution.store.set_setting(key,count)
+        feedback={'category':'spec_report','message':str(exc),'input':execution.claim['input']}
+        with execution.store.transaction():
+            execution.current()
+            count=execution.store.setting(key,0)+1
+            execution.store.db.executemany('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',[
+                (key,json.dumps(count)),
+                ('spec_report_rejected:'+execution.claim['id']+':'+digest(report),json.dumps(feedback)),
+                ('spec_report_feedback:'+execution.claim['id'],json.dumps(feedback))])
         error=Retry(str(exc),fresh_model=True) if count<3 else Attention(str(exc))
         error.category='spec_report';raise error from exc
     # Never let the normal task-body importer treat a planning receipt as delivery.
@@ -341,6 +348,9 @@ def previous_report(execution):
     """One input-bound draft, not an ever-growing failed-attempt prompt ledger."""
     previous=execution.claim.get('result') or {}
     if isinstance(previous,str):previous=json.loads(previous)
+    if previous.get('category')!='spec_report':
+        previous=execution.store.setting('spec_report_feedback:'+execution.claim['id'],{})
+        if previous.get('input')!=execution.claim['input']:return None
     if previous.get('category')!='spec_report':return None
     for path in sorted(execution.directory.parent.glob('*/outcome.json'),key=lambda p:int(p.parent.name),reverse=True):
         if path.parent==execution.directory:continue

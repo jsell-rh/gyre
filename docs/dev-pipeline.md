@@ -962,3 +962,8 @@ shipped or satisfied receipt. Its private checkpoint and reserved IDs remain
 historical; a revised, independently reviewed plan gets new IDs. The exact rejected
 plan cannot be resubmitted unchanged. Three rejected publications in one spec epoch
 require attention. A newer canonical-spec epoch is not reset by an older rejection.
+
+Schema-rejected planning reports are fenced by work identity and report content.
+An intervening transport retry cannot re-adopt the rejected receipt or erase the
+bounded correction draft. A later, different valid published report remains
+recoverable without repeating its model work.

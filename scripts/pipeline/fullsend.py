@@ -63,6 +63,10 @@ def adopt(execution, task):
         if previous.get('fresh_model') and path.parent != execution.directory:
             continue
         receipt = json.loads(path.read_text())
+        if claim['stage'] in ('spec_audit','decompose','plan_review'):
+            from .requirements import digest
+            if execution.store.setting('spec_report_rejected:'+claim['id']+':'+digest(receipt.get('planning'))):
+                continue  # An intervening transport failure cannot make a rejected report recoverable.
         job_path = path.parent / 'bundle/job.json'
         if not job_path.is_file() or not receipt.get('published'):
             continue
