@@ -1152,20 +1152,29 @@ pub(crate) async fn is_preview_agent(state: &AppState, agent_id: &str) -> bool {
     )
 }
 
-/// True when the caller authenticated via a Gyre-minted agent JWT
-/// (`scope == "agent"`) whose agent id belongs to a preview run. Global
-/// tokens, API keys and Keycloak JWTs never satisfy this: they are not the
-/// preview agent itself.
+/// True when the caller authenticated via a Gyre-minted agent JWT whose
+/// agent id belongs to a preview run. Gyre-minted agent JWTs serialize the
+/// fine-grained `scope` claim as a NON-EMPTY JSON ARRAY
+/// (`AgentJwtClaims.scope: Vec<String>`, populated by `mint_with_workload`
+/// with `repo:{name}:write` — see auth.rs §1 Token Scoping), so the array
+/// form is the discriminator; the legacy `scope: "agent"` string form is
+/// accepted for tokens minted before §1 (mirrors `mcp.rs is_agent_jwt` and
+/// `search_scope.rs is_agent_jwt`). Global tokens, API keys and Keycloak
+/// JWTs never satisfy either form: they are not the preview agent itself —
+/// and even a foreign array-scoped JWT falls through to the preview-agent
+/// registry lookup below, which is keyed by Gyre-generated agent ids.
 pub(crate) async fn caller_is_preview_agent(
     state: &AppState,
     auth: &crate::auth::AuthenticatedAgent,
 ) -> bool {
-    let agent_jwt = auth
-        .jwt_claims
-        .as_ref()
-        .and_then(|c| c.get("scope"))
-        .and_then(|s| s.as_str())
-        == Some("agent");
+    let Some(scope) = auth.jwt_claims.as_ref().and_then(|c| c.get("scope")) else {
+        return false;
+    };
+    let agent_jwt = match scope {
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::String(s) => s == "agent",
+        _ => false,
+    };
     agent_jwt && is_preview_agent(state, &auth.agent_id).await
 }
 
@@ -4746,6 +4755,137 @@ mod tests {
                     .is_none(),
                 "orphaned preview agent record must be reclaimed"
             );
+        })
+        .await;
+    }
+
+    /// Direct unit regression for the dead-guard failure class (task-206
+    /// review round 9ee3491d): Gyre-minted agent JWTs serialize `scope` as a
+    /// NON-EMPTY JSON ARRAY (`AgentJwtClaims.scope: Vec<String>`, populated
+    /// by `mint_with_workload` per §1 Token Scoping), so a containment guard
+    /// keyed on `claims["scope"].as_str() == Some("agent")` matches nothing
+    /// and every REST-surface preview-agent refusal silently stops firing
+    /// (the integration tests below drive the router, this one pins the
+    /// discriminator itself). The guard must recognize the claims a real
+    /// minted preview token carries — rebuilt exactly as the auth extractor
+    /// builds them (auth.rs per-agent token path:
+    /// `serde_json::to_value(AgentJwtClaims)` → `jwt_claims`) — and must
+    /// refuse every caller that is not the preview agent itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn caller_is_preview_agent_detects_array_scoped_jwt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, _ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            // Real preview run → real minted agent JWT (the production artifact).
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+
+            let token = state
+                .kv_store
+                .kv_get("agent_tokens", &agent_id)
+                .await
+                .unwrap()
+                .expect("preview agent token must be live");
+            let claims = state
+                .agent_signing_key
+                .validate(&token, &state.base_url)
+                .expect("preview agent token must be a valid JWT");
+            assert!(
+                !claims.scope.is_empty(),
+                "minted preview JWT must carry the §1 fine-grained scope list"
+            );
+            let claims_value = serde_json::to_value(&claims).unwrap();
+            assert!(
+                claims_value["scope"].is_array(),
+                "scope must serialize as a JSON array — the dead-guard failure class"
+            );
+
+            let mk_auth = |agent_id: String, jwt_claims: Option<serde_json::Value>| {
+                crate::auth::AuthenticatedAgent {
+                    agent_id,
+                    user_id: None,
+                    roles: vec![gyre_domain::UserRole::Agent],
+                    tenant_id: "default".to_string(),
+                    workspace_id: None,
+                    repo_id: None,
+                    scope: Vec::new(),
+                    jwt_claims,
+                    bearer_token: None,
+                    deprecated_token_auth: false,
+                    impersonation: None,
+                }
+            };
+
+            // The preview agent's own array-scoped JWT → the guard MUST fire.
+            // (This is the exact case the dead `as_str()` comparison missed.)
+            assert!(
+                super::caller_is_preview_agent(
+                    &state,
+                    &mk_auth(agent_id.clone(), Some(claims_value.clone()))
+                )
+                .await,
+                "array-scoped preview-agent JWT must be recognized"
+            );
+
+            // Same JWT form but a DIFFERENT agent id → refused: the
+            // preview-agent registry lookup, not the JWT shape, scopes the
+            // containment to preview runs.
+            assert!(
+                !super::caller_is_preview_agent(
+                    &state,
+                    &mk_auth(
+                        "not-a-preview-agent".to_string(),
+                        Some(claims_value.clone())
+                    )
+                )
+                .await,
+                "array-scoped JWT of a NON-preview agent must not match"
+            );
+
+            // Global token / API key / legacy UUID token: no JWT claims.
+            assert!(
+                !super::caller_is_preview_agent(&state, &mk_auth(agent_id.clone(), None)).await,
+                "claim-less caller must not match"
+            );
+
+            // Keycloak-style string scope (space-separated) must not match,
+            // even for the preview agent id.
+            let kc = mk_auth(
+                agent_id.clone(),
+                Some(serde_json::json!({ "scope": "openid profile" })),
+            );
+            assert!(
+                !super::caller_is_preview_agent(&state, &kc).await,
+                "space-separated string scope is not the agent-JWT discriminator"
+            );
+
+            // Empty scope array is not an agent-JWT signal.
+            let empty_arr =
+                mk_auth(agent_id.clone(), Some(serde_json::json!({ "scope": [] })));
+            assert!(
+                !super::caller_is_preview_agent(&state, &empty_arr).await,
+                "empty scope array must not match"
+            );
+
+            // Legacy pre-§1 string form `scope: "agent"` is still honored.
+            let legacy =
+                mk_auth(agent_id.clone(), Some(serde_json::json!({ "scope": "agent" })));
+            assert!(
+                super::caller_is_preview_agent(&state, &legacy).await,
+                "legacy string scope \"agent\" for a preview agent must be honored"
+            );
+
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
         })
         .await;
     }
