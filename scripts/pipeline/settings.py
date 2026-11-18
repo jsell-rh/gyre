@@ -22,7 +22,9 @@ def configuration(store):
     add('verification_slots', 'Reserved verification slots', store.setting('verification_slots', 1), live,
         help='0–1000, within total capacity. Effective reserve clamps to capacity minus one; existing workers finish.')
     add('worker_memory_max_gib', 'Worker memory ceiling (GiB)', store.setting('worker_memory_max_gib',6), 'New admissions', 'choice',
-        '4 GiB default. With ceiling 6, an authoritative OOM permits a 6 GiB retry for the same task stage and requirements generation. One CPU/build job; running allocations are unchanged.', ['4','6'])
+        'Bounds all workers, including verification. With ceiling 6, an authoritative OOM permits a 6 GiB retry for the same task stage and requirements generation. One CPU/build job; running allocations are unchanged.', ['4','6'])
+    add('verification_memory_gib', 'Verification starting memory (GiB)', store.setting('verification_memory_gib',4), 'New admissions', 'choice',
+        'Starts remote full-suite verification at 4 or 6 GiB, capped by the worker memory ceiling. Coding and review retain their 4 GiB defaults. Running allocations are unchanged.', ['4','6'])
     add('spec_reconciliation_enabled','Discover missing spec work',store.setting('spec_reconciliation_enabled',False),live,'choice',
         'Audit canonical specs, independently review missing-work plans, and publish task definitions before implementation. Does not mark coverage complete.',['false','true'])
     add('spec_planning_concurrency','Spec planning concurrency',store.setting('spec_planning_concurrency',2),live,
@@ -76,9 +78,9 @@ def save_configuration(store, request):
             value = text == 'true'
         elif key.startswith('limit.') and not text:
             value = None
-        elif key == 'worker_memory_max_gib':
+        elif key in ('worker_memory_max_gib','verification_memory_gib'):
             if text not in ('4','6'):
-                raise ValueError('worker memory ceiling must be 4 or 6 GiB')
+                raise ValueError('worker memory settings must be 4 or 6 GiB')
             value = int(text)
         else:
             if not text.isascii() or not text.isdecimal():

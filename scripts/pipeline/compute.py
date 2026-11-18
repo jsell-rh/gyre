@@ -24,6 +24,11 @@ def oom_limit(evidence):
 def profile(store, task, stage):
     memory = 4
     if memory_ceiling(store) == 6:
+        # Explicit operator sizing of the full verification suite is distinct
+        # from evidence-based escalation of individual coding/review workers.
+        baseline = store.setting('verification_memory_gib',4)
+        if stage == 'verify' and type(baseline) is int and baseline == 6:
+            memory = 6
         # Bind historical evidence through its owned allocation and work record,
         # so another task, stage or requirements generation cannot raise memory.
         records = store.db.execute("""SELECT e.detail FROM events e
