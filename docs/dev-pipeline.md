@@ -893,3 +893,65 @@ CI and guards are outside this amendment's authority. Independent review,
 remote verification and GitHub checks still precede merge. After the amendment
 lands, normal source reconciliation reassesses the parent task and builds the
 remaining implementation. The old contradictory task is never blindly unpaused.
+
+## Spec discovery and backlog reconciliation
+
+The task queue is not the specification. The optional spec reconcilers inspect
+canonical `specs/system/*.md` and `specs/development/*.md`, including documents
+without coverage tables. `trusted-foundry-integration.md` remains excluded by GOAL.
+Coverage labels, imported completion and historical task receipts never prove
+that current code satisfies a requirement.
+
+Four additional independently claimable stages use the same ledger and leases:
+
+| Stage | Operation | Durable output |
+|---|---|---|
+| `spec_audit` | Read the entire canonical document against an exact upstream base. Account for every heading with literal requirement and source evidence. | Source-bound gap/satisfaction/context observations. |
+| `decompose` | Partition confirmed gaps into bounded tasks with concrete acceptance criteria, negative verification intent and dependency edges. Inspect existing tasks before proposing work. | A complete gap-to-task ownership plan; unfinished tasks can be reused. |
+| `plan_review` | A separate read-only agent challenges every section and the plan, including no-gap/context claims and duplicate-work analysis. | Exact-plan approval or actionable feedback to a fresh audit cycle. Repeated rejection requires attention. |
+| `backlog` | Mechanically materialize approved task documents and explicit registry bindings. Reserve names transactionally across planners, human decisions and CI repairs. | A private immutable checkpoint that enters ordinary independent review, remote verification, PR checks and merge. |
+
+Generated implementation tasks are **not inserted into the runnable catalog**
+before the backlog PR merges. Once imported from main, they follow normal triage,
+implementation, independent review, remote verification and publication. The
+backlog publication cannot change specs, production code, coverage or enforcement.
+Its manifest fences changes to the generated contracts and existing bindings;
+a canonical spec change requires a fresh plan. A lost push response reuses the
+same reserved IDs and deterministic commit, rather than duplicating work.
+
+Planning records have stable `spec-…` identities and are not product deliveries.
+The cockpit reports them separately and includes their active allocations in the
+running count. `observed` means independently reviewed source evidence, **not**
+verified coverage. No-gap audits still require independent plan review; they do
+not manufacture implementation tasks or tests for working behavior. Audit and
+plan preparation are source inspection only; their build wrappers reject tests
+and builds. Product changes still pass all existing deterministic gates.
+
+An assigned document is re-audited after its linked tasks are satisfied. Observed
+documents are re-audited when inspected source changes or the audit interval
+expires. Spec/GOAL changes fence old work immediately. The same remaining gaps
+with unchanged production evidence cannot acquire another paraphrased plan:
+they require diagnosis of the original delivery. Existing work and its evidence
+are preserved. Unrelated main advances do not invalidate an audit solely because
+the commit SHA changed; independent publication review checks the materialized
+plan against its newer assigned base.
+
+In Configuration, enable **Discover missing spec work**. It defaults off for an
+explicit rollout. **Spec planning concurrency** defaults to two across all three
+model stages, also bounded by total slots, quota admission and the verification
+reserve. **Spec re-audit interval** defaults to one day. An optional local
+`spec_reconciliation_documents` list restricts a production qualification run to
+named canonical paths; removing it restores the full inventory. `only_task`
+continues to restrict all dispatcher work and should be unset for normal use.
+
+Each stage can also be invoked through the standard `discover`, `run` or `tick`
+commands. `spec_reconciliation` in the cockpit snapshot reports document states;
+the existing coverage display remains independent. The controller never interprets
+an empty task queue or a successful planning run as proof all specs are implemented.
+
+Downstream planning has precedence over fresh audits within the background pool:
+the first useful plan can reach implementation without waiting for the entire
+inventory scan. Normal product work stays ahead of background planning. Deleted
+specs fence their audit claims and retire their planning records without altering
+an operator pause. Semantic conflicts enter the existing three-option human
+decision flow; a reviewed amendment releases a fresh audit, never a blind code run.

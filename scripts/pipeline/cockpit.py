@@ -3,7 +3,7 @@ import json
 import time
 
 from .catalog import contract
-from .store import STAGES
+from .store import STAGES, PLANNING
 
 
 def snapshot(store):
@@ -14,7 +14,8 @@ def snapshot(store):
     from .capacity import summary
     capacity=summary(store)
     from .progress import blockers, delivery
-    records = store.tasks()
+    from .spec_backlog import summary as spec_summary
+    records = [t for t in store.tasks() if not t['data'].get('spec_planner')]
     by_name = {task['name']: task for task in records}
     work = [dict(row) for row in store.db.execute('SELECT * FROM work ORDER BY created DESC')]
     tasks, attempts, counts = [], [], {}
@@ -96,8 +97,8 @@ def snapshot(store):
                       for state in ('ready', 'claimed', 'retry', 'succeeded', 'attention')}
               for stage in STAGES}
     from .decisions import list_decisions
-    return {'decisions': list_decisions(store), 'tasks': tasks, 'attempts': attempts, 'events': events, 'counts': counts,
-            'running': sum(bool(task['stage']) for task in tasks), 'eligible': sum(task['state'] == 'ready' for task in tasks),
+    return {'spec_reconciliation':spec_summary(store), 'decisions': list_decisions(store), 'tasks': tasks, 'attempts': attempts, 'events': events, 'counts': counts,
+            'running': sum(bool(task['stage']) for task in tasks)+sum(w['stage'] in PLANNING and w['state']=='claimed' and (w['expires'] or 0)>time.time() for w in work), 'eligible': sum(task['state'] == 'ready' for task in tasks),
             'slots': store.setting('slots', 8), 'stages': stages,
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
             'resources': {'used': store.compute_used(), 'deletion_pending': dict(resources).get('deleting', 0),

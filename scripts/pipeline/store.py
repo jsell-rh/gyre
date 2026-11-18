@@ -10,7 +10,9 @@ import sqlite3
 import time
 import uuid
 
-STAGES = ('triage', 'assess', 'implement', 'review', 'verify', 'publish', 'observe', 'cleanup')
+PLANNING = ('spec_audit', 'decompose', 'plan_review')
+COMPUTE = ('triage', 'assess', 'implement', 'review', 'verify', *PLANNING)
+STAGES = ('triage', 'assess', *PLANNING, 'backlog', 'implement', 'review', 'verify', 'publish', 'observe', 'cleanup')
 
 
 class StaleClaim(RuntimeError):
@@ -40,6 +42,7 @@ class Store:
               retry_at REAL NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
               result TEXT, created REAL NOT NULL, updated REAL NOT NULL,
               UNIQUE(stage,task,generation,input_key));
+            CREATE INDEX IF NOT EXISTS work_task_generation ON work(task,generation,updated);
             CREATE INDEX IF NOT EXISTS ready_work ON work(stage,state,retry_at,priority);
             CREATE TABLE IF NOT EXISTS findings(
               id TEXT PRIMARY KEY, work TEXT NOT NULL REFERENCES work(id),
@@ -56,6 +59,7 @@ class Store:
               id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, work TEXT,
               kind TEXT NOT NULL, detail TEXT NOT NULL, at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS task_allocations(name TEXT PRIMARY KEY,purpose TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS work_events ON events(work,kind);
             CREATE TABLE IF NOT EXISTS task_history(
               id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT NOT NULL,
@@ -98,8 +102,10 @@ class Store:
         self.db.execute('INSERT INTO events(task,work,kind,detail,at) VALUES(?,?,?,?,?)',
                         (task, work, kind, json.dumps(detail), time.time()))
 
-    def put_task(self, name, generation, body, data, expected=None):
+    def put_task(self, name, generation, body, data, expected=None, fence=None):
         with self.transaction():
+            if fence is not None:
+                self._current(*fence)  # Child creation is atomic with its parent's claim fence.
             old = self.db.execute('SELECT * FROM tasks WHERE name=?', (name,)).fetchone()
             if expected is not None and (not old or old['generation'] != expected['generation']
                     or old['body'] != expected['body'] or json.loads(old['data']) != expected['data']):
@@ -173,7 +179,7 @@ class Store:
             active = self.db.execute("SELECT count(*) FROM work WHERE stage=? AND state='claimed'", (stage,)).fetchone()[0]
             if active >= concurrency:
                 return None
-            compute = stage in ('triage', 'assess', 'implement', 'review', 'verify') and capacity is not None
+            compute = stage in COMPUTE and capacity is not None
             if compute and not self.admission_available(stage,capacity):
                 return None
             rows = self.db.execute('''SELECT w.* FROM work w JOIN tasks t
@@ -188,7 +194,7 @@ class Store:
             from .priority import sort_key, task_priority, PriorityError
             rows=sorted((dict(row) for row in rows),key=lambda row:sort_key(self,row,now))
             def valid_priority(row):
-                if row['stage'] not in ('triage','assess','implement','review','verify'):
+                if row['stage'] not in COMPUTE:
                     return True
                 try:
                     task_priority(self,self.task(row['task']))
@@ -250,7 +256,7 @@ class Store:
             WHERE r.state<>'absent' AND (? IS NULL OR w.task=?) AND (? IS NULL OR r.work=?)""",
             (task,task,work,work)).fetchall()
         return [row for row in rows if row['kind']!='provider' and not (
-            self.compute_released(row) and (row['stage'] in ('review','verify','assess')
+            self.compute_released(row) and (row['stage'] in ('review','verify','assess',*PLANNING)
                 or ((json.loads(row['data']).get('source_capture') or {}).get('state')=='not_started'
                     and (json.loads(row['data']).get('source_capture') or {}).get('work')==row['work']
                     and (json.loads(row['data']).get('source_capture') or {}).get('token')==row['token'])))]
@@ -263,7 +269,7 @@ class Store:
         return min(self.setting('verification_slots',1),max(0,capacity-1))
 
     def admission_available(self, stage, capacity=None, work=None):
-        if stage not in ('triage','assess','implement','review','verify'):
+        if stage not in COMPUTE:
             return True
         if self.setting('admission_paused',False):
             return False

@@ -36,7 +36,7 @@ def restore(directory, repository, expected_branch=None):
         if not re.fullmatch(r'[a-f0-9]{40}', receipt.get(key, '')):
             raise ValueError('invalid checkpoint source identity')
     branch = receipt.get('branch', '')
-    if not re.fullmatch(r'pipeline/task-\d+/[a-f0-9]{32}-\d+', branch):
+    if not re.fullmatch(r'pipeline/(?:task-\d+|spec-[a-f0-9]{24})/[a-f0-9]{32}-\d+', branch):
         raise ValueError('checkpoint does not belong to a pipeline claim')
     if expected_branch is not None and branch != expected_branch:
         raise ValueError('checkpoint belongs to another task or claim')

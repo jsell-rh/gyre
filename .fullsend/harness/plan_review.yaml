@@ -1,0 +1,3 @@
+base: worker.yaml
+agent: agents/plan_review.md
+role: review

@@ -131,6 +131,32 @@ class FullsendContracts(FullsendFixture):
         self.assertTrue((cfg/'agents/assess.md').is_file())
         self.assertTrue((self.execution.directory/'bundle/review-before.json').is_file())
 
+    def test_spec_planning_stages_are_registered_and_finalize_read_only_reports(self):
+        from pipeline.catalog import helper
+        self.store.finish(self.work,self.claim['token'],{})
+        name='spec-'+'a'*24
+        self.store.put_task(name,'g',self.body,{})
+        for stage in ('spec_audit','decompose','plan_review'):
+            with self.subTest(stage=stage):
+                work=self.store.enqueue(stage,name,'g',{'base':self.base})
+                claim=self.store.claim(stage,'planner');execution=Execution(self.store,claim)
+                cfg,repo,_=prepare(execution,self.store.task(name),'Read-only planning fixture.')
+                self.assertIn('name: '+stage+'\n    source: harness/'+stage+'.yaml',(cfg/'config.yaml').read_text())
+                harness=json.loads((cfg/'harness'/f'{stage}.yaml').read_text())
+                self.assertEqual(harness['role'],'review')
+                bundle=execution.directory/'bundle'
+                job=json.loads((bundle/'job.json').read_text());job['checkout']=str(repo)
+                (bundle/'job.json').write_text(json.dumps(job));(bundle/'planning.json').write_text(json.dumps({'fixture':'trusted report transport'}))
+                remote=helper('pipeline-remote');remote.STAGE=bundle
+                previous=Path.cwd()
+                try:
+                    with patch.object(sys,'argv',['pipeline-remote.py','finalize','1']):remote.main()
+                finally:os.chdir(previous)
+                result=json.loads((bundle/'outcome.json').read_text())
+                self.assertTrue(result['valid']);self.assertTrue(result['source_valid']);self.assertTrue(result['published'])
+                self.assertEqual(result['planning']['fixture'],'trusted report transport')
+                self.store.finish(work,claim['token'],{})
+
     def interrupted_review(self, source_edit=False, wrong_candidate=False):
         import io
         self.store.finish(self.work,self.claim['token'],{})
@@ -447,7 +473,9 @@ else: print('fixture control operation')
             deadline=time.monotonic()+5
             while time.monotonic()<deadline:
                 stat=Path(f'/proc/{child}/stat')
-                if not stat.exists() or stat.read_text().rsplit(')',1)[1].split()[0]=='Z':break
+                try:child_state=stat.read_text().rsplit(')',1)[1].split()[0]
+                except FileNotFoundError:break
+                if child_state=='Z':break
                 time.sleep(.02)
             else:self.fail('bootstrap CLI survived its killed wrapper')
         finally:
