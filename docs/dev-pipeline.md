@@ -985,3 +985,8 @@ Stable heading-scoped finding IDs bound repeated unresolved issues to three revi
 Distinct corrections may progress, with a separate ceiling of twelve revisions
 without approval. Approval resets this budget. Re-auditing unchanged production
 source cannot resubmit the same rejected task contracts unchanged.
+
+The inline planning prompt contains input identities and availability counts; the
+complete audit, plan, catalog and correction inputs are read once from the staged
+machine context. A plan-only correction reuses that current audit instead of copying
+it again into its retained draft. Normative requirements and validation remain intact.

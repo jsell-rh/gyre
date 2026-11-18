@@ -273,7 +273,7 @@ class SpecBacklogTests(unittest.TestCase):
         self.run_stage('plan_review',{'plan':digest(plan),'approved':False,'findings':['Nested containment is omitted'],
             'checks':[{'id':i,'detail':'Rechecked source against canonical requirements.'} for i in task['data']['sections']]})
         current=self.store.task(self.name);context=planning_context(current,self.store)
-        self.assertEqual(context['revision_draft'],{'audit':audit,'plan':plan})
+        self.assertEqual(context['revision_draft'],{'audit':{k:audit[k] for k in ('base','requirements','sections')},'plan':plan})
         self.assertIsNone(context['audit']);self.assertIsNone(context['plan'])
         self.assertIn('Nested containment',json.dumps(context['review_feedback']))
         claim_id=discover(self.store,'spec_audit',self.base)[0]
@@ -282,7 +282,7 @@ class SpecBacklogTests(unittest.TestCase):
             text=prompt(execution,current)
         self.assertIn('revision_draft_available',text)
         self.assertNotIn('Production read omits tenant filtering',text)
-        self.assertIsNone(revision_draft({'spec_audit':{'detail':'x'*131073}}))
+        self.assertIsNone(revision_draft({'spec_audit':{'base':self.base,'requirements':task['generation'],'sections':[{'detail':'x'*131073}]}}))
         # A new canonical epoch must not carry this previous-contract draft.
         (self.repo/'specs/system/example.md').write_text('# Example\nNew requirements.\n')
         inventory(self.store,self.repo,self.base)
@@ -330,6 +330,27 @@ class SpecBacklogTests(unittest.TestCase):
         unchanged=copy.deepcopy(plan);unchanged['audit']=digest(new)
         work=self.run_stage('decompose',unchanged,expected_state='retry')
         self.assertIn('Unchanged rejected task contracts',json.loads(work['result'])['message'])
+
+    def test_planning_prompt_references_one_complete_machine_context_without_duplicate_reports(self):
+        from pipeline.stages import prompt
+        from pipeline.spec_backlog import planning_context
+        from types import SimpleNamespace
+        plan=self.planned();task=self.store.task(self.name)
+        discover(self.store,'plan_review',self.base)
+        claim=self.store.claim('plan_review','test',eligible=lambda w:eligible(self.store,w));execution=Execution(self.store,claim)
+        with patch.object(Execution,'command',return_value=SimpleNamespace(stdout='task contract')):
+            text=prompt(execution,task)
+        self.assertNotIn('Production read omits tenant filtering',text)
+        self.assertNotIn(plan['tasks'][0]['required_behavior'],text)
+        summary=json.loads(text.split('Planning context:\n',1)[1].split('\n\n',1)[0])
+        self.assertTrue(summary['audit_available']);self.assertTrue(summary['plan_available'])
+        self.assertEqual(summary['heading_count'],len(task['data']['sections']))
+        self.assertEqual(summary['machine_context'],'/tmp/stage/planning-context.json')
+        context=planning_context(task,self.store)
+        self.assertEqual(context['audit'],task['data']['spec_audit']);self.assertEqual(context['plan'],plan)
+        correction=task|{'data':task['data']|{'decomposition':None,'revision_draft':{'audit':context['audit'],'plan':plan}}}
+        compact=planning_context(correction,self.store)
+        self.assertEqual(compact['audit'],context['audit']);self.assertEqual(compact['revision_draft'],{'plan':plan})
 
     def test_published_manifest_rejects_rewritten_bindings_and_task_definitions(self):
         self.reviewed();self.run_stage('backlog');data=self.store.task(self.name)['data']

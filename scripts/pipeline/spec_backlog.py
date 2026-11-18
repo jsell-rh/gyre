@@ -124,7 +124,9 @@ def audit_input(store, task, base, cycle):
 
 def revision_draft(data):
     """One bounded prior revision, never an approval or an accumulating ledger."""
-    draft={'audit':data.get('spec_audit'),'plan':data.get('decomposition')}
+    audit=data.get('spec_audit')
+    if audit:audit={k:audit[k] for k in ('base','requirements','sections')}
+    draft={'audit':audit,'plan':data.get('decomposition')}
     return draft if len(json.dumps(draft))<=131072 else None
 
 
@@ -433,9 +435,11 @@ def other_plans_context(store, task, documents=None):
 
 def planning_context(task, store=None, documents=None):
     data=task['data']
+    draft=data.get('revision_draft') if not data.get('decomposition') else None
+    if draft and data.get('spec_audit'):draft={'plan':draft.get('plan')}
     return {'document':data['document'],'requirements':task['generation'],'sections':data['sections'],
             'audit':data.get('spec_audit'),'plan':data.get('decomposition'),'review_feedback':data.get('plan_feedback'),
-            'revision_draft':data.get('revision_draft') if not data.get('decomposition') else None,
+            'revision_draft':draft,
             'catalog':catalog_context(store,data['document']) if store else [],
             'audit_at':data.get('audited_at'),
             'other_plans':other_plans_context(store,task,documents) if store else []}
