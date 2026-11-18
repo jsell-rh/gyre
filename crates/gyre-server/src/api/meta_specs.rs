@@ -2192,7 +2192,11 @@ pub(crate) async fn mark_preview_slot_released(state: &AppState, agent_id: &str)
     agent_ref.released = true;
     match serde_json::to_string(&agent_ref) {
         Ok(json) => {
-            if let Err(e) = state.kv_store.kv_set(PREVIEW_AGENTS_NS, agent_id, json).await {
+            if let Err(e) = state
+                .kv_store
+                .kv_set(PREVIEW_AGENTS_NS, agent_id, json)
+                .await
+            {
                 tracing::warn!(agent_id, "preview slot flag persist failed: {e:#}");
             }
         }
@@ -5202,16 +5206,17 @@ mod tests {
             );
 
             // Empty scope array is not an agent-JWT signal.
-            let empty_arr =
-                mk_auth(agent_id.clone(), Some(serde_json::json!({ "scope": [] })));
+            let empty_arr = mk_auth(agent_id.clone(), Some(serde_json::json!({ "scope": [] })));
             assert!(
                 !super::caller_is_preview_agent(&state, &empty_arr).await,
                 "empty scope array must not match"
             );
 
             // Legacy pre-§1 string form `scope: "agent"` is still honored.
-            let legacy =
-                mk_auth(agent_id.clone(), Some(serde_json::json!({ "scope": "agent" })));
+            let legacy = mk_auth(
+                agent_id.clone(),
+                Some(serde_json::json!({ "scope": "agent" })),
+            );
             assert!(
                 super::caller_is_preview_agent(&state, &legacy).await,
                 "legacy string scope \"agent\" for a preview agent must be honored"

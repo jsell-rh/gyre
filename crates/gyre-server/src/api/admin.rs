@@ -443,11 +443,7 @@ pub(crate) async fn kill_agent(
         // of them releases the same slot a second time (exactly-once;
         // decrement_active is MAX(0, n-1) — a double release permanently
         // biases the counter down). No-op for normal agents.
-        crate::api::meta_specs::mark_preview_slot_released(
-            state,
-            &agent.id.to_string(),
-        )
-        .await;
+        crate::api::meta_specs::mark_preview_slot_released(state, &agent.id.to_string()).await;
     }
 
     let ws_id = agent.workspace_id.clone();
