@@ -1492,6 +1492,14 @@ pub async fn budget_stop_agent(state: &AppState, agent: &gyre_domain::Agent, rea
     // Charge wall-clock compute minutes and release the budget slot.
     record_compute_minutes_for_agent(state, &stopped).await;
     decrement_active_agents(state, &stopped.workspace_id.to_string()).await;
+    // Preview-agent slot bookkeeping: this stop released the slot and killed
+    // the process, so the exit monitor will route the agent through
+    // finish_preview_agent and a later preview DELETE/GC runs teardown —
+    // both consult the flag this writes so neither releases the same slot
+    // a second time (exactly-once; decrement_active is MAX(0, n-1) — a
+    // double release permanently biases the counter down). No-op for
+    // normal agents.
+    crate::api::meta_specs::mark_preview_slot_released(state, &stopped.id.to_string()).await;
 
     // platform-model.md §5 Enforcement Behavior: "A task is created:
     // 'Agent hit budget limit on TASK-X, needs reassignment or budget

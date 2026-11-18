@@ -3350,6 +3350,15 @@ pub async fn fail_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // A preview agent holds a real budget slot (spawned via
+    // POST /meta-specs/preview), and this route just released it — flag the
+    // preview bookkeeping so the preview-owned release (process exit,
+    // DELETE, GC) does not decrement the same slot a second time
+    // (exactly-once; `decrement_active` is MAX(0, n-1), so a double
+    // release permanently biases the counter down). No-op for normal
+    // agents. The process keeps running until it exits on its own; the
+    // exit monitor's finish path then sees the flag and skips its release.
+    super::meta_specs::mark_preview_slot_released(&state, &agent.id.to_string()).await;
     // agent-runtime.md §4: wall-clock compute time (spawn → fail).
     super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 
@@ -3520,6 +3529,12 @@ pub async fn stop_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+    // Preview-agent slot bookkeeping — same exactly-once contract as the
+    // decrement above (see fail_agent): this route released the slot, so
+    // the preview-owned release must not release it again. The process
+    // keeps running (stop is a ledger transition, not a kill); its later
+    // exit routes through finish_preview_agent, which consults the flag.
+    super::meta_specs::mark_preview_slot_released(&state, &agent.id.to_string()).await;
     // agent-runtime.md §4: wall-clock compute time (spawn → stop).
     super::budget::record_compute_minutes_for_agent(&state, &agent).await;
 

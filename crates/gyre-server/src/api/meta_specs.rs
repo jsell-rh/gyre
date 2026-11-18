@@ -1000,7 +1000,7 @@ pub async fn post_meta_spec_preview(
                 agent_id = %p.agent_ref.agent_id,
                 "preview agent launch failed: {reason}"
             );
-            mark_preview_agent_failed(&state, &preview_id, p).await;
+            mark_preview_agent_failed(&state, p).await;
         }
     }
 
@@ -1855,7 +1855,7 @@ async fn launch_preview_agent(
 
 /// Launch failure: terminal agent, revoked token, released slot, worktree gone.
 /// The run record survives so the failed agent is still visible in the status.
-async fn mark_preview_agent_failed(state: &AppState, preview_id: &str, p: &mut Provisioned) {
+async fn mark_preview_agent_failed(state: &AppState, p: &mut Provisioned) {
     // Defense-in-depth: if anything registered a process for this agent
     // (a partially-completed dispatch, a stale registry entry), kill it
     // through the recorded handle/backend pair — the same routing as
@@ -1885,17 +1885,12 @@ async fn mark_preview_agent_failed(state: &AppState, preview_id: &str, p: &mut P
     }
     revoke_preview_token(state, &p.agent_ref.agent_id).await;
     remove_preview_worktree(state, &p.agent_ref).await;
-    if !p.agent_ref.released {
-        p.agent_ref.released = true;
-        super::budget::decrement_active_agents(state, &p.agent_ref.workspace_id).await;
-    }
-    let agent_id = p.agent_ref.agent_id.clone();
-    mutate_preview(state, preview_id, |record| {
-        if let Some(entry) = record.agents.iter_mut().find(|a| a.agent_id == agent_id) {
-            entry.released = true;
-        }
-    })
-    .await;
+    // Routed through the durable-guarded release: a generic terminal path
+    // (stop/fail route, admin kill, budget stop) may have released this
+    // slot between provisioning and the launch verdict — the snapshot flag
+    // alone must not decide the decrement.
+    release_preview_slot(state, &p.agent_ref).await;
+    p.agent_ref.released = true;
 }
 
 /// Kill, unmount and forget every agent in a run, then drop its records.
@@ -1966,9 +1961,10 @@ async fn rollback_preview_agent(state: &AppState, agent_ref: &PreviewAgentRef) {
     if let Err(e) = state.agents.delete(&Id::new(&agent_ref.agent_id)).await {
         tracing::warn!(agent_id = %agent_ref.agent_id, "preview agent row cleanup failed: {e:#}");
     }
-    if !agent_ref.released {
-        super::budget::decrement_active_agents(state, &agent_ref.workspace_id).await;
-    }
+    // Same durable-guarded release: the snapshot's `released: true` covers
+    // the no-slot-taken rollbacks, and the durable check covers a generic
+    // terminal path that released the slot first.
+    release_preview_slot(state, agent_ref).await;
 }
 
 /// Kill a preview agent's runtime through the backend recorded at spawn
@@ -2123,13 +2119,92 @@ async fn delete_preview_branch(state: &AppState, agent_ref: &PreviewAgentRef) {
 }
 
 /// Release the budget slot exactly once across process-exit, DELETE and GC.
+///
+/// The caller's `agent_ref` snapshot may be stale: the generic terminal
+/// paths — the stop/fail agent routes, the admin kill, budget enforcement
+/// and the stale-agent detector — decrement the SAME workspace/tenant
+/// counters for a preview agent and flag the record through
+/// [`mark_preview_slot_released`]. The durable per-agent index, not the
+/// snapshot, is therefore the release authority. A double release is not
+/// recoverable: `decrement_active` is MAX(0, n-1), so each extra decrement
+/// permanently biases the counter down and lets later spawns over-admit
+/// past `max_concurrent_agents`.
 async fn release_preview_slot(state: &AppState, agent_ref: &PreviewAgentRef) {
-    if agent_ref.released {
+    if agent_ref.released || preview_slot_released(state, &agent_ref.agent_id).await {
         return;
     }
     super::budget::decrement_active_agents(state, &agent_ref.workspace_id).await;
-    let agent_id = agent_ref.agent_id.clone();
-    mutate_preview(state, &agent_ref.preview_id, |record| {
+    mark_preview_slot_released(state, &agent_ref.agent_id).await;
+}
+
+/// Read the durable `released` flag from the per-agent index — the
+/// authority [`release_preview_slot`] re-checks before decrementing. A
+/// missing or unreadable entry reads as unreleased (the caller then
+/// releases, matching the pre-flag behavior); only an explicit `true`
+/// suppresses the decrement.
+async fn preview_slot_released(state: &AppState, agent_id: &str) -> bool {
+    match state.kv_store.kv_get(PREVIEW_AGENTS_NS, agent_id).await {
+        Ok(Some(raw)) => serde_json::from_str::<PreviewAgentRef>(&raw)
+            .map(|a| a.released)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Flag a preview agent's budget slot as released WITHOUT decrementing it.
+///
+/// Called by the generic terminal paths — the stop/fail agent routes, the
+/// admin kill, budget enforcement and the stale-agent detector — right
+/// after they decremented the workspace/tenant counters themselves through
+/// `budget::decrement_active_agents`. The durable flag is what keeps the
+/// preview-owned release ([`release_preview_slot`], reached from process
+/// exit, DELETE and the GC sweep) exactly-once: without it, the preview
+/// path decrements the same slot a second time, and because
+/// `decrement_active` is MAX(0, n-1) the over-release can never be earned
+/// back — every occurrence permanently biases the counter down.
+///
+/// No-op for non-preview agents (no index entry) and already-released
+/// slots. Best-effort on kv errors: the failure is logged, and the durable
+/// re-check in `release_preview_slot` then still sees the stale flag —
+/// one over-release under a failing kv store, never a silent one.
+pub(crate) async fn mark_preview_slot_released(state: &AppState, agent_id: &str) {
+    let raw = match state.kv_store.kv_get(PREVIEW_AGENTS_NS, agent_id).await {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return, // not a preview agent — nothing to flag
+        Err(e) => {
+            tracing::warn!(agent_id, "cannot flag preview slot released: {e:#}");
+            return;
+        }
+    };
+    let mut agent_ref = match serde_json::from_str::<PreviewAgentRef>(&raw) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(
+                agent_id,
+                "preview agent record corrupt while flagging slot release: {e}"
+            );
+            return;
+        }
+    };
+    if agent_ref.released {
+        return;
+    }
+    agent_ref.released = true;
+    match serde_json::to_string(&agent_ref) {
+        Ok(json) => {
+            if let Err(e) = state.kv_store.kv_set(PREVIEW_AGENTS_NS, agent_id, json).await {
+                tracing::warn!(agent_id, "preview slot flag persist failed: {e:#}");
+            }
+        }
+        Err(e) => {
+            tracing::error!(agent_id, "preview slot flag serialize failed: {e}");
+        }
+    }
+    // Keep the run record's embedded copy in step: `mutate_preview`
+    // rewrites the per-agent index from the record, so an unflagged record
+    // entry would resurrect the stale flag on the next unrelated mutation.
+    let preview_id = agent_ref.preview_id.clone();
+    mutate_preview(state, &preview_id, |record| {
         if let Some(entry) = record.agents.iter_mut().find(|a| a.agent_id == agent_id) {
             entry.released = true;
         }
@@ -3796,7 +3871,7 @@ mod tests {
             std::sync::Arc::new(crate::api::spawn::SpawnBackend::Local),
         );
 
-        mark_preview_agent_failed(&state, "preview-failkill", &mut p).await;
+        mark_preview_agent_failed(&state, &mut p).await;
 
         // The registered process is actually dead.
         let mut dead = false;
@@ -4277,6 +4352,264 @@ mod tests {
                     .any(|p| p["path"].as_str().unwrap() == "specs/system/search.md"),
                 "diff must include the changed spec: {patches:?}"
             );
+        })
+        .await;
+    }
+
+    /// Regression (task-206 review round 05ab61cb — preview budget slot
+    /// double-release): the generic stop/fail routes release a preview
+    /// agent's workspace/tenant slot themselves, and every preview-owned
+    /// release that follows — the process-exit finish path, then the
+    /// human's DELETE — must not release the same slot again. Before the
+    /// fix, neither the exit path nor DELETE consulted a flag the generic
+    /// route had set, so one stopped preview agent biased `active_agents`
+    /// down by one permanently (decrement is MAX(0, n-1)) while the
+    /// background agent kept running — later spawns then over-admit past
+    /// max_concurrent_agents, the exact blocking class the budget exists
+    /// to prevent.
+    ///
+    /// Reproduction shape from the review: background agent B holds one
+    /// slot; POST /meta-specs/preview adds two preview agents (active=3);
+    /// the operator stops one and fails the other through the generic
+    /// routes (active=1); each process later exits and finish_preview_agent
+    /// runs (must stay 1 — the bug dropped the counter to 0 with B still
+    /// live); the human clears the run via DELETE (must stay 1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn generic_stop_fail_release_preview_slot_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Long-lived agent processes: the generic stop/fail routes are
+        // ledger transitions that do NOT kill the process, so the scripts
+        // must outlive the route calls; the test then drives the exit
+        // transition directly (the same `on_agent_process_exit` every
+        // compute-target monitor calls after observing a real exit).
+        let script = dir.path().join("agent-sleep.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 300\n").unwrap();
+        make_executable(&script);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            async fn active_agents(state: &crate::AppState, key: &str) -> u32 {
+                state
+                    .budget_usages
+                    .get_usage(key)
+                    .await
+                    .unwrap()
+                    .map(|u| u.active_agents)
+                    .unwrap_or(0)
+            }
+            let ws_key = crate::api::budget::workspace_key(ws_id.as_str());
+            let tenant_key = crate::api::budget::tenant_key();
+
+            // Background agent B holds one slot for the whole test.
+            crate::api::budget::increment_active_agents(&state, ws_id.as_str()).await;
+            assert_eq!(active_agents(&state, &ws_key).await, 1);
+
+            // Two targets → two preview agents: one stopped, one failed
+            // through the generic routes.
+            let resp = post_preview(
+                &app,
+                preview_body(
+                    &repo_id,
+                    &["specs/system/search.md", "specs/system/identity.md"],
+                ),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let stopped_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            let failed_id = json["agents"][1]["agent_id"].as_str().unwrap().to_string();
+            assert_eq!(active_agents(&state, &ws_key).await, 3);
+            assert_eq!(active_agents(&state, tenant_key).await, 3);
+
+            // Generic terminal routes — the exact production paths an
+            // operator uses on any agent, preview or not.
+            for (suffix, id) in [("/stop", &stopped_id), ("/fail", &failed_id)] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("/api/v1/agents/{id}{suffix}"))
+                            .header("authorization", "Bearer test-token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "generic {suffix} must succeed for a preview agent"
+                );
+            }
+            // One decrement per agent, exactly — B plus nothing else live.
+            assert_eq!(active_agents(&state, &ws_key).await, 1);
+            assert_eq!(active_agents(&state, tenant_key).await, 1);
+
+            // The processes later exit: the monitor's real transition. The
+            // preview finish path must see the flags the generic routes
+            // wrote and release nothing.
+            crate::api::spawn::on_agent_process_exit(&state, &stopped_id).await;
+            crate::api::spawn::on_agent_process_exit(&state, &failed_id).await;
+            assert_eq!(
+                active_agents(&state, &ws_key).await,
+                1,
+                "process exit must not re-release slots the generic routes released"
+            );
+            assert_eq!(active_agents(&state, tenant_key).await, 1);
+
+            // Terminal rows stay terminal — no Idle resurrection.
+            for (id, want) in [
+                (&stopped_id, gyre_domain::AgentStatus::Stopped),
+                (&failed_id, gyre_domain::AgentStatus::Failed),
+            ] {
+                let row = state
+                    .agents
+                    .find_by_id(&gyre_common::Id::new(id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(row.status, want, "row must stay terminal after exit");
+            }
+
+            // The human clears the run (the UI "Clear" path from the
+            // review repro): DELETE teardown must release nothing either.
+            let resp = delete_preview(&app, &preview_id).await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                active_agents(&state, &ws_key).await,
+                1,
+                "DELETE must not re-release slots the generic routes released"
+            );
+            assert_eq!(active_agents(&state, tenant_key).await, 1);
+        })
+        .await;
+    }
+
+    /// The other half of the exactly-once contract: the admin kill and the
+    /// budget-enforcement stop release the slot AND kill the process (they
+    /// consume the registry handle), so the exit monitor fires the preview
+    /// finish path and the 24h GC sweep later tears the run down — each
+    /// must see the flag the generic path wrote and release nothing.
+    /// Without the flag, either path double-decrements the same slot
+    /// (decrement is MAX(0, n-1) — permanent downward bias, over-admission
+    /// past max_concurrent_agents).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn generic_kill_and_budget_stop_release_exactly_once_across_gc() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let script = dir.path().join("agent-sleep.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 300\n").unwrap();
+        make_executable(&script);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            async fn active_agents(state: &crate::AppState, key: &str) -> u32 {
+                state
+                    .budget_usages
+                    .get_usage(key)
+                    .await
+                    .unwrap()
+                    .map(|u| u.active_agents)
+                    .unwrap_or(0)
+            }
+            let ws_key = crate::api::budget::workspace_key(ws_id.as_str());
+            let tenant_key = crate::api::budget::tenant_key();
+
+            // Background agent B holds one slot for the whole test.
+            crate::api::budget::increment_active_agents(&state, ws_id.as_str()).await;
+
+            let resp = post_preview(
+                &app,
+                preview_body(
+                    &repo_id,
+                    &["specs/system/search.md", "specs/system/identity.md"],
+                ),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let killed_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            let budget_stopped_id = json["agents"][1]["agent_id"].as_str().unwrap().to_string();
+            assert_eq!(active_agents(&state, &ws_key).await, 3);
+
+            // Admin kill through the production REST route: decrements the
+            // slot, kills the process, consumes the registry handle.
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/admin/agents/{killed_id}/kill"))
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            assert_eq!(active_agents(&state, &ws_key).await, 2);
+
+            // Budget-enforcement stop on the second agent (grace-expiry
+            // hard stop): same release-and-kill shape.
+            let row = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&budget_stopped_id))
+                .await
+                .unwrap()
+                .unwrap();
+            crate::api::budget::budget_stop_agent(&state, &row, "budget test stop").await;
+            assert_eq!(active_agents(&state, &ws_key).await, 1);
+            assert_eq!(active_agents(&state, tenant_key).await, 1);
+
+            // The killed processes exit: the monitor's real transition for
+            // both agents. The preview finish path must release nothing.
+            crate::api::spawn::on_agent_process_exit(&state, &killed_id).await;
+            crate::api::spawn::on_agent_process_exit(&state, &budget_stopped_id).await;
+            assert_eq!(
+                active_agents(&state, &ws_key).await,
+                1,
+                "process exit must not re-release slots the kill/budget-stop released"
+            );
+            assert_eq!(active_agents(&state, tenant_key).await, 1);
+
+            // Age the run past its TTL and sweep: the GC teardown must
+            // release nothing either, and the run is gone entirely.
+            let raw = state
+                .kv_store
+                .kv_get("meta_spec_previews", &preview_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut record: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            record["created_at"] = serde_json::json!(0);
+            state
+                .kv_store
+                .kv_set("meta_spec_previews", &preview_id, record.to_string())
+                .await
+                .unwrap();
+            super::run_once(&state).await.unwrap();
+
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &preview_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "aged run must be swept"
+            );
+            assert_eq!(
+                active_agents(&state, &ws_key).await,
+                1,
+                "GC must not re-release slots the kill/budget-stop released"
+            );
+            assert_eq!(active_agents(&state, tenant_key).await, 1);
         })
         .await;
     }
