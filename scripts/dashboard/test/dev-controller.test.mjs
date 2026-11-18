@@ -51,9 +51,8 @@ test("cockpit reads pipeline stages and updates the durable sandbox budget", asy
   const root = await mkdtemp(join(tmpdir(), "gyre-cockpit-"));
   await mkdir(join(root, "scripts"));
   await mkdir(join(root, "specs", "tasks"), { recursive: true });
-  for (const name of ["dev-pipeline.py", "dev-contract.py", "dev-gateway-job.py"])
-    await copyFile(resolve("scripts", name), join(root, "scripts", name));
-  await cp(resolve("scripts/pipeline"), join(root, "scripts/pipeline"), { recursive: true });
+  // Exercise the installed harness, including dependencies of newly added stages.
+  await cp(resolve("scripts"), join(root, "scripts"), { recursive: true });
   await execFileP("python3", [join(root, "scripts", "dev-pipeline.py"), "status", "--json"], { cwd: root });
   const paths = controllerPaths(root);
   const state = await collectController(paths);
