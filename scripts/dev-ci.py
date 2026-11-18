@@ -219,6 +219,39 @@ def failed_job_logs(run, repo, head, ident, failed):
     return '\n'.join(logs)
 
 
+def changed_test_inputs(run, repo, head, base, failed, logs):
+    """Refresh an unchanged Python gate when main changed its failing test.
+
+    This requests new exact-tree verification and CI, never a passing receipt.
+    If the refreshed head still fails it follows normal repair handling.
+    """
+    paths=set();cases=[]
+    for check in failed:
+        ident=run_id(check)
+        matches=re.findall(r'(?:ERROR|FAIL): (test_\w+) \((test_\w+)\.[\w.]+\)',logs.get(ident,''))
+        if not matches:return None
+        for name,module in matches:
+            paths.add('scripts/'+module+'.py');cases.append(module+'.'+name)
+    main=json.loads(run('gh','api',f'repos/{repo}/git/ref/heads/main',timeout=30).stdout).get('object',{}).get('sha','')
+    if not re.fullmatch(r'[a-f0-9]{40}',main) or main in (base,head):return None
+    inputs={};changed=False
+    for path in sorted(paths):
+        values=[]
+        for ref in (head,base,main):
+            response=run('gh','api',f'repos/{repo}/contents/{path}?ref={ref}',timeout=30,check=False)
+            try:value=json.loads(response.stdout)
+            except ValueError:return None
+            if response.returncode or value.get('type')!='file' or not re.fullmatch(r'[a-f0-9]{40}',value.get('sha','')):return None
+            values.append(value['sha'])
+        if values[0]!=values[1]:return None  # The candidate edited the failed gate.
+        inputs[path]=values;changed=changed or values[2]!=values[0]
+    if not changed:return None
+    return {'status':'environment_refresh','target_base':main,
+            'failure_signature':hashlib.sha256(json.dumps([sorted(cases),inputs],sort_keys=True).encode()).hexdigest(),
+            'detail':'Main changed the unchanged failing test; reverify and rerun CI before requesting code repair.',
+            'test_input_evidence':inputs}
+
+
 def observe(run, url, head, base, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -315,6 +348,10 @@ def observe(run, url, head, base, directory):
             'artifact_directories': artifact_directories,
             'environment': 'github-' + hashlib.sha256(json.dumps(sorted((item.get('workflowName', ''), item.get('name', ''), item.get('context', '')) for item in failed)).encode()).hexdigest(),
             'log': str(log)}
+    refreshed=changed_test_inputs(run,repo,head,base,failed,logs)
+    if refreshed:
+        result.update(refreshed)
+        return result
     transient=transient_setup_failure(run,repo,head,base,failed,logs) if any(re.search(r'Temporary failure resolving|Could not resolve|EAI_AGAIN|Connection timed out|TLS handshake timeout|HTTP[^\n]*\b50[234]\b',v,re.I) for v in logs.values()) else None
     if transient:
         result.update(transient)

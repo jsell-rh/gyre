@@ -229,6 +229,14 @@ uncertain or queued merge retains that permit, while other candidates continue
 verification and publication. Per-task claims, safety holds, dependencies,
 independent review, exact-head CI, and upstream-tree confirmation still apply.
 
+When workflow-wide logs are unavailable because sibling jobs still run, the
+observer reads the completed failed job's logs after checking its head and
+attempt identity. If neither log source is available, merge remains blocked
+while diagnosis waits; absent logs do not create a speculative coding repair.
+For Python gate failures, an unchanged failing test that main has since edited
+requests fresh exact-tree verification and CI against main first. This is not
+approval: a failure on the refreshed base follows normal repair handling.
+
 A completed verification receipt stays pinned to its original tested head and
 base while main advances. The publisher checks freshness when CI becomes ready.
 It can reuse that original head only if Git proves the resulting merge tree is
