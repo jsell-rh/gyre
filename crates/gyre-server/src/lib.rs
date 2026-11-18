@@ -1694,7 +1694,10 @@ pub fn build_state(
             dyn RolloutPolicyRepository,
             mem::MemRolloutPolicyRepository::default()
         ),
-        messages: Arc::new(mem::MemMessageRepository::default()),
+        messages: store!(
+            dyn gyre_ports::MessageRepository,
+            mem::MemMessageRepository::default()
+        ),
         message_dispatch_tx: message_dispatch_tx.clone(),
         message_dispatch_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
             message_dispatch_rx,
