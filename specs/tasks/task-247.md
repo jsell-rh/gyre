@@ -3,7 +3,7 @@ title: "Wire the SQLite/PostgreSQL MessageRepository into production AppState"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / db-message-repository-wiring / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["68c3bf22bf274bdf7d35ca1c4cbbfbe5e245629f"]
+commits: ["68c3bf22bf274bdf7d35ca1c4cbbfbe5e245629f", "68b63791eeffb2e7eed84d09b3d18dbd4a16e9a9"]
 ---
 
 ## Required behavior
@@ -65,8 +65,8 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 
 ## Shipped
 
-The production wiring change is a single, surgical edit in `build_state`
-(crates/gyre-server/src/lib.rs): `AppState.messages` was set
+The production wiring change (commit 68c3bf22) is a single, surgical edit in
+`build_state` (crates/gyre-server/src/lib.rs): `AppState.messages` was set
 unconditionally to `Arc::new(mem::MemMessageRepository::default())`; it now
 uses the same `store!` macro every sibling durable port in the same struct
 literal uses, so with `GYRE_DATABASE_URL` set the Diesel adapter
@@ -76,38 +76,74 @@ expiry jobs), and `MemMessageRepository` remains only the no-database
 fallback — exactly where sibling durable ports fall back to mem. The port
 trait, both Diesel adapters, and the mem implementation are unchanged.
 
+This round (commit 68b63791) repairs the two review-round-1 findings in
+`crates/gyre-server/tests/message_persistence.rs` and one latent assertion
+bug found while repairing them.
+
+### Review repairs
+
+- **Env-race serialization:** all tests in the binary now hold
+  `static ENV_LOCK: tokio::sync::Mutex<()>` around their
+  `GYRE_DATABASE_URL` set/remove and every `build_state` call, the same
+  pattern `tests/task163_dependency_persistence.rs` documents. Under plain
+  `cargo test -p gyre-server --test message_persistence -- --test-threads=2`
+  the tests can no longer cross-contaminate or silently degrade to the mem
+  adapter.
+- **HTTP-level regression (acceptance criteria 1 and 2):** the new
+  `message_endpoints_and_ws_replay_survive_restart_on_sqlite` test drives
+  the real router over a real TCP listener with `GYRE_DATABASE_URL` set:
+  POST a Directed message via `/api/v1/workspaces/:id/messages` (real
+  validation/signing/persist path — no fabricated Message literals), verify
+  the messages-table row (`to_type='agent'`, `acknowledged=0`) through a
+  third-party `SqliteStorage` pool that shares no state with either
+  AppState, and poll it back via `GET /api/v1/agents/:id/messages`; then
+  abort the listener, drop the AppState, rebuild a second server over the
+  same DB URL, and verify the Directed message via poll and
+  `?acknowledged=false` crash-recovery poll, the Event-tier message via
+  `GET /api/v1/workspaces/:id/messages`, and the WebSocket Subscribe
+  replay (`ws.rs` `list_by_workspace`).
+- **Latent assertion bug fixed:** the port-level test previously asserted a
+  Directed (agent-inbox) message appears in the workspace feed. That
+  contradicts the `MessageRepository` contract — `list_by_workspace` is
+  Event-tier only on BOTH adapters (mem and SQLite filter
+  `to_type != 'agent'`, sqlite/message.rs:344-346) — so the old assertion
+  would fail whenever the test actually ran. The test now asserts the
+  Directed message is excluded from the workspace feed and from Subscribe
+  replay, matching the contract.
+
 ### Behavioral evidence
 
-- `crates/gyre-server/tests/message_persistence.rs` (new, own test binary
-  because `build_state` reads `GYRE_DATABASE_URL` from the process
-  environment, mirroring `tests/dependency_persistence.rs`):
-  - `messages_survive_restart_on_sqlite` — stores an unacked Directed
-    message and an Event-tier workspace message via instance 1 of
-    `build_state` over a real SQLite file, drops it, rebuilds instance 2
-    against the same URL, and requires the Directed message via
-    `list_unacked` / `list_after` / `count_unacked` / `find_by_id` and the
-    Event message via `list_by_workspace`; acknowledges twice (idempotent),
-    then a third instance must see the ack flag persisted. This test fails
-    against the HashMap-backed mem adapter (second instance sees nothing).
-  - `event_ttl_expiry_persists_across_restart_on_sqlite` — an Event older
-    than the horizon is deleted by `expire_events` on a rebuilt instance,
-    and the deletion survives a further restart.
-- Focused probe run in this sandbox (this sandbox's build wrapper blocks
-  `gyre-server` test compilation — server builds belong to the independent
-  verifier): `cargo check -p gyre-server` and
-  `cargo check -p gyre-server --test message_persistence` both clean;
-  `cargo test -p gyre-adapters --lib sqlite::message` — 33 passed, 0
-  failed (send/poll/ack/count/expiry behavior against the SQLite adapter,
-  AC 4).
-- The verifier must execute: `cargo test -p gyre-server --test
-  message_persistence` (both tests), plus the existing message-bus suites
-  (`--lib api::messages`, `--lib message_dispatcher`) to confirm AC 4 on
-  the wired DB path.
+- `crates/gyre-server/tests/message_persistence.rs` (own test binary,
+  ENV_LOCK-serialized):
+  - `messages_survive_restart_on_sqlite` — port-level restart proof:
+    Directed + Event messages stored via instance 1 survive a rebuild
+    (poll paths, unacked count, find_by_id), ack is idempotent and its
+    state survives a further restart.
+  - `event_ttl_expiry_persists_across_restart_on_sqlite` — `expire_events`
+    deletes exactly the stale Event on a rebuilt instance and the deletion
+    survives another restart.
+  - `message_endpoints_and_ws_replay_survive_restart_on_sqlite` — the
+    HTTP/WS-level regression described above; it fails against the
+    HashMap-backed mem adapter (instance 2 sees an empty store) and
+    against the old unconditional mem wiring.
+- Probes run in this sandbox (its build wrapper defers gyre-server test
+  compilation to the independent verifier): `cargo check -p gyre-server
+  --tests` clean; `cargo test -p gyre-adapters --lib sqlite::message` —
+  33 passed, 0 failed (send/poll/ack/count/expiry behavior against the
+  SQLite adapter, AC 4).
 
-### Coverage rows updated
+### Verifier must execute
+
+- `cargo test -p gyre-server --test message_persistence` — all three
+  tests, including under `-- --test-threads=2` (the ENV_LOCK makes
+  intra-binary parallelism safe).
+- The existing message-bus suites on the wired path: `cargo test -p
+  gyre-server --lib api::messages` and `--lib message_dispatcher` (AC 4).
+
+### Coverage rows
 
 `specs/coverage/system/message-bus.md` rows 3 (Core Principle), 11
-(Storage), and 16 (Edge Cases) amended with the wiring evidence; no
-unrelated rows touched. The Directed at-least-once guarantee (ce88ec9) and
-the server-restart edge-case row (e5d4cc99) remain owned by their
-dependent tasks.
+(Storage), and 16 (Edge Cases) were amended in commit 625690a1 with the
+wiring evidence and remain accurate; no unrelated rows touched. The
+Directed at-least-once guarantee (ce88ec9) and the server-restart
+edge-case row (e5d4cc99) remain owned by their dependent tasks.
