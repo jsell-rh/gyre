@@ -2,10 +2,10 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["d603b9f0337d784cd313afc2ac34315957815d52", "6f55459cd8681c009117305386410a225fb126e5", "0513d409453bd1a863640aeb8cd6f7c21e989aa1", "c1a709ba62490cf3661b06b6ea6b72308488ebf4", "a4d8bd712ed166b78311ce648a70c58791082ea1", "2f10e8d134c1911f52b07400d7becabb910dbe21", "7cad12616cd28f691664cac1922337c9f5d72bef", "683da5a1afe0bb249a8fa0aa3e84e65006d9cde2", "f4ee98ba5521f5b8e973ae3172481dec4f2d34de", "8212fa5d945070afac1e859a96e1caae27af950c", "05c06fde1c501cd1f9f5ab5b729c1ec2a1ba2860", "cc3080ff119b5084d507330e038aafb30ee5a0d5", "69488298e887e8c4c76ea5a48f3ce01c10d175c6", "c33a86e2ce9c93de50a97ff3e7644a861cef17d6", "1622b73cdf7e36d32299a4010462b9b1c046eab9", "c8f9fed9abef048df4abf83d4a86e1407a17b9db", "001ec52dd65e890637751d40ecb1a64743a4934d", "a31a731a262c62f7c85202cbca727fe9d9633646", "2c1ddfe60be7f19c843d833e7eead308c3585c8f"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -124,23 +124,3 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
 - Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
-
-## Shipped
-
-Preview mode (meta-spec-reconciliation.md §5) is a real agent run path, implemented and independently review-approved across the rounds recorded in `commits:`: `POST /api/v1/meta-specs/preview` spawns one real `Active` agent per target on `preview/{preview_id}/{slug}` branches with real worktrees and short-lived JWTs (202 response exactly per spec shape); the draft travels in the agent process env (`GYRE_META_SPEC_DRAFT_KIND`/`GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_SPEC_PATH`) and the agent runner builds the prompt with the draft meta-spec as governing context over the target spec; skip-ceremony is enforced (no task assignment, no gates, no MR, no merge queue, no provenance, no `Idle`, REST/MCP escape routes refuse preview callers); completion tears down worktree and token, leaving the branch for `GET .../preview/{preview_id}` status + diff; `DELETE` and the `meta_spec_preview_gc` background job (TTL `GYRE_META_SPEC_PREVIEW_TTL_HOURS`, default 24 h) clean up branches, worktrees, agents, and kv records; the preview budget slot release is exactly-once across every generic terminal path (stop/fail/admin kill/budget stop/stale-abort/DELETE/GC); the hollow structural-impact implementation and the workspace-scoped routes were fully removed (clean cutover); docs updated.
-
-### Repair round — verification exit 1 on the advanced base (rustfmt + stale-exemption integration)
-
-The verification sandbox ran the gate suite against the candidate integrated with the advanced main base f70cfac6 (task-160/161 lineage, 126 commits the task branch did not contain) and failed twice: (1) rustfmt flagged five changed lines in `api/admin.rs` (the `mark_preview_slot_released` call site was split across six lines) and `api/meta_specs.rs` (an over-long `kv_set` line in `mark_preview_slot_released`, two over-eagerly-wrapped `mk_auth` bindings in the `caller_is_preview_agent` JWT test); (2) the integrated tree carried the base's stale `/api/v1/workspaces/:id/meta-specs/preview{,/:preview_id}` exemption lines while the routes are gone from `api/mod.rs`, failing `check-abac-route-registry.sh` and `check-abac-exempt-handlers.sh`.
-
-Fixed with two commits:
-
-- `d603b9f0` (style): reformats exactly those call sites to rustfmt's output — no semantic change.
-- `e8d8426f` (merge): integrates the task branch onto base f70cfac6 with `git merge`; the merge auto-resolved and was verified at the exact failure points — the exemptions file keeps the task-206 removal of the two stale preview lines, `api/mod.rs` keeps the spec-conformant global preview routes (POST `/api/v1/meta-specs/preview`, GET/DELETE `/api/v1/meta-specs/preview/:preview_id`) while preserving the base's new task-160/161 routes, and `meta_specs.rs` keeps the real preview implementation (no `compute_preview_blast_radius`/`StructuralImpact` resurrection).
-
-### Verification
-
-- `python3 scripts/check-rustfmt-diff.py f70cfac6` on the merged tree: changed lines clean (65 Rust files). The clippy diff check timed out in this sandbox's build wrapper (same standing constraint as prior rounds — it passed in the verification sandbox on the pre-merge candidate and this round's edits are pure reformats plus an auto-merge); deferred to the verifier.
-- `cargo check --all` on the exact merged tree: exit 0 (3m13s + 2m10s warm, web assets rebuilt by build.rs as a side effect and not committed).
-- `check-arch.sh`, `check-hierarchy.sh`, `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-mcp-write-tools.sh`, migration-version/SQL-portability, dead-message-kinds, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, mem-port-contracts, fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults, inert-enforcement, forged-scope-fields, forwarded-header-trust, in-memory-state-stores, unbounded-external-http, task-commit-attribution: all green on the merged tree with the restored cumulative `commits:` frontmatter.
-- Deferred to the verifier (gyre-server test compilation exceeds this sandbox's 4 GiB build wrapper — the standing task-206 constraint): `cargo test -p gyre-server preview_` plus the regression suite (`generic_stop_fail_release_preview_slot_exactly_once`, `generic_kill_and_budget_stop_release_exactly_once_across_gc`, `preview_agent_finish_teardown_and_diff`, `preview_worktree_failure_releases_no_untaken_budget_slot`, `preview_persist_failure_rolls_back_every_provisioned_agent`, `mark_preview_agent_failed_kills_registered_process`, GC/DELETE suite, REST-ceremony refusals, `caller_is_preview_agent_detects_array_scoped_jwt`), and the full diff-gate suite (`check-clippy-diff.py`, web tests) against the merged head. The merge touched no test logic; conflicts auto-resolved in non-preview files only.
