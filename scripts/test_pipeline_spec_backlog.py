@@ -288,6 +288,49 @@ class SpecBacklogTests(unittest.TestCase):
         inventory(self.store,self.repo,self.base)
         self.assertIsNone(planning_context(self.store.task(self.name),self.store).get('revision_draft'))
 
+    def test_plan_only_review_correction_retains_the_audit_and_schedules_decomposition(self):
+        plan=self.planned();before=self.store.task(self.name)['data'];audit=before['spec_audit']
+        finding={'id':audit['gaps'][0]['id']+':missing-replay-check','detail':'Replay serialization needs an acceptance probe'}
+        self.run_stage('plan_review',{'plan':digest(plan),'approved':False,'revision_target':'plan','audit_approved':True,
+            'findings':[finding],'checks':[{'id':i,'detail':'Audit is sound; task criteria omit the replay path.'} for i in before['sections']]})
+        after=self.store.task(self.name)['data'];self.assertEqual(after['spec_audit'],audit)
+        self.assertEqual(after['audit_cycle'],before['audit_cycle']);self.assertEqual(after['status'],'audited')
+        self.assertEqual(discover(self.store,'spec_audit',self.base),[])
+        self.assertEqual(len(discover(self.store,'decompose',self.base)),1)
+        self.assertEqual(after['revision_draft']['plan'],plan)
+
+    def test_distinct_review_improvements_continue_past_three_but_repeated_issues_stop(self):
+        from pipeline.spec_backlog import review_revision
+        plan=self.planned();data=self.store.task(self.name)['data'];identity=data['spec_audit']['gaps'][0]['id']
+        report={'revision_target':'plan','audit_approved':True}
+        for i in range(4):
+            result=review_revision(data,report|{'findings':[{'id':identity+':issue-'+str(i),'detail':'New missing path'}]})
+            data=data|result|{'decomposition':plan}
+        self.assertEqual(data['plan_revision'],4);self.assertEqual(data['review_budget']['revisions'],4)
+        repeated=report|{'findings':[{'id':identity+':issue-3','detail':'Same unresolved issue, different wording'}]}
+        data=data|review_revision(data,repeated)|{'decomposition':plan}
+        with self.assertRaisesRegex(Attention,'repeated unresolved'):review_revision(data,repeated)
+        exhausted=data|{'review_budget':data['review_budget']|{'revisions':12}}
+        with self.assertRaisesRegex(Attention,'twelve revisions'):review_revision(exhausted,report|{'findings':[{'id':identity+':new-issue','detail':'New'}]})
+
+    def test_plan_only_revision_cannot_waive_audit_validation_or_forge_finding_ids(self):
+        from pipeline.spec_backlog import review_revision
+        self.planned();data=self.store.task(self.name)['data']
+        with self.assertRaisesRegex(ValueError,'explicit confirmation'):
+            review_revision(data,{'revision_target':'plan','findings':['Missing behavior']})
+        with self.assertRaisesRegex(ValueError,'known heading'):
+            review_revision(data,{'findings':[{'id':'0'*24+':invented','detail':'Unknown heading'}]})
+
+    def test_reauditing_identical_code_cannot_resubmit_unchanged_rejected_task_contracts(self):
+        plan=self.planned();task=self.store.task(self.name)
+        self.run_stage('plan_review',{'plan':digest(plan),'approved':False,'findings':['Missing nested query path'],
+            'checks':[{'id':i,'detail':'Plan is incomplete.'} for i in task['data']['sections']]})
+        revised_audit=self.audit();revised_audit['sections'][1]['detail']+=' Reinspected this same code.'
+        self.run_stage('spec_audit',revised_audit);new=self.store.task(self.name)['data']['spec_audit']
+        unchanged=copy.deepcopy(plan);unchanged['audit']=digest(new)
+        work=self.run_stage('decompose',unchanged,expected_state='retry')
+        self.assertIn('Unchanged rejected task contracts',json.loads(work['result'])['message'])
+
     def test_published_manifest_rejects_rewritten_bindings_and_task_definitions(self):
         self.reviewed();self.run_stage('backlog');data=self.store.task(self.name)['data']
         pub=self.store.task(data['backlog_publication']);self.git('fetch','-q','origin',pub['data']['candidate']);self.git('checkout','-q','--detach',pub['data']['candidate'])

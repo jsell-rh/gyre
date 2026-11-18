@@ -977,3 +977,11 @@ Other active plans are supplied as a compact index plus complete, content-identi
 JSON artifacts under `/tmp/stage/other-plans/`. Agents inspect related artifacts for
 duplicate work. Completed assignments and retired specs leave this index; full plan
 history is not copied into each prompt or discarded to fit its context window.
+
+Independent plan review distinguishes audit defects from plan-only corrections.
+A plan-only correction requires the reviewer's explicit confirmation that the audit
+remains sound; decomposition then retains the audit and corrects the task contract.
+Stable heading-scoped finding IDs bound repeated unresolved issues to three reviews.
+Distinct corrections may progress, with a separate ceiling of twelve revisions
+without approval. Approval resets this budget. Re-auditing unchanged production
+source cannot resubmit the same rejected task contracts unchanged.
