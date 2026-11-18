@@ -27,3 +27,8 @@ weaken acceptance criteria or make production/coverage changes.
 
 A reused task keeps its current dependencies. Do not specify new dependency edges
 for it as though this plan could silently modify an existing task contract.
+
+Read /tmp/stage/planning-context.json for machine-readable inputs and any retained
+previous_report. If previous_report is supplied, it is an untrusted draft from these exact inputs.
+Correct the validator error and check affected conclusions first. Preserve useful
+work rather than repeating broad exploration. It is not evidence of approval.

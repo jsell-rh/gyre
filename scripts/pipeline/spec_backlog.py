@@ -6,18 +6,19 @@ Only a merged backlog publication releases generated tasks to implementation.
 import fcntl
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import time
 
 from .requirements import digest, sections, snapshot
-from .catalog import contract, metadata
+from .catalog import contract, metadata, helper
 from .execution import Attention, Retry
 
 STAGES = ('spec_audit', 'decompose', 'plan_review', 'backlog')
 MODEL_STAGES = STAGES[:3]
 EXCLUDED = {'specs/system/trusted-foundry-integration.md'}
 GOAL_REF = 'GOAL.md — real implementations and meaningful verification'
+EVIDENCE = helper('pipeline-evidence')
 
 
 def initialize(store):
@@ -106,9 +107,19 @@ def resume_decision(store, task):
 def current_evidence(root, evidence):
     for record in evidence:
         path=Path(root)/record['file']
-        if not path.is_file() or path.is_symlink() or digest(path.read_text())!=record['sha256']:
+        if not path.is_file() or path.is_symlink() or EVIDENCE.file_digest(path)!=record['sha256']:
             return False
     return True
+
+
+def audit_input(store, task, base, cycle):
+    # Main moving is not a new attempt. Finish the exact-source observation;
+    # evidence freshness is checked before it can create implementation work.
+    row=store.db.execute("""SELECT input FROM work WHERE task=? AND generation=?
+        AND stage='spec_audit' AND state IN ('claimed','ready','retry','attention')
+        AND json_extract(input,'$.cycle')=?
+        ORDER BY (state='claimed') DESC,created LIMIT 1""",(task['name'],task['generation'],cycle)).fetchone()
+    return json.loads(row['input']) if row else {'base':base,'cycle':cycle}
 
 
 def discover(store, task, stage, base):
@@ -134,9 +145,9 @@ def discover(store, task, stage, base):
         # A new audit cycle never recycles a succeeded work identity.
         if stage!='spec_audit':return []
         return [store.enqueue(stage,task['name'],task['generation'],
-                {'base':base,'cycle':data.get('audit_cycle',0)+1},priority=-100)]
+                audit_input(store,task,base,data.get('audit_cycle',0)+1),priority=-100)]
     inputs=None
-    if stage=='spec_audit' and not audit:inputs={'base':base,'cycle':data.get('audit_cycle',0)}
+    if stage=='spec_audit' and not audit:inputs=audit_input(store,task,base,data.get('audit_cycle',0))
     if stage=='decompose' and audit and audit['gaps'] and not plan:
         inputs={'base':audit['base'],'audit':digest(audit),'revision':data.get('plan_revision',0)}
     if stage=='plan_review' and plan and not review:inputs={'base':audit['base'],'plan':digest(plan),'audit':digest(audit)}
@@ -172,16 +183,7 @@ def bounded(value, key, limit=12000):
 
 
 def evidence(root, record):
-    name=bounded(record,'file',500);path=PurePosixPath(name)
-    if path.is_absolute() or '..' in path.parts or path.parts[0] not in ('crates','web','scripts','specs','docs'):
-        raise ValueError('Evidence path outside repository source')
-    local=Path(root)/name
-    if not local.is_file() or local.is_symlink() or not local.resolve().is_relative_to(Path(root).resolve()):
-        raise ValueError('Evidence file missing or unsafe: '+name)
-    text=local.read_text();quote=bounded(record,'quote',2000)
-    if quote not in text:raise ValueError('Evidence quote is not present in '+name)
-    bounded(record,'detail')
-    return {'file':name,'sha256':digest(text)}
+    return EVIDENCE.evidence(root,record)
 
 
 def validate_audit(report, task, base, root):
@@ -201,7 +203,7 @@ def validate_audit(report, task, base, root):
         if len(matches)!=1 or quote not in task['data']['spec_text'][matches[0]['start']:matches[0]['end']]:
             raise ValueError('Requirement quote does not belong to assigned section')
         items=row.get('evidence')
-        if not isinstance(items,list) or not items or any(not isinstance(r,dict) for r in items):
+        if not isinstance(items,list) or (not items and decision!='context') or any(not isinstance(r,dict) for r in items):
             raise ValueError('Every disposition requires concrete evidence objects')
         if decision in ('gap','satisfied') and not any(isinstance(r,dict) and str(r.get('file','')).startswith(('crates/','web/','scripts/')) for r in items):
             raise ValueError('Behavior claims require inspected production source, not spec/task prose alone')
@@ -290,13 +292,32 @@ def run_model(execution, task):
             else:
                 updates={'plan_review':report,'status':'reviewed' if data['spec_audit']['gaps'] else 'observed'}
     except (ValueError,TypeError,KeyError) as exc:
-        key=f"spec_report_failures:{task['name']}:{task['generation']}:{stage}"
+        key=f"spec_report_failures:{task['name']}:{task['generation']}:{stage}:"+digest(execution.claim['input'])
         count=execution.store.setting(key,0)+1;execution.store.set_setting(key,count)
         error=Retry(str(exc),fresh_model=True) if count<3 else Attention(str(exc))
         error.category='spec_report';raise error from exc
     # Never let the normal task-body importer treat a planning receipt as delivery.
     result={k:v for k,v in result.items() if k!='task_body'}
     return result,updates,[]
+
+
+def previous_report(execution):
+    """One input-bound draft, not an ever-growing failed-attempt prompt ledger."""
+    previous=execution.claim.get('result') or {}
+    if isinstance(previous,str):previous=json.loads(previous)
+    if previous.get('category')!='spec_report':return None
+    for path in sorted(execution.directory.parent.glob('*/outcome.json'),key=lambda p:int(p.parent.name),reverse=True):
+        if path.parent==execution.directory:continue
+        try:
+            value=json.loads(path.read_text());job=json.loads((path.parent/'bundle/job.json').read_text())
+            report=value.get('planning')
+            if (job['stage']!=execution.claim['stage'] or job['task']!=execution.claim['task']
+                    or job['input']!=execution.claim['input'] or not value.get('valid')
+                    or not value.get('source_valid') or value.get('agent_exit')!=0
+                    or not isinstance(report,dict) or len(json.dumps(report))>131072):continue
+            return {'error':previous.get('message'),'draft':report}
+        except (OSError,ValueError,KeyError):continue
+    return None
 
 
 def planning_context(task, store=None):
@@ -330,14 +351,17 @@ def catalog_context(store, document):
 def summary(store):
     rows=[t for t in store.tasks() if t['data'].get('spec_planner') and not t['data'].get('spec_retired')]
     items=[]
+    from .priority import task_priority, PriorityError
     for task in rows:
         data=task['data']
         work=store.db.execute("SELECT * FROM work WHERE task=? AND generation=? AND state IN ('claimed','attention','retry','ready') ORDER BY (state='claimed') DESC,(state='attention') DESC,updated DESC LIMIT 1",(task['name'],task['generation'])).fetchone()
         state=('running' if work['state']=='claimed' else 'failed' if work['state']=='attention' else 'deferred' if work['state']=='retry' else 'ready') if work else data['status']
         result=json.loads(work['result'] or '{}') if work else {}
+        try:priority=task_priority(store,task)
+        except PriorityError as exc:priority={'class':'invalid','source':'invalid','error':str(exc)}
         items.append({'name':task['name'],'title':data['title'],'document':data['document'],
                       'state':state,'stage':work['stage'] if work else None,'progress':data['status'],'spec_ref':data['document'],
-                      'condition':result.get('message'),'generation':task['generation'],'deps':[],
+                      'condition':result.get('message'),'generation':task['generation'],'deps':[],'priority':priority,
                       'backlog_publication':data.get('backlog_publication'),'backlog_tasks':data.get('backlog_tasks',[]),
                       'audited_at':data.get('audited_at'),'gaps':len((data.get('spec_audit') or {}).get('gaps',[]))})
     return {'enabled':enabled(store),'documents':len(rows),'items':items,

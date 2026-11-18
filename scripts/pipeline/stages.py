@@ -15,8 +15,10 @@ def prompt(execution, task):
     role = execution.claim['stage']
     planning={}
     if task['data'].get('spec_planner'):
-        from .spec_backlog import planning_context
+        from .spec_backlog import planning_context, previous_report
         planning=planning_context(task,execution.store)
+        planning['previous_report_available']=bool(previous_report(execution))
+        planning['machine_context']='/tmp/stage/planning-context.json'
     task_path = execution.directory / 'task.md'
     task_path.write_text(task['body'])
     bounded = (task['body'][:16000] if role == 'triage' and safe_metadata(task['body']).get('metadata_error') else

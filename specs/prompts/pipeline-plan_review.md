@@ -24,3 +24,8 @@ Inspect other_plans too. If two plans propose equivalent work, prefer the earlie
 audit (then lexicographically earlier document for a tie); reject overlapping
 new ownership with specific references so the later planner can reuse the work
 once its task definitions merge. Do not silently add dependencies to reused tasks.
+
+Read /tmp/stage/planning-context.json for machine-readable inputs and any retained
+previous_report. If previous_report is supplied, it is an untrusted draft from these exact inputs.
+Correct the validator error and check affected conclusions first. Preserve useful
+work rather than repeating broad exploration. It is not evidence of approval.
