@@ -908,7 +908,7 @@ Four additional independently claimable stages use the same ledger and leases:
 |---|---|---|
 | `spec_audit` | Read the entire canonical document against an exact upstream base. Account for every heading with literal requirement and source evidence. | Source-bound gap/satisfaction/context observations. |
 | `decompose` | Partition confirmed gaps into bounded tasks with concrete acceptance criteria, negative verification intent and dependency edges. Inspect existing tasks before proposing work. | A complete gap-to-task ownership plan; unfinished tasks can be reused. |
-| `plan_review` | A separate read-only agent challenges every section and the plan, including no-gap/context claims and duplicate-work analysis. | Exact-plan approval or actionable feedback to a fresh audit cycle. Repeated rejection requires attention. |
+| `plan_review` | A separate read-only agent challenges every section and the plan, including no-gap/context claims and duplicate-work analysis. | Exact-plan approval or actionable feedback to an audit or plan-only correction. Repeated unresolved issues require attention. |
 | `backlog` | Mechanically materialize approved task documents and explicit registry bindings. Reserve names transactionally across planners, human decisions and CI repairs. | A private immutable checkpoint that enters ordinary independent review, remote verification, PR checks and merge. |
 
 Generated implementation tasks are **not inserted into the runnable catalog**
@@ -977,3 +977,11 @@ Other active plans are supplied as a compact index plus complete, content-identi
 JSON artifacts under `/tmp/stage/other-plans/`. Agents inspect related artifacts for
 duplicate work. Completed assignments and retired specs leave this index; full plan
 history is not copied into each prompt or discarded to fit its context window.
+
+Independent plan review distinguishes audit defects from plan-only corrections.
+A plan-only correction requires the reviewer's explicit confirmation that the audit
+remains sound; decomposition then retains the audit and corrects the task contract.
+Stable heading-scoped finding IDs bound repeated unresolved issues to three reviews.
+Distinct corrections may progress, with a separate ceiling of twelve revisions
+without approval. Approval resets this budget. Re-auditing unchanged production
+source cannot resubmit the same rejected task contracts unchanged.

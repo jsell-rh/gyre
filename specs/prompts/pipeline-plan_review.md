@@ -46,3 +46,16 @@ other_plans in the machine context is a compact index. Each path points to the
 complete staged plan JSON, with its plan_id and source-file list. Search/read related
 plan artifacts before concluding that work is independent; an unread index entry is
 not evidence of non-overlap. Completed assignments are omitted from this active index.
+
+For a rejection also set revision_target: "audit" or "plan". Use "audit" for wrong
+or incomplete audit conclusions. Use "plan" ONLY when the existing audit remains
+sound and only task scope, dependencies or acceptance need correction; set
+audit_approved: true explicitly in that case. Do not ask for a fresh source audit
+merely to refine a task's acceptance criteria.
+
+Each blocking finding should have id: "HEADING_ID:specific-issue-slug" using a known
+heading ID. Reuse the exact ID while an issue remains unresolved, even if rewording
+its explanation. Distinct issues get distinct IDs. Check the previous review_feedback
+first and confirm that its corrections are present. Three reviews of the same
+unresolved issue stop for attention; distinct improvements may continue, bounded by
+twelve revisions without approval. Approval resets that review budget.

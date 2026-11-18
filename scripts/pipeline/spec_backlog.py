@@ -298,6 +298,45 @@ def validate_plan(report, audit, store):
     return report
 
 
+def evidence_identity(audit):
+    return digest(sorted((r['file'],r['sha256']) for r in audit.get('source_evidence',[])))
+
+
+def rejected_contract(plan, audit):
+    return digest([plan['tasks'],evidence_identity(audit)])
+
+
+def review_revision(data, report):
+    """Bound unresolved issues, not legitimate successive improvements."""
+    findings=report['findings'];target=report.get('revision_target','audit')
+    if target not in ('audit','plan'):raise ValueError('Unknown review revision target')
+    if target=='plan' and (report.get('audit_approved') is not True or not data['spec_audit']['gaps']):
+        raise ValueError('Plan-only revision requires explicit confirmation that the existing nonempty gap audit remains sound')
+    source=evidence_identity(data['spec_audit']);previous=data.get('review_budget',{})
+    counts=dict(previous.get('issues',{})) if previous.get('evidence')==source else {}
+    keys=set()
+    for finding in findings:
+        identity=finding.get('id') if isinstance(finding,dict) else None
+        if identity is not None:
+            if (not isinstance(identity,str) or not re.fullmatch(r'[0-9a-f]{24}:[a-z0-9-]{1,64}',identity)
+                    or identity.split(':')[0] not in data['sections']):
+                raise ValueError('Review finding ID must name a known heading and a stable issue slug')
+        keys.add(identity or digest(finding))
+    for key in keys:counts[key]=counts.get(key,0)+1
+    attempts=previous.get('revisions',data.get('plan_revision',0))+1
+    if any(counts[k]>=3 for k in keys) or attempts>12:
+        error=Attention('Spec planning stalled: repeated unresolved findings or twelve revisions without approval: '+json.dumps(findings)[:5000])
+        error.category='spec_plan';raise error
+    result={'revision_draft':revision_draft(data),'decomposition':None,'plan_review':None,
+        'plan_revision':data.get('plan_revision',0)+1,'plan_feedback':findings,
+        'review_budget':{'revisions':attempts,'evidence':source,'issues':counts},
+        'rejected_plans':[*data.get('rejected_plans',[])[-23:],digest(data['decomposition'])],
+        'rejected_task_contracts':[*data.get('rejected_task_contracts',[])[-23:],rejected_contract(data['decomposition'],data['spec_audit'])]}
+    if target=='plan':result['status']='audited'
+    else:result.update(spec_audit=None,status='pending',audit_cycle=data.get('audit_cycle',0)+1)
+    return result
+
+
 def run_model(execution, task):
     from .stages import prompt, checkout
     stage=execution.claim['stage'];data=task['data'];base=execution.claim['input']['base']
@@ -315,6 +354,8 @@ def run_model(execution, task):
         elif stage=='decompose':
             if digest(report) in data.get('rejected_plans',[]):
                 raise ValueError('This exact plan was rejected at backlog review; address the retained findings before resubmitting')
+            if isinstance(report,dict) and isinstance(report.get('tasks'),list) and rejected_contract(report,data['spec_audit']) in data.get('rejected_task_contracts',[]):
+                raise ValueError('Unchanged rejected task contracts cannot be resubmitted against unchanged source evidence')
             updates={'decomposition':validate_plan(report,data['spec_audit'],execution.store),'status':'planned'}
         else:
             if (not isinstance(report,dict) or report.get('plan')!=digest(data['decomposition']) or
@@ -327,14 +368,10 @@ def run_model(execution, task):
             if report['approved'] and report['findings']:raise ValueError('Approved plan has unresolved findings')
             if not report['approved']:
                 if not report['findings']:raise ValueError('Rejection requires actionable findings')
-                revision=data.get('plan_revision',0)+1
-                if revision>=3:
-                    error=Attention('Spec plan repeatedly rejected: '+json.dumps(report['findings'])[:6000]);error.category='spec_plan';raise error
-                # A rejected audit must be re-inspected, not merely rephrased by a planner.
-                updates={'revision_draft':revision_draft(data),'spec_audit':None,'decomposition':None,'plan_review':None,'status':'pending',
-                         'audit_cycle':data.get('audit_cycle',0)+1,'plan_revision':revision,'plan_feedback':report['findings']}
+                updates=review_revision(data,report)
             else:
-                updates={'revision_draft':None,'plan_review':report,'status':'reviewed' if data['spec_audit']['gaps'] else 'observed'}
+                updates={'revision_draft':None,'plan_review':report,'review_budget':{'revisions':0,'issues':{}},
+                         'rejected_task_contracts':[],'status':'reviewed' if data['spec_audit']['gaps'] else 'observed'}
     except (ValueError,TypeError,KeyError) as exc:
         key=f"spec_report_failures:{task['name']}:{task['generation']}:{stage}:"+digest(execution.claim['input'])
         feedback={'category':'spec_report','message':str(exc),'input':execution.claim['input']}
