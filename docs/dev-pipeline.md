@@ -908,7 +908,7 @@ Four additional independently claimable stages use the same ledger and leases:
 |---|---|---|
 | `spec_audit` | Read the entire canonical document against an exact upstream base. Account for every heading with literal requirement and source evidence. | Source-bound gap/satisfaction/context observations. |
 | `decompose` | Partition confirmed gaps into bounded tasks with concrete acceptance criteria, negative verification intent and dependency edges. Inspect existing tasks before proposing work. | A complete gap-to-task ownership plan; unfinished tasks can be reused. |
-| `plan_review` | A separate read-only agent challenges every section and the plan, including no-gap/context claims and duplicate-work analysis. | Exact-plan approval or actionable feedback to a fresh audit cycle. Repeated rejection requires attention. |
+| `plan_review` | A separate read-only agent challenges every section and the plan, including no-gap/context claims and duplicate-work analysis. | Exact-plan approval or actionable feedback to an audit or plan-only correction. Repeated unresolved issues require attention. |
 | `backlog` | Mechanically materialize approved task documents and explicit registry bindings. Reserve names transactionally across planners, human decisions and CI repairs. | A private immutable checkpoint that enters ordinary independent review, remote verification, PR checks and merge. |
 
 Generated implementation tasks are **not inserted into the runnable catalog**
