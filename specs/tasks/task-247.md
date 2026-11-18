@@ -2,8 +2,8 @@
 title: "Wire the SQLite/PostgreSQL MessageRepository into production AppState"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / db-message-repository-wiring / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
-commits: ["68c3bf22bf274bdf7d35ca1c4cbbfbe5e245629f"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -62,52 +62,3 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
-
-## Shipped
-
-The production wiring change is a single, surgical edit in `build_state`
-(crates/gyre-server/src/lib.rs): `AppState.messages` was set
-unconditionally to `Arc::new(mem::MemMessageRepository::default())`; it now
-uses the same `store!` macro every sibling durable port in the same struct
-literal uses, so with `GYRE_DATABASE_URL` set the Diesel adapter
-(`SqliteStorage` / `PgStorage`, migration `2026-03-24-000017_messages`)
-serves every `state.messages` operation (send, poll, ack, WS replay,
-expiry jobs), and `MemMessageRepository` remains only the no-database
-fallback — exactly where sibling durable ports fall back to mem. The port
-trait, both Diesel adapters, and the mem implementation are unchanged.
-
-### Behavioral evidence
-
-- `crates/gyre-server/tests/message_persistence.rs` (new, own test binary
-  because `build_state` reads `GYRE_DATABASE_URL` from the process
-  environment, mirroring `tests/dependency_persistence.rs`):
-  - `messages_survive_restart_on_sqlite` — stores an unacked Directed
-    message and an Event-tier workspace message via instance 1 of
-    `build_state` over a real SQLite file, drops it, rebuilds instance 2
-    against the same URL, and requires the Directed message via
-    `list_unacked` / `list_after` / `count_unacked` / `find_by_id` and the
-    Event message via `list_by_workspace`; acknowledges twice (idempotent),
-    then a third instance must see the ack flag persisted. This test fails
-    against the HashMap-backed mem adapter (second instance sees nothing).
-  - `event_ttl_expiry_persists_across_restart_on_sqlite` — an Event older
-    than the horizon is deleted by `expire_events` on a rebuilt instance,
-    and the deletion survives a further restart.
-- Focused probe run in this sandbox (this sandbox's build wrapper blocks
-  `gyre-server` test compilation — server builds belong to the independent
-  verifier): `cargo check -p gyre-server` and
-  `cargo check -p gyre-server --test message_persistence` both clean;
-  `cargo test -p gyre-adapters --lib sqlite::message` — 33 passed, 0
-  failed (send/poll/ack/count/expiry behavior against the SQLite adapter,
-  AC 4).
-- The verifier must execute: `cargo test -p gyre-server --test
-  message_persistence` (both tests), plus the existing message-bus suites
-  (`--lib api::messages`, `--lib message_dispatcher`) to confirm AC 4 on
-  the wired DB path.
-
-### Coverage rows updated
-
-`specs/coverage/system/message-bus.md` rows 3 (Core Principle), 11
-(Storage), and 16 (Edge Cases) amended with the wiring evidence; no
-unrelated rows touched. The Directed at-least-once guarantee (ce88ec9) and
-the server-restart edge-case row (e5d4cc99) remain owned by their
-dependent tasks.
