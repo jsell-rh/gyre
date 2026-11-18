@@ -123,6 +123,37 @@ class GitHubChecksTest(unittest.TestCase):
         self.assertEqual(observed['status'],'candidate_failed')
         self.assertIn('broken feature',Path(observed['candidate_log']).read_text())
 
+    def job_log_observation(self, *, available=True, stale=False):
+        self.pr['statusCheckRollup']=[self.check('FAILURE'),self.check(None,'IN_PROGRESS')]
+        def run(*args,**kwargs):
+            if '--log-failed' in args:return subprocess.CompletedProcess(args,1,'','workflow still running')
+            if args[:2]==('gh','api'):
+                path=args[2]
+                if path.endswith('/runs/10'):
+                    value={'id':10,'head_sha':self.head,'run_attempt':1,'status':'in_progress'}
+                elif path.endswith('/jobs/100'):
+                    value={'id':100,'run_id':10,'head_sha':self.base if stale else self.head,'name':'e2e',
+                           'run_attempt':1,'status':'completed','conclusion':'failure'}
+                elif path.endswith('/jobs/100/logs'):
+                    return subprocess.CompletedProcess(args,0 if available else 1,
+                        'tests/e2e/app.spec.js:4:1 › actual failure\n' if available else '','')
+                else:return self.run_cli(*args,**kwargs)
+                return subprocess.CompletedProcess(args,0,json.dumps(value),'')
+            return self.run_cli(*args,**kwargs)
+        return ci.observe(run,'https://github.com/example/repo/pull/1',self.head,self.base,self.temp.name)
+
+    def test_completed_job_logs_work_before_sibling_jobs_finish(self):
+        observation=self.job_log_observation()
+        self.assertEqual(observation['status'],'candidate_failed')
+        self.assertIn('actual failure',Path(observation['candidate_log']).read_text())
+
+    def test_missing_job_logs_do_not_create_a_speculative_code_repair(self):
+        self.assertEqual(self.job_log_observation(available=False)['status'],'pending')
+
+    def test_job_log_evidence_must_match_exact_head_and_attempt(self):
+        with self.assertRaisesRegex(RuntimeError,'evidence changed'):
+            self.job_log_observation(stale=True)
+
     def test_missing_or_unknown_completed_conclusion_is_not_a_code_failure(self):
         for conclusion in (None,'UNKNOWN','ACTION_REQUIRED'):
             self.pr['statusCheckRollup']=[self.check(conclusion)]

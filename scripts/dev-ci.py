@@ -195,6 +195,30 @@ def transient_setup_failure(run, repo, head, base, failed, logs):
     return result
 
 
+def failed_job_logs(run, repo, head, ident, failed):
+    """Read completed jobs while sibling jobs keep workflow logs unavailable."""
+    workflow=json.loads(run('gh','api',f'repos/{repo}/actions/runs/{ident}',timeout=30).stdout)
+    if workflow.get('id')!=ident or workflow.get('head_sha')!=head:
+        raise RuntimeError('CI log workflow differs from the observed head')
+    logs=[]
+    for check in failed:
+        if run_id(check)!=ident:continue
+        match=re.fullmatch(r'https://github.com/'+re.escape(repo)+
+                           r'/actions/runs/'+str(ident)+r'/job/(\d+)',check.get('detailsUrl') or '')
+        if not match:return ''
+        job_id=int(match[1])
+        job=json.loads(run('gh','api',f'repos/{repo}/actions/jobs/{job_id}',timeout=30).stdout)
+        if (job.get('id')!=job_id or job.get('run_id')!=ident or job.get('head_sha')!=head
+                or job.get('name')!=check.get('name') or job.get('status')!='completed'
+                or job.get('conclusion')!='failure' or type(job.get('run_attempt')) is not int
+                or job['run_attempt']!=workflow.get('run_attempt')):
+            raise RuntimeError('CI log job evidence changed; observe the current attempt again')
+        response=run('gh','api',f'repos/{repo}/actions/jobs/{job_id}/logs',timeout=60,check=False)
+        if response.returncode or not response.stdout.strip():return ''
+        logs.append('\n'.join(check['name']+'\tUNKNOWN STEP\t'+line for line in response.stdout.splitlines()))
+    return '\n'.join(logs)
+
+
 def observe(run, url, head, base, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -248,12 +272,11 @@ def observe(run, url, head, base, directory):
         except (OSError, subprocess.TimeoutExpired):
             candidate_log = ''
         if not candidate_log:
-            # A completed failed job can coexist with running sibling jobs.
-            # Logs may be unavailable until its workflow ends; that cannot
-            # turn a confirmed failure back into indefinite pending.
-            candidate_log = 'Completed failed check; logs not yet available.\n' + json.dumps([
-                {key:check.get(key) for key in ('name','conclusion','detailsUrl','targetUrl')}
-                for check in failed if run_id(check) == ident])
+            candidate_log=failed_job_logs(run,repo,head,ident,failed)
+        if not candidate_log:
+            # A failed check still blocks merge. Missing diagnostic evidence
+            # is not proof of a code defect and must not spawn a coding worker.
+            return {'status':'pending','detail':'Failed CI job logs unavailable; awaiting diagnostic evidence','runs':[ident]}
         (directory / f'github-run-{ident}.log').write_text(candidate_log)
         logs[ident]=candidate_log
         allowance = max(1024, 60000 // (2 * len(failed)))
