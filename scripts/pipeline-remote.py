@@ -103,7 +103,7 @@ def main():
     # Returning to the same immutable candidate via detached HEAD is harmless.
     # Reattach without changing the tree or approving edits.
     reattach_candidate(branch, checkout)
-    if role in ('review', 'assess', 'triage'):
+    if role in ('review', 'assess', 'triage', 'spec_audit', 'decompose', 'plan_review'):
         guard = run('python3', str(STAGE / 'dev-review-guard.py'), 'check', str(before), check=False)
         source_valid = guard.returncode == 0
         valid = valid and source_valid
@@ -135,6 +135,10 @@ def main():
     if role == 'triage' and job['input'].get('decision_request'):
         report=STAGE/'decision.json'
         if report.exists():outcome['decision']=json.loads(report.read_text())
+        else:outcome['valid']=False
+    if role in ('spec_audit','decompose','plan_review'):
+        report=STAGE/'planning.json'
+        if report.exists():outcome['planning']=json.loads(report.read_text())
         else:outcome['valid']=False
     record_outcome(outcome)
     # This private, claim-specific branch can never overwrite another worker.

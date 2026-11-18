@@ -8,7 +8,7 @@ real=${!key:?missing original build command}
 case "${1:-}" in --version|-V|--help|-h|help|metadata|locate-project) exec "$real" "$@";; esac
 # Inspection and large server code generation have separate memory ownership.
 # The verifier runs after the model process exits, in its own 4 GiB sandbox.
-if [ "${GYRE_PIPELINE_STAGE:-}" = assess ]; then
+if [[ "${GYRE_PIPELINE_STAGE:-}" =~ ^(assess|spec_audit|decompose|plan_review)$ ]]; then
   echo 'Gyre: assessment inspects source and test definitions. Builds and test execution are deferred to host-controlled verification after the model exits. Record deferred checks; do not bypass this wrapper.' >&2
   exit 64
 fi

@@ -17,7 +17,7 @@ from pipeline.catalog import discover, generation_for, metadata, sync_checkout
 from pipeline.execution import Execution, ROOT, Retry, Wait
 from pipeline.eligibility import eligible
 from pipeline.stages import HANDLERS
-from pipeline.store import STAGES, Store, StaleClaim
+from pipeline.store import STAGES, COMPUTE, Store, StaleClaim
 
 
 def source(store):
@@ -45,6 +45,8 @@ def source(store):
         resolve_upstream_assessments(store,path,revision)
         from pipeline.recovery_policy import reconcile as recover_holds
         recover_holds(store)
+        from pipeline.spec_backlog import inventory
+        if store.setting('spec_reconciliation_enabled',False):inventory(store,path,revision)
         store.set_setting('observed_main', revision)
         return revision
 
@@ -84,7 +86,7 @@ def discover_stage(store, stage, base):
 
 def run_one(store, stage, task=None):
     limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
-    if stage in ('implement', 'assess', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
+    if stage in COMPUTE and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
         return False
     claim = store.claim(stage, f'{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}',
                         concurrency=limit, task=task, eligible=lambda work: eligible(store, work),

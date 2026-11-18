@@ -1,4 +1,5 @@
 """Read-only namespace capacity observations and transactional local reservations."""
+from .store import COMPUTE
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_CEILING
 import fcntl
@@ -193,7 +194,7 @@ def summary(store):
     from .eligibility import eligible
     blocked=None
     for work in store.ordered_ready():
-        if work['stage'] not in ('triage','assess','implement','review','verify') or not eligible(store,work):continue
+        if work['stage'] not in COMPUTE or not eligible(store,work):continue
         value=decision(store,work)
         if value['allowed']:return value
         if blocked is None:blocked=value

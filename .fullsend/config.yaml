@@ -9,6 +9,12 @@ agents:
     source: harness/assess.yaml
   - name: review
     source: harness/review.yaml
+  - name: spec_audit
+    source: harness/spec_audit.yaml
+  - name: decompose
+    source: harness/decompose.yaml
+  - name: plan_review
+    source: harness/plan_review.yaml
 inference:
   gateway:
     url: https://api.enmaas.devshift.net

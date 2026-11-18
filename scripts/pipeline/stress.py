@@ -13,7 +13,7 @@ def observe(store,now=None):
     cutoff=max(start,now-600)
     reason=None;tasks=[]
     overlaps=store.db.execute("""SELECT w.task FROM work w JOIN tasks t ON t.name=w.task AND t.generation=w.generation
-        WHERE w.state='claimed' AND w.expires>? AND w.stage IN ('triage','assess','implement','review','verify')
+        WHERE w.state='claimed' AND w.expires>? AND w.stage IN ('triage','assess','implement','review','verify','spec_audit','decompose','plan_review')
         GROUP BY w.task HAVING count(*)>1""",(now,)).fetchall()
     if overlaps:reason='Overlapping live compute claims for the same task';tasks=[r['task'] for r in overlaps]
     groups={'provisioning':set(),'leases':set(),'memory_ceiling':set(),'ledger':set()}

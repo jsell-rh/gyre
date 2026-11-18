@@ -114,6 +114,10 @@ def discover(store, stage, base):
     selected = []
     for name, task in tasks.items():
         data = task['data']
+        if data.get('spec_planner'):
+            from .spec_backlog import discover as discover_specs
+            selected.extend(discover_specs(store,task,stage,base))
+            continue
         if satisfied(data):
             continue
         requirements = data.get('requirements') or {}

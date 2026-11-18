@@ -23,6 +23,12 @@ def configuration(store):
         help='0–1000, within total capacity. Effective reserve clamps to capacity minus one; existing workers finish.')
     add('worker_memory_max_gib', 'Worker memory ceiling (GiB)', store.setting('worker_memory_max_gib',6), 'New admissions', 'choice',
         '4 GiB default. With ceiling 6, an authoritative OOM permits a 6 GiB retry for the same task stage and requirements generation. One CPU/build job; running allocations are unchanged.', ['4','6'])
+    add('spec_reconciliation_enabled','Discover missing spec work',store.setting('spec_reconciliation_enabled',False),live,'choice',
+        'Audit canonical specs, independently review missing-work plans, and publish task definitions before implementation. Does not mark coverage complete.',['false','true'])
+    add('spec_planning_concurrency','Spec planning concurrency',store.setting('spec_planning_concurrency',2),live,
+        help='1–10 across audits, decomposition and plan reviews; shares total slots and verification reserve.')
+    add('spec_audit_interval','Spec re-audit interval (seconds)',store.setting('spec_audit_interval',86400),'New audit cycles',
+        help='3600–604800. Source evidence changes and completed linked tasks also trigger re-audit.')
     limits = store.setting('limits', {})
     for stage, label in [('triage', 'Triage'), ('assess', 'Spec assessment'), ('implement', 'Implementation'), ('review', 'Review'), ('verify', 'Verification')]:
         add('limit.' + stage, label + ' concurrency', limits.get(stage, ''), live,
@@ -64,7 +70,7 @@ def save_configuration(store, request):
         if 'expected' in request and request['expected'] != row['value']:
             raise ValueError('Setting changed in another controller; refresh and edit again.')
         text = text.strip()
-        if key in ('admission_paused','stress_watch_enabled'):
+        if key in ('admission_paused','stress_watch_enabled','spec_reconciliation_enabled'):
             if text not in ('true', 'false'):
                 raise ValueError('pause must be true or false')
             value = text == 'true'
@@ -83,6 +89,10 @@ def save_configuration(store, request):
                 low = 1
             elif key in ('model_timeout', 'verification_timeout'):
                 low, high = 60, 86400
+            elif key == 'spec_planning_concurrency':
+                low, high = 1, 10
+            elif key == 'spec_audit_interval':
+                low, high = 3600, 604800
             elif key == 'retry_base_seconds':
                 low, high = 1, 3600
             elif key == 'retry_max_seconds':

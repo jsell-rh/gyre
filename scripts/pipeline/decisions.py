@@ -18,7 +18,8 @@ def initialize(store):
 
 
 def request(store, task):
-    hold=store.setting(store.runtime_hold_key(task['name'],'assess',task['generation'])) or {}
+    stage='spec_audit' if task['data'].get('spec_planner') else 'assess'
+    hold=store.setting(store.runtime_hold_key(task['name'],stage,task['generation'])) or {}
     if hold.get('category')!='requirements_triage':return None
     desired=contract.requirement_parts(task['body'])
     text=json.dumps([task['data'].get('spec_ref'),hold,task['data'].get('assessment'),desired])
@@ -103,10 +104,12 @@ def choose(store, identity, option_id, actor=None, source='local cockpit', instr
         report=json.loads(row['body']);option=next((o for o in report['options'] if o['id']==option_id),None)
         if option is None:raise ValueError('Unknown decision option')
         selection={'option':option_id,'actor':actor or getpass.getuser(),'source':source,'instruction':instruction,'at':time.time()}
-        number=max([int(t['name'][5:]) for t in store.tasks() if re.fullmatch(r'task-\d+',t['name'])]+[0])+1
-        name=f'task-{number:03d}'
+        from .spec_backlog import allocate
+        name=allocate(store,1,'operator decision '+identity)[0]
         title=f"Apply operator decision for {parent['name']}: {option['title']}"
-        body='---\ntitle: '+json.dumps(title)+'\nspec_ref: '+json.dumps(parent['data']['spec_ref'],ensure_ascii=False)+'\ndepends_on: []\nprogress: not-started\n---\n\n## Approved operator decision\n\n'
+        from .spec_backlog import GOAL_REF
+        spec_ref=GOAL_REF if parent['data'].get('spec_planner') else parent['data']['spec_ref']
+        body='---\ntitle: '+json.dumps(title)+'\nspec_ref: '+json.dumps(spec_ref,ensure_ascii=False)+'\ndepends_on: []\nprogress: not-started\n---\n\n## Approved operator decision\n\n'
         body+=json.dumps({'id':identity,'parent':parent['name'],'question':report['question'],'context':report['context'],
             'options':report['options'],'recommendation':report['recommendation'],'selection':selection,'sources':report.get('sources',[])},indent=2)+'\n\n'
         body+=f"Only option `{option_id}` is authorized. The other alternatives are recorded history, not requirements.\n\n## Selected direction\n\n{option['title']}\n\n{option['summary']}\n\n{option['next_step']}\n\n"
@@ -134,6 +137,8 @@ docs/ (plus this task's own bookkeeping). Do not modify unrelated task contracts
 - [ ] Existing implementation status is reported honestly; no fabricated coverage.
 - [ ] No production code, tests or enforcement have been changed in this amendment.
 '''
+        if parent['data'].get('spec_planner'):
+            body=body.replace("the parent task's requirements/spec binding","related real task bindings (the spec audit is a controller record, not a task file to create)")
         scoped=snapshot(store.directory/'source',body,contract,require_registry=True)
         if scoped.get('errors'):raise ValueError('Cannot queue amendment until its spec binding is corrected: '+'; '.join(scoped['errors']))
         generation=scoped['fingerprint']

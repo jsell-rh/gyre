@@ -77,7 +77,7 @@ def adopt(execution, task):
         job = json.loads(job_path.read_text())
         if job['stage'] != claim['stage'] or job['task'] != task['name']:
             raise ValueError('published receipt belongs to another assignment')
-        if claim['stage'] in ('triage', 'assess', 'review') and not receipt.get('valid'):
+        if claim['stage'] in ('triage', 'assess', 'review', 'spec_audit', 'decompose', 'plan_review') and not receipt.get('valid'):
             continue
         execution.branch = job['branch']
         execution.phase('AdoptingPublishedOutcome', head=receipt['head'])
@@ -137,7 +137,7 @@ def prepare(execution, task, prompt):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
     for name in ('pipeline-remote.py', 'dev-contract.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py','dev-coverage.py', 'pipeline-usage.py', 'pipeline-build-env.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
-    if claim['stage'] in ('review', 'assess', 'triage'):
+    if claim['stage'] in ('review', 'assess', 'triage', 'spec_audit', 'decompose', 'plan_review'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
                           str(bundle / 'review-before.json'), '--task', task['name'], cwd=repo)
     if claim['stage'] == 'review':
@@ -186,7 +186,7 @@ def prepare(execution, task, prompt):
     stage = claim['stage']
     harness = {'base': 'worker.yaml', 'agent': 'agents/' + stage + '.md',
                'providers': [forge_provider],
-               'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage', 'assess':'review'}[stage],
+               'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage', 'assess':'review','spec_audit':'review','decompose':'review','plan_review':'review'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
                # Pinned Fullsend 0.50.0 validates this field in [30,600].
                # Model/CLI budgets and capacity backoff are separate bounds.
