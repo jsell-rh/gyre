@@ -41,3 +41,8 @@ conflict so a human can decide through the spec lifecycle.
 Approval requires findings: []. If findings remain unresolved, set approved: false
 and retain actionable findings; do not delete them just to satisfy the schema.
 Purely editorial observations that do not affect any requirement may go in checks.
+
+other_plans in the machine context is a compact index. Each path points to the
+complete staged plan JSON, with its plan_id and source-file list. Search/read related
+plan artifacts before concluding that work is independent; an unread index entry is
+not evidence of non-overlap. Completed assignments are omitted from this active index.

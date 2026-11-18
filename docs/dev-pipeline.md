@@ -972,3 +972,8 @@ Rejected revisions retain at most one bounded, unapproved audit/plan draft in th
 machine-readable context. Review feedback drives corrections; every requirement and
 source citation is validated again. The draft is omitted from the inline prompt,
 not treated as current evidence, and discarded on a new canonical-spec epoch.
+
+Other active plans are supplied as a compact index plus complete, content-identified
+JSON artifacts under `/tmp/stage/other-plans/`. Agents inspect related artifacts for
+duplicate work. Completed assignments and retired specs leave this index; full plan
+history is not copied into each prompt or discarded to fit its context window.

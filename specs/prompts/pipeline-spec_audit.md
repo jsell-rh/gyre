@@ -44,3 +44,8 @@ plan plus separate review_feedback. Use it as a correction starting point, not p
 Recheck the affected conclusions and evidence against this exact assigned base,
 retain sound work, and account for every requirement; do not repeat broad exploration
 when the cited source is unchanged. The controller validates all citations again.
+
+other_plans in the machine context is a compact index. Each path points to the
+complete staged plan JSON, with its plan_id and source-file list. Search/read related
+plan artifacts before concluding that work is independent; an unread index entry is
+not evidence of non-overlap. Completed assignments are omitted from this active index.

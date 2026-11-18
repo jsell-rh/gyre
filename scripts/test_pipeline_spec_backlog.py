@@ -83,9 +83,14 @@ class SpecBacklogTests(unittest.TestCase):
         return plan
 
     def test_full_chain_creates_reviewable_git_backlog_before_releasing_product_work(self):
-        self.reviewed();self.run_stage('backlog')
+        plan=self.reviewed();self.run_stage('backlog')
         data=self.store.task(self.name)['data'];publication=self.store.task(data['backlog_publication'])
         generated=data['backlog_tasks'][0]
+        from pipeline.spec_backlog import catalog_context
+        self.assertNotIn(publication['name'],[t['task'] for t in catalog_context(self.store,'specs/system/example.md')])
+        invalid=copy.deepcopy(plan);invalid['tasks'][0]['existing_task']=publication['name']
+        with self.assertRaisesRegex(ValueError,'publication is not a product'):
+            validate_plan(invalid,data['spec_audit'],self.store)
         self.assertFalse(self.store.db.execute('SELECT 1 FROM tasks WHERE name=?',(generated,)).fetchone())
         self.assertIsNone(publication['data'].get('delivered'))
         self.assertIn(publication['name'],[self.store.db.execute('SELECT task FROM work WHERE id=?',(w,)).fetchone()[0] for w in discover(self.store,'review',self.base)])
@@ -456,9 +461,36 @@ class SpecBacklogTests(unittest.TestCase):
         self.assertEqual(check(forged).returncode,1)
         self.assertEqual(check({'planning':self.audit()}).returncode,2)
 
+    def test_full_inventory_plan_index_stays_small_and_preserves_full_details_on_demand(self):
+        from pipeline.spec_backlog import planning_context
+        task=self.store.task(self.name)
+        plan={'audit':'source','tasks':[{'key':'work-'+str(i),'title':'Concrete deliverable '+str(i),
+                'required_behavior':'real requirement '*600,'acceptance':['meaningful acceptance '*50],
+                'negative_probe':'real negative probe '*100,'covers':[format(i,'024x')],'dependencies':[]} for i in range(8)]}
+        for i in range(50):
+            name='spec-'+format(i,'024x');data=task['data']|{'document':'specs/system/other-'+str(i)+'.md',
+                'status':'planned','decomposition':plan}
+            self.store.put_task(name,str(i),task['body'],data)
+        documents={};context=planning_context(task,self.store,documents)
+        self.assertEqual(len(context['other_plans']),50);self.assertEqual(len(documents),50)
+        self.assertLess(len(json.dumps(context)),100000)
+        self.assertGreater(sum(len(json.dumps(v)) for v in documents.values()),2000000)
+        for item in context['other_plans']:
+            artifact=documents[Path(item['path']).name]
+            self.assertEqual(digest(artifact['plan']),item['plan_id']);self.assertEqual(artifact['plan'],plan)
+        finished=self.store.task('spec-'+format(0,'024x'))
+        self.store.put_task('task-999','done','task',{'delivered':{'sha':'merged'}})
+        self.store.put_task(finished['name'],finished['generation'],finished['body'],finished['data']|{'status':'assigned','backlog_tasks':['task-999']})
+        retired=self.store.task('spec-'+format(1,'024x'))
+        self.store.put_task(retired['name'],retired['generation'],retired['body'],retired['data']|{'spec_retired':True})
+        self.assertEqual(len(planning_context(task,self.store)['other_plans']),48)
+
     def test_real_fullsend_bundle_supplies_machine_context_and_shared_citation_checker(self):
         import os,sys
         from pipeline.fullsend import prepare
+        own=self.store.task(self.name);other='spec-'+'f'*24
+        plan={'audit':'other-source','tasks':[{'key':'related','required_behavior':'Complete duplicate-work evidence'}]}
+        self.store.put_task(other,'other',own['body'],own['data']|{'document':'specs/system/other.md','status':'planned','decomposition':plan})
         discover(self.store,'spec_audit',self.base)
         claim=self.store.claim('spec_audit','planner',eligible=lambda w:eligible(self.store,w));execution=Execution(self.store,claim)
         with patch.dict(os.environ,{'OPENSHELL':sys.executable}):
@@ -468,3 +500,7 @@ class SpecBacklogTests(unittest.TestCase):
         self.assertEqual(context['assignment'],claim['input']);self.assertEqual(context['requirements'],claim['generation'])
         self.assertEqual(context['sections'],self.store.task(self.name)['data']['sections'])
         self.assertTrue((bundle/'pipeline-evidence.py').is_file())
+        item=context['other_plans'][0];artifact=bundle/'other-plans'/Path(item['path']).name
+        self.assertEqual(json.loads(artifact.read_text())['plan'],plan)
+        harness=json.loads((cfg/'harness/spec_audit.yaml').read_text())
+        self.assertIn(item['path'],[f['dest'] for f in harness['host_files']])

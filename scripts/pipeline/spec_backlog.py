@@ -287,6 +287,8 @@ def validate_plan(report, audit, store):
             row=store.db.execute('SELECT data FROM tasks WHERE name=?',(existing,)).fetchone()
             if not row or satisfied(json.loads(row['data'])):raise ValueError('Reuse requires an unfinished existing task')
             current=json.loads(row['data'])
+            if current.get('backlog_plan') or current.get('backlog_rejected'):
+                raise ValueError('Backlog publication is not a product implementation task')
             for dependency in deps:
                 target=by_key[dependency].get('existing_task') if dependency in by_key else dependency
                 if not target or target not in (current.get('dependencies') or []):
@@ -372,17 +374,34 @@ def previous_report(execution):
     return None
 
 
-def planning_context(task, store=None):
+def other_plans_context(store, task, documents=None):
+    """A small index; complete immutable plan snapshots are staged on demand."""
+    from .repairs import satisfied
+    tasks=store.tasks();by_name={t['name']:t for t in tasks};result=[]
+    for other in tasks:
+        data=other['data'];plan=data.get('decomposition')
+        if (other['name']==task['name'] or not data.get('spec_planner') or data.get('spec_retired')
+                or not plan or not plan.get('tasks')):continue
+        linked=data.get('backlog_tasks',[])
+        if data.get('status')=='assigned' and linked and all(n in by_name and satisfied(by_name[n]['data']) for n in linked):continue
+        identity=digest(plan);filename=digest([other['name'],identity])[:32]+'.json'
+        files=sorted({e['file'] for e in (data.get('spec_audit') or {}).get('source_evidence',[])})
+        record={'planner':other['name'],'document':data['document'],'audit_at':data.get('audited_at'),
+                'status':data.get('status'),'plan_id':identity,'publication':data.get('backlog_publication')}
+        result.append(record|{'path':'/tmp/stage/other-plans/'+filename,'source_files':files[:5],
+                              'source_file_count':len(files),'task_count':len(plan['tasks'])})
+        if documents is not None:documents[filename]=record|{'plan':plan,'source_files':files,'backlog_tasks':linked}
+    return result
+
+
+def planning_context(task, store=None, documents=None):
     data=task['data']
     return {'document':data['document'],'requirements':task['generation'],'sections':data['sections'],
             'audit':data.get('spec_audit'),'plan':data.get('decomposition'),'review_feedback':data.get('plan_feedback'),
             'revision_draft':data.get('revision_draft') if not data.get('decomposition') else None,
             'catalog':catalog_context(store,data['document']) if store else [],
             'audit_at':data.get('audited_at'),
-            'other_plans':[{'document':t['data']['document'],'audit_at':t['data'].get('audited_at'),
-                'plan':t['data']['decomposition'],'publication':t['data'].get('backlog_publication')}
-                for t in store.tasks() if t['name']!=task['name'] and t['data'].get('spec_planner')
-                and t['data'].get('decomposition') and not t['data'].get('spec_retired')] if store else []}
+            'other_plans':other_plans_context(store,task,documents) if store else []}
 
 
 def catalog_context(store, document):
@@ -392,7 +411,7 @@ def catalog_context(store, document):
     registry=json.loads(registry_path.read_text()) if registry_path.is_file() else {}
     for task in store.tasks():
         data=task['data']
-        if data.get('spec_planner'):continue
+        if data.get('spec_planner') or data.get('backlog_plan') or data.get('backlog_rejected'):continue
         inputs=(data.get('requirements') or {}).get('inputs') or registry.get('bindings',{}).get(data.get('spec_ref'),[])
         related=any(registry.get('sections',{}).get(i,{}).get('file')==document for i in inputs)
         if satisfied(data) and not related and Path(document).name not in (data.get('spec_ref') or ''):continue

@@ -138,7 +138,14 @@ def prepare(execution, task, prompt):
     (bundle / 'prompt.md').write_text(prompt)
     if task['data'].get('spec_planner'):
         from .spec_backlog import planning_context, previous_report
-        planning=planning_context(task,execution.store)
+        documents={}
+        planning=planning_context(task,execution.store,documents)
+        plan_directory=bundle/'other-plans'
+        if plan_directory.exists():shutil.rmtree(plan_directory)
+        if documents:
+            plan_directory.mkdir()
+            for filename,document in documents.items():
+                (plan_directory/filename).write_text(json.dumps(document,indent=2)+'\n')
         planning.update(previous_report=previous_report(execution),assignment=claim['input'],stage=claim['stage'])
         (bundle/'planning-context.json').write_text(json.dumps(planning))
     (bundle / 'bin').mkdir(exist_ok=True)
