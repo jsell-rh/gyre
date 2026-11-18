@@ -8,6 +8,9 @@ For every heading ID in Planning context, inspect real production wiring, enforc
 storage implementations and error paths. Include stubs, missing calls, audit-only
 checks where enforcement is required, and hardcoded stand-ins as gaps. Read parent
 introductions and related canonical specs; never silently resolve a contradiction.
+Code that contradicts a canonical requirement is an implementation gap, even when
+intentional. A spec conflict needs incompatible canonical requirements or concrete
+evidence that the contract cannot be satisfied; existing code rationale is not enough.
 Use context for rationale-only headings; do not call normative requirements context.
 Avoid counting a requirement again under a parent if its children account for it.
 
