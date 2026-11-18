@@ -298,3 +298,62 @@ class SpecBacklogTests(unittest.TestCase):
             self.store.put_task(name,'g','body',{'dependencies':[],'title':name})
         plan['tasks'][0].update(existing_task='task-004',dependencies=['task-005'])
         with self.assertRaisesRegex(ValueError,'silently add dependencies'):validate_plan(plan,audit,self.store)
+
+    def test_spec_cockpit_reflects_operator_priority_instead_of_a_default_label(self):
+        from pipeline.priority import set_task
+        set_task(self.store,self.name,'urgent')
+        item=summary(self.store)['items'][0]
+        self.assertEqual(item['priority']['class'],'urgent');self.assertEqual(item['priority']['source'],'operator')
+
+    def test_malformed_report_retry_gets_one_trusted_same_input_draft_not_stale_history(self):
+        from pipeline.spec_backlog import previous_report
+        work=discover(self.store,'spec_audit',self.base)[0]
+        claim=self.store.claim('spec_audit','one',eligible=lambda w:eligible(self.store,w))
+        execution=Execution(self.store,claim);bundle=execution.directory/'bundle';bundle.mkdir()
+        job={'stage':claim['stage'],'task':claim['task'],'input':claim['input']}
+        (bundle/'job.json').write_text(json.dumps(job))
+        (execution.directory/'outcome.json').write_text(json.dumps({'valid':True,'source_valid':True,'agent_exit':0,'planning':self.audit()}))
+        self.store.retry(work,claim['token'],{'category':'spec_report','message':'One quote needs correction','fresh_model':True},delay=0)
+        retry=self.store.claim('spec_audit','two',eligible=lambda w:eligible(self.store,w));second=Execution(self.store,retry)
+        self.assertEqual(previous_report(second)['draft'],self.audit())
+        job['input']['base']='different-source';(bundle/'job.json').write_text(json.dumps(job))
+        self.assertIsNone(previous_report(second))
+
+    def test_rationale_needs_literal_spec_context_but_not_fabricated_production_evidence(self):
+        report=self.audit();report['sections'][0]['evidence']=[]
+        validated=validate_audit(report,self.store.task(self.name),self.base,self.repo)
+        self.assertEqual(len(validated['gaps']),1)
+        report['sections'][1]['evidence']=[]
+        with self.assertRaises(ValueError):validate_audit(report,self.store.task(self.name),self.base,self.repo)
+
+    def test_main_advances_preserve_audit_retry_identity_and_base_until_cycle_finishes(self):
+        first=discover(self.store,'spec_audit',self.base)
+        self.assertEqual(discover(self.store,'spec_audit','new-unrelated-main'),first)
+        claim=self.store.claim('spec_audit','auditor',eligible=lambda w:eligible(self.store,w))
+        self.store.retry(first[0],claim['token'],{'category':'spec_report','fresh_model':True},delay=0)
+        self.assertEqual(discover(self.store,'spec_audit','another-main'),first)
+        row=self.store.db.execute('SELECT input,state FROM work WHERE id=?',(first[0],)).fetchone()
+        self.assertEqual(json.loads(row['input'])['base'],self.base);self.assertEqual(row['state'],'retry')
+
+    def test_sandbox_citation_preflight_rejects_forged_quotes_and_empty_envelopes(self):
+        script=Path(__file__).with_name('pipeline-evidence.py');report=self.root/'planning.json'
+        def check(value):
+            report.write_text(json.dumps(value))
+            return subprocess.run(['python3',str(script),str(report),'--root',str(self.repo)],capture_output=True,text=True)
+        self.assertEqual(check(self.audit()).returncode,0)
+        forged=self.audit();forged['sections'][1]['evidence'][0]['quote']='invented source'
+        self.assertEqual(check(forged).returncode,1)
+        self.assertEqual(check({'planning':self.audit()}).returncode,2)
+
+    def test_real_fullsend_bundle_supplies_machine_context_and_shared_citation_checker(self):
+        import os,sys
+        from pipeline.fullsend import prepare
+        discover(self.store,'spec_audit',self.base)
+        claim=self.store.claim('spec_audit','planner',eligible=lambda w:eligible(self.store,w));execution=Execution(self.store,claim)
+        with patch.dict(os.environ,{'OPENSHELL':sys.executable}):
+            cfg,repo,_=prepare(execution,self.store.task(self.name),'Read the immutable planning assignment.')
+        bundle=execution.directory/'bundle'
+        context=json.loads((bundle/'planning-context.json').read_text())
+        self.assertEqual(context['assignment'],claim['input']);self.assertEqual(context['requirements'],claim['generation'])
+        self.assertEqual(context['sections'],self.store.task(self.name)['data']['sections'])
+        self.assertTrue((bundle/'pipeline-evidence.py').is_file())

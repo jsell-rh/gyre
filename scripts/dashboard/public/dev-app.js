@@ -26,6 +26,7 @@ let errorText = "";
 let retryAllPending = false;
 let slotsDraft = null;
 let decisionPending = null;
+let specPlanningExpanded = false;
 
 function e(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -236,7 +237,7 @@ function renderOverview() {
       `Spec reconciliation ${s.spec_reconciliation.enabled ? "enabled" : "disabled"} · ${s.spec_reconciliation.documents} canonical documents · ` +
       Object.entries(s.spec_reconciliation.states || {}).map(([state, count]) => `${count} ${state}`).join(" · ") +
       ". Observed means reviewed source evidence, not verified coverage." }) : null,
-    s.spec_reconciliation?.enabled ? e("details", {}, e("summary", { text: "Spec audits and planning · inspect work or failures" }),
+    s.spec_reconciliation?.enabled ? e("details", { open: specPlanningExpanded, ontoggle: (event) => { specPlanningExpanded = event.currentTarget.open; } }, e("summary", { text: "Spec audits and planning · inspect work or failures" }),
       ...(s.spec_reconciliation.items || []).map((item) => e("div", { class: "dev-control-line" },
         taskButton(item, `${item.stage || item.progress} · ${item.gaps} observed gaps`),
         item.condition ? e("span", { class: "dev-health-error", text: item.condition }) : null))) : null,

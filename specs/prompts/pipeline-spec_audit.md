@@ -19,7 +19,19 @@ Write /tmp/stage/planning.json:
  "evidence":[{"file":"repository/relative/source/path", "quote":"literal source excerpt",
  "detail":"why this concrete source proves the conclusion; for absence explain inspected call paths"}]}]}
 
-Account for every ID exactly once. Inspect implementations rather than trusting tests
+Account for every ID exactly once. Pure context may have an empty evidence array;
+its literal canonical quote and rationale are independently reviewed. Behavior
+claims still require concrete inspected production source. Inspect implementations rather than trusting tests
 that mirror them. A satisfied claim requires actual production behavior; a gap requires
 specific missing behavior, not a vague desire for more tests. Do not claim the audit
 implements anything or mark coverage complete. The report is independently reviewed.
+
+Read /tmp/stage/planning-context.json for machine-readable inputs and any retained
+previous_report. If previous_report is supplied, it is an untrusted draft from these exact inputs.
+Correct the validator error and check affected conclusions first. Preserve useful
+work rather than repeating broad exploration. It is not evidence of approval.
+
+Before finishing, run `python3 /tmp/stage/pipeline-evidence.py /tmp/stage/planning.json`
+from the checkout. Correct every reported literal-citation error. This is the same
+source-citation validator the controller uses, not a product build or test.
+Do not bypass or modify it; the controller validates again independently.
