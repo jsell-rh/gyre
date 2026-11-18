@@ -3,7 +3,7 @@ title: "Wire the SQLite/PostgreSQL MessageRepository into production AppState"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / db-message-repository-wiring / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["68c3bf22"]
+commits: ["68c3bf22bf274bdf7d35ca1c4cbbfbe5e245629f"]
 ---
 
 ## Required behavior
