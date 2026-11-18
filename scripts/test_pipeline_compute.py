@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 from pipeline.store import Store
-from pipeline.compute import profile, record_oom, from_usage
+from pipeline.compute import profile, assigned_profile, record_oom, from_usage
 from pipeline.runtime import observe, failure, restart, snapshot, ensure_workspace
 from pipeline.execution import Execution, Attention, Retry
 
@@ -16,6 +16,29 @@ class ComputeTests(unittest.TestCase):
         self.work=self.store.enqueue('implement','task-001','g',{})
         self.execution=Execution(self.store,self.store.claim('implement','test',capacity=10))
         self.store.reserve('owned',self.work,self.execution.claim['token'],'sandbox',10,{'compute':profile(self.store,'task-001','implement')})
+
+    def test_explicit_verification_baseline_is_stage_scoped_and_ceiling_bounded(self):
+        self.assertEqual(profile(self.store,'task-002','verify')['memory'],'4Gi')
+        self.store.set_setting('verification_memory_gib',6)
+        self.assertEqual(profile(self.store,'task-002','verify')['memory'],'6Gi')
+        for stage in ('implement','review','spec_audit','decompose','plan_review'):
+            self.assertEqual(profile(self.store,'task-002',stage)['memory'],'4Gi')
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='compute_oom'").fetchone()[0],0)
+        self.store.set_setting('worker_memory_max_gib',4)
+        self.assertEqual(profile(self.store,'task-002','verify')['memory'],'4Gi')
+        self.store.set_setting('worker_memory_max_gib',6)
+        for value in (8,'6',True,None):
+            self.store.set_setting('verification_memory_gib',value)
+            self.assertEqual(profile(self.store,'task-002','verify')['memory'],'4Gi')
+
+    def test_verification_setting_does_not_resize_existing_admission(self):
+        self.store.put_task('task-002','g','spec',{})
+        self.store.enqueue('verify','task-002','g',{})
+        claim=self.store.claim('verify','test',capacity=10)
+        self.assertEqual(assigned_profile(self.store,claim)['memory'],'4Gi')
+        self.store.set_setting('verification_memory_gib',6)
+        self.assertEqual(profile(self.store,'task-002','verify')['memory'],'6Gi')
+        self.assertEqual(assigned_profile(self.store,claim)['memory'],'4Gi')
 
     def test_historical_escalation_and_incomplete_oom_proof_never_raise_memory(self):
         self.store.set_setting('compute_memory:task-001:implement',8)

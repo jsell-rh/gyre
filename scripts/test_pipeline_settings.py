@@ -69,12 +69,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self.store.setting('model_timeout'), 14400)
 
     def test_worker_memory_ceiling_is_explicit_and_bounded(self):
-        for value in ('4','6'):
-            self.save('worker_memory_max_gib',value)
-            self.assertEqual(self.store.setting('worker_memory_max_gib'),int(value))
-        for value in ('5','8','0','6Gi','6.0'):
-            with self.subTest(value=value),self.assertRaises(ValueError):
-                self.save('worker_memory_max_gib',value)
+        for key in ('worker_memory_max_gib','verification_memory_gib'):
+            for value in ('4','6'):
+                self.save(key,value)
+                self.assertEqual(self.store.setting(key),int(value))
+            for value in ('5','8','0','6Gi','6.0'):
+                with self.subTest(key=key,value=value),self.assertRaises(ValueError):
+                    self.save(key,value)
 
     def test_foreign_scope_readonly_invalid_and_stale_edits_are_rejected(self):
         before = self.store.db.execute('SELECT * FROM settings ORDER BY key').fetchall()

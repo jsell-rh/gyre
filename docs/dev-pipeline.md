@@ -56,6 +56,12 @@ attention; there is no escalation to 8 GiB. Historical ad-hoc 8 GiB settings are
 ignored. The harness does not change namespace admission policy or cluster
 resources to increase its budget. Running allocations keep their assigned size.
 
+Operators can set `verification_memory_gib` to 6 when the remote full-suite
+verification workload needs that size from the outset (default 4). This applies
+only to verification and is capped by `worker_memory_max_gib`; coding and review
+still start at 4 GiB. Changing this setting does not resize running allocations
+or manufacture OOM evidence for other tasks.
+
 When the scoped runtime observer is configured, new compute admissions also
 respect the namespace's CPU, memory and pod quotas and container maxima. A fresh
 read-only observation accounts for every namespace pod (including other callers),
