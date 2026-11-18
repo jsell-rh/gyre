@@ -195,14 +195,14 @@ export async function setSlots(paths, value) {
 }
 
 export async function retryTask(paths, task) {
-  if (!/^task-\d+$/.test(task)) throw new Error("invalid task");
+  if (!/^(?:task-\d+|spec-[a-f0-9]{24})$/.test(task)) throw new Error("invalid task");
   const { stdout } = await execFileP("python3", [paths.command, "--state", paths.state, "retry", task],
     { cwd: paths.root, timeout: 5000, maxBuffer: 1024 * 1024 });
   return stdout.trim();
 }
 
 export async function setPriority(paths, task, priority) {
-  if (!/^task-\d+$/.test(task) || (priority !== null && (typeof priority !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(priority))))
+  if (!/^(?:task-\d+|spec-[a-f0-9]{24})$/.test(task) || (priority !== null && (typeof priority !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(priority))))
     throw new Error("invalid task or priority class");
   await stat(paths.db);
   const args = [paths.command, "--state", paths.state, "priority", task, ...(priority === null ? ["--clear"] : [priority])];

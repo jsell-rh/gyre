@@ -319,7 +319,7 @@ def summary(store):
         state=('running' if work['state']=='claimed' else 'failed' if work['state']=='attention' else 'deferred' if work['state']=='retry' else 'ready') if work else data['status']
         result=json.loads(work['result'] or '{}') if work else {}
         items.append({'name':task['name'],'title':data['title'],'document':data['document'],
-                      'state':state,'stage':work['stage'] if work else None,'progress':data['status'],
+                      'state':state,'stage':work['stage'] if work else None,'progress':data['status'],'spec_ref':data['document'],
                       'condition':result.get('message'),'generation':task['generation'],'deps':[],
                       'backlog_publication':data.get('backlog_publication'),'backlog_tasks':data.get('backlog_tasks',[]),
                       'audited_at':data.get('audited_at'),'gaps':len((data.get('spec_audit') or {}).get('gaps',[]))})
