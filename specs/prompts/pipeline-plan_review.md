@@ -29,3 +29,20 @@ Read /tmp/stage/planning-context.json for machine-readable inputs and any retain
 previous_report. If previous_report is supplied, it is an untrusted draft from these exact inputs.
 Correct the validator error and check affected conclusions first. Preserve useful
 work rather than repeating broad exploration. It is not evidence of approval.
+
+An intentional code-versus-spec deviation is still an implementation gap. Existing
+code comments, rationale, or a defensible design choice are not a spec amendment.
+A spec conflict needs incompatible canonical requirements or concrete evidence that
+the contract itself cannot be satisfied; current code is not a competing requirement.
+Never classify a normative or security requirement as non-blocking merely because
+the current behavior seems reasonable. Require a faithful repair or report the
+conflict so a human can decide through the spec lifecycle.
+
+Approval requires findings: []. If findings remain unresolved, set approved: false
+and retain actionable findings; do not delete them just to satisfy the schema.
+Purely editorial observations that do not affect any requirement may go in checks.
+
+other_plans in the machine context is a compact index. Each path points to the
+complete staged plan JSON, with its plan_id and source-file list. Search/read related
+plan artifacts before concluding that work is independent; an unread index entry is
+not evidence of non-overlap. Completed assignments are omitted from this active index.

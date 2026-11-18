@@ -27,7 +27,7 @@ def eligible(store, work):
     if data.get('spec_planner'):
         from .spec_backlog import eligible as planning_eligible
         return planning_eligible(store,work,task,inputs)
-    if satisfied(data):
+    if data.get('backlog_rejected') or satisfied(data):
         return False
     if stage in ('triage','assess','implement','review','verify'):
         repair=data.get('repair') or {}

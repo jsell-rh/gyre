@@ -8,6 +8,9 @@ For every heading ID in Planning context, inspect real production wiring, enforc
 storage implementations and error paths. Include stubs, missing calls, audit-only
 checks where enforcement is required, and hardcoded stand-ins as gaps. Read parent
 introductions and related canonical specs; never silently resolve a contradiction.
+Code that contradicts a canonical requirement is an implementation gap, even when
+intentional. A spec conflict needs incompatible canonical requirements or concrete
+evidence that the contract cannot be satisfied; existing code rationale is not enough.
 Use context for rationale-only headings; do not call normative requirements context.
 Avoid counting a requirement again under a parent if its children account for it.
 
@@ -35,3 +38,14 @@ Before finishing, run `python3 /tmp/stage/pipeline-evidence.py /tmp/stage/planni
 from the checkout. Correct every reported literal-citation error. This is the same
 source-citation validator the controller uses, not a product build or test.
 Do not bypass or modify it; the controller validates again independently.
+
+The machine context may also contain revision_draft: one unapproved prior audit and
+plan plus separate review_feedback. Use it as a correction starting point, not proof.
+Recheck the affected conclusions and evidence against this exact assigned base,
+retain sound work, and account for every requirement; do not repeat broad exploration
+when the cited source is unchanged. The controller validates all citations again.
+
+other_plans in the machine context is a compact index. Each path points to the
+complete staged plan JSON, with its plan_id and source-file list. Search/read related
+plan artifacts before concluding that work is independent; an unread index entry is
+not evidence of non-overlap. Completed assignments are omitted from this active index.

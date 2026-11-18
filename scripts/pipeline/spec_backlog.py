@@ -122,8 +122,48 @@ def audit_input(store, task, base, cycle):
     return json.loads(row['input']) if row else {'base':base,'cycle':cycle}
 
 
+def revision_draft(data):
+    """One bounded prior revision, never an approval or an accumulating ledger."""
+    draft={'audit':data.get('spec_audit'),'plan':data.get('decomposition')}
+    return draft if len(json.dumps(draft))<=131072 else None
+
+
+def reconcile_rejected_publication(store, task):
+    """A semantic backlog rejection is planning feedback, never a code repair."""
+    data=task['data'];publication=data.get('backlog_publication')
+    if data.get('status')!='assigned' or not publication:return False
+    with store.transaction():
+        parent=store.task(task['name']);current=parent['data']
+        row=store.db.execute('SELECT data FROM tasks WHERE name=?',(publication,)).fetchone()
+        child=json.loads(row['data']) if row else {}
+        rejection=child.get('backlog_rejected')
+        if (parent['generation']!=task['generation'] or current.get('status')!='assigned'
+                or current.get('backlog_publication')!=publication or not rejection
+                or child.get('backlog_plan')!=digest(current.get('decomposition'))
+                or child.get('backlog_manifest',{}).get('requirements')!=parent['generation']):return False
+        plan=child['backlog_plan']
+        prefix='spec_gap_owner:'+task['name']+':'+task['generation']+':'
+        # Only the rejected plan relinquishes ownership. Reserved task IDs and
+        # immutable private Git receipts remain historical and are never reused.
+        store.db.execute('DELETE FROM settings WHERE substr(key,1,?)=? AND value=?',
+                         (len(prefix),prefix,json.dumps(plan)))
+        current.update(revision_draft=revision_draft(current),status='pending',spec_audit=None,decomposition=None,plan_review=None,
+            backlog_publication=None,backlog_tasks=[],audit_cycle=current.get('audit_cycle',0)+1,
+            plan_revision=current.get('plan_revision',0)+1,
+            publication_rejections=current.get('publication_rejections',0)+1,
+            rejected_plans=[*current.get('rejected_plans',[]),plan],
+            plan_feedback=[{'publication':publication,'candidate':rejection['source'],
+                            'artifact':rejection.get('artifact'),'findings':rejection['details']}])
+        store.db.execute('UPDATE tasks SET data=?,updated=? WHERE name=?',
+                         (json.dumps(current),time.time(),task['name']))
+        store.event('spec_backlog_rejected',{'publication':publication,'plan':plan,
+                    'feedback':rejection,'cycle':current['audit_cycle']},task['name'])
+    return True
+
+
 def discover(store, task, stage, base):
     if not enabled(store) or task['data'].get('spec_retired'):return []
+    if reconcile_rejected_publication(store,task):return []
     selected=store.setting('spec_reconciliation_documents')
     if selected and task['data']['document'] not in selected:return []
     from .decisions import request, exists
@@ -247,6 +287,8 @@ def validate_plan(report, audit, store):
             row=store.db.execute('SELECT data FROM tasks WHERE name=?',(existing,)).fetchone()
             if not row or satisfied(json.loads(row['data'])):raise ValueError('Reuse requires an unfinished existing task')
             current=json.loads(row['data'])
+            if current.get('backlog_plan') or current.get('backlog_rejected'):
+                raise ValueError('Backlog publication is not a product implementation task')
             for dependency in deps:
                 target=by_key[dependency].get('existing_task') if dependency in by_key else dependency
                 if not target or target not in (current.get('dependencies') or []):
@@ -271,6 +313,8 @@ def run_model(execution, task):
                      'audited_at':time.time(),'audit_cycle':execution.claim['input']['cycle']}
             if not audit['gaps']:updates['decomposition']={'audit':digest(audit),'tasks':[]}
         elif stage=='decompose':
+            if digest(report) in data.get('rejected_plans',[]):
+                raise ValueError('This exact plan was rejected at backlog review; address the retained findings before resubmitting')
             updates={'decomposition':validate_plan(report,data['spec_audit'],execution.store),'status':'planned'}
         else:
             if (not isinstance(report,dict) or report.get('plan')!=digest(data['decomposition']) or
@@ -287,13 +331,20 @@ def run_model(execution, task):
                 if revision>=3:
                     error=Attention('Spec plan repeatedly rejected: '+json.dumps(report['findings'])[:6000]);error.category='spec_plan';raise error
                 # A rejected audit must be re-inspected, not merely rephrased by a planner.
-                updates={'spec_audit':None,'decomposition':None,'plan_review':None,'status':'pending',
+                updates={'revision_draft':revision_draft(data),'spec_audit':None,'decomposition':None,'plan_review':None,'status':'pending',
                          'audit_cycle':data.get('audit_cycle',0)+1,'plan_revision':revision,'plan_feedback':report['findings']}
             else:
-                updates={'plan_review':report,'status':'reviewed' if data['spec_audit']['gaps'] else 'observed'}
+                updates={'revision_draft':None,'plan_review':report,'status':'reviewed' if data['spec_audit']['gaps'] else 'observed'}
     except (ValueError,TypeError,KeyError) as exc:
         key=f"spec_report_failures:{task['name']}:{task['generation']}:{stage}:"+digest(execution.claim['input'])
-        count=execution.store.setting(key,0)+1;execution.store.set_setting(key,count)
+        feedback={'category':'spec_report','message':str(exc),'input':execution.claim['input']}
+        with execution.store.transaction():
+            execution.current()
+            count=execution.store.setting(key,0)+1
+            execution.store.db.executemany('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',[
+                (key,json.dumps(count)),
+                ('spec_report_rejected:'+execution.claim['id']+':'+digest(report),json.dumps(feedback)),
+                ('spec_report_feedback:'+execution.claim['id'],json.dumps(feedback))])
         error=Retry(str(exc),fresh_model=True) if count<3 else Attention(str(exc))
         error.category='spec_report';raise error from exc
     # Never let the normal task-body importer treat a planning receipt as delivery.
@@ -305,6 +356,9 @@ def previous_report(execution):
     """One input-bound draft, not an ever-growing failed-attempt prompt ledger."""
     previous=execution.claim.get('result') or {}
     if isinstance(previous,str):previous=json.loads(previous)
+    if previous.get('category')!='spec_report':
+        previous=execution.store.setting('spec_report_feedback:'+execution.claim['id'],{})
+        if previous.get('input')!=execution.claim['input']:return None
     if previous.get('category')!='spec_report':return None
     for path in sorted(execution.directory.parent.glob('*/outcome.json'),key=lambda p:int(p.parent.name),reverse=True):
         if path.parent==execution.directory:continue
@@ -320,16 +374,34 @@ def previous_report(execution):
     return None
 
 
-def planning_context(task, store=None):
+def other_plans_context(store, task, documents=None):
+    """A small index; complete immutable plan snapshots are staged on demand."""
+    from .repairs import satisfied
+    tasks=store.tasks();by_name={t['name']:t for t in tasks};result=[]
+    for other in tasks:
+        data=other['data'];plan=data.get('decomposition')
+        if (other['name']==task['name'] or not data.get('spec_planner') or data.get('spec_retired')
+                or not plan or not plan.get('tasks')):continue
+        linked=data.get('backlog_tasks',[])
+        if data.get('status')=='assigned' and linked and all(n in by_name and satisfied(by_name[n]['data']) for n in linked):continue
+        identity=digest(plan);filename=digest([other['name'],identity])[:32]+'.json'
+        files=sorted({e['file'] for e in (data.get('spec_audit') or {}).get('source_evidence',[])})
+        record={'planner':other['name'],'document':data['document'],'audit_at':data.get('audited_at'),
+                'status':data.get('status'),'plan_id':identity,'publication':data.get('backlog_publication')}
+        result.append(record|{'path':'/tmp/stage/other-plans/'+filename,'source_files':files[:5],
+                              'source_file_count':len(files),'task_count':len(plan['tasks'])})
+        if documents is not None:documents[filename]=record|{'plan':plan,'source_files':files,'backlog_tasks':linked}
+    return result
+
+
+def planning_context(task, store=None, documents=None):
     data=task['data']
     return {'document':data['document'],'requirements':task['generation'],'sections':data['sections'],
             'audit':data.get('spec_audit'),'plan':data.get('decomposition'),'review_feedback':data.get('plan_feedback'),
+            'revision_draft':data.get('revision_draft') if not data.get('decomposition') else None,
             'catalog':catalog_context(store,data['document']) if store else [],
             'audit_at':data.get('audited_at'),
-            'other_plans':[{'document':t['data']['document'],'audit_at':t['data'].get('audited_at'),
-                'plan':t['data']['decomposition'],'publication':t['data'].get('backlog_publication')}
-                for t in store.tasks() if t['name']!=task['name'] and t['data'].get('spec_planner')
-                and t['data'].get('decomposition') and not t['data'].get('spec_retired')] if store else []}
+            'other_plans':other_plans_context(store,task,documents) if store else []}
 
 
 def catalog_context(store, document):
@@ -339,7 +411,7 @@ def catalog_context(store, document):
     registry=json.loads(registry_path.read_text()) if registry_path.is_file() else {}
     for task in store.tasks():
         data=task['data']
-        if data.get('spec_planner'):continue
+        if data.get('spec_planner') or data.get('backlog_plan') or data.get('backlog_rejected'):continue
         inputs=(data.get('requirements') or {}).get('inputs') or registry.get('bindings',{}).get(data.get('spec_ref'),[])
         related=any(registry.get('sections',{}).get(i,{}).get('file')==document for i in inputs)
         if satisfied(data) and not related and Path(document).name not in (data.get('spec_ref') or ''):continue
@@ -375,6 +447,7 @@ def reconcile(execution, task):
     from .stages import checkout
     store=execution.store;data=task['data'];plan=data['decomposition'];audit=data['spec_audit']
     plan_id=digest(plan)
+    if plan_id in data.get('rejected_plans',[]):raise Attention('Rejected backlog plan cannot be republished unchanged')
     # No network operation or checkout mutation runs under the SQLite transaction.
     with (store.directory/'backlog.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)

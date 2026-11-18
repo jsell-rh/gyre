@@ -17,6 +17,8 @@ def prompt(execution, task):
     if task['data'].get('spec_planner'):
         from .spec_backlog import planning_context, previous_report
         planning=planning_context(task,execution.store)
+        planning['revision_draft_available']=bool(planning.pop('revision_draft',None))
+        planning['other_plan_count']=len(planning.pop('other_plans',[]))
         planning['previous_report_available']=bool(previous_report(execution))
         planning['machine_context']='/tmp/stage/planning-context.json'
     task_path = execution.directory / 'task.md'
@@ -205,6 +207,18 @@ def review(execution, task):
                'review_checkpoint': result['head'], 'branch': result['branch'],
                'details': result.get('source_edits') or verdict.get('findings') or ['review did not produce an affirmative exact-source verdict'],
                'artifact': receipt['artifact'], 'id': execution.claim['id']}
+    if (task['data'].get('backlog_manifest') and result['valid'] and findings
+            and isinstance(verdict.get('findings'),list)
+            and verdict.get('candidate')==assigned and verdict.get('approved') is False):
+        from .requirements import digest
+        parent_name='spec-'+digest(task['data']['backlog_manifest']['document'])[:24]
+        parent=execution.store.task(parent_name)
+        if (parent['generation']==task['data']['backlog_manifest']['requirements']
+                and parent['data'].get('publication_rejections',0)>=2):
+            from .execution import Attention
+            error=Attention('Three reviewed backlog publications were rejected; inspect the planner and retained review findings before retrying')
+            error.category='spec_plan';error.diagnostic=finding;raise error
+        return result, {'review':receipt,'backlog_rejected':finding,'repair':None}, [finding]
     from .repair_budget import check
     check(execution,task,path,assigned,findings or finding['details'])
     return result, {'review': receipt, 'repair': finding}, [finding]
