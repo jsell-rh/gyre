@@ -955,3 +955,10 @@ inventory scan. Normal product work stays ahead of background planning. Deleted
 specs fence their audit claims and retire their planning records without altering
 an operator pause. Semantic conflicts enter the existing three-option human
 decision flow; a reviewed amendment releases a fresh audit, never a blind code run.
+
+A semantic rejection of a generated backlog returns its findings to spec planning,
+not to a coding worker. The rejected publication is retained as retired, with no
+shipped or satisfied receipt. Its private checkpoint and reserved IDs remain
+historical; a revised, independently reviewed plan gets new IDs. The exact rejected
+plan cannot be resubmitted unchanged. Three rejected publications in one spec epoch
+require attention. A newer canonical-spec epoch is not reset by an older rejection.

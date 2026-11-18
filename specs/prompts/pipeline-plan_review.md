@@ -29,3 +29,13 @@ Read /tmp/stage/planning-context.json for machine-readable inputs and any retain
 previous_report. If previous_report is supplied, it is an untrusted draft from these exact inputs.
 Correct the validator error and check affected conclusions first. Preserve useful
 work rather than repeating broad exploration. It is not evidence of approval.
+
+An intentional code-versus-spec deviation is still a gap or a conflict. Existing
+code comments, rationale, or a defensible design choice are not a spec amendment.
+Never classify a normative or security requirement as non-blocking merely because
+the current behavior seems reasonable. Require a faithful repair or report the
+conflict so a human can decide through the spec lifecycle.
+
+Approval requires findings: []. If findings remain unresolved, set approved: false
+and retain actionable findings; do not delete them just to satisfy the schema.
+Purely editorial observations that do not affect any requirement may go in checks.

@@ -118,7 +118,7 @@ def discover(store, stage, base):
             from .spec_backlog import discover as discover_specs
             selected.extend(discover_specs(store,task,stage,base))
             continue
-        if satisfied(data):
+        if data.get('backlog_rejected') or satisfied(data):
             continue
         requirements = data.get('requirements') or {}
         if requirements.get('errors'):

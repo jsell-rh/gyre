@@ -53,7 +53,7 @@ class SpecBacklogTests(unittest.TestCase):
                 'evidence':[{'file':'crates/worker.rs','quote':'load_all();','detail':'Read path has no tenant predicate'}]})
         return {'base':self.base,'requirements':task['generation'],'sections':rows}
 
-    def run_stage(self,stage,report=None):
+    def run_stage(self,stage,report=None,expected_state='succeeded'):
         queued=discover(self.store,stage,self.base);self.assertEqual(len(queued),1)
         claim=self.store.claim(stage,'test',eligible=lambda w:eligible(self.store,w));self.assertIsNotNone(claim)
         task=self.store.task(claim['task'])
@@ -62,7 +62,7 @@ class SpecBacklogTests(unittest.TestCase):
         with patch.object(Execution,'cloud_step',return_value=result),patch('pipeline.stages.prompt',return_value='read-only'),patch('pipeline.stages.checkout',side_effect=self.checkout):
             self.cli.run_claim(self.store,claim)
         work=dict(self.store.db.execute('SELECT * FROM work WHERE id=?',(claim['id'],)).fetchone())
-        self.assertEqual(work['state'],'succeeded',work.get('result'))
+        self.assertEqual(work['state'],expected_state,work.get('result'))
         return work
 
     def planned(self):
@@ -171,6 +171,71 @@ class SpecBacklogTests(unittest.TestCase):
         self.run_stage('plan_review',report)
         data=self.store.task(self.name)['data'];self.assertIsNone(data['spec_audit']);self.assertEqual(data['plan_revision'],1)
         self.assertTrue(discover(self.store,'spec_audit',self.base))
+
+    def reject_backlog(self):
+        data=self.store.task(self.name)['data'];name=data['backlog_publication']
+        publication=self.store.task(name);head=publication['data']['candidate']
+        discover(self.store,'review',self.base)
+        claim=self.store.claim('review','test',task=name,eligible=lambda w:eligible(self.store,w))
+        result={'valid':True,'source_valid':True,'agent_exit':0,'stream_exit':0,
+                'task_body':publication['body'],'head':head,'base':self.base,'branch':'private',
+                'verdict':{'candidate':head,'approved':False,'findings':[
+                    {'file':'specs/tasks/'+data['backlog_tasks'][0]+'.md','detail':'Required nested query path is missing'}]}}
+        with patch.object(Execution,'cloud_step',return_value=result),patch('pipeline.stages.prompt',return_value='review'),patch('pipeline.stages.checkout',side_effect=self.checkout):
+            self.cli.run_claim(self.store,claim)
+        return name,dict(self.store.db.execute('SELECT * FROM work WHERE id=?',(claim['id'],)).fetchone())
+
+    def test_backlog_semantic_rejection_replans_without_code_repair_or_duplicate_publication(self):
+        plan=self.reviewed();self.run_stage('backlog')
+        original=self.store.task(self.name)['data'];reserved=original['backlog_tasks']
+        name,work=self.reject_backlog();self.assertEqual(work['state'],'succeeded')
+        rejected=self.store.task(name)['data'];self.assertTrue(rejected['backlog_rejected'])
+        self.assertIsNone(rejected['repair']);self.assertFalse(rejected.get('delivered'))
+        self.assertEqual(discover(self.store,'implement',self.base),[])
+        parent=self.store.task(self.name)['data'];self.assertEqual(parent['status'],'pending')
+        self.assertEqual(parent['publication_rejections'],1);self.assertEqual(parent['audit_cycle'],1)
+        self.assertIn('nested query',json.dumps(parent['plan_feedback']))
+        self.assertIn(digest(plan),parent['rejected_plans'])
+        self.assertTrue(all(not self.store.db.execute('SELECT 1 FROM tasks WHERE name=?',(n,)).fetchone() for n in reserved))
+        first=discover(self.store,'spec_audit',self.base);self.assertEqual(first,discover(self.store,'spec_audit',self.base))
+        from pipeline.cockpit import snapshot as cockpit
+        visible=next(t for t in cockpit(self.store)['tasks'] if t['name']==name)
+        self.assertEqual(visible['state'],'retired');self.assertFalse(visible['current_satisfied'])
+        self.run_stage('spec_audit',self.audit());audit=self.store.task(self.name)['data']['spec_audit']
+        revised=copy.deepcopy(plan);revised['audit']=digest(audit)
+        revised['tasks'][0]['required_behavior']+=' Enforce the same containment on nested queries.'
+        self.run_stage('decompose',revised)
+        self.run_stage('plan_review',{'plan':digest(revised),'approved':True,'findings':[],
+            'checks':[{'id':k,'detail':'Rechecked nested query containment.'} for k in self.store.task(self.name)['data']['sections']]})
+        self.run_stage('backlog');new=self.store.task(self.name)['data']
+        self.assertNotEqual(new['backlog_publication'],name);self.assertFalse(set(new['backlog_tasks'])&set(reserved))
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM backlog_publications').fetchone()[0],2)
+        self.assertEqual(discover(self.store,'implement',self.base),[])
+
+    def test_rejected_plan_cannot_be_resubmitted_unchanged_after_a_new_audit(self):
+        plan=self.reviewed();self.run_stage('backlog');self.reject_backlog()
+        discover(self.store,'implement',self.base);self.run_stage('spec_audit',self.audit())
+        work=self.run_stage('decompose',plan,expected_state='retry')
+        self.assertIn('exact plan was rejected',json.loads(work['result'])['message'])
+        self.assertEqual(self.store.task(self.name)['data']['status'],'audited')
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM backlog_publications').fetchone()[0],1)
+
+    def test_old_backlog_rejection_does_not_reset_a_new_specification_epoch(self):
+        self.reviewed();self.run_stage('backlog');self.reject_backlog()
+        (self.repo/'specs/system/example.md').write_text('# Example\nContext for this specification.\n\n## Isolation\nReject cross-tenant reads and writes.\n')
+        inventory(self.store,self.repo,self.base);new=self.store.task(self.name)
+        discover(self.store,'spec_audit',self.base);again=self.store.task(self.name)
+        self.assertEqual(again['generation'],new['generation']);self.assertEqual(again['data']['status'],'pending')
+        self.assertNotIn('publication_rejections',again['data']);self.assertNotIn('plan_feedback',again['data'])
+
+    def test_third_backlog_semantic_rejection_requires_attention_instead_of_unbounded_replanning(self):
+        self.reviewed();self.run_stage('backlog');task=self.store.task(self.name)
+        self.store.put_task(self.name,task['generation'],task['body'],task['data']|{'publication_rejections':2})
+        name,work=self.reject_backlog();self.assertEqual(work['state'],'attention')
+        self.assertEqual(json.loads(work['result'])['category'],'spec_plan')
+        self.assertIsNone(self.store.task(name)['data'].get('backlog_rejected'))
+        self.assertEqual(self.store.task(self.name)['data']['status'],'assigned')
+        self.assertEqual(discover(self.store,'implement',self.base),[])
 
     def test_published_manifest_rejects_rewritten_bindings_and_task_definitions(self):
         self.reviewed();self.run_stage('backlog');data=self.store.task(self.name)['data']

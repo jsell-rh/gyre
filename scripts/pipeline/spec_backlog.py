@@ -122,8 +122,42 @@ def audit_input(store, task, base, cycle):
     return json.loads(row['input']) if row else {'base':base,'cycle':cycle}
 
 
+def reconcile_rejected_publication(store, task):
+    """A semantic backlog rejection is planning feedback, never a code repair."""
+    data=task['data'];publication=data.get('backlog_publication')
+    if data.get('status')!='assigned' or not publication:return False
+    with store.transaction():
+        parent=store.task(task['name']);current=parent['data']
+        row=store.db.execute('SELECT data FROM tasks WHERE name=?',(publication,)).fetchone()
+        child=json.loads(row['data']) if row else {}
+        rejection=child.get('backlog_rejected')
+        if (parent['generation']!=task['generation'] or current.get('status')!='assigned'
+                or current.get('backlog_publication')!=publication or not rejection
+                or child.get('backlog_plan')!=digest(current.get('decomposition'))
+                or child.get('backlog_manifest',{}).get('requirements')!=parent['generation']):return False
+        plan=child['backlog_plan']
+        prefix='spec_gap_owner:'+task['name']+':'+task['generation']+':'
+        # Only the rejected plan relinquishes ownership. Reserved task IDs and
+        # immutable private Git receipts remain historical and are never reused.
+        store.db.execute('DELETE FROM settings WHERE substr(key,1,?)=? AND value=?',
+                         (len(prefix),prefix,json.dumps(plan)))
+        current.update(status='pending',spec_audit=None,decomposition=None,plan_review=None,
+            backlog_publication=None,backlog_tasks=[],audit_cycle=current.get('audit_cycle',0)+1,
+            plan_revision=current.get('plan_revision',0)+1,
+            publication_rejections=current.get('publication_rejections',0)+1,
+            rejected_plans=[*current.get('rejected_plans',[]),plan],
+            plan_feedback=[{'publication':publication,'candidate':rejection['source'],
+                            'artifact':rejection.get('artifact'),'findings':rejection['details']}])
+        store.db.execute('UPDATE tasks SET data=?,updated=? WHERE name=?',
+                         (json.dumps(current),time.time(),task['name']))
+        store.event('spec_backlog_rejected',{'publication':publication,'plan':plan,
+                    'feedback':rejection,'cycle':current['audit_cycle']},task['name'])
+    return True
+
+
 def discover(store, task, stage, base):
     if not enabled(store) or task['data'].get('spec_retired'):return []
+    if reconcile_rejected_publication(store,task):return []
     selected=store.setting('spec_reconciliation_documents')
     if selected and task['data']['document'] not in selected:return []
     from .decisions import request, exists
@@ -271,6 +305,8 @@ def run_model(execution, task):
                      'audited_at':time.time(),'audit_cycle':execution.claim['input']['cycle']}
             if not audit['gaps']:updates['decomposition']={'audit':digest(audit),'tasks':[]}
         elif stage=='decompose':
+            if digest(report) in data.get('rejected_plans',[]):
+                raise ValueError('This exact plan was rejected at backlog review; address the retained findings before resubmitting')
             updates={'decomposition':validate_plan(report,data['spec_audit'],execution.store),'status':'planned'}
         else:
             if (not isinstance(report,dict) or report.get('plan')!=digest(data['decomposition']) or
@@ -375,6 +411,7 @@ def reconcile(execution, task):
     from .stages import checkout
     store=execution.store;data=task['data'];plan=data['decomposition'];audit=data['spec_audit']
     plan_id=digest(plan)
+    if plan_id in data.get('rejected_plans',[]):raise Attention('Rejected backlog plan cannot be republished unchanged')
     # No network operation or checkout mutation runs under the SQLite transaction.
     with (store.directory/'backlog.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
