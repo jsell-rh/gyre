@@ -16,11 +16,14 @@ def prompt(execution, task):
     planning={}
     if task['data'].get('spec_planner'):
         from .spec_backlog import planning_context, previous_report
-        planning=planning_context(task,execution.store)
-        planning['revision_draft_available']=bool(planning.pop('revision_draft',None))
-        planning['other_plan_count']=len(planning.pop('other_plans',[]))
-        planning['previous_report_available']=bool(previous_report(execution))
-        planning['machine_context']='/tmp/stage/planning-context.json'
+        context=planning_context(task,execution.store)
+        planning={'document':context['document'],'requirements':context['requirements'],
+            'heading_count':len(context['sections']),'audit_available':bool(context.get('audit')),
+            'plan_available':bool(context.get('plan')),
+            'revision_draft_available':bool(context.get('revision_draft')),
+            'other_plan_count':len(context['other_plans']),
+            'previous_report_available':bool(previous_report(execution)),
+            'machine_context':'/tmp/stage/planning-context.json'}
     task_path = execution.directory / 'task.md'
     task_path.write_text(task['body'])
     bounded = (task['body'][:16000] if role == 'triage' and safe_metadata(task['body']).get('metadata_error') else
