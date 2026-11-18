@@ -291,3 +291,10 @@ class SpecBacklogTests(unittest.TestCase):
         with patch.object(Execution,'command',command),patch('pipeline.stages.checkout',side_effect=self.checkout):
             self.cli.run_claim(self.store,claim)
         self.assertFalse(any(t['name'].startswith('task-') for t in self.store.tasks()))
+
+    def test_reused_tasks_cannot_silently_gain_unapplied_dependency_edges(self):
+        plan=self.planned();audit=self.store.task(self.name)['data']['spec_audit']
+        for name in ('task-004','task-005'):
+            self.store.put_task(name,'g','body',{'dependencies':[],'title':name})
+        plan['tasks'][0].update(existing_task='task-004',dependencies=['task-005'])
+        with self.assertRaisesRegex(ValueError,'silently add dependencies'):validate_plan(plan,audit,self.store)

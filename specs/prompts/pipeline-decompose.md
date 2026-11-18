@@ -2,7 +2,7 @@ Decompose the confirmed gaps in Planning context into a bounded, dependency-awar
 This is read-only planning: do not edit tracked files, specs, coverage or code and do
 not run tests/builds. Read the canonical spec and evidence; preserve its full behavior.
 
-First inspect the supplied task catalog and relevant task documents. Reuse an unfinished
+First inspect the supplied task catalog, other pending plans and relevant task documents. Reuse an unfinished
 existing task only if its actual contract covers the gap. A finished task is historical
 context, not proof the behavior works. If it missed behavior, propose a narrowly scoped
 delta task rather than replaying the entire original implementation. Avoid overlapping
@@ -24,3 +24,6 @@ Write /tmp/stage/planning.json:
 Use 1–8 tasks. For reused tasks set existing_task to its name; otherwise null. Every
 confirmed gap must be covered exactly once. Do not mark tasks complete, amend specs,
 weaken acceptance criteria or make production/coverage changes.
+
+A reused task keeps its current dependencies. Do not specify new dependency edges
+for it as though this plan could silently modify an existing task contract.

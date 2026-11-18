@@ -201,7 +201,8 @@ def validate_audit(report, task, base, root):
         if len(matches)!=1 or quote not in task['data']['spec_text'][matches[0]['start']:matches[0]['end']]:
             raise ValueError('Requirement quote does not belong to assigned section')
         items=row.get('evidence')
-        if not isinstance(items,list) or not items:raise ValueError('Every disposition requires concrete evidence')
+        if not isinstance(items,list) or not items or any(not isinstance(r,dict) for r in items):
+            raise ValueError('Every disposition requires concrete evidence objects')
         if decision in ('gap','satisfied') and not any(isinstance(r,dict) and str(r.get('file','')).startswith(('crates/','web/','scripts/')) for r in items):
             raise ValueError('Behavior claims require inspected production source, not spec/task prose alone')
         records.extend(evidence(root,r) for r in items)
@@ -220,8 +221,12 @@ def validate_plan(report, audit, store):
     keys=[bounded(t,'key',60) for t in tasks]
     if len(set(keys))!=len(keys) or any(not re.fullmatch('[a-z][a-z0-9-]*',k) for k in keys):raise ValueError('Invalid plan task keys')
     covered=[];graph={}
+    by_key={t['key']:t for t in tasks}
     for task in tasks:
-        covered.extend(task.get('covers',[]));bounded(task,'title',200)
+        owned=task.get('covers')
+        if not isinstance(owned,list) or not owned or any(not isinstance(i,str) or i not in gaps for i in owned):
+            raise ValueError('Task coverage must name known gap IDs')
+        covered.extend(owned);bounded(task,'title',200)
         bounded(task,'required_behavior');bounded(task,'negative_probe',3000)
         if any(re.search(r'^## (?:Shipped|Review|Implementation Notes|Implementation Log)\s*$',task[k],re.M) for k in ('required_behavior','negative_probe')):
             raise ValueError('Requirements cannot be hidden in operational sections')
@@ -229,14 +234,21 @@ def validate_plan(report, audit, store):
         if not isinstance(acceptance,list) or not acceptance or any(not isinstance(a,str) or not a.strip() or len(a)>2000 or '\n' in a for a in acceptance):
             raise ValueError('Concrete acceptance criteria required')
         deps=task.get('dependencies')
-        if not isinstance(deps,list) or any(d not in keys and not store.db.execute('SELECT 1 FROM tasks WHERE name=?',(d,)).fetchone() for d in deps):
+        if not isinstance(deps,list) or any(not isinstance(d,str) or (d not in keys and not store.db.execute('SELECT 1 FROM tasks WHERE name=?',(d,)).fetchone()) for d in deps):
             raise ValueError('Plan has unknown dependencies')
         graph[task['key']]=[d for d in deps if d in keys]
         existing=task.get('existing_task')
+        if existing is not None and (not isinstance(existing,str) or not re.fullmatch(r'task-\d+',existing)):
+            raise ValueError('Invalid existing task identity')
         if existing:
             from .repairs import satisfied
             row=store.db.execute('SELECT data FROM tasks WHERE name=?',(existing,)).fetchone()
             if not row or satisfied(json.loads(row['data'])):raise ValueError('Reuse requires an unfinished existing task')
+            current=json.loads(row['data'])
+            for dependency in deps:
+                target=by_key[dependency].get('existing_task') if dependency in by_key else dependency
+                if not target or target not in (current.get('dependencies') or []):
+                    raise ValueError('Reusing a task cannot silently add dependencies; plan a separately reviewed dependency amendment')
     if set(covered)!=gaps or len(covered)!=len(set(covered)):raise ValueError('Each gap must have exactly one owner in the plan')
     if contract.graph_errors(graph):raise ValueError('Cyclic decomposition dependencies')
     return report
@@ -291,7 +303,12 @@ def planning_context(task, store=None):
     data=task['data']
     return {'document':data['document'],'requirements':task['generation'],'sections':data['sections'],
             'audit':data.get('spec_audit'),'plan':data.get('decomposition'),'review_feedback':data.get('plan_feedback'),
-            'catalog':catalog_context(store,data['document']) if store else []}
+            'catalog':catalog_context(store,data['document']) if store else [],
+            'audit_at':data.get('audited_at'),
+            'other_plans':[{'document':t['data']['document'],'audit_at':t['data'].get('audited_at'),
+                'plan':t['data']['decomposition'],'publication':t['data'].get('backlog_publication')}
+                for t in store.tasks() if t['name']!=task['name'] and t['data'].get('spec_planner')
+                and t['data'].get('decomposition') and not t['data'].get('spec_retired')] if store else []}
 
 
 def catalog_context(store, document):
