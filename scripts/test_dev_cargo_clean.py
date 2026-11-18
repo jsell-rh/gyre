@@ -1,4 +1,5 @@
 """Prove a shared Cargo cache cannot hide a broken workspace implementation."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -32,17 +33,25 @@ class CargoArtifactTest(unittest.TestCase):
                     '#[test]\nfn requires_scope() { assert!(scoped()); }\n')
             env = {**os.environ, 'CARGO_TARGET_DIR': str(root / 'target')}
             helper = Path(__file__).with_name('dev-cargo-clean.py')
-            sentinel = root / 'target/debug/deps/unrelated-dependency.rlib'
+            sentinel = None
             for name, expected in [('good', 0), ('mutant', 101), ('good', 0)]:
                 cleaned = subprocess.run([sys.executable, str(helper)], cwd=root / name,
                                          env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
-                result = subprocess.run(['cargo', 'test', '--offline', '--quiet'], cwd=root / name,
+                result = subprocess.run(['cargo', 'test', '--offline', '--quiet', '--message-format=json'], cwd=root / name,
                                         env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                if name == 'good':
+                if sentinel is None:
+                    artifacts = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+                    executables = [Path(item['executable']) for item in artifacts
+                                   if item.get('reason') == 'compiler-artifact' and item.get('executable')]
+                    self.assertEqual(len(executables), 1, result.stdout)
+                    # Target triples and Cargo's intermediate build layout can
+                    # vary across toolchains; use Cargo's actual artifact path.
+                    self.assertTrue(executables[0].is_relative_to(root / 'target'))
+                    sentinel = executables[0].parent / 'unrelated-dependency.rlib'
                     sentinel.write_text('dependency cache retained')
-                self.assertTrue(sentinel.exists())
+                self.assertEqual(sentinel.read_text(), 'dependency cache retained')
 
 
 if __name__ == '__main__':
