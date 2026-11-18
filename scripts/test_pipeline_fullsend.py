@@ -473,7 +473,9 @@ else: print('fixture control operation')
             deadline=time.monotonic()+5
             while time.monotonic()<deadline:
                 stat=Path(f'/proc/{child}/stat')
-                if not stat.exists() or stat.read_text().rsplit(')',1)[1].split()[0]=='Z':break
+                try:child_state=stat.read_text().rsplit(')',1)[1].split()[0]
+                except FileNotFoundError:break
+                if child_state=='Z':break
                 time.sleep(.02)
             else:self.fail('bootstrap CLI survived its killed wrapper')
         finally:
