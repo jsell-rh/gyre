@@ -38,3 +38,9 @@ Before finishing, run `python3 /tmp/stage/pipeline-evidence.py /tmp/stage/planni
 from the checkout. Correct every reported literal-citation error. This is the same
 source-citation validator the controller uses, not a product build or test.
 Do not bypass or modify it; the controller validates again independently.
+
+The machine context may also contain revision_draft: one unapproved prior audit and
+plan plus separate review_feedback. Use it as a correction starting point, not proof.
+Recheck the affected conclusions and evidence against this exact assigned base,
+retain sound work, and account for every requirement; do not repeat broad exploration
+when the cited source is unchanged. The controller validates all citations again.

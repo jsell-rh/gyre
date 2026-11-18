@@ -260,6 +260,29 @@ class SpecBacklogTests(unittest.TestCase):
         self.assertEqual(self.store.task(self.name)['data']['status'],'assigned')
         self.assertEqual(discover(self.store,'implement',self.base),[])
 
+    def test_rejected_revision_retains_one_bounded_draft_without_treating_it_as_current_evidence(self):
+        from pipeline.spec_backlog import planning_context,revision_draft
+        from pipeline.stages import prompt
+        from types import SimpleNamespace
+        plan=self.planned();task=self.store.task(self.name);audit=task['data']['spec_audit']
+        self.run_stage('plan_review',{'plan':digest(plan),'approved':False,'findings':['Nested containment is omitted'],
+            'checks':[{'id':i,'detail':'Rechecked source against canonical requirements.'} for i in task['data']['sections']]})
+        current=self.store.task(self.name);context=planning_context(current,self.store)
+        self.assertEqual(context['revision_draft'],{'audit':audit,'plan':plan})
+        self.assertIsNone(context['audit']);self.assertIsNone(context['plan'])
+        self.assertIn('Nested containment',json.dumps(context['review_feedback']))
+        claim_id=discover(self.store,'spec_audit',self.base)[0]
+        claim=self.store.claim('spec_audit','test',eligible=lambda w:eligible(self.store,w));execution=Execution(self.store,claim)
+        with patch.object(Execution,'command',return_value=SimpleNamespace(stdout='task contract')):
+            text=prompt(execution,current)
+        self.assertIn('revision_draft_available',text)
+        self.assertNotIn('Production read omits tenant filtering',text)
+        self.assertIsNone(revision_draft({'spec_audit':{'detail':'x'*131073}}))
+        # A new canonical epoch must not carry this previous-contract draft.
+        (self.repo/'specs/system/example.md').write_text('# Example\nNew requirements.\n')
+        inventory(self.store,self.repo,self.base)
+        self.assertIsNone(planning_context(self.store.task(self.name),self.store).get('revision_draft'))
+
     def test_published_manifest_rejects_rewritten_bindings_and_task_definitions(self):
         self.reviewed();self.run_stage('backlog');data=self.store.task(self.name)['data']
         pub=self.store.task(data['backlog_publication']);self.git('fetch','-q','origin',pub['data']['candidate']);self.git('checkout','-q','--detach',pub['data']['candidate'])

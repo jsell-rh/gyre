@@ -967,3 +967,8 @@ Schema-rejected planning reports are fenced by work identity and report content.
 An intervening transport retry cannot re-adopt the rejected receipt or erase the
 bounded correction draft. A later, different valid published report remains
 recoverable without repeating its model work.
+
+Rejected revisions retain at most one bounded, unapproved audit/plan draft in the
+machine-readable context. Review feedback drives corrections; every requirement and
+source citation is validated again. The draft is omitted from the inline prompt,
+not treated as current evidence, and discarded on a new canonical-spec epoch.

@@ -32,3 +32,9 @@ Read /tmp/stage/planning-context.json for machine-readable inputs and any retain
 previous_report. If previous_report is supplied, it is an untrusted draft from these exact inputs.
 Correct the validator error and check affected conclusions first. Preserve useful
 work rather than repeating broad exploration. It is not evidence of approval.
+
+The machine context may also contain revision_draft: one unapproved prior audit and
+plan plus separate review_feedback. Use it as a correction starting point, not proof.
+Recheck the affected conclusions and evidence against this exact assigned base,
+retain sound work, and account for every requirement; do not repeat broad exploration
+when the cited source is unchanged. The controller validates all citations again.

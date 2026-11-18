@@ -17,6 +17,7 @@ def prompt(execution, task):
     if task['data'].get('spec_planner'):
         from .spec_backlog import planning_context, previous_report
         planning=planning_context(task,execution.store)
+        planning['revision_draft_available']=bool(planning.pop('revision_draft',None))
         planning['previous_report_available']=bool(previous_report(execution))
         planning['machine_context']='/tmp/stage/planning-context.json'
     task_path = execution.directory / 'task.md'

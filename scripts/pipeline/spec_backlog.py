@@ -122,6 +122,12 @@ def audit_input(store, task, base, cycle):
     return json.loads(row['input']) if row else {'base':base,'cycle':cycle}
 
 
+def revision_draft(data):
+    """One bounded prior revision, never an approval or an accumulating ledger."""
+    draft={'audit':data.get('spec_audit'),'plan':data.get('decomposition')}
+    return draft if len(json.dumps(draft))<=131072 else None
+
+
 def reconcile_rejected_publication(store, task):
     """A semantic backlog rejection is planning feedback, never a code repair."""
     data=task['data'];publication=data.get('backlog_publication')
@@ -141,7 +147,7 @@ def reconcile_rejected_publication(store, task):
         # immutable private Git receipts remain historical and are never reused.
         store.db.execute('DELETE FROM settings WHERE substr(key,1,?)=? AND value=?',
                          (len(prefix),prefix,json.dumps(plan)))
-        current.update(status='pending',spec_audit=None,decomposition=None,plan_review=None,
+        current.update(revision_draft=revision_draft(current),status='pending',spec_audit=None,decomposition=None,plan_review=None,
             backlog_publication=None,backlog_tasks=[],audit_cycle=current.get('audit_cycle',0)+1,
             plan_revision=current.get('plan_revision',0)+1,
             publication_rejections=current.get('publication_rejections',0)+1,
@@ -323,10 +329,10 @@ def run_model(execution, task):
                 if revision>=3:
                     error=Attention('Spec plan repeatedly rejected: '+json.dumps(report['findings'])[:6000]);error.category='spec_plan';raise error
                 # A rejected audit must be re-inspected, not merely rephrased by a planner.
-                updates={'spec_audit':None,'decomposition':None,'plan_review':None,'status':'pending',
+                updates={'revision_draft':revision_draft(data),'spec_audit':None,'decomposition':None,'plan_review':None,'status':'pending',
                          'audit_cycle':data.get('audit_cycle',0)+1,'plan_revision':revision,'plan_feedback':report['findings']}
             else:
-                updates={'plan_review':report,'status':'reviewed' if data['spec_audit']['gaps'] else 'observed'}
+                updates={'revision_draft':None,'plan_review':report,'status':'reviewed' if data['spec_audit']['gaps'] else 'observed'}
     except (ValueError,TypeError,KeyError) as exc:
         key=f"spec_report_failures:{task['name']}:{task['generation']}:{stage}:"+digest(execution.claim['input'])
         feedback={'category':'spec_report','message':str(exc),'input':execution.claim['input']}
@@ -370,6 +376,7 @@ def planning_context(task, store=None):
     data=task['data']
     return {'document':data['document'],'requirements':task['generation'],'sections':data['sections'],
             'audit':data.get('spec_audit'),'plan':data.get('decomposition'),'review_feedback':data.get('plan_feedback'),
+            'revision_draft':data.get('revision_draft') if not data.get('decomposition') else None,
             'catalog':catalog_context(store,data['document']) if store else [],
             'audit_at':data.get('audited_at'),
             'other_plans':[{'document':t['data']['document'],'audit_at':t['data'].get('audited_at'),
