@@ -631,7 +631,10 @@ describe('WorkspaceSettings', () => {
           {
             id: 'inv-1', workspace_id: 'ws-1', user_id: 'u-5', invited_by: 'u-1',
             role: 'Developer', status: 'Pending',
-            expires_at: Math.floor(Date.now() / 1000) + 6 * 86400,
+            // +30s slack: the countdown floors whole minutes from
+            // Date.now() at render time, so an exact 6d boundary would race
+            // the next wall-clock second and flake to "5d".
+            expires_at: Math.floor(Date.now() / 1000) + 6 * 86400 + 30,
             created_at: 1700000000, accepted_at: null,
           },
           {
@@ -643,7 +646,12 @@ describe('WorkspaceSettings', () => {
           {
             id: 'inv-3', workspace_id: 'ws-1', user_id: 'u-7', invited_by: 'u-1',
             role: 'Developer', status: 'Pending',
-            expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+            // Sub-hour pending row: the countdown renders whole minutes, not raw
+            // seconds ("Expires in 30m", never "1800m"). +30s slack keeps the
+            // minute floor at 30 regardless of when the row renders — an exact
+            // 30m boundary races the next wall-clock second and flakes to 29m
+            // (observed in the task-249 verification run).
+            expires_at: Math.floor(Date.now() / 1000) + 30 * 60 + 30,
             created_at: 1700000000, accepted_at: null,
           },
         ],
