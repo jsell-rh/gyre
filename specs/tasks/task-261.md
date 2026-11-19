@@ -3,7 +3,7 @@ title: "SPIFFE workload attestation: X.509-SVIDs replace the G10 local scheme"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / spiffe-workload-attestation / b60edce5bc49"
 depends_on: []
 progress: complete
-commits: ["c9a4d033"]
+commits: ["c9a4d033", "354a5e7a"]
 ---
 
 ## Required behavior
