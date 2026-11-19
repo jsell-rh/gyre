@@ -1932,6 +1932,88 @@
         "Edge Cases"
       ]
     },
+    "backlog/9d623241914634d94371c864": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "Agent Identity Stack"
+      ]
+    },
+    "backlog/16fb4f5c865aa918b828b94e": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "Agent Identity Stack",
+        "Layer 1: SPIFFE/SPIRE - \"This workload is real\""
+      ]
+    },
+    "backlog/05e06b05e91abddea8707d41": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "Agent Identity Stack",
+        "Federation"
+      ]
+    },
+    "backlog/91f35f78880c4d70c32342ee": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "Agent Identity Stack",
+        "Layer 2: Gyre as OIDC Identity Provider - \"This agent has these permissions\""
+      ]
+    },
+    "backlog/5576c3d85b41c8482ee8b1ee": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "Agent Identity Stack",
+        "Task-Scoped JWT Claims — Reference"
+      ]
+    },
+    "backlog/68b06ebc09a7c8d49aa516d0": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "Agent Identity Stack",
+        "Layer 3: Sigstore/Fulcio - \"This commit was made by this verified agent\""
+      ]
+    },
+    "backlog/e88b0643650de3d8f271012a": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "User Identity",
+        "SCIM Provisioning"
+      ]
+    },
+    "backlog/2cf8a1c0fbde5c0d82e85317": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "User Identity",
+        "SCIM Provisioning",
+        "SCIM Endpoints (stub — to be implemented)"
+      ]
+    },
+    "backlog/b2b37ae05e75a44a9117ceca": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "User Identity",
+        "SCIM Provisioning",
+        "SCIM User Schema"
+      ]
+    },
+    "backlog/6273edccbcca379f21b54f97": {
+      "file": "specs/system/identity-security.md",
+      "heading": [
+        "Identity & Security",
+        "User Identity",
+        "SCIM Provisioning",
+        "Group-to-Workspace Mapping"
+      ]
+    },
     "backlog/633595c9df8812514a9517ad": {
       "file": "specs/system/source-control.md",
       "heading": [
@@ -2678,6 +2760,28 @@
     ],
     "Spec gap spec-c62aac6701125cb09e0c736c / message-size-and-key-rotation / 60b177f85a11": [
       "backlog/e5d4cc99cba7ab16b2b40bb5"
+    ],
+    "Spec gap spec-31d3ae72e12e22c52442e309 / spiffe-workload-attestation / b60edce5bc49": [
+      "backlog/9d623241914634d94371c864",
+      "backlog/16fb4f5c865aa918b828b94e"
+    ],
+    "Spec gap spec-31d3ae72e12e22c52442e309 / spiffe-federation / b60edce5bc49": [
+      "backlog/05e06b05e91abddea8707d41"
+    ],
+    "Spec gap spec-31d3ae72e12e22c52442e309 / agent-jwt-claims-task-scope / b60edce5bc49": [
+      "backlog/91f35f78880c4d70c32342ee",
+      "backlog/5576c3d85b41c8482ee8b1ee"
+    ],
+    "Spec gap spec-31d3ae72e12e22c52442e309 / sigstore-layer3-completion / b60edce5bc49": [
+      "backlog/68b06ebc09a7c8d49aa516d0"
+    ],
+    "Spec gap spec-31d3ae72e12e22c52442e309 / scim-users-lifecycle / b60edce5bc49": [
+      "backlog/e88b0643650de3d8f271012a",
+      "backlog/2cf8a1c0fbde5c0d82e85317",
+      "backlog/b2b37ae05e75a44a9117ceca"
+    ],
+    "Spec gap spec-31d3ae72e12e22c52442e309 / scim-groups-workspace-mapping / b60edce5bc49": [
+      "backlog/6273edccbcca379f21b54f97"
     ],
     "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f": [
       "backlog/633595c9df8812514a9517ad"
