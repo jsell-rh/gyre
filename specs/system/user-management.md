@@ -699,6 +699,7 @@ The release process creates artifacts but doesn't deploy them:
 ## Relationship to Existing Specs
 
 - **Platform Model** (`platform-model.md`): users belong to tenants, access workspaces through membership. This spec defines the membership model.
+- **Database & Migrations** (`database-migrations.md`): its "Which Tables Get tenant_id" classification records `users` as tenant-bound (nullable `tenant_id` column, auth fail-closes on unbound users), amended 2026-11-19 by operator decision `3e7bbde727f5dcf55afb0217` to match this spec's single-tenant User entity and the shipped schema.
 - **Identity & Security** (`identity-security.md`): SSO provides the external_id, email, and initial profile. This spec defines what Gyre does with that identity beyond auth. **SCIM 2.0 provisioning** (the `/scim/v2/*` endpoint stubs, schema, and group-to-workspace mapping) is specified in `identity-security.md` — user-management.md covers the Gyre-side user model that SCIM populates.
 - **Spec Registry** (`spec-registry.md`): spec approvers are users. Notifications route approval requests to the right humans.
 - **Agent Gates** (`agent-gates.md`): gate failures notify the MR author's spawning user.
