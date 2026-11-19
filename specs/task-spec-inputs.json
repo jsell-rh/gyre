@@ -2013,6 +2013,20 @@
         "SCIM Provisioning",
         "Group-to-Workspace Mapping"
       ]
+    },
+    "backlog/633595c9df8812514a9517ad": {
+      "file": "specs/system/source-control.md",
+      "heading": [
+        "Source Control",
+        "Agent-to-Commit Tracking"
+      ]
+    },
+    "backlog/09c28182c53ccd934aa3b93a": {
+      "file": "specs/system/source-control.md",
+      "heading": [
+        "Source Control",
+        "External Repository Mirroring"
+      ]
     }
   },
   "bindings": {
@@ -2768,6 +2782,12 @@
     ],
     "Spec gap spec-31d3ae72e12e22c52442e309 / scim-groups-workspace-mapping / b60edce5bc49": [
       "backlog/6273edccbcca379f21b54f97"
+    ],
+    "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f": [
+      "backlog/633595c9df8812514a9517ad"
+    ],
+    "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / mirror-namespace-isolation / b580b93c564f": [
+      "backlog/09c28182c53ccd934aa3b93a"
     ]
   }
 }
