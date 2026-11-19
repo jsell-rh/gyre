@@ -2,8 +2,8 @@
 title: "SCIM user lifecycle completion: PATCH, deactivation semantics, enterprise extension, production wiring"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / scim-users-lifecycle / b60edce5bc49"
 depends_on: []
-progress: ready-for-review
-commits: ["156d268fde267a990c59a047da860d9b9725e77c"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -94,29 +94,3 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
-
-## Shipped
-
-Commit `156d268f` on `pipeline/task-265/db77120c340c4f29bc0ce5accf72f90f-1` (base `67cc0398`). All five requirement areas are implemented in production code; the full behavior map with source pointers and the required verifier probes is in `/tmp/stage/review-evidence/task-265-evidence.md`.
-
-### Production wiring (requirement 1)
-
-`require_auth_middleware` (crates/gyre-server/src/lib.rs) now passes `/scim/v2/*` through to the handlers instead of running the global agent/API-key/JWT token ladder (which rejected a SCIM-only bearer 401 "Invalid token" before `check_scim_auth` could run). The exemption is fail-closed: every `/scim/v2` handler still enforces `check_scim_auth` — 403 when `GYRE_SCIM_TOKEN` is unset, constant-time bearer compare (`auth::tokens_equal`, replacing the previous plain `!=`). The routes were already ABAC resolver-exempt with per-handler auth, so the ABAC-exempt-handler and route-registry gates stay green (all 17 mechanical gate scripts re-run and pass).
-
-### PATCH + deactivation lifecycle (requirements 2–3)
-
-`PATCH /scim/v2/Users/{id}` (`scim_patch_user`, api/scim.rs) implements RFC 7644 PatchOp (`Operations` with `op`/`path`/`value`, including enterprise-extension URN paths) plus a simplified bare-body form (`{"active": false}`) for IdPs that send a fragment. `active:false` (PATCH, PUT, or DELETE) runs `deactivate_via_scim`: soft `User::deactivate` (the row remains resolvable — SCIM DELETE no longer hard-deletes), `sessions.revoke_all_for_user`, `impersonation::end_active_sessions_for_user`, agents' `spawned_by` attribution cleared, `workspace_ownership::on_user_removed`, and a `user_deactivated` audit event with `source: "scim"`. The serialized `active` field now mirrors `!user.is_deactivated()` instead of the hardcoded `true`. `ServiceProviderConfig` advertises `patch.supported: true`. One supporting change in auth.rs: the `credential_revoked` ("signed out everywhere") check was hoisted above the deactivation check in the API-key branch, so a session-revoking SCIM deactivation replays its pre-deactivation credential with 401 "Session has been revoked" (the AC's expected signal) while the admin deactivation path — which does not revoke sessions — still reports its accurate 403 "user account is deactivated".
-
-### Enterprise extension (requirement 4) + core-schema preservation (requirement 5)
-
-User resources serialize `urn:ietf:params:scim:schemas:extension:enterprise:2.0:User` with `organization` (the tenant id) and `manager.value`, persisted via a new `users.manager_id` column (migration `2026-11-13-000067_user_manager_id`, portable ALTER TABLE; SQLite + Postgres row/record/update mapping; domain field `User.manager_id` with `#[serde(default)]`). Create/PUT/PATCH accept and persist both attributes. `userName`/`externalId` remain immutable on PUT and PATCH (ignored, not 409, to keep IdP sync loops working); idempotent create, emails, meta, and no-password-fields behavior are unchanged. Schemas/ResourceTypes discovery now also advertises the extension.
-
-### Test evidence
-
-- New `crates/gyre-server/tests/scim_lifecycle.rs` — 8 tests through the FULL `build_router()` stack over a real SQLite temp-file DB: SCIM bearer alone passes the production middleware (the pre-task 401); wrong/missing/unset token rejected 403 (and the global token is not a SCIM credential); PATCH `active:false` (PatchOp and bare-body) deactivates end-to-end (stored record inactive, serialized `active:false`, all sessions revoked, pre-deactivation API key replays 401, `spawned_by` cleared); DELETE deprovisions without hard delete (same cascade, GET still 200); enterprise extension round-trips create/PUT/PATCH; userName/externalId immutable; patch advertised.
-- Executed here (smaller packages): `cargo test -p gyre-domain user` (14 passed), `cargo test -p gyre-adapters sqlite::user` (37 passed, including the new `enterprise_manager_id_round_trips`). `cargo check -p gyre-server --all-targets` exit 0.
-- Deferred to the independent verifier (gyre-server codegen exceeds this sandbox's 4 GiB budget, per the build wrapper): `cargo test -p gyre-server --test scim_lifecycle`, `cargo test -p gyre-server --lib scim::`, `cargo test -p gyre-server --lib deactivate_user_cascades`, `cargo test -p gyre-server --lib auth::`. The existing `scim_delete_user` unit test was updated for the new deprovision semantics (GET after DELETE expects 200 + `active:false`, not 404).
-
-### Coverage
-
-`specs/coverage/system/identity-security.md` row 10 updated with concrete source evidence: the user-lifecycle half is real (wiring, PATCH, deactivation cascade, enterprise extension); the six `/scim/v2/Groups` endpoints and the group-to-workspace mapping remain missing and are tracked by task-266 (depends_on task-265).
