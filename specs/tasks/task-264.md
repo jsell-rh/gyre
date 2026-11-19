@@ -2,8 +2,8 @@
 title: "Sigstore layer-3 completion: every commit signed, keyless by default, no silent fallback, real Rekor for attestation bundles"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / sigstore-layer3-completion / b60edce5bc49"
 depends_on: [task-107]
-progress: ready-for-review
-commits: ["7e96fca019100d9bcc03aad6dff32640c3d18601", "fd91e5ba64f5b4a2ed4463afe9d9f1117df4c659", "cd0ff0eacdddd3e6d27acf5a86cb8427946a0595", "6f3dd98ddc96ba451c8773cede85fff2e8eda19b"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -53,23 +53,3 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
-
-## Shipped
-
-Task-264 closes the five Layer-3 shortfalls on top of the task-107 stack. Implementation: `6f3dd98d` (pipeline checkpoint), `cd0ff0ea` (implementation + finalizer), review repair `fd91e5ba` (round `31d4fb6e7aa04318939755a5d28aa1bf`: branch pushes no longer overwrite existing attribution records; landed-commit enumeration fails closed), verification repair `7e96fca0` (deferred-suite fixture fixes). This round is merge repair `c8245f79a52e4d138cbf74f1d81da3ee`: the published PR conflicted with current main; merge commit `863ebbe6` resolves the single conflicted path `specs/coverage/system/identity-security.md` as a union — the task-264 layer-3 audit line is kept and extended to record that row 7 (Federation) takes main's task-262 implemented state, rows 1/2/5 keep the task-264/task-261 reconciled state, coverage recomputed to 10/10 (2 n/a, 0 not-started, 0 task-assigned, 3 verified, 7 implemented). All other paths auto-merged: `lib.rs` keeps both the task-264 `HttpRekorClient` wiring and task-262's `load_spiffe_service`/`FederationBundles` (AppState carries both), docs keep the task-264 signing/Rekor rows alongside the `GYRE_SPIFFE_FEDERATION_*` rows. No implementation behavior changed in the reconciliation.
-
-### Behavior
-
-1. **Every commit surface signs.** A single shared entry point, `commit_signatures::sign_commit`, is called by all four commit-producing surfaces, each persisting a `CommitSignature`: `jj new` (the `JjOpsPort::jj_new` port returns `JjNewChange {change_id, commit_id}` so the signable, content-addressed commit id is available), `jj squash`, git HTTP push (`git_http.rs` `git_receive_pack` — signs every landed commit *before* responding; on signing failure it undoes the ref updates, emits a `git_push_rejected` audit event naming the `commit-signing` gate and the active mode, and rejects the push), and MR merge-commit creation (`merge_processor.rs` `sign_merge_commit`, wired into both the single-MR path — signing failure triggers the post-merge recovery protocol: queue pause, revert, escalation — and the atomic-group path, which rolls the group back). Pushes over already-signed history skip SHAs with a persisted record (original attribution preserved; enumeration errors reject the push).
-2. **Keyless by default.** `SigningMode::parse` maps unset/empty → `Fulcio`; `local` and `none` are explicit operator opt-ins only. An unrecognized `GYRE_SIGNING_MODE` value is a hard startup error instead of a silent `_ => Local` downgrade.
-3. **No silent degradation.** On Fulcio failure the operation fails loudly with an error naming the active mode (403 for callers with no presentable OIDC JWT — `sigstore::jwt_is_presentable` gates *before* any HTTP call, so an empty/dev-token bearer is never presented to Fulcio; 502/push-rejection/merge-revert for stack failures). The only fallback is the operator-configured `GYRE_SIGNING_FULCIO_FALLBACK=local`, which warns and stores an honest `sigstore_mode=local` record.
-4. **Attribution is cryptographically bound.** The local Ed25519 signature, the keyless ECDSA signature, and the Rekor hashedrekord digest all cover the canonical payload `{commit_sha, task_id, spawned_by}` (`signed_commit_payload`/`commit_digest`/`record_signed_payload`). Verification (local and fulcio paths, including the Rekor entry content-match) recomputes the payload from the record's own fields, so a tampered `task_id` or `spawned_by` fails verification.
-5. **Real Rekor for attestation bundles.** `NoopRekorClient` is deleted; production wiring (`build_state`) and the test fixture wire `HttpRekorClient` (gyre-adapters/src/rekor.rs), which submits each signed bundle as a hashedrekord to `GYRE_REKOR_URL` (latency-bounded, 10 s timeout) and persists the returned entry UUID keyed by MR id (KV namespace `rekor_attestation_entries`). An unconfigured log or a Rekor outage is an explicit `Err` surfaced as a warn/audit state by `store_merge_attestation_bundle` — never a silent `Ok(None)` — while the already-landed merge is not rolled back.
-
-Integration harnesses that push/merge with non-JWT dev tokens (git_integration, e2e_ralph_loop, graph_integration, spec_enforcement) explicitly set `GYRE_SIGNING_MODE=local` — the documented operator opt-in — mirroring `mem::test_state`, so Fulcio-by-default does not break unrelated push/merge coverage. Docs: server-config.md (`GYRE_SIGNING_MODE`, `GYRE_SIGNING_FULCIO_FALLBACK`, `GYRE_REKOR_URL`) and api-reference.md.
-
-### Test evidence
-
-- **Ran here (build wrapper /tmp/stage/bin/cargo, post-merge at `863ebbe6`):** `cargo check -p gyre-server --tests` — clean, type-checks the merge resolution across both the task-264 signing surfaces and task-262's federation code. `cargo test -p gyre-spiffe` 36/36 green (includes the task-262 federation suite merged in this round). `cargo test -p gyre-adapters rekor` 3/3 green. `cargo fmt --check -p gyre-server -p gyre-spiffe -p gyre-adapters` clean. `check-arch` green. Evidence saved under /tmp/stage/review-evidence.
-- **The build wrapper rejects gyre-server test compilation in this assignment (4 GiB model budget), so the verifier must execute:** `cargo test -p gyre-server --lib -- merge_attestation::rekor_storage_tests sigstore::tests::verification_fails_on_rogue_leaf_paired_with_genuine_chain`, plus the task-264 suites: `commit_signatures::tests`, `api::jj::tests`, `git_http::tests::{push_signs_every_landed_commit, push_rejected_loudly_when_fulcio_unreachable, branch_push_over_signed_history_preserves_original_attribution, landed_commit_enumeration_failure_is_an_error}`, `merge_processor::merge_signing_tests`, and the regression-sensitive existing binaries `cargo test -p gyre-server --test git_integration --test e2e_ralph_loop --test graph_integration --test spec_enforcement` (these opt into local signing), plus `cargo test -p gyre-adapters rekor`.
-- **Environment restriction:** the `jj` binary is not installed in this sandbox, so jj-dependent suites must run in the verifier environment. No listener was needed (in-process axum `oneshot` requests only); no transport restriction was encountered.
