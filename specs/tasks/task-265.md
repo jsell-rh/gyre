@@ -3,7 +3,7 @@ title: "SCIM user lifecycle completion: PATCH, deactivation semantics, enterpris
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / scim-users-lifecycle / b60edce5bc49"
 depends_on: []
 progress: ready-for-review
-commits: ["117384c359678c880277190e2523c7f4b99f676f", "ed7b5a88115656eab7480444622586f57c8dd99f", "d835ff672057a17202f7c2902f7c958e9ea4b233", "156d268fde267a990c59a047da860d9b9725e77c"]
+commits: ["364546418446f9f0154b78a588529b7ff4b3f52c", "117384c359678c880277190e2523c7f4b99f676f", "ed7b5a88115656eab7480444622586f57c8dd99f", "d835ff672057a17202f7c2902f7c958e9ea4b233", "156d268fde267a990c59a047da860d9b9725e77c"]
 ---
 
 ## Required behavior
