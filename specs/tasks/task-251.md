@@ -2,8 +2,8 @@
 title: "Directed inbox lifecycle: acknowledge_all on agent completion and on stale-agent Dead transition"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / directed-inbox-lifecycle / 60b177f85a11"
 depends_on: [task-247]
-progress: not-started
-commits: []
+progress: ready-for-review
+commits: ["d2983bedc5d72a7a107c6d89f32e05fd681ce19e"]
 ---
 
 ## Required behavior
@@ -63,3 +63,82 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+`acknowledge_all` now has three production callers (previously zero — its only
+server-crate call site was a test fixture), all through one shared helper:
+
+- **REST completion** (`crates/gyre-server/src/api/spawn.rs`): new
+  `pub(crate) async fn acknowledge_agent_inbox(state, agent_id, reason)` wraps
+  `state.messages.acknowledge_all` (best-effort by design: a storage failure
+  logs a warning and leaves the inbox unacked, so messages stay redeliverable —
+  the safe side of at-least-once). `complete_agent` calls it with
+  `"agent_completed"` immediately after the Idle transition on the
+  fresh-completion (201) path, and also on the duplicate-complete (202) path so
+  Directed messages that arrived after a first completion are reclaimable
+  (message-bus.md §Edge Cases: messages to a completed agent arrive into an
+  inbox that will be cleaned by the dead-inbox retention).
+- **MCP parity** (`crates/gyre-server/src/mcp.rs`): `handle_agent_complete`
+  (the `gyre_agent_complete` tool — the autonomous agent-runner path) calls the
+  same helper with `"agent_completed"` right after the agent update succeeds.
+- **Orphan cleanup** (`crates/gyre-server/src/stale_agents.rs`): the stale
+  detector's Abort arm calls it with `"agent_orphaned"` when it marks a
+  heartbeated-out agent Dead, so `expire_acked_inboxes`
+  (GYRE_DEAD_INBOX_TTL_SECS) can reclaim dead agents' inboxes instead of
+  unacked Directed messages accumulating indefinitely.
+
+Expiry semantics are unchanged: `expire_acked_inboxes` still deletes only
+agent-targeted messages acked with `agent_completed`/`agent_orphaned` after
+the retention window.
+
+### Test evidence
+
+Three new focused tests (each fails on the base commit: `count_unacked` stays
+> 0 and `expire_acked_inboxes` deletes 0 rows because no production path
+called `acknowledge_all`):
+
+- `complete_agent_bulk_acks_directed_inbox` (spawn.rs) — full REST lifecycle
+  probe: real router spawn → two unacked Directed messages → POST
+  `/agents/:id/complete` (201) → `count_unacked == 0`,
+  `GET /agents/:id/messages?acknowledged=false` returns `[]`, both rows still
+  retrievable with `acknowledged == true` (audit retention), and
+  `expire_acked_inboxes` deletes exactly 2 (the deletion count proves the
+  recorded ack_reason, since the expiry matches only
+  agent_completed/agent_orphaned). Controls: a live second agent's unacked
+  message and an explicit-ack message inside the retention window survive.
+- `agent_complete_bulk_acks_directed_inbox` (mcp.rs) — MCP parity probe via
+  the real `/mcp` tools/call router: `count_unacked` 1 → 0, row retained and
+  acknowledged.
+- `stale_abort_bulk_acks_directed_inbox_with_agent_orphaned`
+  (stale_agents.rs) — orphan lifecycle probe: `run_once` marks the agent Dead,
+  `count_unacked == 0`, rows retained acknowledged, `expire_acked_inboxes`
+  deletes exactly 2, live agent's unacked message untouched.
+
+Server-lib test execution is wrapper-blocked in this sandbox (4 GiB budget);
+`cargo check -p gyre-server --tests` is clean (exit 0, no warnings). The
+independent verifier must run:
+
+    cargo test -p gyre-server --lib complete_agent_bulk_acks_directed_inbox
+    cargo test -p gyre-server --lib agent_complete_bulk_acks_directed_inbox
+    cargo test -p gyre-server --lib stale_abort_bulk_acks_directed_inbox_with_agent_orphaned
+
+plus the regression suites `--lib api::spawn`, `--lib api::messages`, `--lib
+message_dispatcher`, `--lib stale_agents`, `--lib mcp`, and `--test
+message_persistence` (task-247 dependency suite). Evidence retained at
+`/tmp/stage/review-evidence/task-251-directed-inbox-lifecycle.md` (probe
+commands, exit codes, logs: cargo-check.log, rustfmt-diff.log, arch.log,
+inert-enforcement.log).
+
+### Acceptance-criteria notes
+
+- AC1–AC4 are covered by the three tests above (zero unacked, empty
+  `?acknowledged=false` poll, audit retention with the reason proven via the
+  expiry match, reclamation with live-agent/explicit-ack controls).
+- AC5 (at-least-once across the full lifecycle) combines this task's
+  no-redelivery-after-completion/Dead behavior (asserted above) with the
+  task-247 restart-persistence suite (`tests/message_persistence.rs`), which
+  is unchanged by this task.
+
+Coverage row 16 (Edge Cases) in `specs/coverage/system/message-bus.md` now
+carries the cleanup evidence; no other rows were touched.
