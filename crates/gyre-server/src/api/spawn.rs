@@ -2622,6 +2622,34 @@ pub(crate) async fn create_mr_for_completion(
     Ok((mr, true))
 }
 
+/// message-bus.md §Delivery Guarantees (Agent completion cleanup) and
+/// §Edge Cases (orphaned agents): bulk-ack every unacked Directed message
+/// in an agent's inbox with the lifecycle reason — "agent_completed" on the
+/// REST/MCP completion surfaces, "agent_orphaned" when the stale-agent
+/// detector marks the agent Dead. The rows remain stored for audit but are
+/// no longer redelivered, and `expire_acked_inboxes` reclaims them after the
+/// dead-inbox retention window (`GYRE_DEAD_INBOX_TTL_SECS`). Best-effort by
+/// design: a storage failure logs and leaves the inbox unacked — the
+/// messages stay redeliverable, the safe side of the Directed tier's
+/// at-least-once guarantee.
+pub(crate) async fn acknowledge_agent_inbox(state: &AppState, agent_id: &Id, reason: &str) {
+    match state.messages.acknowledge_all(agent_id, reason).await {
+        Ok(acked) if acked > 0 => tracing::info!(
+            agent_id = %agent_id,
+            acked,
+            reason,
+            "agent inbox bulk-acked on lifecycle transition"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            agent_id = %agent_id,
+            reason,
+            error = %e,
+            "agent inbox bulk-ack failed; unacked Directed messages remain redeliverable"
+        ),
+    }
+}
+
 /// POST /api/v1/agents/{id}/complete
 ///
 /// Agent signals it has finished its task:
@@ -2650,6 +2678,13 @@ pub async fn complete_agent(
     )
     .await?;
     if !created {
+        // Duplicate complete call (the completion MR already exists): the
+        // agent's teardown ran on the first call, but Directed messages that
+        // arrived since then sit unacked in its inbox — bulk-ack them so the
+        // dead-inbox retention job can reclaim the inbox (message-bus.md
+        // §Edge Cases: messages sent to a completed agent arrive into an
+        // inbox that will be cleaned by expire_acked_inboxes).
+        acknowledge_agent_inbox(&state, &agent.id, "agent_completed").await;
         return Ok((StatusCode::ACCEPTED, Json(MrResponse::from(mr))));
     }
     let now = now_secs();
@@ -2657,6 +2692,13 @@ pub async fn complete_agent(
     // Transition agent to Idle
     let _ = agent.transition_status(AgentStatus::Idle);
     state.agents.update(&agent).await?;
+
+    // message-bus.md §Delivery Guarantees (Agent completion cleanup): all
+    // unacked Directed messages in the completing agent's inbox are
+    // bulk-acked with reason "agent_completed" — retained for audit, no
+    // longer redelivered, and reclaimable by the dead-inbox retention job
+    // (expire_acked_inboxes) once GYRE_DEAD_INBOX_TTL_SECS elapses.
+    acknowledge_agent_inbox(&state, &agent.id, "agent_completed").await;
 
     // Agent lifecycle audit events (observability.md §Audit Event Types).
     crate::agent_audit::emit_completed(
@@ -4700,6 +4742,202 @@ mod tests {
         assert_eq!(
             created[0].properties["source_branch"],
             "feat/analytics-complete"
+        );
+    }
+
+    /// message-bus.md §Delivery Guarantees (Agent completion cleanup):
+    /// POST /agents/:id/complete must bulk-ack the completing agent's
+    /// unacked Directed inbox with reason "agent_completed" — count_unacked
+    /// drops to zero, ?acknowledged=false returns nothing, the rows remain
+    /// stored for audit, and the dead-inbox retention expiry reclaims exactly
+    /// those rows (expire_acked_inboxes matches only the
+    /// agent_completed/agent_orphaned reasons, so the deletion count also
+    /// proves the recorded reason). Fails on the old behavior where the
+    /// completion path never called acknowledge_all.
+    #[tokio::test]
+    async fn complete_agent_bulk_acks_directed_inbox() {
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Inbox cleanup complete").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/inbox-cleanup").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        // Aged past a 1s retention cutoff so the reclamation probe can use a
+        // short dead-inbox window without touching process-global env vars.
+        let created_at = now - 10_000;
+        let directed = |id: &str, agent: &str| Message {
+            id: Id::new(id.to_string()),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-1")),
+            to: Destination::Agent(Id::new(agent.to_string())),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+
+        // Two unacked Directed messages in the completing agent's inbox.
+        state
+            .messages
+            .store(&directed("cleanup-msg-1", &agent_id))
+            .await
+            .unwrap();
+        state
+            .messages
+            .store(&directed("cleanup-msg-2", &agent_id))
+            .await
+            .unwrap();
+        // A live second agent's unacked inbox — must survive untouched.
+        state
+            .messages
+            .store(&directed("live-agent-msg", "cleanup-live-agent"))
+            .await
+            .unwrap();
+        // An explicitly acked message inside the retention window —
+        // expire_acked_inboxes must not reclaim it (reason "explicit").
+        state
+            .messages
+            .store(&directed("explicit-ack-msg", "cleanup-ack-agent"))
+            .await
+            .unwrap();
+        state
+            .messages
+            .acknowledge(&Id::new("explicit-ack-msg"), &Id::new("cleanup-ack-agent"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new(&agent_id))
+                .await
+                .unwrap(),
+            2,
+            "precondition: two unacked Directed messages before completion"
+        );
+
+        let body = serde_json::json!({
+            "branch": "feat/inbox-cleanup",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Completion cleanup: zero unacked, nothing redelivered on the
+        // crash-recovery poll.
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new(&agent_id))
+                .await
+                .unwrap(),
+            0,
+            "completion must bulk-ack the agent's unacked Directed inbox"
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/agents/{agent_id}/messages?acknowledged=false"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let poll_json = body_json(resp).await;
+        assert_eq!(
+            poll_json.as_array().unwrap().len(),
+            0,
+            "?acknowledged=false must return nothing after completion"
+        );
+
+        // Audit retention: the rows are still stored, now acknowledged.
+        for msg_id in ["cleanup-msg-1", "cleanup-msg-2"] {
+            let msg = state
+                .messages
+                .find_by_id(&Id::new(msg_id))
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{msg_id} must remain stored for audit"));
+            assert!(msg.acknowledged, "{msg_id} must be acknowledged");
+        }
+
+        // Reclamation: with the dead-inbox retention window (1s here)
+        // elapsed, expire_acked_inboxes deletes exactly the two
+        // agent_completed rows — the deletion proves the ack_reason, since
+        // the expiry only matches agent_completed/agent_orphaned.
+        let deleted = state
+            .messages
+            .expire_acked_inboxes(now - 1_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted, 2,
+            "dead-inbox retention must reclaim exactly the completed agent's inbox"
+        );
+        assert!(state
+            .messages
+            .find_by_id(&Id::new("cleanup-msg-1"))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(state
+            .messages
+            .find_by_id(&Id::new("cleanup-msg-2"))
+            .await
+            .unwrap()
+            .is_none());
+
+        // Untouched: the live agent's unacked inbox and the explicit-ack
+        // message inside the retention window.
+        let live = state
+            .messages
+            .find_by_id(&Id::new("live-agent-msg"))
+            .await
+            .unwrap()
+            .expect("live agent's unacked Directed message must survive");
+        assert!(!live.acknowledged);
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new("cleanup-live-agent"))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            state
+                .messages
+                .find_by_id(&Id::new("explicit-ack-msg"))
+                .await
+                .unwrap()
+                .is_some(),
+            "explicitly acked message inside the retention window must survive"
         );
     }
 
