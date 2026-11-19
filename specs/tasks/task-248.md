@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
 ---
 
 ## Required behavior
@@ -120,3 +120,69 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+All five send-path guard deviations from the Message Envelope and Scoping
+Rules sections are implemented in production code (955c134a, 9dd4a1f0,
+round-4 fail-closed repair 873d0821, round-5 test repair 3bb9c9bd, round-7
+clippy repair a2781ff0), and the branch is rebased onto 321615ec
+(task-250's WebSocket replay-window work) with behavior preserved.
+
+### Behavior
+
+1. **Scopeless-message guard** — `emit_scoped_event`
+   (crates/gyre-server/src/lib.rs), the shared body of the internal
+   `emit_event`/`emit_tenant_event` family, returns `Err` and logs at
+   error level when `destination != Broadcast && workspace_id.is_none()`;
+   the message is never constructed, stored, or broadcast.
+2. **Mem store contract** — `MemMessageRepository::store`
+   (crates/gyre-server/src/mem.rs) returns `Err` on `workspace_id: None`,
+   matching the SQLite/PostgreSQL `message_to_new_row` contract. All send
+   paths skip `store()` for Broadcast destinations.
+3. **WS `acknowledged` exclusion** — both WebSocket Message serialization
+   sites (live bus-delivery arm and Subscribe replay arm in
+   crates/gyre-server/src/ws.rs) serialize through `ws_message_payload`,
+   which strips `acknowledged` with the same manual-removal pattern as
+   `send_response`. GET inbox responses keep the field.
+4. **Origin table** — `origin_from_auth` (crates/gyre-server/src/api/messages.rs)
+   derives origin from the auth mechanism threaded through
+   `AuthenticatedAgent.auth_mechanism` (set by the extractor on every auth
+   path): global `GYRE_AUTH_TOKEN` → Server; API key / OIDC user JWT →
+   `User(user_id)`; agent token / federated JWT → `Agent(sub)`. Admin-role
+   API-key/OIDC callers resolve to User origin (server_only 403 gate and
+   rule-3 membership check apply to them); the separate rule-6 Admin-role
+   check still lets them target Broadcast; the global token keeps full
+   forge authority.
+5. **Rule-1 tenant isolation, fail-closed** — the REST send handler and
+   the mirrored MCP `handle_message_send` load the target agent's
+   workspace record on every `Destination::Agent(id)` send and compare
+   its tenant with the caller's verified tenant; mismatch rejects 403
+   (nothing stored or broadcast), including Server-origin global-token
+   callers. An unresolvable workspace record rejects fail-closed rather
+   than skip-and-log (round-4 repair 873d0821).
+
+### Round-7 repair (a2781ff0)
+
+Verification finding: the round-6 scopeless-guard test bound the
+captured-logs `MutexGuard` via `let logs = logs.lock().unwrap()` in an
+async test body with later awaits, tripping `clippy::await_holding_lock`
+(checks.sh exit 1; the only diff-scoped clippy finding). The captured
+`(level, message)` records are now cloned out in a single statement so
+the guard never survives across an await. Production code unchanged.
+
+### Test evidence
+
+Fourteen focused tests cover every acceptance criterion (list and probe
+transcripts in /tmp/stage/review-evidence/task-248-evidence.md and
+task-248-round7-repair.md). Executed in this sandbox this round:
+`rustfmt --check` on lib.rs (exit 0), `cargo check -p gyre-server --lib
+--tests` (exit 0), and `cargo clippy -p gyre-server --lib --tests -- -A
+clippy::all -W clippy::await_holding_lock` (exit 0, zero findings).
+gyre-server test codegen exceeds the sandbox 4 GiB budget and is deferred
+to the independent verifier, which must run:
+`cargo test -p gyre-server --lib emit_scoped_event_rejects_scopeless_non_broadcast_message`
+(expect: Err + error-level log + no store/broadcast/dispatch for scopeless
+non-Broadcast; Broadcast and scoped controls pass) plus the other thirteen
+focused tests listed in the evidence file, and full checks.sh including
+check-clippy-diff.py against base 321615ec.

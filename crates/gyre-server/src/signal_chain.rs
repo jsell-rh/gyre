@@ -1156,6 +1156,7 @@ async fn count_active_agents_for_repo(
 /// containment treats it as the bootstrap principal.
 fn scheduler_system_auth() -> crate::auth::AuthenticatedAgent {
     crate::auth::AuthenticatedAgent {
+        auth_mechanism: crate::auth::AuthMechanism::GlobalToken,
         agent_id: "system".to_string(),
         user_id: None,
         roles: vec![gyre_domain::UserRole::Admin],
