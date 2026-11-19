@@ -5467,6 +5467,12 @@ fn test_state_inner(
             )
             .expect("test SPIFFE service construction must succeed"),
         ),
+        // No federation peers configured by default; tests that exercise
+        // SPIFFE federation install a registry with a local test endpoint.
+        spiffe_federation: Arc::new(crate::spiffe_federation::FederationBundles::new(
+            vec![],
+            std::time::Duration::from_secs(300),
+        )),
         repos: Arc::new(MemRepoRepository::default()),
         agents,
         tasks,
