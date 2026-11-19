@@ -168,9 +168,12 @@ specs/tasks/task-253.md auto-merged cleanly — task-248's
 `mcp_sse_handler` coexist without overlap. The single content conflict
 was specs/coverage/system/message-bus.md's "Last audited" paragraph,
 resolved as the union: this task's row 5/9/10 closure sentence is
-retained alongside task-253's row-14 SSE closure sentence. No
-production code changed this round; the five guards and their tests are
-bit-identical to the previously verified candidate.
+retained alongside task-253's row-14 SSE closure sentence. The conflict
+resolution itself changed no production code: the only crates/ change on
+this round's diff is task-253's already-reviewed mcp.rs SSE work arriving
+from the base (mcp_sse_handler + its tests — the handle_message_send
+tenant-isolation guard region is untouched), and the five guards and
+their tests are bit-identical to the previously verified candidate.
 
 ### Test evidence
 
