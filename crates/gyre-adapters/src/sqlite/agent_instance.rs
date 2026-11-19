@@ -136,3 +136,113 @@ impl AgentInstanceRepository for SqliteStorage {
         .await?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gyre_ports::AgentInstanceRepository as _;
+    use tempfile::NamedTempFile;
+
+    fn setup() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, s)
+    }
+
+    fn instance(agent_id: &str, handle: &str) -> AgentInstanceRecord {
+        AgentInstanceRecord {
+            agent_id: agent_id.to_string(),
+            backend: "local".to_string(),
+            target_type: "local".to_string(),
+            handle_id: handle.to_string(),
+            pid: Some(4242),
+            spawned_at: 1_000,
+            terminated_at: None,
+            terminated_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn record_find_list_running_roundtrip() {
+        let (_tmp, s) = setup();
+        s.record_spawned(&instance("agent-1", "proc-1"))
+            .await
+            .unwrap();
+        s.record_spawned(&instance("agent-2", "proc-2"))
+            .await
+            .unwrap();
+
+        let found = s
+            .find_by_agent("agent-1")
+            .await
+            .unwrap()
+            .expect("row must exist");
+        assert_eq!(found.backend, "local");
+        assert_eq!(found.handle_id, "proc-1");
+        assert_eq!(found.pid, Some(4242));
+        assert!(found.terminated_at.is_none());
+
+        let running = s.list_running().await.unwrap();
+        assert_eq!(running.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_spawned_replaces_on_respawn() {
+        let (_tmp, s) = setup();
+        s.record_spawned(&instance("agent-1", "proc-1"))
+            .await
+            .unwrap();
+        // One live instance per agent: a respawn replaces the row.
+        s.record_spawned(&instance("agent-1", "proc-1b"))
+            .await
+            .unwrap();
+
+        let running = s.list_running().await.unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].handle_id, "proc-1b");
+    }
+
+    #[tokio::test]
+    async fn mark_terminated_sets_fields_and_fails_for_unknown_agent() {
+        let (_tmp, s) = setup();
+        s.record_spawned(&instance("agent-1", "proc-1"))
+            .await
+            .unwrap();
+
+        // Port contract: terminating an unknown agent's instance fails.
+        assert!(s
+            .mark_terminated("agent-missing", "clean_exit")
+            .await
+            .is_err());
+
+        s.mark_terminated("agent-1", "remote_agent_cleanup")
+            .await
+            .unwrap();
+        let record = s.find_by_agent("agent-1").await.unwrap().unwrap();
+        assert!(record.terminated_at.is_some());
+        assert_eq!(
+            record.terminated_reason.as_deref(),
+            Some("remote_agent_cleanup")
+        );
+        // Terminated instances leave the sweep candidate set.
+        assert!(s.list_running().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn running_records_survive_storage_rebuild_restart_durability() {
+        // The orphan-sweep restart scenario: the durable store still lists
+        // the instance as running after a storage rebuild (server restart).
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        {
+            let s = SqliteStorage::new(&path).unwrap();
+            s.record_spawned(&instance("agent-orphan", "proc-9"))
+                .await
+                .unwrap();
+        }
+        let s2 = SqliteStorage::new(&path).unwrap();
+        let running = s2.list_running().await.unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].agent_id, "agent-orphan");
+    }
+}

@@ -107,7 +107,10 @@ impl JobRunLog {
         self.lines.lock().await.push(line.to_string());
     }
 
-    async fn take(&self) -> Vec<String> {
+    /// Take a snapshot of the lines written so far (crate-visible: the
+    /// scheduler and in-crate job tests read the sink to assert run-log
+    /// outcomes).
+    pub(crate) async fn take(&self) -> Vec<String> {
         self.lines.lock().await.clone()
     }
 }

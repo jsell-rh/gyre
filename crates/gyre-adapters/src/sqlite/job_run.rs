@@ -136,3 +136,177 @@ impl JobRunRepository for SqliteStorage {
         .await?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gyre_ports::JobRunRepository as _;
+    use tempfile::NamedTempFile;
+
+    fn setup() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, s)
+    }
+
+    fn run(
+        id: &str,
+        job: &str,
+        started: u64,
+        finished: Option<u64>,
+        logs: Vec<&str>,
+    ) -> JobRunRecord {
+        JobRunRecord {
+            id: id.to_string(),
+            job_name: job.to_string(),
+            started_at: started,
+            finished_at: finished,
+            status: match finished {
+                Some(_) => "success".to_string(),
+                None => "running".to_string(),
+            },
+            error: None,
+            logs: logs.into_iter().map(|l| l.to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn record_list_by_job_newest_first_with_logs_and_limit() {
+        let (_tmp, s) = setup();
+        s.record(&run(
+            "r1",
+            "repo_maintenance",
+            100,
+            Some(150),
+            vec!["repo a: ok"],
+        ))
+        .await
+        .unwrap();
+        s.record(&run(
+            "r2",
+            "repo_maintenance",
+            300,
+            Some(350),
+            vec!["repo b: ok", "repo c: FAILED"],
+        ))
+        .await
+        .unwrap();
+        s.record(&run("r3", "other_job", 200, Some(250), vec![]))
+            .await
+            .unwrap();
+
+        let runs = s.list_by_job("repo_maintenance", 10).await.unwrap();
+        assert_eq!(runs.len(), 2);
+        // Newest first.
+        assert_eq!(runs[0].id, "r2");
+        assert_eq!(runs[1].id, "r1");
+        // Per-run log lines round-trip in write order.
+        assert_eq!(runs[0].logs, vec!["repo b: ok", "repo c: FAILED"]);
+        assert_eq!(runs[1].logs, vec!["repo a: ok"]);
+
+        // Limit is honored.
+        let limited = s.list_by_job("repo_maintenance", 1).await.unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].id, "r2");
+    }
+
+    #[tokio::test]
+    async fn list_recent_across_jobs_newest_first() {
+        let (_tmp, s) = setup();
+        s.record(&run("r1", "job_a", 100, Some(110), vec![]))
+            .await
+            .unwrap();
+        s.record(&run("r2", "job_b", 300, Some(310), vec![]))
+            .await
+            .unwrap();
+        s.record(&run("r3", "job_a", 200, Some(210), vec![]))
+            .await
+            .unwrap();
+
+        let runs = s.list_recent(10).await.unwrap();
+        let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["r2", "r3", "r1"]);
+    }
+
+    #[tokio::test]
+    async fn record_same_id_replaces_row() {
+        let (_tmp, s) = setup();
+        s.record(&run("r1", "job_a", 100, None, vec![]))
+            .await
+            .unwrap();
+        // The scheduler re-records the run at completion (same id): the row
+        // is replaced, not duplicated.
+        s.record(&run("r1", "job_a", 100, Some(140), vec!["done"]))
+            .await
+            .unwrap();
+
+        let runs = s.list_by_job("job_a", 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].finished_at, Some(140));
+        assert_eq!(runs[0].status, "success");
+        assert_eq!(runs[0].logs, vec!["done"]);
+    }
+
+    #[tokio::test]
+    async fn delete_older_than_removes_only_finished_rows() {
+        let (_tmp, s) = setup();
+        // Finished before the cutoff → deleted.
+        s.record(&run("old-fin", "job_a", 100, Some(150), vec![]))
+            .await
+            .unwrap();
+        // Started before the cutoff but NEVER finished (crashed cycle) →
+        // kept: only finished rows are pruned.
+        s.record(&run("old-run", "job_a", 100, None, vec![]))
+            .await
+            .unwrap();
+        // Finished after the cutoff → kept.
+        s.record(&run("new-fin", "job_a", 500, Some(550), vec![]))
+            .await
+            .unwrap();
+
+        let deleted = s.delete_older_than(300).await.unwrap();
+        assert_eq!(deleted, 1, "only the old finished row is deleted");
+
+        let ids: Vec<String> = s
+            .list_recent(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(ids.contains(&"old-run".to_string()));
+        assert!(ids.contains(&"new-fin".to_string()));
+        assert!(!ids.contains(&"old-fin".to_string()));
+    }
+
+    #[tokio::test]
+    async fn history_survives_storage_rebuild_restart_durability() {
+        // The restart probe's adapter half: a NEW SqliteStorage opened on
+        // the same database file still serves previously recorded runs
+        // with status, derived duration, error and logs.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        {
+            let s = SqliteStorage::new(&path).unwrap();
+            let mut failed = run(
+                "r-fail",
+                "repo_maintenance",
+                100,
+                Some(190),
+                vec!["repo a: ok", "repo b: FAILED"],
+            );
+            failed.status = "failed".to_string();
+            failed.error = Some("1 of 2 repositories failed".to_string());
+            s.record(&failed).await.unwrap();
+        }
+        // "Server restart": rebuild the storage against the same file.
+        let s2 = SqliteStorage::new(&path).unwrap();
+        let runs = s2.list_by_job("repo_maintenance", 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        let r = &runs[0];
+        assert_eq!(r.status, "failed");
+        assert_eq!(r.error.as_deref(), Some("1 of 2 repositories failed"));
+        assert_eq!(r.duration_secs(), Some(90));
+        assert_eq!(r.logs, vec!["repo a: ok", "repo b: FAILED"]);
+    }
+}

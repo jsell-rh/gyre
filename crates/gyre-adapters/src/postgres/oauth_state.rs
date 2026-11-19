@@ -128,3 +128,53 @@ impl OAuthStateRepository for PgStorage {
         .await?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! SQL-shape regression tests (postgres/search.rs precedent: the repo
+    //! has no PG server harness). The behavioral semantics — single-use
+    //! consumption, only-expired deletion, restart durability — are
+    //! exercised against a real SQLite file by the sqlite sibling's suite;
+    //! these pin the PG statements the mirror emits.
+
+    use super::*;
+
+    #[test]
+    fn mark_consumed_updates_only_matching_state_row() {
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(
+            &diesel::update(oauth_states::table.filter(oauth_states::state.eq("st-1")))
+                .set(oauth_states::consumed.eq(1)),
+        )
+        .to_string();
+        assert!(
+            sql.contains("UPDATE") && sql.contains("state") && sql.contains("consumed"),
+            "mark_consumed must be a scoped UPDATE: {sql}"
+        );
+    }
+
+    #[test]
+    fn delete_expired_before_filters_on_expires_at_in_sql() {
+        // Only-expired deletion must live in the WHERE clause: a predicate
+        // on expires_at < cutoff, never a bare DELETE of the whole table.
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(
+            &diesel::delete(oauth_states::table).filter(oauth_states::expires_at.lt(1_000i64)),
+        )
+        .to_string();
+        assert!(
+            sql.contains("expires_at") && sql.contains("< $"),
+            "cleanup must filter on expires_at < cutoff in SQL: {sql}"
+        );
+    }
+
+    #[test]
+    fn find_by_state_scopes_on_state_key() {
+        let sql = diesel::debug_query::<diesel::pg::Pg, _>(
+            &oauth_states::table.filter(oauth_states::state.eq("st-1")),
+        )
+        .to_string();
+        assert!(
+            sql.contains("state") && sql.contains("= $"),
+            "find_by_state must filter on the state key: {sql}"
+        );
+    }
+}

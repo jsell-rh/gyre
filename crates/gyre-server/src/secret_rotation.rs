@@ -249,10 +249,21 @@ impl SecretRotationHandler for GcpServiceAccountHandler {
         _secret: &Secret,
         current_value: &[u8],
     ) -> anyhow::Result<RotatedSecret> {
-        let doc: GcpSaDoc = serde_json::from_slice(current_value)
+        // Parse the document as a whole JSON object and only READ the
+        // signing fields through the typed view: the admin-supplied SA key
+        // carries fields Gyre does not use (project_id, private_key_id,
+        // client_id, auth_uri, auth_provider_x509_cert_url,
+        // client_x509_cert_url, …) that MUST survive the refresh — the
+        // rotated document is re-serialized from the ORIGINAL value with
+        // only `access_token` overwritten, never from a lossy typed copy.
+        let mut doc: serde_json::Value = serde_json::from_slice(current_value).context(
+            "value is not a GCP service-account key (JSON with type, client_email, private_key, token_uri)",
+        )?;
+        anyhow::ensure!(doc.is_object(), "service-account key must be a JSON object");
+        let typed: GcpSaDoc = serde_json::from_value(doc.clone())
             .context("value is not a GCP service-account key (JSON with type, client_email, private_key, token_uri)")?;
         anyhow::ensure!(
-            doc.r#type == "service_account",
+            typed.r#type == "service_account",
             "credential document is not a service account"
         );
 
@@ -262,9 +273,9 @@ impl SecretRotationHandler for GcpServiceAccountHandler {
         let now = now_secs();
         let header = serde_json::json!({ "alg": "RS256", "typ": "JWT" });
         let claims = serde_json::json!({
-            "iss": doc.client_email,
+            "iss": typed.client_email,
             "scope": "https://www.googleapis.com/auth/cloud-platform",
-            "aud": doc.token_uri,
+            "aud": typed.token_uri,
             "iat": now,
             "exp": now + 3600,
         });
@@ -274,7 +285,7 @@ impl SecretRotationHandler for GcpServiceAccountHandler {
             b64url(claims.to_string().as_bytes())
         );
 
-        let der = pem_to_der(&doc.private_key)?;
+        let der = pem_to_der(&typed.private_key)?;
         let key_pair = ring::signature::RsaKeyPair::from_pkcs8(&der)
             .map_err(|e| anyhow::anyhow!("service-account private_key is unusable: {e:?}"))?;
         let mut sig = vec![0u8; key_pair.public().modulus_len()];
@@ -293,7 +304,7 @@ impl SecretRotationHandler for GcpServiceAccountHandler {
         // client (30 s total timeout), so a hung Google endpoint cannot
         // stall the job loop.
         let resp = http
-            .post(&doc.token_uri)
+            .post(&typed.token_uri)
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                 ("assertion", assertion.as_str()),
@@ -317,14 +328,12 @@ impl SecretRotationHandler for GcpServiceAccountHandler {
             .and_then(|v| v.as_u64())
             .unwrap_or(3600);
 
-        let updated = GcpSaDoc {
-            r#type: doc.r#type,
-            client_email: doc.client_email,
-            private_key: doc.private_key,
-            token_uri: doc.token_uri,
-            access_token: Some(access_token),
-        };
-        let value = serde_json::to_vec(&updated).context("serializing rotated credential")?;
+        // Overwrite ONLY the access token on the original document — every
+        // other field the admin supplied (Google-issued SA key fields
+        // included) is preserved verbatim, so the stored value remains a
+        // complete, re-refreshable SA key.
+        doc["access_token"] = serde_json::Value::String(access_token);
+        let value = serde_json::to_vec(&doc).context("serializing rotated credential")?;
         Ok(RotatedSecret {
             value,
             expires_at: Some(now_secs().saturating_add(expires_in)),
@@ -1505,5 +1514,554 @@ mod tests {
         // (warn) rather than fabricate a tenant scope or panic.
         let state = crate::mem::test_state();
         revoke_task_secrets(&state, &Id::new("ws-ghost"), "task-1", "agent-1").await;
+    }
+
+    // ── TASK-273: shape-based dispatch + GCP service-account refresh ─────────
+
+    /// Seed a tenant/workspace/admin member and ONE expiring secret with the
+    /// given id, NAME (arbitrary — dispatch is shape-based, not name-based)
+    /// and plaintext value.
+    async fn seed_named_secret(now: u64, id: &str, name: &str, value: &[u8]) -> Arc<AppState> {
+        let state = crate::mem::test_state();
+        state
+            .tenants
+            .create(&gyre_domain::Tenant::new(
+                Id::new("default"),
+                "Default",
+                "default",
+                now,
+            ))
+            .await
+            .unwrap();
+        let ws = Workspace::new(
+            Id::new("ws-rot"),
+            Id::new("default"),
+            "Rotation WS",
+            "rotation-ws",
+            now,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let m = WorkspaceMembership::new(
+            Id::new("mem-shape-admin"),
+            Id::new("user-admin"),
+            ws.id,
+            WorkspaceRole::Admin,
+            Id::new("inviter"),
+            now,
+        );
+        state.workspace_memberships.create(&m).await.unwrap();
+        state
+            .secrets
+            .create(
+                &gyre_common::Secret {
+                    id: Id::new(id),
+                    name: name.to_string(),
+                    scope: gyre_common::SecretScope::Workspace,
+                    scope_id: "ws-rot".to_string(),
+                    secret_type: gyre_common::SecretType::Rotated,
+                    created_by: "system".to_string(),
+                    created_at: now,
+                    // Expiring in 30 minutes → inside the check window.
+                    expires_at: Some(now + 1800),
+                    last_rotated_at: None,
+                    tenant_id: "default".to_string(),
+                },
+                value,
+            )
+            .await
+            .unwrap();
+        state
+    }
+
+    /// Minimal percent-decoding for reading captured `application/x-www-
+    /// form-urlencoded` bodies in tests (reqwest percent-encodes `:` etc.).
+    fn form_get(body: &str, key: &str) -> Option<String> {
+        fn percent_decode(s: &str) -> Option<String> {
+            let bytes = s.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'%' => {
+                        let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                        out.push(u8::from_str_radix(hex, 16).ok()?);
+                        i += 3;
+                    }
+                    b'+' => {
+                        out.push(b' ');
+                        i += 1;
+                    }
+                    b => {
+                        out.push(b);
+                        i += 1;
+                    }
+                }
+            }
+            String::from_utf8(out).ok()
+        }
+        for pair in body.split('&') {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            if k == key {
+                return percent_decode(v);
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn oauth_document_under_arbitrary_name_is_refreshed_by_shape() {
+        // TASK-273: dispatch matches the credential-document SHAPE, not the
+        // secret name — an OAuth credential document stored under a name
+        // with no `_refresh_token` suffix is refreshed by the RFC 6749
+        // handler all the same.
+        let now = now_secs();
+        let (endpoint, seen) = spawn_token_endpoint(
+            axum::http::StatusCode::OK,
+            serde_json::json!({
+                "access_token": "rotated-access",
+                "expires_in": 7200,
+                "refresh_token": "rotated-refresh"
+            }),
+        )
+        .await;
+        let cred = serde_json::json!({
+            "token_endpoint": endpoint,
+            "client_id": "gyre-test",
+            "refresh_token": "original-refresh"
+        });
+        let state = seed_named_secret(
+            now,
+            "sec-api-cred",
+            // Deliberately NOT a *_refresh_token name: an API-credential
+            // secret carrying an OAuth document.
+            "PROD_API_CREDENTIALS",
+            cred.to_string().as_bytes(),
+        )
+        .await;
+
+        let log = crate::jobs::JobRunLog::new();
+        run_once(&state, &log).await.unwrap();
+
+        // A real refresh_token grant was performed against the document's
+        // token endpoint using the stored refresh token.
+        let posted = seen.lock().await.clone();
+        assert!(
+            posted.contains("grant_type=refresh_token"),
+            "shape-matched OAuth doc must be refreshed via the RFC 6749 grant, posted: {posted}"
+        );
+        assert!(posted.contains("refresh_token=original-refresh"));
+
+        // The stored value is the rotated document and the expiry was
+        // extended past the check window.
+        let value = state
+            .secrets
+            .get_value(&Id::new("sec-api-cred"), "default")
+            .await
+            .unwrap()
+            .expect("secret must survive rotation");
+        let doc: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert_eq!(doc["refresh_token"], "rotated-refresh");
+        assert_eq!(doc["access_token"], "rotated-access");
+        let stored = state
+            .secrets
+            .find_by_id(&Id::new("sec-api-cred"), "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.expires_at.unwrap() > now + 3600);
+
+        // The durable run log records the per-secret refreshed outcome.
+        let lines = log.take().await;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("refreshed via oauth_refresh_token_grant")),
+            "run log must record the refresh outcome, got: {lines:?}"
+        );
+
+        // Successful rotation suppresses the admin notification.
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(notifs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_refresh_mechanism_outcome_recorded_in_run_logs() {
+        // TASK-273: an expiring API key with no refresh mechanism must BOTH
+        // notify admins AND record a no-refresh-mechanism outcome in the
+        // run's durable log — no expiring credential is silently skipped.
+        let now = now_secs();
+        let state =
+            seed_named_secret(now, "sec-api-key", "THIRD_PARTY_API_KEY", b"sk-live-plain").await;
+
+        let log = crate::jobs::JobRunLog::new();
+        run_once(&state, &log).await.unwrap();
+
+        let lines = log.take().await;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("THIRD_PARTY_API_KEY") && l.contains("no-refresh-mechanism")),
+            "run log must account for the no-refresh-mechanism secret, got: {lines:?}"
+        );
+
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(notifs.len(), 1, "admins must still be notified");
+    }
+
+    /// Throwaway 2048-bit RSA test key, as base64 of its PKCS#8 DER
+    /// (generated solely for this test suite — never a real credential).
+    /// The test rebuilds the PEM armor at runtime so the handler's real
+    /// `pem_to_der` path is exercised.
+    const TEST_SA_PRIVATE_KEY_DER_B64: &str = concat!(
+        "MIIEpAIBAAKCAQEAoptEfzjxiQ1VJoEzYLvdYM9dJzSwd25dMxqbBYzjfRGgNUZPIeHe2hx66w+l",
+        "cmGpY1zvzuPGCXKcvmFAiYxDo594gyGaF6ZgR5tX/d1V+DDPmCnq2fxdPimHfXTixR0hIbmkNDqc",
+        "vAxbhKJFcx0aSWYkNY2fyHVyHCLaw4+IT+QztX3Zgh+45AsoL3LGAAlEbrF6hjJFHku4cEpE13Hh",
+        "A3XxEruQ4RtdnUH96uS3HKN0Zt3XF7ENbn8/JokSf3qfie5jLDCxN8521unaPP5wsNi/ADYKo8Ur",
+        "v1hG+0NZC57bgNBuZoUSmm3enK5H6qKdUJSkArkNjwf5hSlQpJCu9wIDAQABAoIBAEACKtaBzeKL",
+        "UweTOGxNx3lCZ4L1ZLm+wgVJ5dgre6lR9OTDxoap6RWmvGQnhpMeCpXIkcW5N82kRjtTARqkEkQo",
+        "lEHaSlQg9Cl75wlRxXOrkyxs47vncbT0mBc0mcfKDa6+6vp8UBJeMvBlCD2mKSDXik1icJFyWfbl",
+        "aYQtzhTUOGqVlR+1PyuVu7wYW+HVE/wSl38q209uHtHlEeZgIU1kK+8ZG2ZL7+ZafB+I6yWzxULU",
+        "pvg3+9kuWCd2gGV916NcRkv7g5h/Bcy23p8wUdmZYn6YfOopEfx/2OjuDYbJmQC4Z6PG8I8q1AhX",
+        "HCzY02tOona1ld48tFxWjfnETsECgYEA4cRuNQ88tln9OnGdKo6CRGxp8tdO7z8/zqXvOsLW/rGK",
+        "NNYgserjDs7zRKzjhhb8JcwVw9QngHCrQfsXyx9R9SDaJ8p88bsH9/lxxid8DqF3EYKFqkosEXMR",
+        "EBAWn7p91tueKaABQLqxTiFXdpRLzFl6Zr5WCShrzs5K5R5xFzECgYEAuGGcUTg3gfIPmj+/qD4Y",
+        "dPPxzCLY/Zxtb7v8474YBPoLtvb+Mp7m5UJiyJ+ACyYX7Sb/eAQPCaLFOtCZOzCfxez1uzXc9Bmy",
+        "DP0O2+DOuOOq1LpKWbHqRgEU2Ze6/7lU8EyqwNBzx8+MRBS9waOciM1TOIzYitzUdycXecAr7qcC",
+        "gYA5+/lSJ1ewfexL1mJHS9KpQC7179aWG+iHapbGwMP3JiIY7+X1zB4E76ILQVwuVDjufDwaz6JV",
+        "mpphl9vEj4a9LnLZRWhRrXeeeLJ/8iQqnc228Y7i7anj0WnQdlFZNMydIkq85htsRIbFSkrsaaoO",
+        "Ee0d9kSilX8a3mDd97OUAQKBgQCBwmAqYK/fyaTlXzvYgWrg09U1XsjrIq151wjQljV9OyQHbafT",
+        "pDTG34N5wZZxQivQgIOFyQV0OJMpIyjTmRK4Tl1ZlTycpYDC100fvQR+5eqRr1En8qf3AEfWIow9",
+        "8AYw3yPEcm8pDY2fVCF/J0/Ajw+kWqsCfwsfl+lTi8TfPQKBgQCqMx9I4uSjw6xEIoYGBCgjRorY",
+        "14Njhox5UoLFZr2KXONFZm+Cm+l+bqPT+yu/p26SAWcTD6cpzn6joRwCIusf5MtEoo33Pgh/7tdg",
+        "y/vtQVC3yPyMHfhkwsMZAj1c1ez3NbOZJm9GK+BS9YWoOAHWGC0I1PsE/1v6DgfQ1Zr2gw==",
+    );
+
+    /// Public half (SPKI DER, base64) of [`TEST_SA_PRIVATE_KEY_DER_B64`] —
+    /// the stub token endpoint verifies the RS256 assertion against it.
+    const TEST_SA_PUBLIC_SPKI_B64: &str = concat!(
+        "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoptEfzjxiQ1VJoEzYLvdYM9dJzSwd25d",
+        "MxqbBYzjfRGgNUZPIeHe2hx66w+lcmGpY1zvzuPGCXKcvmFAiYxDo594gyGaF6ZgR5tX/d1V+DDP",
+        "mCnq2fxdPimHfXTixR0hIbmkNDqcvAxbhKJFcx0aSWYkNY2fyHVyHCLaw4+IT+QztX3Zgh+45Aso",
+        "L3LGAAlEbrF6hjJFHku4cEpE13HhA3XxEruQ4RtdnUH96uS3HKN0Zt3XF7ENbn8/JokSf3qfie5j",
+        "LDCxN8521unaPP5wsNi/ADYKo8Urv1hG+0NZC57bgNBuZoUSmm3enK5H6qKdUJSkArkNjwf5hSlQ",
+        "pJCu9wIDAQAB",
+    );
+
+    /// Rebuild the PEM-armored PKCS#8 form of the test SA key (the shape a
+    /// real Google-issued SA JSON carries in `private_key`).
+    fn test_sa_private_key_pem() -> String {
+        use base64::Engine as _;
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(TEST_SA_PRIVATE_KEY_DER_B64.trim())
+            .expect("test key DER is valid base64");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str("-----END PRIVATE KEY-----\n");
+        pem
+    }
+
+    /// A full, Google-shaped service-account key document pointing at
+    /// `token_uri` — every extra field a real SA JSON carries is included
+    /// so the preservation assertions are meaningful.
+    fn test_sa_doc(token_uri: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "service_account",
+            "project_id": "gyre-test-project",
+            "private_key_id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0",
+            "private_key": test_sa_private_key_pem(),
+            "client_email": "sa-test@gyre-test-project.iam.gserviceaccount.com",
+            "client_id": "102938475610293847561",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": token_uri,
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url":
+                "https://www.googleapis.com/robot/v1/metadata/x509/sa-test%40gyre-test-project.iam.gserviceaccount.com"
+        })
+    }
+
+    /// Stub Google token endpoint for the JWT-bearer grant: it enforces the
+    /// RFC 7523 request shape — `grant_type` MUST be the jwt-bearer URI and
+    /// the `assertion` MUST be an RS256 JWT whose signature verifies against
+    /// the test key's public half with the expected iss/aud/scope claims —
+    /// returning 400 with the failure reason when it does not. The received
+    /// form body is captured for test-side assertions.
+    async fn spawn_sa_token_endpoint() -> (String, Arc<tokio::sync::Mutex<String>>) {
+        use base64::Engine as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let seen_clone = Arc::clone(&seen);
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move |body: String| {
+                let seen = Arc::clone(&seen_clone);
+                async move {
+                    *seen.lock().await = body.clone();
+
+                    let bad_request = |reason: &str| {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({ "error": reason })),
+                        )
+                    };
+
+                    let grant_type = form_get(&body, "grant_type").unwrap_or_default();
+                    if grant_type != "urn:ietf:params:oauth:grant-type:jwt-bearer" {
+                        return bad_request("unexpected grant_type");
+                    }
+                    let assertion = form_get(&body, "assertion").unwrap_or_default();
+                    let mut parts = assertion.split('.');
+                    let (h, c, s) = (
+                        parts.next().unwrap_or_default(),
+                        parts.next().unwrap_or_default(),
+                        parts.next().unwrap_or_default(),
+                    );
+                    if parts.next().is_some() || h.is_empty() || c.is_empty() || s.is_empty() {
+                        return bad_request("assertion is not a three-part JWT");
+                    }
+
+                    // Real RS256 verification against the test key's public
+                    // half — a forged or malformed signature fails here.
+                    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(s)
+                        .unwrap_or_default();
+                    let spki = base64::engine::general_purpose::STANDARD
+                        .decode(TEST_SA_PUBLIC_SPKI_B64.trim())
+                        .expect("test public key is valid base64");
+                    let pubkey = ring::signature::UnparsedPublicKey::new(
+                        &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+                        spki,
+                    );
+                    let signing_input = format!("{h}.{c}");
+                    if pubkey.verify(signing_input.as_bytes(), &sig).is_err() {
+                        return bad_request("RS256 signature verification failed");
+                    }
+
+                    // Claim checks: iss = SA email, aud = this endpoint,
+                    // cloud-platform scope, exp > iat.
+                    let claims_raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(c)
+                        .unwrap_or_default();
+                    let claims: serde_json::Value = match serde_json::from_slice(&claims_raw) {
+                        Ok(v) => v,
+                        Err(_) => return bad_request("claims are not JSON"),
+                    };
+                    if claims["iss"] != "sa-test@gyre-test-project.iam.gserviceaccount.com" {
+                        return bad_request("unexpected iss");
+                    }
+                    if claims["aud"] != format!("http://127.0.0.1:{port}/token") {
+                        return bad_request("unexpected aud");
+                    }
+                    if claims["scope"] != "https://www.googleapis.com/auth/cloud-platform" {
+                        return bad_request("unexpected scope");
+                    }
+                    let exp = claims["exp"].as_u64().unwrap_or(0);
+                    let iat = claims["iat"].as_u64().unwrap_or(1);
+                    if exp <= iat {
+                        return bad_request("exp must be after iat");
+                    }
+
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "access_token": "sa-short-lived-access-token",
+                            "expires_in": 5400,
+                            "token_type": "Bearer"
+                        })),
+                    )
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://127.0.0.1:{port}/token"), seen)
+    }
+
+    #[tokio::test]
+    async fn gcp_sa_refresh_performs_real_rs256_jwt_bearer_grant_and_preserves_document() {
+        let now = now_secs();
+        let (endpoint, seen) = spawn_sa_token_endpoint().await;
+        let sa = test_sa_doc(&endpoint);
+        // A non-`*_refresh_token` name: the GCP SA handler is selected by
+        // credential-document shape (type=service_account), like the OAuth
+        // handler above.
+        let state =
+            seed_named_secret(now, "sec-gcp-sa", "GCP_SA_JSON", sa.to_string().as_bytes()).await;
+
+        let log = crate::jobs::JobRunLog::new();
+        run_once(&state, &log).await.unwrap();
+
+        // The endpoint saw a jwt-bearer grant carrying an assertion that
+        // verified (a 400 would have failed the rotation below).
+        let posted = seen.lock().await.clone();
+        let grant_type = form_get(&posted, "grant_type").unwrap_or_default();
+        assert_eq!(
+            grant_type, "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "the SA refresh must be a JWT-bearer grant, posted: {posted}"
+        );
+        assert!(form_get(&posted, "assertion").is_some());
+
+        // The stored value is the refreshed document: the new access token
+        // AND every Google-issued field of the original SA key preserved
+        // verbatim (no lossy re-serialization).
+        let value = state
+            .secrets
+            .get_value(&Id::new("sec-gcp-sa"), "default")
+            .await
+            .unwrap()
+            .expect("secret must survive rotation");
+        let doc: serde_json::Value = serde_json::from_slice(&value).unwrap();
+        assert_eq!(doc["access_token"], "sa-short-lived-access-token");
+        assert_eq!(doc["type"], "service_account");
+        assert_eq!(doc["project_id"], "gyre-test-project");
+        assert_eq!(
+            doc["private_key_id"],
+            "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6a7b8c9d0"
+        );
+        assert_eq!(doc["client_id"], "102938475610293847561");
+        assert_eq!(doc["auth_uri"], "https://accounts.google.com/o/oauth2/auth");
+        assert_eq!(
+            doc["auth_provider_x509_cert_url"],
+            "https://www.googleapis.com/oauth2/v1/certs"
+        );
+        assert!(doc["client_x509_cert_url"].is_string());
+        assert_eq!(doc["private_key"], sa["private_key"]);
+        assert_eq!(doc["client_email"], sa["client_email"]);
+        assert_eq!(doc["token_uri"], endpoint);
+
+        // Expiry extended past the check window; last_rotated_at set.
+        let stored = state
+            .secrets
+            .find_by_id(&Id::new("sec-gcp-sa"), "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored.expires_at.unwrap() > now + 3600,
+            "SA refresh must extend expiry past the check window, got {:?}",
+            stored.expires_at
+        );
+        assert!(stored.last_rotated_at.is_some());
+
+        // The durable run log records the per-secret refreshed outcome via
+        // the SA handler.
+        let lines = log.take().await;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("refreshed via gcp_service_account_jwt_bearer")),
+            "run log must record the SA refresh outcome, got: {lines:?}"
+        );
+
+        // Successful rotation suppresses the admin notification.
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            notifs.is_empty(),
+            "a handler-rotated SA secret must not notify admins"
+        );
+    }
+
+    #[tokio::test]
+    async fn gcp_sa_refresh_failure_leaves_document_untouched_and_notifies() {
+        // A bad private key: the handler cannot sign, so rotation fails and
+        // the admin is notified with the stored document intact.
+        let now = now_secs();
+        // Point at an endpoint that would succeed — the failure must come
+        // from signing, before any HTTP call.
+        let (endpoint, _seen) = spawn_sa_token_endpoint().await;
+        let mut sa = test_sa_doc(&endpoint);
+        sa["private_key"] = serde_json::json!(
+            "-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----\n"
+        );
+        let original = sa.to_string();
+        let state =
+            seed_named_secret(now, "sec-gcp-sa-bad", "GCP_SA_JSON", original.as_bytes()).await;
+
+        let log = crate::jobs::JobRunLog::new();
+        run_once(&state, &log).await.unwrap();
+
+        let value = state
+            .secrets
+            .get_value(&Id::new("sec-gcp-sa-bad"), "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            value,
+            original.as_bytes(),
+            "failed SA refresh must not corrupt the credential"
+        );
+
+        let lines = log.take().await;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("FAILED") && l.contains("gcp_service_account_jwt_bearer")),
+            "run log must record the failed refresh, got: {lines:?}"
+        );
+        let notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some(&["SecretExpiring"]),
+                None,
+                &[],
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(notifs.len(), 1, "failed SA refresh must notify admins");
     }
 }
