@@ -26,10 +26,22 @@ AUTH="Authorization: Bearer ${GYRE_AUTH_TOKEN}"
 
 log() { echo "[e2e-agent] $1"; }
 
+# Heartbeat payload builder: the heartbeat carries the session's X.509-SVID
+# (identity-security.md Layer 1) and the server verifies the workload
+# identity fail-closed before recording liveness. GYRE_SVID_PEM holds the
+# multi-line PEM chain, so the JSON body is built with jq (already required
+# by this script) rather than shell interpolation.
+svid_payload() {
+  jq -nc --arg svid "${GYRE_SVID_PEM:-}" --arg stack "${GYRE_STACK_HASH:-}" \
+    '{svid: $svid, stack_fingerprint: $stack}'
+}
+
 log "Starting: agent=${GYRE_AGENT_ID} task=${GYRE_TASK_ID} branch=${GYRE_BRANCH}"
 
 # --- Heartbeat ---
-curl -sf -X PUT -H "$AUTH" "${API}/agents/${GYRE_AGENT_ID}/heartbeat" >/dev/null 2>&1 || true
+curl -sf -X PUT -H "$AUTH" -H "Content-Type: application/json" \
+  -d "$(svid_payload)" \
+  "${API}/agents/${GYRE_AGENT_ID}/heartbeat" >/dev/null 2>&1 || true
 log "Heartbeat sent"
 
 # --- Read task description ---
@@ -146,7 +158,9 @@ GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
 log "Push complete"
 
 # --- Heartbeat again ---
-curl -sf -X PUT -H "$AUTH" "${API}/agents/${GYRE_AGENT_ID}/heartbeat" >/dev/null 2>&1 || true
+curl -sf -X PUT -H "$AUTH" -H "Content-Type: application/json" \
+  -d "$(svid_payload)" \
+  "${API}/agents/${GYRE_AGENT_ID}/heartbeat" >/dev/null 2>&1 || true
 
 # --- Complete ---
 log "Signaling completion..."

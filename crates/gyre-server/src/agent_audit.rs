@@ -178,6 +178,30 @@ pub async fn emit_heartbeat(
     .await;
 }
 
+/// `AgentHeartbeat` with a Failure outcome — emitted when a heartbeat is
+/// rejected because workload-identity (SVID) verification failed
+/// (identity-security.md Layer 1). `pid_alive` is false: the workload
+/// identity did not verify.
+pub async fn emit_heartbeat_rejected(
+    state: &AppState,
+    agent: &Agent,
+    pid: Option<u32>,
+    reason: &str,
+) {
+    emit(
+        state,
+        AuditEventType::AgentHeartbeat,
+        agent,
+        AuditOutcome::Failure,
+        serde_json::json!({
+            "pid": pid,
+            "pid_alive": false,
+            "reason": reason,
+        }),
+    )
+    .await;
+}
+
 /// `AgentTokenRevoked` — emitted whenever an agent's auth token is revoked
 /// (agent completion, operator stop, admin kill).
 ///
@@ -281,11 +305,11 @@ pub async fn revoke_agent_token(state: &AppState, agent: &Agent, reason: &str) {
     emit_token_revoked(state, agent, jti, reason).await;
 }
 
-/// Best-effort PID liveness lookup for audit detail fields.
+/// Best-effort workload-identity status for audit detail fields.
 ///
-/// Reads the agent's workload attestation (if any) and checks whether the
-/// attested OS PID is still alive. Returns `None` when no PID was attested —
-/// liveness is unknown, not assumed.
+/// Reads the agent's workload attestation (if any) and reports whether the
+/// most recent SVID verification passed (`alive`). Returns `None` when no
+/// attestation exists — verification status is unknown, not assumed.
 pub async fn attested_pid_alive(state: &AppState, agent_id: &str) -> Option<bool> {
     let json = state
         .kv_store
@@ -294,7 +318,7 @@ pub async fn attested_pid_alive(state: &AppState, agent_id: &str) -> Option<bool
         .ok()
         .flatten()?;
     let att: crate::workload_attestation::WorkloadAttestation = serde_json::from_str(&json).ok()?;
-    att.pid.map(crate::workload_attestation::pid_is_alive)
+    Some(att.alive)
 }
 
 /// Best-effort attested PID lookup for audit detail fields.

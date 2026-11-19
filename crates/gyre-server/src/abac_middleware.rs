@@ -318,6 +318,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/agents/:id/logs/stream", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id/stack", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id/workload", "agent", None),
+                RouteResourceMapping::api("/api/v1/agents/:id/attest", "agent", Some("write")),
                 RouteResourceMapping::api("/api/v1/agents/:id/container", "agent", None),
                 // ── Compose ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/compose/apply", "compose", Some("write")),

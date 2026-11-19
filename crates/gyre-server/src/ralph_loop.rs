@@ -765,23 +765,25 @@ pub(crate) async fn relaunch_agent_session(
             repo.id
         ),
     };
-    // identity-security.md §Task-Scoped JWT Claims: the re-spawn mint
-    // carries every fact knowable at mint time — the persona slug bound to
-    // the agent row, the attestation level implied by the compute target,
-    // `wl_hostname` (the remote compute target's host), and
-    // `wl_stack_hash` (the agent's stored workload-attestation stack
-    // fingerprint — the re-spawn reuses the agent row, so the previous
-    // iteration's attested stack is the real current stack fact). A stale
-    // `wl_pid`/`wl_container_id` from the previous process is NOT minted:
-    // those facts belong to the not-yet-launched process and are recorded
-    // in the fresh workload-attestation record after the launch below.
-    let wl_hostname: Option<String> = match resolved_ct_entity.as_ref() {
-        Some(e) if e.target_type == gyre_domain::ComputeTargetType::Ssh => {
-            e.config["host"].as_str().map(|h| h.to_string())
-        }
-        _ => None,
-    };
-    let wl_stack_hash = crate::api::spawn::stored_stack_fingerprint(state, agent.id.as_str()).await;
+    // Layer 1 wl_* claims (identity-security.md): the same spawn-time
+    // evidence the first spawn mint carries — the session's stack
+    // fingerprint (resolved once; the SVID issuance below binds the same
+    // value), the resolved authorized compute target, and the host.
+    let respawn_compute_target_label = resolved_ct_entity
+        .as_ref()
+        .map(|e| e.id.to_string())
+        .unwrap_or_else(|| "local".to_string());
+    let respawn_stack_evidence = crate::spiffe::resolve_session_stack_evidence(
+        state,
+        agent.id.as_str(),
+        &respawn_compute_target_label,
+        resolved_ct_entity.as_ref(),
+        wl_image_hash.as_deref(),
+        persona.as_ref().map(|p| p.slug.as_str()),
+    )
+    .await;
+    let wl_stack_hash = Some(respawn_stack_evidence.clone());
+    let wl_compute_target = respawn_compute_target_label.clone();
     let token = state
         .agent_signing_key
         .mint_worker_scoped(
@@ -807,12 +809,8 @@ pub(crate) async fn relaunch_agent_session(
                         gyre_domain::ComputeTargetType::Kubernetes => 1,
                     }),
             ),
-            // The workspace compute target is resolved by entity, not by a
-            // request id — the claim is absent rather than fabricated
-            // (identity-security.md: `wl_compute_target` is present when a
-            // compute target was set on spawn).
-            None,
-            wl_hostname,
+            Some(crate::workload_attestation::read_hostname()),
+            Some(wl_compute_target),
             wl_stack_hash,
             wl_image_hash,
         )
@@ -837,6 +835,7 @@ pub(crate) async fn relaunch_agent_session(
         state,
         &crate::api::spawn::AgentLaunchCtx {
             agent: agent.clone(),
+            stack_fingerprint: respawn_stack_evidence.clone(),
             workspace,
             repo: repo.clone(),
             task: task.clone(),
@@ -859,21 +858,31 @@ pub(crate) async fn relaunch_agent_session(
             is_interrogation: false,
         },
     )
-    .await;
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "re-spawn launch (incl. SVID issuance) failed for agent {}: {e:#}",
+            agent.id
+        )
+    })?;
 
     if !launch.launched {
         anyhow::bail!("compute-target spawn failed for re-spawn");
     }
 
     // Workload attestation for the new session (same record shape as the
-    // first spawn — queryable via GET /agents/:id/workload).
+    // first spawn — queryable via GET /agents/:id/workload), carrying the
+    // SVID identity issued inside launch_agent_process and the stack
+    // evidence the JWT wl_stack_hash claim carries.
     let att = crate::workload_attestation::attest_agent_with_container(
         agent.id.as_str(),
         launch.pid,
         &launch.compute_target_label,
-        "",
+        &respawn_stack_evidence,
         launch.container_id.clone(),
         launch.container_image.clone(),
+        launch.spiffe_id.clone(),
+        launch.svid_serial.clone(),
     );
     if let Ok(json) = serde_json::to_string(&att) {
         let _ = state
@@ -949,10 +958,16 @@ mod tests {
     }
 
     /// AC (task-263, identity-security.md §Task-Scoped JWT Claims): the
-    /// re-spawn mint carries the agent's stored workload-attestation
-    /// stack fingerprint (`wl_stack_hash` AND its `stack_hash` alias),
-    /// the persona slug bound to the agent row, the `agent:<uuid>` `sub`,
-    /// and the task claim — every fact knowable at re-spawn mint time.
+    /// re-spawn mint carries the agent's stack fingerprint
+    /// (`wl_stack_hash` AND its `stack_hash` alias), the persona slug
+    /// bound to the agent row, the `agent:<uuid>` `sub`, and the task
+    /// claim — every fact knowable at re-spawn mint time. Under the
+    /// Layer-1 SPIFFE design (task-261, merged with this task) the
+    /// session stack evidence is resolved once
+    /// (`spiffe::resolve_session_stack_evidence` reads the agent's
+    /// registered stack first) and the SAME value is bound to the mint
+    /// claims, the session SVID, and the fresh workload-attestation
+    /// record written at launch.
     #[tokio::test]
     async fn respawn_mint_carries_stored_stack_fingerprint() {
         let state = test_state();
@@ -1014,27 +1029,27 @@ mod tests {
             .await
             .unwrap();
 
-        // The previous iteration's attested workload: a
-        // workload_attestations record whose stack fingerprint is the
-        // real current stack fact for the re-spawned session.
-        let att = crate::workload_attestation::WorkloadAttestation {
-            agent_id: "agent-fp".to_string(),
-            pid: Some(4242),
-            hostname: "worker-host".to_string(),
-            compute_target: "local".to_string(),
-            stack_fingerprint: "sha256:abcdef123456".to_string(),
-            attested_at: 1,
-            alive: true,
-            last_verified_at: 2,
-            container_id: None,
-            image_hash: None,
+        // The previous iteration's attested stack: the agent's registered
+        // stack (M14.1 `agent_stacks` KV) — the self-reported, fingerprinted
+        // runtime configuration. `resolve_session_stack_evidence` reads it
+        // first, so the re-spawn mint, the session SVID, and the fresh
+        // workload-attestation record all carry this fingerprint.
+        let registered = gyre_domain::stack::AgentStack {
+            agents_md_hash: "agents-md-hash-fp".to_string(),
+            hooks: vec![],
+            mcp_servers: vec![],
+            model: "test-model".to_string(),
+            cli_version: "1.2.3".to_string(),
+            settings_hash: "settings-hash-fp".to_string(),
+            persona_hash: None,
         };
+        let registered_fingerprint = registered.fingerprint();
         state
             .kv_store
             .kv_set(
-                "workload_attestations",
+                "agent_stacks",
                 "agent-fp",
-                serde_json::to_string(&att).unwrap(),
+                serde_json::to_string(&registered).unwrap(),
             )
             .await
             .unwrap();
@@ -1068,13 +1083,29 @@ mod tests {
         assert_eq!(claims.task_id, "task-fp");
         assert_eq!(
             claims.wl_stack_hash.as_deref(),
-            Some("sha256:abcdef123456"),
-            "wl_stack_hash carries the stored workload-attestation fingerprint"
+            Some(registered_fingerprint.as_str()),
+            "wl_stack_hash carries the agent's registered stack fingerprint"
         );
         assert_eq!(
             claims.stack_hash.as_deref(),
-            Some("sha256:abcdef123456"),
+            Some(registered_fingerprint.as_str()),
             "stack_hash alias is populated from the same fingerprint"
+        );
+        // The fresh workload-attestation record (written at launch from
+        // the SVID-bound evidence) stores the same fingerprint — the
+        // minted claim equals the stored attestation fact.
+        let fresh_att_json = state
+            .kv_store
+            .kv_get("workload_attestations", "agent-fp")
+            .await
+            .unwrap()
+            .expect("re-spawn launch wrote a fresh attestation record");
+        let fresh_att: crate::workload_attestation::WorkloadAttestation =
+            serde_json::from_str(&fresh_att_json).unwrap();
+        assert_eq!(
+            fresh_att.stack_fingerprint, registered_fingerprint,
+            "the stored workload-attestation fingerprint equals the minted \
+             stack hash"
         );
         assert_eq!(
             claims.persona.as_deref(),

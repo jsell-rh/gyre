@@ -747,8 +747,8 @@ impl AgentSigningKey {
         repo_name: &str,
         persona: Option<&str>,
         attestation_level: Option<u8>,
-        wl_compute_target: Option<String>,
         wl_hostname: Option<String>,
+        wl_compute_target: Option<String>,
         wl_stack_hash: Option<String>,
         wl_image_hash: Option<String>,
     ) -> Result<String, String> {
