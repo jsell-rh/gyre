@@ -2,8 +2,8 @@
 title: "Workspace-scoped telemetry access: Subscribe membership authorization and the REST activity endpoint"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / telemetry-workspace-access / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
-commits: ["9fa691150452e3df58ea95f3731cf150c96d84b4", "d2fe75e4c1098a26adb8717c02feed86e2afbc4a", "81910e025d8602ee0f20612620f1fdcb14a4349d"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -81,63 +81,3 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
-
-## Shipped
-
-Both capabilities are implemented in production code and previously reviewed
-and approved; this round (merge_conflict 3008f070a71f46fbbfb3bf6e75fb4c2a)
-resolved the rebase against current main head `05024b3e` (task-254) and
-re-verified the merged tree. The implementation itself is unchanged this
-round beyond the union merge.
-
-### Subscribe membership authorization (gap 2b439cf656cf14c344afdb07)
-
-The ws.rs Subscribe handler authorizes each requested workspace in order:
-the preserved Admin bypass, the preserved tenant-containment check, then real
-workspace-membership verification. User connections resolve a membership
-record through `state.workspace_memberships.find_by_user_and_workspace`;
-agent connections (user_id None) are scoped to their own agent record's
-workspace. A rejected scope produces the SubscribeError frame, creates no
-subscription, and delivers neither workspace-scoped bus messages, telemetry,
-nor replay.
-
-### REST telemetry endpoint (gap 64d1be477f27ebf27ec73076)
-
-`GET /api/v1/workspaces/:workspace_id/activity` (`workspace_activity_handler`,
-crates/gyre-server/src/api/activity.rs:107) is backed by
-`state.telemetry_buffer`: `since` in epoch milliseconds (entries with
-`created_at <= since` excluded, 1-ms-newer included), `limit` honored
-(default 100), per-handler membership enforcement (403 for non-members), and
-the spec's exact ActivityEventData field mapping via
-`MessageKind::ag_event_type`. The route is registered in the ABAC
-RouteResourceMapping (abac_middleware.rs:317, "activity" resource, workspace
-path param) — check-abac-route-registry.sh passes with no new exemptions. The
-unscoped `/api/v1/activity` and WS ActivityQuery paths are unchanged.
-
-### Rebase repair (this round, merge commit 26eefb2d)
-
-Single conflict against main `05024b3e`, in
-`specs/coverage/system/message-bus.md` (the "Last audited" header):
-HEAD's task-252 audit-trail sentence and main's task-254 sentence were
-combined in chronological order; the rest auto-merged. Verified the merged
-tree preserves both sides: task-252's route registration (api/mod.rs:871),
-ABAC mapping, and Subscribe membership check, plus task-254's
-`DefaultBodyLimit::max(max_message_bytes)` on the POST messages route
-(api/mod.rs:867) and signing-key history test file.
-
-### Test evidence
-
-- This sandbox, merged tree (26eefb2d): `cargo check -p gyre-server
-  --all-targets` exit 0; `cargo test -p gyre-common --lib` green (130 passed,
-  incl. `kind_ag_event_type_mapping_matches_spec`); `cargo fmt -p gyre-server -p gyre-common -- --check` clean;
-  `scripts/check-abac-route-registry.sh`, `check-arch.sh`, and
-  `check-migration-versions.sh` pass. Evidence:
-  /tmp/stage/review-evidence/task-252-rebase-repair-3.md.
-- Server behavior is unchanged this round beyond the union merge; server
-  test execution belongs to the independent verifier — focused list:
-  ws_subscribe_rejects_same_tenant_non_member (ws.rs:985),
-  ws_subscribe_agent_scoped_to_own_workspace_record (ws.rs:1096), the four
-  workspace_activity_* tests in api/activity.rs (activity.rs:288-453), and
-  gyre-common's kind_ag_event_type_mapping_matches_spec.
-- Deferred for remote verification: full `npm test`, all-target clippy,
-  full workspace suite, and exact-head GitHub checks.
