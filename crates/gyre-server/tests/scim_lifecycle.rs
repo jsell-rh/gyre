@@ -332,6 +332,91 @@ async fn scim_unset_token_fails_closed() {
     drop(guard);
 }
 
+/// Review repair (task-265, round 2): a successful SCIM request must not
+/// leave a false AuthFailure audit row behind. Pre-repair,
+/// `last_seen_middleware` — layered over the SCIM routes in
+/// `build_router` — ran the `AuthenticatedAgent` extractor with the SCIM
+/// bearer token; the ladder rejected it and its final fallback persisted
+/// an AuthFailure ('invalid token', CEF severity 6 in the SIEM export) for
+/// every legitimate IdP provisioning call, masking real credential
+/// attacks. The audit channel must stay quiet for authorized SCIM traffic.
+#[tokio::test]
+async fn successful_scim_requests_do_not_record_auth_failures() {
+    let (_guard, _dir, state, app) = sqlite_ctx().await;
+
+    // A spread of successful SCIM calls through the full production
+    // stack (list, create, PATCH, GET).
+    let resp = scim_call(&app, Method::GET, "/scim/v2/Users", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = scim_call(
+        &app,
+        Method::POST,
+        "/scim/v2/Users",
+        Some(serde_json::json!({ "userName": "audit-clean-user" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+    let resp = scim_call(
+        &app,
+        Method::PATCH,
+        &format!("/scim/v2/Users/{id}"),
+        Some(serde_json::json!({
+            "Operations": [{ "op": "replace", "path": "displayName", "value": "Clean" }]
+        })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = scim_call(&app, Method::GET, &format!("/scim/v2/Users/{id}"), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Zero AuthFailure rows: authorized provisioning traffic must not
+    // pollute the audit trail.
+    let failures = state
+        .audit
+        .query(&gyre_ports::AuditQueryFilter {
+            event_type: Some("auth_failure".to_string()),
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        failures.is_empty(),
+        "successful SCIM requests must not record AuthFailure audit events, \
+         found {}",
+        failures.len()
+    );
+
+    // Control — the audit channel is alive: a genuinely invalid bearer on
+    // an /api/v1 route (rejected by require_auth_middleware, which owns
+    // its AuthFailure emission) records exactly one TRUE row, so the zero
+    // above is not a vacuous pass.
+    let resp = raw_call(
+        &app,
+        Method::GET,
+        "/api/v1/users/me",
+        Some("Bearer definitely-not-any-credential"),
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let failures = state
+        .audit
+        .query(&gyre_ports::AuditQueryFilter {
+            event_type: Some("auth_failure".to_string()),
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        failures.len(),
+        1,
+        "exactly the one true failure — no false rows from the SCIM calls above"
+    );
+}
+
 // ── Deactivation lifecycle ───────────────────────────────────────────────────
 
 #[tokio::test]
