@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
-commits: ["951fa88b25aa0c530aab4dc4c4e2c59cbe6994f2", "a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -120,89 +120,3 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
-
-## Shipped
-
-All five send-path guards are implemented and retained on this branch
-(955c134a, 9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0), merged with current
-main (cd088f9c → task-254, 02e018de → task-259, d5a69026 → task-274,
-specs-only).
-
-### Behavior
-
-1. **Scopeless-message guard** — `emit_scoped_event`
-   (crates/gyre-server/src/lib.rs), the shared body of the internal
-   emitter family, returns `Err` and logs at error level when
-   `destination != Broadcast && workspace_id.is_none()`; the message is
-   never constructed, stored, or broadcast.
-2. **Mem store contract** — `MemMessageRepository::store`
-   (crates/gyre-server/src/mem.rs) returns `Err` on `workspace_id: None`,
-   matching the SQLite/PostgreSQL `message_to_new_row` contract; all send
-   paths skip `store()` for Broadcast destinations.
-3. **WS `acknowledged` exclusion** — both WebSocket Message
-   serialization sites (live bus-delivery arm and Subscribe replay arm
-   in crates/gyre-server/src/ws.rs) serialize through
-   `ws_message_payload`, which strips `acknowledged` with the same
-   manual-removal pattern as `send_response`; GET inbox responses keep
-   the field.
-4. **Origin table** — `origin_from_auth` (crates/gyre-server/src/api/messages.rs)
-   derives origin from `AuthenticatedAgent.auth_mechanism`, set by the
-   extractor on every auth path: global `GYRE_AUTH_TOKEN` → Server;
-   API key / OIDC user JWT → `User(user_id)`; agent token / federated
-   JWT → `Agent(sub)`. Admin-role API-key/OIDC callers resolve to User
-   origin (server_only 403 gate and rule-3 membership check apply to
-   them); the separate rule-6 Admin-role check still lets them target
-   Broadcast; the global token keeps full forge authority.
-5. **Rule-1 tenant isolation, fail-closed** — the REST send handler and
-   the mirrored MCP `handle_message_send` resolve the target agent's
-   workspace record on every `Destination::Agent(id)` send and compare
-   its tenant with the caller's verified tenant; mismatch rejects 403
-   (nothing stored or broadcast), including Server-origin global-token
-   callers. An unresolvable workspace record rejects fail-closed.
-
-### Verification repairs
-
-**Round 7 — task-254 fixture repair (951fa88b).** Retained
-verification (`cargo test --all`, exit 101) failed the three task-254
-tests in `crates/gyre-server/tests/message_size_and_key_rotation.rs`
-with 403 "target agent ... cannot be resolved; tenant isolation cannot
-be verified": those fixtures predate rule 1 and created only the target
-agent row, never the workspace record the guard resolves the tenant
-from. Fixed the fixtures — `create_agent` now creates the workspace row
-(tenant `default`, the global test token's system principal tenant)
-first, mirroring the `create_agent_in_workspace` helper this task's own
-tests use; the rotation test's boot 2 reuses the same SQLite DB so the
-row persists. No assertion weakened (same sends must still return
-201/413); production code unchanged.
-
-**Round 8 — attribution recording.** Retained verification
-(`bash /tmp/stage/checks.sh`, exit 1) failed the task-commit-attribution
-gate: 951fa88b mentions task-254 in its subject and touches product
-surface, so the gate requires its SHA in task-254's `commits:`
-frontmatter as well (review scoping). Recorded it there
-(specs/tasks/task-254.md, with a note in that task's Shipped record) —
-the frozen exemption file was NOT extended. No code change this round:
-`git diff 30e9049b..HEAD -- crates/ web/` is empty, so the verified
-candidate's code surface is bit-identical to this head; the merge with
-main (ee03c299, task-274 spec backlog) is specs-only.
-
-### Test evidence
-
-- In-sandbox, current head plus the repair: `cargo check -p gyre-server
-  --tests` exit 0 (full unit+integration surface type-checked, including
-  the repaired file); `cargo fmt --check` clean. Evidence:
-  /tmp/stage/review-evidence/task-248-round7-fixture-repair.md.
-- The cargo wrapper defers gyre-server test execution to the independent
-  verifier (build-budget gate, no transport restriction). Required
-  deferred probes: (1) `cargo test -p gyre-server --test
-  message_size_and_key_rotation` — all three tests must pass; (2) full
-  `cargo test --all`, otherwise green in the retained run (2483+ passed,
-  only these three failed).
-- Prior rounds' in-sandbox probes for the five guards themselves
-  (origin-table probes, rule-1 cross-tenant 403 with empty store, WS
-  replay/live `acknowledged` exclusion, mem-store Err-on-None contract
-  test, scopeless-guard Err + error-level log) are unchanged by the
-  fixture-only and specs-only repairs and remain in the commits above.
-- Round 8 probe: `bash scripts/check-task-commit-attribution.sh` exits 0
-  after the task-254 frontmatter recording (it exited 1 on the retained
-  run with 951fa88b/task-254 as the only violation).
