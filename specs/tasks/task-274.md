@@ -2,8 +2,8 @@
 title: "Publish reviewed spec backlog for specs/system/admin-panel.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
-commits: []
+progress: ready-for-review
+commits: ["16158031", "4ad6915a"]
 ---
 
 ## Required behavior
@@ -279,3 +279,26 @@ Publish exactly the independently reviewed missing-work plan below. Only create 
 ## Shipped
 
 Task definitions and explicit bindings only; no product implementation claimed.
+
+### Published backlog (commit 16158031)
+
+- `specs/tasks/task-273.md` created from the independently reviewed plan for section `42df7a7e48e1904b76eface1` (specs/system/admin-panel.md, Admin Panel): required behavior, all 11 acceptance criteria and the negative probe appear verbatim; `progress: not-started`.
+- `specs/task-spec-inputs.json`: section entry `backlog/42df7a7e48e1904b76eface1` and binding `Spec gap spec-5b647653a4554eea3e93ac19 / admin-panel-remaining-gap / e61ffd082155` → that section.
+- Nothing else changed: the publication commit touches only those three spec files; every existing task, spec, registry entry, coverage status (admin-panel.md coverage matrix untouched), product file and gate is preserved; the section id is referenced by no other task, so there is no duplicate active assignment.
+
+### CI repair (commit 4ad6915a)
+
+- Finding (durable, PR 881, head 357f9307, run 44497765666): the dev-controller job failed with `FileNotFoundError` on the dependency sentinel at `target/debug/build/gyre_cache_probe/<hash>/out/unrelated-dependency.rlib` in `test_dev_cargo_clean.py`.
+- Root cause: the test derived the sentinel path from the probe's own reported executable; Cargo's artifact layout varies across toolchains (the test's own comment acknowledges this), and a runner cargo that reports the executable inside a package-attributed `build/<pkg>/<hash>/out` directory places the sentinel exactly where `cargo clean --package` legitimately removes it. The branch diff vs the verified base 61b6080d is docs-only, so the trigger is runner toolchain drift, not content.
+- Fix: the sentinel now lives at a fixed path in the shared dependency cache (`target/debug/deps/unrelated-dependency.rlib` — where real dependency artifacts live and the location the baseline run proved survives package-scoped cleaning), is written exactly once, and the probe's `cargo test` invocation is self-scoped with `--package gyre_cache_probe` (identical in the single-package probe workspace; keeps the probe runnable under memory-bounded build policies that require explicit package selection for code generation). Assertions unchanged in strength: exactly one reported executable under the shared target dir, returncodes 0/101/0 across good→mutant→good, sentinel content intact after both package-scoped cleans.
+
+### Test evidence
+
+- `python3 -m unittest discover -s scripts -p 'test_dev_cargo_clean.py'` — 2 tests, OK (in-sandbox through the build wrapper; the self-scoped invocation is wrapper-legal).
+- Mutation probe: replacing the helper's package-scoped clean with a full `cargo clean` makes the test fail with `FileNotFoundError` on the sentinel — the retention property is genuinely enforced. The same probe caught a first fix attempt (`if not sentinel.exists()`) as self-confirming (it re-created the sentinel after deletion) and it was corrected to write-once before shipping.
+- Full dev-controller suite in-sandbox: 65 tests, the only remaining failures are 2 pre-existing `test_dev_build_command.py` errors that reproduce identically on the unmodified HEAD — they interact with this sandbox's `GYRE_PIPELINE_STAGE=implement` wrapper environment and did not occur in CI (the CI run had exactly one error, the one fixed here).
+- Newly merged Rust files (task-251 base merge: `spawn.rs`, `mcp.rs`, `stale_agents.rs`) are rustfmt-clean; no formatting changes were needed and no crate was rebuilt.
+
+### Deferred verification
+
+- Exact-head GitHub re-run of the dev-controller suite (`python3 -m unittest discover -s scripts -p 'test_dev*.py'`) after independent review; no server tests are required by this assignment (no `crates/` or `web/` change vs base 61b6080d).
