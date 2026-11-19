@@ -83,6 +83,7 @@ use audit::{
     query_audit_events, record_audit_event, update_siem_target,
 };
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
     Router,
 };
@@ -118,6 +119,21 @@ use users::{
 use crate::AppState;
 
 pub fn api_router() -> Router<Arc<AppState>> {
+    // Message-specific body limit (message-bus.md §Edge Cases
+    // "Message too large"): the TOTAL POST request body on the send
+    // endpoint — the full JSON envelope including `to`, `kind`, and
+    // `payload` — is capped at 64KB, configurable via
+    // GYRE_MAX_MESSAGE_SIZE. Applied as a per-route layer on the send
+    // route's method router, it takes precedence over the global
+    // GYRE_MAX_BODY_SIZE (default 10MB) router layer in `build_router`,
+    // so a message payload can never ride the global limit up to ~10MB.
+    // Exceeding it is rejected with 413 by the body-limit extractor
+    // before the handler runs, so nothing is signed, stored, or broadcast.
+    let max_message_bytes: usize = std::env::var("GYRE_MAX_MESSAGE_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64 * 1024);
+
     Router::new()
         .route("/api/v1/version", get(version::version_handler))
         .route("/api/v1/activity", get(activity::activity_handler))
@@ -842,10 +858,13 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/admin/llm/config/:function",
             put(llm_config::put_tenant_llm_default),
         )
-        // Message bus (Phase 3)
+        // Message bus (Phase 3): the send route carries the message-specific
+        // body limit declared above (GYRE_MAX_MESSAGE_SIZE, default 64KB → 413).
         .route(
             "/api/v1/workspaces/:workspace_id/messages",
-            post(messages::send_message).get(messages::list_workspace_messages),
+            post(messages::send_message)
+                .get(messages::list_workspace_messages)
+                .layer(DefaultBodyLimit::max(max_message_bytes)),
         )
         // Presence (HSI §7)
         .route(
