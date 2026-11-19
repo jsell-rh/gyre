@@ -105,12 +105,18 @@ Adapters were verified directly in this sandbox: `cargo test -p
 (send/poll/ack/count/expiry against the SQLite adapter, AC 4), and
 `cargo check -p gyre-server --tests` was clean.
 
-### This round (commit b2fd012c)
+### Formatting repair and re-confirmation
 
 Formatting-only repair of the verification finding: rustfmt flagged
 changed lines 97, 117, 133, 135, 206, 215 of
 `crates/gyre-server/tests/message_persistence.rs`. Applied `rustfmt
---edition 2021` to the file; no behavior change.
+--edition 2021` to the file (commit b2fd012c); no behavior change.
+`scripts/check-rustfmt-diff.py` against base 5eff43dd was re-run on the
+retained candidate ff1957d in this round: changed lines clean
+(2 Rust files checked), exit 0 (evidence:
+`/tmp/stage/review-evidence/rustfmt-diff-probe.log`). No Rust source
+was changed this round — implementation and tests are preserved verbatim
+from the retained candidate.
 
 ### Verifier must execute
 
