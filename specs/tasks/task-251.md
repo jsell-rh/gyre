@@ -115,8 +115,14 @@ called `acknowledge_all`):
   `count_unacked == 0`, rows retained acknowledged, `expire_acked_inboxes`
   deletes exactly 2, live agent's unacked message untouched.
 
-Server-lib test execution is wrapper-blocked in this sandbox (4 GiB budget);
-`cargo check -p gyre-server --tests` is clean (exit 0, no warnings). The
+Server-lib test execution is wrapper-blocked in this sandbox (the build
+wrapper exits 64 on gyre-server codegen: 4 GiB budget); on the post-rebase
+head it was verified that `cargo check -p gyre-server --tests` is clean
+(exit 0, no warnings — this type-checks all three tests plus the merged
+ws.rs/message_persistence.rs changes), `cargo fmt --check -p gyre-server` is
+clean, and the storage half was executed for real via
+`cargo test -p gyre-adapters acknowledge_all`
+(`sqlite::message::tests::acknowledge_all_returns_count ... ok`). The
 independent verifier must run:
 
     cargo test -p gyre-server --lib complete_agent_bulk_acks_directed_inbox
@@ -126,9 +132,18 @@ independent verifier must run:
 plus the regression suites `--lib api::spawn`, `--lib api::messages`, `--lib
 message_dispatcher`, `--lib stale_agents`, `--lib mcp`, and `--test
 message_persistence` (task-247 dependency suite). Evidence retained at
-`/tmp/stage/review-evidence/task-251-directed-inbox-lifecycle.md` (probe
-commands, exit codes, logs: cargo-check.log, rustfmt-diff.log, arch.log,
-inert-enforcement.log).
+`/tmp/stage/review-evidence/task-251-directed-inbox-lifecycle.md` (source
+SHAs, rebase-conflict resolution, probe commands and exit codes).
+
+### This attempt (rebase repair)
+
+Rebased the task-251 candidate (`34d13815`) onto base `25497b9e`; the one
+conflict (`specs/coverage/system/message-bus.md` header audit line —
+candidate's Task-251 note vs base's Task-250 note) was resolved by combining
+both notes; the table body auto-merged with row 9 carrying task-250 evidence
+and row 16 carrying task-251 evidence. Merge commit `4462a4b3`. No source
+changes were needed — all production call sites and tests survived the
+merge intact (grep evidence in the review-evidence file).
 
 ### Acceptance-criteria notes
 
