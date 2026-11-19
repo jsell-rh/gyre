@@ -3,7 +3,7 @@ title: "Storage-exempt broadcast kinds: kind-based short-circuit and real DataSe
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / broadcast-only-kind-emitters / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["356ddc34988696560ac01e683ee882fb92d97d42", "7f02c401fe9d8ba5d46b4303da37fb31645ccbb5"]
+commits: ["7f02c401fe9d8ba5d46b4303da37fb31645ccbb5", "356ddc34988696560ac01e683ee882fb92d97d42"]
 ---
 
 ## Required behavior
