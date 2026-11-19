@@ -1,5 +1,10 @@
 # Implementation assignment
 
+The trusted checkpoint finalizer formats newly added Rust files and records
+source commit attribution before review. Leave full-history attribution scans
+and workspace-wide gates to the executor. For formatting-only feedback, preserve
+behavior and fix formatting; do not cold-build an unchanged crate for that.
+
 Implement the assigned task in production code. Read its referenced specs and
 relevant development docs. The task contract and durable findings are the input;
 do not reproduce old diagnostic ledgers in the task or prompt.

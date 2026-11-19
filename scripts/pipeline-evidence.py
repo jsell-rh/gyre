@@ -13,12 +13,28 @@ def file_digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def production_source(name):
+    """Recognize executable source and public build/deployment configuration."""
+    path=PurePosixPath(name)
+    if path.is_absolute() or '..' in path.parts or not path.parts:return False
+    if len(path.parts)>1 and path.parts[0] in ('crates','web','scripts'):return True
+    if path.parts[:2]==('.github','workflows'):
+        return len(path.parts)==3 and path.suffix in ('.yml','.yaml')
+    if path.as_posix() in ('Cargo.toml','Cargo.lock','Dockerfile','flake.nix','flake.lock',
+                           'rust-toolchain.toml','.cargo/config.toml'):return True
+    if len(path.parts)>1 and path.parts[0]=='docker' and not any(p.startswith('.') for p in path.parts):
+        return (path.name in ('Dockerfile','package.json','package-lock.json','flake.lock')
+                or path.suffix in ('.nix','.mjs','.sh','.yaml','.yml','.toml'))
+    return False
+
+
 def evidence(root, record):
     if not isinstance(record,dict):raise ValueError('Evidence must be an object')
     name=record.get('file');quote=record.get('quote');detail=record.get('detail')
     if not isinstance(name,str) or not name.strip() or len(name)>500:raise ValueError('Invalid evidence file')
     path=PurePosixPath(name)
-    if path.is_absolute() or '..' in path.parts or path.parts[0] not in ('crates','web','scripts','specs','docs'):
+    if (path.is_absolute() or '..' in path.parts or not path.parts or
+            (path.parts[0] not in ('crates','web','scripts','specs','docs') and not production_source(name))):
         raise ValueError('Evidence path outside repository source')
     local=Path(root)/name
     if not local.is_file() or local.is_symlink() or not local.resolve().is_relative_to(Path(root).resolve()):
