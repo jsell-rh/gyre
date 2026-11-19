@@ -5088,8 +5088,15 @@ pub async fn mcp_handler(
 /// - `Destination::Broadcast` — delivered to all subscribers per the bus's
 ///   broadcast semantics (message-bus.md §Delivery: "all connected clients");
 /// - `Destination::Agent(id)` — delivered only on the authenticated agent's
-///   own stream; other agents' directed messages never appear (they reach
-///   their target via the REST/MCP poll paths instead).
+///   own stream, and only for genuine agent principals: the match is gated
+///   on the agent-principal namespace exactly like the ws.rs bus filter —
+///   user principals (API key, Keycloak) carry a display name/username in
+///   `agent_id`, and the global token carries `agent_id: "system"` with
+///   the Admin role, so under an id collision neither may receive another
+///   principal's Directed messages (message-bus.md §Real-time Delivery:
+///   user identities and the global token never match agent-targeted
+///   messages); other agents' directed messages never appear either (they
+///   reach their target via the REST/MCP poll paths instead).
 pub async fn mcp_sse_handler(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -5114,11 +5121,16 @@ pub async fn mcp_sse_handler(
         auth.workspace_id.map(Id::new)
     };
     let unscoped_admin = scope.is_none() && auth.roles.contains(&UserRole::Admin);
+    // Principal-namespace guard for directed delivery, mirroring the ws.rs
+    // bus filter: user principals (user_id set) and the global token (Admin
+    // role, agent_id "system") never match `Destination::Agent(id)`, even
+    // when `auth.agent_id` collides with a real agent's id.
+    let agent_principal = auth.user_id.is_none() && !auth.roles.contains(&UserRole::Admin);
     let agent_id = auth.agent_id.clone();
     let rx = state.message_broadcast_tx.subscribe();
     let event_stream = stream::unfold(
-        (rx, scope, agent_id, unscoped_admin),
-        |(mut rx, scope, agent_id, unscoped_admin)| async move {
+        (rx, scope, agent_id, unscoped_admin, agent_principal),
+        |(mut rx, scope, agent_id, unscoped_admin, agent_principal)| async move {
             loop {
                 match rx.recv().await {
                     Ok(msg) => {
@@ -5128,7 +5140,7 @@ pub async fn mcp_sse_handler(
                                 Some(scope_ws) => scope_ws == ws_id,
                                 None => unscoped_admin,
                             },
-                            Destination::Agent(aid) => aid.as_str() == agent_id,
+                            Destination::Agent(aid) => agent_principal && aid.as_str() == agent_id,
                         };
                         if !deliver {
                             continue;
@@ -5142,7 +5154,7 @@ pub async fn mcp_sse_handler(
                             .data(data);
                         return Some((
                             Ok::<Event, std::convert::Infallible>(sse_event),
-                            (rx, scope, agent_id, unscoped_admin),
+                            (rx, scope, agent_id, unscoped_admin, agent_principal),
                         ));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -6010,6 +6022,93 @@ mod tests {
         assert!(
             !text.contains("sse-other-agent"),
             "directed message to another agent must not be delivered; got: {text}"
+        );
+    }
+
+    /// Directed-tier bus message to `aid` carrying a distinctive payload
+    /// marker, so a stream assertion can tell deliveries apart.
+    fn directed_message(aid: &str, marker: &str) -> Message {
+        Message {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-c")),
+            to: Destination::Agent(Id::new(aid)),
+            kind: MessageKind::TaskAssignment,
+            payload: Some(json!({"probe": marker})),
+            created_at: 1_700_000_000_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        }
+    }
+
+    /// Review repair (principal-namespace guard): `Destination::Agent(id)`
+    /// must never match a non-agent principal whose `auth.agent_id`
+    /// collides with a real agent's id — an API-key user whose display_name
+    /// equals an agent's id, and the global token (`agent_id: "system"`,
+    /// Admin role) versus an agent literally named "system". Mirrors the
+    /// ws.rs bus filter (user_id set / Admin role never match).
+    #[tokio::test]
+    async fn mcp_sse_directed_delivery_rejects_principal_namespace_collisions() {
+        let state = test_state();
+        // A real agent whose id collides with a user principal's display
+        // name — the exact confusion class the scope-resolution arm already
+        // guards against for workspaces.
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("sse-collide-agent"), "sse-collide-agent", 1);
+        agent.workspace_id = Id::new("ws-c");
+        state.agents.create(&agent).await.unwrap();
+
+        // API-key user principal whose display_name equals that agent's id.
+        let mut user = gyre_domain::User::new(
+            Id::new("u-collide"),
+            "ext-collide",
+            "sse-collide-agent",
+            1000,
+        );
+        user.tenant_id = Some(Id::new("t1"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_sse_collision_key";
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key(raw_key),
+                &user.id,
+                "sse-collision",
+            )
+            .await
+            .unwrap();
+
+        let app = crate::build_router(state.clone());
+        let mut user_stream = open_sse(app.clone(), raw_key).await;
+        // Global token → system principal (Admin, agent_id "system").
+        let mut admin_stream = open_sse(app, "test-token").await;
+
+        // Directed message to the agent whose id collides with the user's
+        // display name: must NOT land on the user's stream.
+        state
+            .message_broadcast_tx
+            .send(directed_message("sse-collide-agent", "user-collision"))
+            .unwrap();
+        // Directed message to an agent literally named "system": must NOT
+        // land on the global-token admin stream.
+        state
+            .message_broadcast_tx
+            .send(directed_message("system", "admin-collision"))
+            .unwrap();
+
+        let text_user = drain_sse(&mut user_stream, 300).await;
+        assert!(
+            !text_user.contains("user-collision"),
+            "directed message to an agent must not reach an API-key user whose \
+             display_name collides with that agent's id; got: {text_user}"
+        );
+        let text_admin = drain_sse(&mut admin_stream, 300).await;
+        assert!(
+            !text_admin.contains("admin-collision"),
+            "directed message to an agent named 'system' must not reach the \
+             global-token admin stream; got: {text_admin}"
         );
     }
 
