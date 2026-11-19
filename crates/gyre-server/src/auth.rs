@@ -336,6 +336,50 @@ fn derive_kid(public_key_bytes: &[u8]) -> String {
         .collect()
 }
 
+/// A historical signing key's retained public material
+/// (message-bus.md §Edge Cases "Signature key rotation").
+///
+/// When the active forge signing key changes (operator rotation via
+/// `GYRE_AGENT_SIGNING_KEY`, or a regenerated key), the previous key's
+/// public material is retained in durable storage so `GET
+/// /.well-known/jwks.json` keeps serving its JWK: messages signed before
+/// the rotation carry the old `key_id` and must remain verifiable by
+/// third parties that resolve kids through JWKS.
+#[derive(Clone)]
+pub struct HistoricalSigningKey {
+    /// Key id — same derivation as the active key (`derive_kid`), so a kid
+    /// stored in a message's `key_id` field resolves to this entry.
+    pub kid: String,
+    /// Raw 32-byte Ed25519 public key (JWK `x`, base64url-unpadded).
+    pub public_key_bytes: Vec<u8>,
+}
+
+impl HistoricalSigningKey {
+    /// Retain a key's public material. The kid is derived from the public
+    /// key bytes with the same function the active key uses, so a
+    /// rotation can never introduce a kid mismatch.
+    pub fn from_public_key_bytes(public_key_bytes: Vec<u8>) -> Self {
+        Self {
+            kid: derive_kid(&public_key_bytes),
+            public_key_bytes,
+        }
+    }
+
+    /// The JWK representation served in the JWKS `keys` array — same field
+    /// set as the active key's entry.
+    pub fn jwk(&self) -> serde_json::Value {
+        let x = URL_SAFE_NO_PAD.encode(&self.public_key_bytes);
+        serde_json::json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "use": "sig",
+            "alg": "EdDSA",
+            "kid": self.kid,
+            "x": x
+        })
+    }
+}
+
 impl AgentSigningKey {
     /// Generate a fresh Ed25519 key pair.
     pub fn generate() -> Self {
