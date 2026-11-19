@@ -2,7 +2,7 @@
 title: "Directed inbox lifecycle: acknowledge_all on agent completion and on stale-agent Dead transition"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / directed-inbox-lifecycle / 60b177f85a11"
 depends_on: [task-247]
-progress: ready-for-review
+progress: complete
 commits: ["d2983bedc5d72a7a107c6d89f32e05fd681ce19e"]
 ---
 
