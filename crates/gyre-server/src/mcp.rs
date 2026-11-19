@@ -5817,7 +5817,7 @@ mod tests {
         tenant: &str,
         ws: &str,
     ) -> String {
-        let token = state
+        state
             .agent_signing_key
             .mint_orchestrator(
                 agent_id,
@@ -5831,8 +5831,7 @@ mod tests {
                 "workspace_orchestrator",
                 "workspace-orchestrator",
             )
-            .unwrap();
-        token
+            .unwrap()
     }
 
     async fn register_agent_token(state: &crate::AppState, agent_id: &str, token: &str) {
