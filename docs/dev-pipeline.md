@@ -320,6 +320,16 @@ attribution; unrelated historical attempt branches are excluded. Checkout blobs
 are materialized as needed and no host-local object alternates are copied into
 the sandbox. Remote Git access remains available for historical blob reads.
 
+After implementation tools stop, the trusted checkpoint finalizer runs the
+worker image's rustfmt on Rust files newly added since the assignment base.
+It includes committed and untracked additions, even after metadata-only commits,
+and leaves existing files' formatting debt alone. Formatting happens before the
+checkpoint and commit attribution, so independent review sees the actual
+normalized source. Formatter failures retain an unapproved source checkpoint;
+symlinks and shared files are rejected. Existing differential formatting checks
+remain mandatory in verification and CI. No prior approval transfers to a
+changed checkpoint.
+
 The model is `gateway/rits/zai-org/glm-5-3`. Fullsend strips `gateway/` and calls
 `https://api.enmaas.devshift.net/v1/chat/completions`, using the inline pinned
 OpenAI-completions model entry and `supportsDeveloperRole: false`. The configured
