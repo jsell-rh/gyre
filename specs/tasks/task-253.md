@@ -3,7 +3,7 @@ title: "MCP SSE stream: workspace filtering and MessageKind-to-AG-UI event mappi
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / mcp-sse-workspace-agui / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["1388c32e4f4d81242744e9bfa8c9738316ed1e2b", "b4ac4adc9246394c8d3408850c43eeca158b9c33", "c9c8b4c3722d79b8ddc835ea6b1602bc70b9474a"]
+commits: ["c9c8b4c3", "b4ac4adc", "1388c32e"]
 ---
 
 ## Required behavior
@@ -62,10 +62,13 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 ## Shipped
 
 `mcp_sse_handler` (crates/gyre-server/src/mcp.rs) implements both halves of
-message-bus.md §MCP Integration plus the review-repair hardening; the
-server code at this branch head is byte-identical to the independently
-reviewed candidate 09f18bae. This round additionally repairs the CI
-failure (dev-controller run 44486313569) that blocked that candidate.
+message-bus.md §MCP Integration plus the review-repair hardening. This round
+additionally repaired the rebase onto base 61b6080d (task-251's Directed
+inbox lifecycle work): the code auto-merged cleanly, and the one content
+conflict — specs/coverage/system/message-bus.md's "Last audited" audit
+trail, where both sides had appended a different gap-closure sentence — was
+resolved by keeping both (task-251's row-16 sentence and task-253's row-14
+sentence), with rows 14 and 16 each carrying their own merged evidence.
 
 ### Workspace filtering
 
@@ -97,68 +100,29 @@ RunStarted→RUN_STARTED, RunFinished→RUN_FINISHED,
 TextMessageContent→TEXT_MESSAGE_CONTENT, StateChanged→STATE_CHANGED,
 AgentError→ERROR; kinds outside the table (incl. `Custom`) keep the
 generic `message` event. The SSE data payload is unchanged (raw envelope
-JSON), and existing broadcast server→client notifications still arrive.
-
-### CI repair — Cargo cache probe sentinel (5fba4da7)
-
-PR 875 run 44486313569 failed the dev-controller job
-(`python3 -m unittest discover -s scripts -p 'test_dev*.py'`,
-65 tests, 1 error) in
-`test_dev_cargo_clean.CargoArtifactTest.test_rebuilds_current_checkout_and_retains_dependency_artifacts`:
-FileNotFoundError for
-`target/debug/build/gyre_cache_probe/<hash>/out/unrelated-dependency.rlib`.
-The runner toolchain's build layout places the probe package's own test
-executable inside a package-owned `build/<pkg>/<hash>/` tree, which
-`cargo clean --package` (correctly) removes — so the "retained dependency
-artifact" sentinel, derived from that executable's directory, vanished.
-The probe now has a real path dependency (`gyre_cache_dep`) and the
-sentinel is placed in the dependency's Cargo-reported artifact directory,
-which a workspace-scoped clean must retain on every layout. Verified
-locally against cargo 1.99.0 (shared-deps layout): the suite passes, and
-a mutated helper that runs an unscoped `cargo clean` still fails the test
-on the missing sentinel, so the retention assertion keeps its strength.
-No product code changed in this round.
+JSON), and existing broadcast server→client notifications still arrive
+(probe: mcp_sse_admin_connection_still_receives_notifications).
 
 ### Test evidence
 
-Six focused tests in the mcp.rs test module (in-process
-`tower::ServiceExt::oneshot` against `build_router(test_state())` — real
-router, real auth extractor with minted+registered agent JWTs / API-key
-user / global token, real broadcast bus; no TCP listener involved):
+Focused tests in crates/gyre-server/src/mcp.rs (mem-backed, real bus
+broadcast channel): mcp_sse_workspace_isolation (workspace A's
+ToolCallStart reaches A's stream only — asserts B's stream stays silent),
+mcp_sse_agui_event_mapping (all seven spec-table kinds produce their
+AG-UI event name; TaskCreated keeps `message`), mcp_sse_directed_delivery
+(own Directed message delivered, other agents' not),
+mcp_sse_directed_delivery_rejects_principal_namespace_collisions,
+mcp_sse_admin_connection_still_receives_notifications, and
+mcp_sse_record_activity_telemetry_reaches_workspace. The isolation and
+mapping assertions fail against the pre-fix handler (generic `message`
+event, no filtering) by construction.
 
-- `mcp_sse_workspace_isolation` (AC1) — agents in different workspaces of
-  different tenants; a Workspace-scoped ToolCallStart to workspace A
-  reaches A's stream only.
-- `mcp_sse_agui_event_mapping` (AC2) — all seven spec-table kinds arrive
-  with their AG-UI event names (AgentError → ERROR); TaskCreated keeps
-  the default `message` name.
-- `mcp_sse_directed_delivery` (AC3) — a Directed message to the
-  authenticated agent is delivered; a Directed message to another agent
-  is not.
-- `mcp_sse_directed_delivery_rejects_principal_namespace_collisions`
-  (repair regression) — an API-key user whose display_name equals a real
-  agent's id receives nothing for that agent's Directed messages, and a
-  Directed message to an agent literally named "system" never lands on
-  the global-token admin stream.
-- `mcp_sse_admin_connection_still_receives_notifications` (AC4) —
-  broadcast server→client notifications still arrive on the
-  global-token admin connection.
-- `mcp_sse_record_activity_telemetry_reaches_workspace` (AC5) — telemetry
-  emitted by the `gyre_record_activity` MCP tool surfaces on a
-  same-workspace subscriber's stream with the mapped AG-UI event name.
-
-### Local verification status
-
-The repaired dev-controller probe passes locally
-(`python3 -m unittest -v test_dev_cargo_clean`, cargo 1.99.0, both test
-methods; plus the over-clean mutation check proving the retention
-assertion still fails a helper that discards the cache — evidence under
-/tmp/stage/review-evidence). Sandbox build budget blocks local
-`cargo test` compilation of gyre-server — the independent verifier must
-run:
-
-- `cargo test -p gyre-server mcp_sse`
-- `python3 -m unittest discover -s scripts -p 'test_dev*.py'`
-
-The mcp.rs tree is unchanged from the reviewed candidate 09f18bae, where
-`cargo check -p gyre-server --tests` passed at the merged head.
+Sandbox evidence for this round (post-rebase head e8e4b7c6):
+`cargo check -p gyre-server --tests` clean (build wrapper, 9m28s); all
+six focused tests present and compiling; rustfmt clean on the merged
+Rust files. Server test execution is deferred to the independent
+verifier per the sandbox build-budget rule — verifier must run:
+`cargo test -p gyre-server --lib mcp_sse` (all six SSE tests) and the
+task-251 inbox-lifecycle suite it was merged with
+(complete_agent_bulk_acks_directed_inbox, agent_complete_bulk_acks_directed_inbox,
+stale_abort_bulk_acks_directed_inbox_with_agent_orphaned).
