@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: complete
-commits: ["a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
+progress: ready-for-review
+commits: ["955c134a8c669070c3b936eac55f0e5e3f448418", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "873d0821ca7a33501c178303bdc618a1802ccbb6", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "a2781ff06b71bc443eda82aa1c0022edf011c972", "cd088f9cdd2b6845fac38d059ac5338fc07bda35"]
 ---
 
 ## Required behavior
@@ -123,12 +123,11 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 
 ## Shipped
 
-The task-248 implementation is retained in full on this branch, and this
-round resolved the DIRTY merge against current main (`bafc0353`, task-249
-storage-exempt broadcast kinds) as merge commit `bc4c6924`, preserving every
-send-path guard.
+The task-248 implementation is retained in full on this branch. This round
+resolved the DIRTY merge against current main (`05024b3e`, task-254 message
+edge cases) as merge commit `cd088f9c`, preserving every send-path guard.
 
-### Retained implementation (955c134a, 9dd4a1f0, round-4 fail-closed repair 873d0821, round-5 test repair 3bb9c9bd, round-7 clippy repair a2781ff0)
+### Retained implementation (955c134a, 9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0)
 
 1. **Scopeless-message guard** — `emit_scoped_event`
    (crates/gyre-server/src/lib.rs), the shared body of the internal
@@ -161,36 +160,39 @@ send-path guard.
    callers. An unresolvable workspace record rejects fail-closed rather
    than skip-and-log.
 
-### This round: merge repair (bc4c6924)
+### This round: merge repair (cd088f9c)
 
-Merged main `bafc0353` (task-249) into the branch. Two textual conflicts,
-both resolved as unions so both sides' work is retained: the tests-module
-tail of `crates/gyre-server/src/lib.rs` (task-248's
-`emit_scoped_event_rejects_scopeless_non_broadcast_message` and task-249's
-`emit_event_broadcast_only_kind_never_stored_for_workspace_destination`
-are both kept) and rows 5/6 of `specs/coverage/system/message-bus.md`
-(task-248's row-5 envelope evidence + task-249's row-6 broadcast-only-kinds
-evidence; the auto-merged header keeps the task-248 sentence). Main's
-remaining changes are additive task-249 code (broadcast_only() storage
-short-circuit on the three send paths, DataSeeded/QueueUpdated emitters)
-disjoint from every task-248 guard; the merged production
-`emit_scoped_event` carries both the scopeless guard and the kind-based
-storage exemption, and `origin_from_auth`, the rule-1 tenant comparisons
-(REST + MCP), `ws_message_payload`, and the mem store contract are all
-preserved as verified line-by-line in the probe record.
+Merged main `05024b3e` (task-254) into the branch. One textual conflict,
+in the `**Last audited:**` header paragraph of
+`specs/coverage/system/message-bus.md` only, resolved as a union so both
+sides' audit trails are retained (task-248's send-path-guard sentence and
+task-254's row-16 edge-case sentence). No production-code conflicts: all
+five guards were verified line-by-line present in the merged tree
+(`emit_scoped_event` scopeless guard at lib.rs, `MemMessageRepository::store`
+Err-on-None at mem.rs, `ws_message_payload` at both ws.rs sites,
+mechanism-keyed `origin_from_auth` at api/messages.rs, and the rule-1
+tenant comparisons in both api/messages.rs and mcp.rs). Main's changes are
+additive task-254 code (route-level body limit, JWKS signing-key history,
+tests/message_size_and_key_rotation.rs) disjoint from every task-248 guard;
+`cargo check -p gyre-server --tests` type-checks the combined tree
+including the new task-254 test file.
 
 ### Test evidence
 
 - In-sandbox, on the merged tree: `cargo check -p gyre-server --tests`
-  clean (full unit-test surface type-checked incl. both unioned lib.rs
-  tests, exit 0); `cargo fmt --all -- --check` clean; `cargo test -p
-  gyre-common` 129 passed / 0 failed (includes
-  `broadcast_only_returns_true_for_dataseeded_queueupdated_only`).
-- gyre-server test-binary compilation is deferred to the independent
+  clean (exit 0, full unit-test surface type-checked including both the
+  task-248 guard suite and the merged task-254 test file);
+  `cargo fmt --all -- --check` clean; `cargo test -p gyre-common`
+  129 passed / 0 failed.
+- gyre-server test-binary execution is deferred to the independent
   verifier per the sandbox 4 GiB budget contract. Suites to run (all green
-  on the task-248 lineage pre-merge; the merge adds only additive
-  task-249 code): `message_send*` (api/messages.rs guard suite incl.
-  `admin_api_key_cannot_forge_server_only_kind`,
+  on the task-248 lineage; the merge adds only additive task-254 code
+  disjoint from the guards): `message_send*` (api/messages.rs guard suite
+  incl. `admin_api_key_cannot_forge_server_only_kind`,
+  `admin_oidc_user_cannot_forge_server_only_kind`,
+  `global_token_keeps_server_origin_and_broadcast_authority`,
+  `admin_api_key_broadcast_allowed_non_admin_rejected`,
+  `admin_api_key_directed_send_requires_workspace_membership`,
   `cross_tenant_directed_send_rejected_for_server_origin`,
   `unresolvable_target_workspace_rejects_send`,
   `broadcast_only_kinds_not_persisted_even_forced_to_workspace`),
@@ -200,10 +202,10 @@ preserved as verified line-by-line in the probe record.
   `ws_subscribe_replay_strips_acknowledged`,
   `get_inbox_still_includes_acknowledged`, `mcp_message_send_cross_tenant_rejected`,
   `mcp_message_send_unresolvable_target_workspace_rejected`, plus
-  `cargo test -p gyre-server --test message_persistence` and the merged
-  task-249/task-251 suites (`admin_seed_broadcasts_data_seeded`,
+  `cargo test -p gyre-server --test message_persistence`,
+  `cargo test -p gyre-server --test message_size_and_key_rotation`, and the
+  merged task-249/task-251 suites (`admin_seed_broadcasts_data_seeded`,
   `enqueue_and_cancel_broadcast_queue_updated`,
   `complete_agent_bulk_acks_directed_inbox`,
   `agent_complete_bulk_acks_directed_inbox`,
   `stale_abort_bulk_acks_directed_inbox_with_agent_orphaned`).
-  Probe record: /tmp/stage/review-evidence/task-248-merge-repair-round2.md.
