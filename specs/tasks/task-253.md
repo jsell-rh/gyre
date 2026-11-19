@@ -3,7 +3,7 @@ title: "MCP SSE stream: workspace filtering and MessageKind-to-AG-UI event mappi
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / mcp-sse-workspace-agui / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["c9c8b4c3722d79b8ddc835ea6b1602bc70b9474a"]
+commits: ["c9c8b4c3722d79b8ddc835ea6b1602bc70b9474a", "b4ac4adc9246394c8d3408850c43eeca158b9c33"]
 ---
 
 ## Required behavior
@@ -61,8 +61,8 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 
 ## Shipped
 
-`mcp_sse_handler` (crates/gyre-server/src/mcp.rs, commit c9c8b4c3) now
-implements both halves of message-bus.md §MCP Integration:
+`mcp_sse_handler` (crates/gyre-server/src/mcp.rs, commits c9c8b4c3 +
+b4ac4adc) implements both halves of message-bus.md §MCP Integration:
 
 ### Workspace filtering
 
@@ -93,6 +93,15 @@ TextMessageContent→TEXT_MESSAGE_CONTENT, StateChanged→STATE_CHANGED,
 AgentError→ERROR; kinds outside the table (incl. `Custom`) keep the generic
 `message` event. The SSE data payload is unchanged (raw envelope JSON).
 
+### Verification-round repair (b4ac4adc)
+
+The first verification round (a64f885714ae4c2da326c8a21c4db607) failed the
+changed-lines clippy gate with `clippy::let_and_return` at mcp.rs:5835 in
+the `mint_ws_orchestrator_jwt` test helper. Fixed by returning the
+`.unwrap()` expression directly; behavior and types unchanged. That was the
+run's only gate failure (all arch/ABAC/migration/attribution checks and the
+web build passed).
+
 ### Test evidence
 
 Five focused tests in the mcp.rs test module (in-process
@@ -119,18 +128,11 @@ bus; no TCP listener involved):
 
 ### Deferred to the independent verifier
 
-The sandbox build wrapper refuses gyre-server test codegen ("gyre-server
-code generation plus the model exceeds 4 GiB"), so the five tests were
-type-checked (`cargo check -p gyre-server --lib --tests`, clean) but not
-executed locally. Required probe:
+Local execution of the gyre-server test binary and the full clippy gate is
+deferred per the sandbox build budget (see
+/tmp/stage/review-evidence/clippy-repair.md on the assignment sandbox).
+Verifier must run at exact head:
 
-```
-SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib mcp_sse
-```
-
-Expected: 5 passed. Evidence and exact commands recorded in
-/tmp/stage/review-evidence/task-253.md. No transport/listener restriction was
-encountered.
-
-Coverage: specs/coverage/system/message-bus.md row 14 (MCP Integration) and
-the audit header updated with the SSE evidence.
+- `cargo clippy --all-targets --all-features` (changed-lines gate that
+  failed in round a64f8857 and is now fixed);
+- `cargo test -p gyre-server mcp_sse` (the five focused tests above).
