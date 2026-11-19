@@ -3,7 +3,7 @@ title: "Sigstore layer-3 completion: every commit signed, keyless by default, no
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / sigstore-layer3-completion / b60edce5bc49"
 depends_on: [task-107]
 progress: ready-for-review
-commits: ["6f3dd98ddc96ba451c8773cede85fff2e8eda19b", "cd0ff0eacdddd3e6d27acf5a86cb8427946a0595", "fd91e5ba64f5b4a2ed4463afe9d9f1117df4c659", "7e96fca019100d9bcc03aad6dff32640c3d18601"]
+commits: ["7e96fca019100d9bcc03aad6dff32640c3d18601", "fd91e5ba64f5b4a2ed4463afe9d9f1117df4c659", "cd0ff0eacdddd3e6d27acf5a86cb8427946a0595", "6f3dd98ddc96ba451c8773cede85fff2e8eda19b"]
 ---
 
 ## Required behavior
