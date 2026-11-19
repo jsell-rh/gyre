@@ -68,6 +68,7 @@ pub mod policy_cache;
 pub mod policy_engine;
 pub mod signal_chain;
 pub mod spiffe;
+pub mod spiffe_federation;
 pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
@@ -226,6 +227,11 @@ pub struct AppState {
     /// trust-domain CA / external SPIRE Workload API, trust-bundle
     /// publication, and SVID issuance for agent sessions.
     pub spiffe: Arc<spiffe::SpiffeService>,
+    /// SPIFFE federation (identity-security.md §Federation): trust-bundle
+    /// exchange with peer Gyre instances — bundle endpoints keyed by trust
+    /// domain (`GYRE_SPIFFE_FEDERATION_PEERS`), refreshed on interval.
+    /// Independent of the OIDC-issuer federation (`trusted_issuers`).
+    pub spiffe_federation: Arc<spiffe_federation::FederationBundles>,
     pub repos: Arc<dyn RepoRepository>,
     pub agents: Arc<dyn AgentRepository>,
     pub tasks: Arc<dyn TaskRepository>,
@@ -1875,10 +1881,17 @@ pub fn build_state(
     // the trust domain and anchor before wiring AppState.
     let spiffe_service = load_spiffe_service(&sqlite_db, &pg_db);
 
+    // SPIFFE federation (identity-security.md §Federation): exchanged
+    // trust bundles for peer trust domains, keyed by trust domain.
+    let spiffe_federation = Arc::new(spiffe_federation::FederationBundles::from_env(
+        spiffe_service.trust_domain(),
+    ));
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
         spiffe: spiffe_service,
+        spiffe_federation,
         repos: store!(dyn RepoRepository, mem::MemRepoRepository::default()),
         agents,
         tasks,
