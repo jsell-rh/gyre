@@ -364,7 +364,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // JWK Set with at least one SVID anchor for the test trust domain.
-        assert!(json["keys"].as_array().unwrap().len() >= 1);
+        assert!(!json["keys"].as_array().unwrap().is_empty());
         assert_eq!(json["keys"][0]["use"], "svid");
         assert_eq!(json["keys"][0]["kty"], "EC");
     }
