@@ -2,8 +2,8 @@
 title: "Storage-exempt broadcast kinds: kind-based short-circuit and real DataSeeded/QueueUpdated emitters"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / broadcast-only-kind-emitters / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
-commits: ["356ddc34988696560ac01e683ee882fb92d97d42"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -63,105 +63,3 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
-
-## Shipped
-
-Both requirements are implemented in production code (commit 356ddc34).
-
-### Kind-based storage short-circuit
-
-`MessageKind::broadcast_only()` (crates/gyre-common/src/message.rs) returns
-true for exactly `DataSeeded` and `QueueUpdated`. All three send paths now
-short-circuit storage by KIND in addition to the existing tier/destination
-guards, so no `DataSeeded`/`QueueUpdated` row is ever persisted even when
-the message is addressed to a Workspace destination, while broadcast-channel
-delivery, signing, and all validation for other kinds are unchanged:
-
-- REST send: `send_message` (crates/gyre-server/src/api/messages.rs)
-- MCP send: `handle_message_send` (crates/gyre-server/src/mcp.rs)
-- internal emitter: `emit_scoped_event` (crates/gyre-server/src/lib.rs)
-
-The optional 400-rejection of non-Broadcast destinations was NOT taken: the
-acceptance criterion requires the broadcast channel to deliver a
-Workspace-forced broadcast-only message, so the send succeeds 201 and the
-kind-based exemption keeps it out of `store()`.
-
-### Real emitters for the two formerly-dead kinds
-
-- `DataSeeded` — emitted when workspace data seeding completes, at the end
-  of `admin_seed` (crates/gyre-server/src/api/admin.rs) via
-  `emit_tenant_event`: server origin, `Destination::Broadcast`,
-  `workspace_id: None`, payload none, tenant = the seeding caller's tenant.
-- `QueueUpdated` — new `emit_queue_updated` helper
-  (crates/gyre-server/src/merge_processor.rs) called at every merge-queue
-  entry state transition: enqueue (`enqueue_core` in api/merge_queue.rs and
-  the reconciliation auto-enqueue in reconciliation.rs), claim
-  (Queued→Processing, single-entry and atomic-group paths), requeue
-  (Processing→Queued: paused queue, supervised-trust hold, ABAC fail-closed,
-  atomic-group rollback), and terminal outcomes (Merged both paths, Failed
-  via `fail_queue_entry` and the direct conflict/git-error sites, Cancelled
-  via the circuit breaker and operator `cancel_entry`). Payload none,
-  `Destination::Broadcast`, `workspace_id: None`; tenant resolved from the
-  affected workspace (skip-and-log when unresolvable, never fabricated).
-
-`QueueUpdated` was removed from scripts/dead-message-kind-exemptions.txt
-(no new entries); `bash scripts/check-dead-message-kinds.sh` passes.
-
-### Tests
-
-New tests (each fails against the pre-task code):
-
-- `broadcast_only_kinds_not_persisted_even_forced_to_workspace`
-  (api/messages.rs): sends `data_seeded` and `queue_updated` through the
-  REST send path to a Workspace destination — 201, `find_by_id` → None,
-  `list_by_workspace` empty, broadcast channel delivered both to
-  subscribers. With the prior destination-only guard the row IS stored, so
-  this fails pre-task.
-- `emit_event_broadcast_only_kind_never_stored_for_workspace_destination`
-  (lib.rs): same probe through the internal emitter for both kinds.
-- `admin_seed_broadcasts_data_seeded` (api/admin.rs): runs the real
-  workspace-seed flow with a broadcast subscriber attached; asserts a
-  Server-origin DataSeeded broadcast (`Destination::Broadcast`,
-  `workspace_id: None`, payload none) and no stored row. Pre-task the kind
-  had zero production constructors, so no DataSeeded could ever arrive.
-- `enqueue_and_cancel_broadcast_queue_updated` (api/merge_queue.rs): an MR
-  entering the queue (enqueue) and leaving it (operator cancel) each result
-  in a Server-origin QueueUpdated broadcast with the spec shape and no
-  stored row.
-- `broadcast_only_returns_true_for_dataseeded_queueupdated_only`
-  (gyre-common): pins that exactly the two spec-named kinds are
-  storage-exempt.
-
-Four existing merge_processor tests
-(`post_merge_pass_does_not_pause_queue`,
-`advisory_post_merge_gate_failure_does_not_pause`,
-`atomic_group_rollback_requeues_all_members`,
-`atomic_group_rollback_without_pre_group_sha`) asserted broadcast-channel
-emptiness or first-message identity after merge-queue transitions; the new
-spec-mandated QueueUpdated broadcasts change that, so they now drain the
-channel requiring every message to be QueueUpdated (any recovery event
-still fails) or scan for the AtomicGroupFailed event (payload assertions
-preserved). No assertion was weakened relative to the new spec contract.
-
-### Verification status
-
-Executed in this sandbox (exit 0): `check-dead-message-kinds.sh`,
-`check-arch.sh`, `cargo check -p gyre-server --lib --tests`, `cargo clippy`
-(no new warnings vs. base), `cargo fmt --check`, and
-`cargo test -p gyre-common --lib message::` (33 passed, incl. the new unit
-test). The gyre-server test binary cannot be compiled inside the model
-sandbox (build wrapper: codegen exceeds the 4 GiB budget with the model
-resident) — the independent verifier must run:
-
-    cargo test -p gyre-server --lib broadcast_only_kinds_not_persisted_even_forced_to_workspace
-    cargo test -p gyre-server --lib emit_event_broadcast_only_kind_never_stored_for_workspace_destination
-    cargo test -p gyre-server --lib admin_seed_broadcasts_data_seeded
-    cargo test -p gyre-server --lib enqueue_and_cancel_broadcast_queue_updated
-    cargo test -p gyre-server --lib merge_processor
-    cargo test -p gyre-server --lib api::messages api::admin api::merge_queue
-
-All new server tests type-check (`cargo check --tests` clean) and follow
-existing test-module patterns exactly (mem `test_state`,
-`ensure_test_workspace`, `message_broadcast_tx.subscribe`, tower oneshot).
-Coverage row 6 (Message Kinds) in specs/coverage/system/message-bus.md was
-updated with the concrete source evidence.
