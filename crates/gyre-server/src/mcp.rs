@@ -5645,11 +5645,8 @@ mod tests {
         // Uncommitted modification present in the worktree at completion.
         std::fs::write(wt_path.join("src"), "fn main() { changed }\n").unwrap();
 
-        let result = handle_agent_complete(
-            &state,
-            &json!({ "agent_id": "agent-mcp-complete" }),
-        )
-        .await;
+        let result =
+            handle_agent_complete(&state, &json!({ "agent_id": "agent-mcp-complete" })).await;
         assert_eq!(result["isError"], false, "tool must succeed, got: {result}");
 
         let sessions = state.agent_sessions.find_by_agent(&agent.id).await.unwrap();
