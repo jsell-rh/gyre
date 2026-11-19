@@ -1,0 +1,29 @@
+# Review — task-253 (MCP SSE stream: workspace filtering and MessageKind-to-AG-UI event mapping)
+
+Spec: `specs/system/message-bus.md` §MCP Integration: "The MCP SSE endpoint (`GET /mcp/sse`) subscribes to the message bus filtered by the authenticated agent's workspace. It maps `MessageKind` variants to AG-UI event types for protocol compatibility."
+Commits under review (scoping per `commits:` frontmatter): `c9c8b4c3` (feat: workspace filter + AG-UI mapping + 5 tests), `b4ac4adc` (clippy let_and_return test-helper repair), `1388c32e` (review repair: principal-namespace guard on directed delivery + collision regression test). Base `321615ec`, candidate `b06ed36a`.
+Verdict: **complete**.
+
+## Evidence (this checkout, branch `pipeline/task-253/95b97a0caab54cf29c8a0d903ff0f5c4-1` at `b06ed36a`)
+
+- Full `git diff 321615ec..b06ed36a` inspected: only `crates/gyre-server/src/mcp.rs` (+516), `docs/api-reference.md`, `specs/coverage/system/message-bus.md` (row 14), and the task file. No routes added, no scripts/exemptions touched, no unrelated tasks.
+- `/tmp/stage/bin/cargo check -p gyre-server --tests` → **exit=0** (16m23s; output retained under /tmp/stage/review-evidence). Type-checks the handler, `agui_event_name`, and the whole test module.
+- `bash scripts/check-abac-route-registry.sh` → OK. `bash scripts/check-task-commit-attribution.sh` at the candidate commit (temp worktree) → OK: all three product-surface commits listed in frontmatter. (The working tree carries a harness-staged revert of the task file to the pre-task body; code files are clean at the candidate.)
+- Deferred to the verifier (build wrapper rejects gyre-server test codegen in the review stage): `cargo test -p gyre-server mcp_sse` (the six task tests; the filter matches nothing else), plus `cargo clippy -p gyre-server --tests`.
+
+## Verified working (no findings)
+
+- **Workspace filtering is real and fail-closed.** `mcp_sse_handler` resolves the subscriber's scope: agent/system principals (`user_id: None`) via the stored agent record (`agents.find_by_id` — the authoritative ABAC boundary), falling back to the signature-verified `workspace_id` JWT claim (mirrored by `with_hierarchy_from_claims` after signature + `agent_tokens` validation in auth.rs); user principals are claim-only; no literal `"default"` anywhere on the path. `Destination::Workspace(ws)` is delivered only on exact workspace-id match (ids are UUIDs, so match implies tenant containment); `Destination::Broadcast` is delivered to all subscribers, which is the bus's specced semantics (message-bus.md §Real-time Delivery: "delivered to all connected clients"); admins with no resolvable scope keep the legacy unscoped dashboard view, mirroring the ws.rs Subscribe admin bypass (ws.rs:106-108).
+- **Directed delivery carries the principal-namespace guard** (review repair `1388c32e`): `Destination::Agent(id)` matches only genuine agent principals — `user_id.is_none() && !roles.contains(Admin) && id == agent_id` — byte-for-byte the same guard as the sibling ws.rs bus filter (ws.rs:493-497). An API-key user whose display_name collides with an agent's id, and the global token (`agent_id: "system"`, Admin) versus an agent literally named "system", can no longer receive another principal's Directed messages.
+- **AG-UI mapping transcribes the spec table exactly**: ToolCallStart→TOOL_CALL_START, ToolCallEnd→TOOL_CALL_END, RunStarted→RUN_STARTED, RunFinished→RUN_FINISHED, TextMessageContent→TEXT_MESSAGE_CONTENT, StateChanged→STATE_CHANGED, AgentError→ERROR; kinds outside the table (incl. `Custom`) keep the generic `message` event; the SSE data payload is unchanged (raw envelope JSON), so existing notification consumers keep parsing.
+- **Tests are hard, not self-confirming.** Each new test was traced against the pre-task handler and fails there: isolation (event name was always `message`, no filter), mapping, directed-to-other-agent (was forwarded), both collision classes (pre-repair `aid == agent_id` matched), record_activity end-to-end (real `gyre_record_activity` tool call through the real router + auth with a minted, registered worker JWT; event name was `message`). The isolation test's negative assertion is sound: the payload carries the snake_case kind name, never the uppercase SSE event name, so a false pass is impossible. No assertionless/mirrored logic; no conditional guards.
+- **Test mechanics are race-free**: the handler subscribes its broadcast receiver before the response is returned (oneshot resolves after subscription), the test channel capacity (16) exceeds the 8 buffered mapping messages, and the 15 s keep-alive cannot appear inside the 300 ms quiet window used for draining.
+- **Bookkeeping is honest**: coverage row 14 and the task's Shipped section explicitly label the six tests as pending the independent verifier run; the docs commit updates api-reference.md to describe the actual behavior. No unrelated coverage rows touched.
+
+Non-blocking observations (recorded, not defects):
+
+- If a stored agent were literally named "system", the global-token admin's scope resolution would adopt that agent's workspace instead of the unscoped view — strictly more restrictive (fail-closed), never a leak; the directed-arm guard already prevents the inverse confusion.
+- Broadcast delivery on the SSE stream is cross-tenant by design ("all connected clients" per spec); the ws.rs path additionally tenant-gates Broadcast via its subscription list, but the task text and spec both define Broadcast as bus-wide on this surface.
+- No test pins Broadcast delivery to a non-admin workspace agent specifically (the admin notification test pins the Broadcast path; the code path is destination-name-independent).
+
+— Review, 2026-10-09 (candidate `b06ed36a`; verifier to execute `cargo test -p gyre-server mcp_sse`)
