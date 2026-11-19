@@ -14,6 +14,16 @@ pub struct JjChange {
     pub bookmarks: Vec<String>,
 }
 
+/// The change created by `jj new`: its change id AND the immutable commit
+/// id the new change's current state maps to. The commit id is what commit
+/// signing covers (identity-security.md §Layer 3, task-264) — a change id
+/// alone is not a signable, content-addressed artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JjNewChange {
+    pub change_id: String,
+    pub commit_id: String,
+}
+
 /// Port for jj (Jujutsu) VCS operations.
 ///
 /// jj operates in colocated mode: both `.jj/` and `.git/` exist in the same directory.
@@ -37,8 +47,11 @@ pub trait JjOpsPort: Send + Sync {
     /// Initialize jj in an existing git repo (colocated mode).
     async fn jj_init(&self, repo_path: &str) -> Result<()>;
 
-    /// Create a new jj change (anonymous WIP commit). Returns the new change ID.
-    async fn jj_new(&self, repo_path: &str, description: &str) -> Result<String>;
+    /// Create a new jj change (anonymous WIP commit). Returns the new
+    /// change id together with the commit id of the change's current
+    /// state — the commit id is the artifact commit signing covers
+    /// (task-264).
+    async fn jj_new(&self, repo_path: &str, description: &str) -> Result<JjNewChange>;
 
     /// Update the description of an existing change.
     async fn jj_describe(&self, repo_path: &str, change_id: &str, description: &str) -> Result<()>;
