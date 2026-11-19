@@ -206,6 +206,8 @@ diesel::table! {
         global_role -> Text,
         // TASK-124: soft deactivation stamp (NULL = active).
         deactivated_at -> Nullable<BigInt>,
+        // TASK-265: SCIM enterprise extension manager.value (RFC 7643 §4.3).
+        manager_id -> Nullable<Text>,
     }
 }
 
