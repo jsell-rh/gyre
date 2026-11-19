@@ -753,6 +753,18 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/federation/trusted-issuers",
             get(federation::list_trusted_issuers),
         )
+        // SPIFFE federation (identity-security.md §Federation): the
+        // workload-attestation layer federated independently of the
+        // OIDC-issuer layer — exchanged trust-bundle verification for
+        // federated agents' SVIDs.
+        .route(
+            "/api/v1/federation/spiffe/attest",
+            post(federation::attest_federated_workload),
+        )
+        .route(
+            "/api/v1/federation/spiffe/workload",
+            get(federation::get_federated_workload),
+        )
         // Budget governance (M22.2)
         .route(
             "/api/v1/workspaces/:id/budget",
