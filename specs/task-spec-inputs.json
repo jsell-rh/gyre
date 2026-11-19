@@ -1931,6 +1931,20 @@
         "Design: One Envelope, Routing Determines Delivery",
         "Edge Cases"
       ]
+    },
+    "backlog/633595c9df8812514a9517ad": {
+      "file": "specs/system/source-control.md",
+      "heading": [
+        "Source Control",
+        "Agent-to-Commit Tracking"
+      ]
+    },
+    "backlog/09c28182c53ccd934aa3b93a": {
+      "file": "specs/system/source-control.md",
+      "heading": [
+        "Source Control",
+        "External Repository Mirroring"
+      ]
     }
   },
   "bindings": {
@@ -2664,6 +2678,12 @@
     ],
     "Spec gap spec-c62aac6701125cb09e0c736c / message-size-and-key-rotation / 60b177f85a11": [
       "backlog/e5d4cc99cba7ab16b2b40bb5"
+    ],
+    "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f": [
+      "backlog/633595c9df8812514a9517ad"
+    ],
+    "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / mirror-namespace-isolation / b580b93c564f": [
+      "backlog/09c28182c53ccd934aa3b93a"
     ]
   }
 }
