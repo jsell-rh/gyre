@@ -38,7 +38,11 @@ class CargoArtifactTest(unittest.TestCase):
                 cleaned = subprocess.run([sys.executable, str(helper)], cwd=root / name,
                                          env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
-                result = subprocess.run(['cargo', 'test', '--offline', '--quiet', '--message-format=json'], cwd=root / name,
+                # Explicit package selection: the probe workspace has exactly
+                # one member, so this compiles the same units as a bare
+                # `cargo test` while staying a focused probe that constrained
+                # dev environments (single-package build budgets) can run.
+                result = subprocess.run(['cargo', 'test', '-p', 'gyre_cache_probe', '--offline', '--quiet', '--message-format=json'], cwd=root / name,
                                         env=env, capture_output=True, text=True, timeout=120)
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                 if sentinel is None:
@@ -49,7 +53,28 @@ class CargoArtifactTest(unittest.TestCase):
                     # Target triples and Cargo's intermediate build layout can
                     # vary across toolchains; use Cargo's actual artifact path.
                     self.assertTrue(executables[0].is_relative_to(root / 'target'))
-                    sentinel = executables[0].parent / 'unrelated-dependency.rlib'
+                    # The sentinel must represent an artifact of an UNRELATED
+                    # package in the shared target dir: something `cargo clean
+                    # --package` of the workspace member must never remove.
+                    # Cargo 1.100 stabilized a new build-dir layout that puts a
+                    # package's own artifacts (including test executables)
+                    # under <profile>/build/<pkg>/<meta>/out/ and `cargo clean
+                    # --package` removes that whole tree, so the member's own
+                    # executable directory cannot host the sentinel. Both
+                    # layouts always create a `build` directory inside the
+                    # profile directory, so locate the profile directory that
+                    # owns the executable and place the sentinel in a sibling
+                    # package's build unit.
+                    profile = None
+                    for candidate in executables[0].parents:
+                        if not candidate.is_relative_to(root / 'target'):
+                            break
+                        if (candidate / 'build').is_dir():
+                            profile = candidate
+                            break
+                    self.assertIsNotNone(profile, result.stdout)
+                    sentinel = profile / 'build' / 'unrelated-dependency' / 'out' / 'unrelated-dependency.rlib'
+                    sentinel.parent.mkdir(parents=True, exist_ok=True)
                     sentinel.write_text('dependency cache retained')
                 self.assertEqual(sentinel.read_text(), 'dependency cache retained')
 
