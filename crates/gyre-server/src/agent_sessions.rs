@@ -325,7 +325,7 @@ pub(crate) async fn completion_snapshot(
             continue;
         }
         let committed_at = commit_time(repo_path, sha).await?;
-        if committed_at <= ended_at && best.as_ref().map_or(true, |(t, _, _)| committed_at >= *t) {
+        if committed_at <= ended_at && best.as_ref().is_none_or(|(t, _, _)| committed_at >= *t) {
             best = Some((committed_at, ref_name.to_string(), sha.to_string()));
         }
     }
@@ -467,10 +467,10 @@ mod tests {
             &["worktree", "add", "-b", "feat/spawn", wt.to_str().unwrap()],
         );
 
-        let agent = Agent::new(Id::new(&format!("agent-{tag}")), format!("a-{tag}"), 1000);
+        let agent = Agent::new(Id::new(format!("agent-{tag}")), format!("a-{tag}"), 1000);
         state.agents.create(&agent).await.unwrap();
         let repo = gyre_domain::Repository::new(
-            Id::new(&format!("repo-{tag}")),
+            Id::new(format!("repo-{tag}")),
             Id::new("ws-1"),
             format!("r-{tag}"),
             main.to_str().unwrap().to_string(),
@@ -478,7 +478,7 @@ mod tests {
         );
         state.repos.create(&repo).await.unwrap();
         let wt_record = AgentWorktree::new(
-            Id::new(&format!("wt-{tag}")),
+            Id::new(format!("wt-{tag}")),
             agent.id.clone(),
             repo.id.clone(),
             None,

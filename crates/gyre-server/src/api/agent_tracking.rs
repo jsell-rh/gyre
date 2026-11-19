@@ -1335,7 +1335,7 @@ mod tests {
 
         let view = get_json(
             &app,
-            format!("/api/v1/repos/repo-tt/agent-sessions/sess-tt/state"),
+            "/api/v1/repos/repo-tt/agent-sessions/sess-tt/state".to_string(),
         )
         .await;
 

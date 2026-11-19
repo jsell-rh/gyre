@@ -4,6 +4,7 @@ use gyre_common::Id;
 use gyre_domain::{AgentCommit, AgentWorktree, Session};
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait AgentCommitRepository: Send + Sync {
     /// Record a mapping between an agent and a git commit.
     async fn record(&self, mapping: &AgentCommit) -> Result<()>;
@@ -34,6 +35,7 @@ pub trait AgentCommitRepository: Send + Sync {
 /// Persistence for the agent `Session` entity (one context window per
 /// execution — source-control.md §Agent-to-Commit Tracking).
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait AgentSessionRepository: Send + Sync {
     /// Start a new session. Fails if a session with the same `id` already
     /// exists.
