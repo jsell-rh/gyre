@@ -53,3 +53,31 @@ Verifier must run (test-target compilation exceeds this sandbox's budget; wrappe
 - `cargo test -p gyre-server respawn_mint_carries_stored_stack_fingerprint` (ralph_loop::tests).
 - Pre-existing suites in every touched file (abac_middleware, agents, compose, discover, merge_requests, orchestrator, repos, spawn, tasks, constraint_check, gate_executor, rbac, mcp, git_http, auth, agent_audit) plus the spec-approval e2e (`agent_only_requires_exact_stack_hash_match_e2e`) — the ~54 test builders that gained `Authorization` headers must all still pass, proving non-agent principals are not locked out.
 - Full workspace suite + Clippy per standard verification.
+
+## Round 2
+
+Candidate: `a1dde704e68c7038b3f715b980ea2899413371ab` (branch `pipeline/task-263/6cf050cd02334f8eacdb71fa0603a7d5-1`, base `4cfbe20d`; includes repair `356184ee` wl_hostname, merge rounds `07d01c55`/`050ef5e0` onto current main, test repairs `544b2755`/`585d459e`, admin-seed gate `5cdce3aa`).
+Verdict: **approved** — round-1 F1 verified repaired; no findings. Evidence: `/tmp/stage/review-evidence/` (round2-summary.md, cargo-check log, mechanical-check logs, full base-relative diffs).
+
+Probes run:
+
+- Full diff read `4cfbe20d..a1dde704` (all 24 files; security hunks in detail).
+- `/tmp/stage/bin/cargo check -p gyre-server` → exit 0 (8m23s).
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh` (exemption file untouched), `check-abac-exempt-handlers.sh` (stop/fail now carry mandated per-handler authorization), `check-inert-enforcement.sh`, `check-mcp-write-tools.sh`, `check-mem-port-contracts.sh` → all exit 0.
+- `cargo check -p gyre-server --all-targets` → rejected by the executor wrapper (exit 64); test-target compilation deferred to the verifier (infrastructure restriction, not a code defect). Verifier test list in round2-summary.md.
+- By-effect sweep audit by grep: every production task-mutating site maps to a gated handler or a server-internal system-authority job; `reject_spec` denies Agent-role in-handler; no `revoked_tokens` delete path exists; all `AgentJwtClaims` constructions set `aud`/`agent:<uuid>` sub; `with_hierarchy_from_claims` mirrors verified claims onto the principal.
+
+F1 disposition — **repaired on both axes**: the first-spawn mint resolves the session stack evidence once (`spiffe::resolve_session_stack_evidence`, spawn.rs:946) and binds the SAME value to the JWT `wl_stack_hash`/`stack_hash` claims (:955), the session SVID (launch ctx :1414), and the launch-written workload-attestation record (:1385) — `spawn_minted_jwt_carries_task_scoped_claims` asserts mint == stored record on the FIRST spawn; the coverage row and Shipped text now describe the actual single-mint mechanism (the phantom "post-launch re-mint" claim is gone). The re-spawn path is proven by `respawn_mint_carries_stored_stack_fingerprint`; the spec-registry consumer e2e (`agent_only_requires_exact_stack_hash_match_e2e`) is pre-existing and its producer input is now live on every session.
+
+Repair `356184ee` verified: `wl_hostname` is minted from the COMPUTE TARGET (Ssh → configured remote host, Kubernetes → honestly absent, local/Container → local host) on both the spawn and Ralph re-spawn mints; `ssh_spawn_mints_configured_remote_host_as_wl_hostname` kills the forge-hostname regression (asserts `worker-box`, not the server hostname).
+
+Enforcement, revocation, audience, TTL (3600 s), persona, sub/aud forms — re-verified clean this round by inspection + type check (unchanged in substance from the round-1 verification, plus the admin-surface gate `deny_task_bound_agent` whose test runs under a permissive priority-860 policy and asserts the 403 comes from the handler gate, not middleware).
+
+Minor (non-blocking, recorded):
+
+- `fail_agent` performs no token revocation (pre-existing at base; the task contract requires revocation on complete, and stop/kill/budget/gate all revoke through the one writer). A Failed agent's JWT stays valid until exp, confined to its own task by the new boundary. Candidate for a follow-up task. (This also corrects round 1's loose phrase "all teardown paths … funnel through the one writer" — the fail path does not revoke at all.)
+- Legacy UUID agent tokens bypass the claim-based checks — pre-existing class, documented in-code.
+- Federated agent JWTs now fall under the git-push scope check (tightening, documented).
+- `jti_revocation_denial` falls through on a table-lookup error with a warning; the KV removal remains the live gate — documented in-code.
+
+Test-inflation check: none. The repair-round commits touch test fixtures/names and spec-form assertions only (`544b2755` removes a hardcoded `"worker-1"` name; `585d459e`/gate_executor update `sub` assertions to the specced `agent:<uuid>`); no assertion weakened.
