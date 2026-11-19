@@ -1931,6 +1931,13 @@
         "Design: One Envelope, Routing Determines Delivery",
         "Edge Cases"
       ]
+    },
+    "backlog/2a09dd756eff40d15b609010": {
+      "file": "specs/development/speed-backpressure.md",
+      "heading": [
+        "The Wheel: Speed & Backpressure",
+        "Pre-Commit Hooks"
+      ]
     }
   },
   "bindings": {
@@ -2664,6 +2671,9 @@
     ],
     "Spec gap spec-c62aac6701125cb09e0c736c / message-size-and-key-rotation / 60b177f85a11": [
       "backlog/e5d4cc99cba7ab16b2b40bb5"
+    ],
+    "Spec gap spec-17abbc950d9bce3d8a575239 / commit-time-backpressure-invariants / 8207800eca00": [
+      "backlog/2a09dd756eff40d15b609010"
     ]
   }
 }
