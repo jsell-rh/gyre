@@ -2,7 +2,7 @@
 title: "Message edge cases: 64KB send limit with 413 and JWKS historical-key serving for signature rotation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-size-and-key-rotation / 60b177f85a11"
 depends_on: [task-247, task-251]
-progress: ready-for-review
+progress: complete
 commits: ["7cdd66d072c448cc23200daac8b16e2e46d1b78d"]
 ---
 
