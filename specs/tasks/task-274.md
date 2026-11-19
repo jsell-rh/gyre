@@ -3,7 +3,7 @@ title: "Publish reviewed spec backlog for specs/system/admin-panel.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: ["16158031", "4ad6915a"]
+commits: []
 ---
 
 ## Required behavior
