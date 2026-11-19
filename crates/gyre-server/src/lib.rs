@@ -2075,7 +2075,7 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
 ///
 /// Sessions whose `expires_at` is more than 30 days in the past are
 /// deleted. Revoked rows are NEVER deleted, whatever their age (the
-/// `AgentSessionRepository::delete_expired_before` port contract): a revoked row
+/// `SessionRepository::delete_expired_before` port contract): a revoked row
 /// is the durable record that keeps a signed-out credential rejected
 /// ("sign out everywhere") — deleting one would silently re-authorize the
 /// API key it belonged to.

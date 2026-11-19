@@ -2294,6 +2294,14 @@ async fn handle_agent_complete(state: &std::sync::Arc<AppState>, args: &Value) -
 
             match state.agents.update(&agent).await {
                 Ok(()) => {
+                    // source-control.md §Agent-to-Commit Tracking: completion
+                    // terminates the agent's open session — records the
+                    // worktree's real current branch and dirty state, and
+                    // stamps ended_at. MCP parity with the REST
+                    // POST /agents/:id/complete surface (which calls the
+                    // same helper). Best-effort: never fails the completion.
+                    crate::agent_sessions::end_session(state, &agent).await;
+
                     // Platform Model §7: revoke task-scoped ephemeral secrets
                     // on agent completion ("Secrets access revoked" at
                     // teardown) — deletes Task-scoped secrets for the
@@ -5563,6 +5571,110 @@ mod tests {
             json["result"]["isError"].as_bool().unwrap_or(false),
             "unknown workspace_id must be rejected: {json}"
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_agent_complete_terminates_open_session_with_dirty_state() {
+        // Regression (task-258 review): the MCP gyre_agent_complete path
+        // must terminate the agent's open session exactly like the REST
+        // POST /agents/:id/complete surface — a real `git status
+        // --porcelain` in the agent's worktree recording the dirty flag and
+        // uncommitted paths, plus ended_at. Before the fix the session
+        // stayed open (ended_at/dirty null) and a later Ralph-loop respawn
+        // stacked a second session on top of the never-ended first one.
+        let state = test_state();
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(main.join("src"), "fn main() {}\n").unwrap();
+        git(&["add", "src"]);
+        git(&["commit", "-m", "init"]);
+        let wt_path = dir.path().join("wt");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "feat/spawn",
+            wt_path.to_str().unwrap(),
+        ]);
+
+        let mut agent = gyre_domain::Agent::new(
+            gyre_common::Id::new("agent-mcp-complete"),
+            "mcp-complete",
+            1000,
+        );
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-mcp-complete"),
+            gyre_common::Id::new("ws-1"),
+            "r-mcp-complete".to_string(),
+            main.to_str().unwrap().to_string(),
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let wt = gyre_domain::AgentWorktree::new(
+            gyre_common::Id::new("wt-mcp-complete"),
+            agent.id.clone(),
+            repo.id.clone(),
+            None,
+            "feat/spawn",
+            wt_path.to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+        crate::agent_sessions::start_session(&state, &agent.id, &repo.id, "feat/spawn").await;
+
+        // Uncommitted modification present in the worktree at completion.
+        std::fs::write(wt_path.join("src"), "fn main() { changed }\n").unwrap();
+
+        let result = handle_agent_complete(
+            &state,
+            &json!({ "agent_id": "agent-mcp-complete" }),
+        )
+        .await;
+        assert_eq!(result["isError"], false, "tool must succeed, got: {result}");
+
+        let sessions = state.agent_sessions.find_by_agent(&agent.id).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        assert!(s.ended_at.is_some(), "MCP completion must stamp ended_at");
+        assert_eq!(
+            s.dirty,
+            Some(true),
+            "uncommitted edit must record dirty=true, got dirty={:?}",
+            s.dirty
+        );
+        assert!(
+            s.uncommitted_paths.contains(&"src".to_string()),
+            "modified file must be listed, got {:?}",
+            s.uncommitted_paths
+        );
+        // The ended session must no longer resolve as open: a subsequent
+        // respawn opens a fresh session instead of stacking on this one.
+        assert!(state
+            .agent_sessions
+            .find_open_by_agent(&agent.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
