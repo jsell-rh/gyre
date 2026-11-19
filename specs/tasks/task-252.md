@@ -3,7 +3,7 @@ title: "Workspace-scoped telemetry access: Subscribe membership authorization an
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / telemetry-workspace-access / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["81910e025d8602ee0f20612620f1fdcb14a4349d", "d2fe75e4c1098a26adb8717c02feed86e2afbc4a"]
+commits: ["d2fe75e4c1098a26adb8717c02feed86e2afbc4a", "81910e025d8602ee0f20612620f1fdcb14a4349d"]
 ---
 
 ## Required behavior
