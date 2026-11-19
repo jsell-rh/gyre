@@ -91,9 +91,9 @@ With `--repo-path`, bootstrap configures `cargo test --all` and
 `bash scripts/check-arch.sh` if that script exists. Gate detection does not
 require a manifest.
 
-When the manifest exists, bootstrap pushes the checkout's `HEAD` and its
-history to the target Gyre repo's `main`, then syncs the spec registry from
-the server repo's default branch.
+When the manifest exists, bootstrap imports the whole committed tree at the
+checkout's `HEAD` and its history by pushing `HEAD` to the target Gyre repo's
+`main`. It then syncs the spec registry from the server repo's default branch.
 
 A normal push creates a missing `main` or fast-forwards it when the checkout
 is ahead. A matching `HEAD` needs no branch update and still triggers a sync.
@@ -112,15 +112,16 @@ bootstrap from that branch. If `main` has unrelated history and fails the seed
 check, bootstrap also refuses the push. Verify that you selected the intended
 Gyre repo and local checkout before retrying.
 
-The run is resumable: re-running `gyre bootstrap` with the same names reuses
-already-created resources (tenant, workspace, repo, personas are matched by
-slug or name) and keeps any active repo orchestrator. If admin creation returns
-`409 Conflict`, bootstrap looks for a saved API key in `~/.gyre/config` for the
-same server URL. It reuses the key only if `GET /api/v1/users/me` authenticates
-it as the requested username in the target tenant. Fatal errors tracked by
-bootstrap include the failed step and the steps that completed. Auth token
-precedence is `--token` flag > `GYRE_AUTH_TOKEN` env var > `gyre-dev-token`
-default.
+Re-running `gyre bootstrap` with the same names reuses the tenant, workspace,
+repo, and personas by slug or name and keeps any active repo orchestrator.
+In non-dev mode, if admin creation returns `409 Conflict`, the CLI reads the
+saved token from `~/.gyre/config` and requires an exact match between the stored
+and bootstrap server URLs. It calls `GET /api/v1/users/me` with that token and
+checks that the returned username and tenant ID match the requested admin and
+target tenant before continuing with the saved token. Other admin creation
+errors stop bootstrap. Fatal errors tracked by bootstrap include the failed
+step and the steps that completed. Initial auth token precedence is `--token`
+flag > `GYRE_AUTH_TOKEN` env var > `gyre-dev-token` default.
 
 ---
 
