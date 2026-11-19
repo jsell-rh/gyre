@@ -247,7 +247,7 @@ def validate_audit(report, task, base, root):
         items=row.get('evidence')
         if not isinstance(items,list) or (not items and decision!='context') or any(not isinstance(r,dict) for r in items):
             raise ValueError('Every disposition requires concrete evidence objects')
-        if decision in ('gap','satisfied') and not any(isinstance(r,dict) and str(r.get('file','')).startswith(('crates/','web/','scripts/')) for r in items):
+        if decision in ('gap','satisfied') and not any(isinstance(r,dict) and EVIDENCE.production_source(str(r.get('file',''))) for r in items):
             raise ValueError('Behavior claims require inspected production source, not spec/task prose alone')
         records.extend(evidence(root,r) for r in items)
         if decision=='conflict':
@@ -499,7 +499,7 @@ def reconcile(execution, task):
         validate_plan(plan,audit,store)
         with store.transaction():
             gap_identity=digest([sorted(g['id'] for g in audit['gaps']),
-                sorted((r['file'],r['sha256']) for r in audit['source_evidence'] if r['file'].startswith(('crates/','web/','scripts/')))])
+                sorted((r['file'],r['sha256']) for r in audit['source_evidence'] if EVIDENCE.production_source(r['file']))])
             key='spec_gap_owner:'+task['name']+':'+task['generation']+':'+gap_identity
             owner=store.setting(key)
             if owner and owner!=plan_id:

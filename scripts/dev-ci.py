@@ -195,6 +195,63 @@ def transient_setup_failure(run, repo, head, base, failed, logs):
     return result
 
 
+def failed_job_logs(run, repo, head, ident, failed):
+    """Read completed jobs while sibling jobs keep workflow logs unavailable."""
+    workflow=json.loads(run('gh','api',f'repos/{repo}/actions/runs/{ident}',timeout=30).stdout)
+    if workflow.get('id')!=ident or workflow.get('head_sha')!=head:
+        raise RuntimeError('CI log workflow differs from the observed head')
+    logs=[]
+    for check in failed:
+        if run_id(check)!=ident:continue
+        match=re.fullmatch(r'https://github.com/'+re.escape(repo)+
+                           r'/actions/runs/'+str(ident)+r'/job/(\d+)',check.get('detailsUrl') or '')
+        if not match:return ''
+        job_id=int(match[1])
+        job=json.loads(run('gh','api',f'repos/{repo}/actions/jobs/{job_id}',timeout=30).stdout)
+        if (job.get('id')!=job_id or job.get('run_id')!=ident or job.get('head_sha')!=head
+                or job.get('name')!=check.get('name') or job.get('status')!='completed'
+                or job.get('conclusion')!='failure' or type(job.get('run_attempt')) is not int
+                or job['run_attempt']!=workflow.get('run_attempt')):
+            raise RuntimeError('CI log job evidence changed; observe the current attempt again')
+        response=run('gh','api',f'repos/{repo}/actions/jobs/{job_id}/logs',timeout=60,check=False)
+        if response.returncode or not response.stdout.strip():return ''
+        logs.append('\n'.join(check['name']+'\tUNKNOWN STEP\t'+line for line in response.stdout.splitlines()))
+    return '\n'.join(logs)
+
+
+def changed_test_inputs(run, repo, head, base, failed, logs):
+    """Refresh an unchanged Python gate when main changed its failing test.
+
+    This requests new exact-tree verification and CI, never a passing receipt.
+    If the refreshed head still fails it follows normal repair handling.
+    """
+    paths=set();cases=[]
+    for check in failed:
+        ident=run_id(check)
+        matches=re.findall(r'(?:ERROR|FAIL): (test_\w+) \((test_\w+)\.[\w.]+\)',logs.get(ident,''))
+        if not matches:return None
+        for name,module in matches:
+            paths.add('scripts/'+module+'.py');cases.append(module+'.'+name)
+    main=json.loads(run('gh','api',f'repos/{repo}/git/ref/heads/main',timeout=30).stdout).get('object',{}).get('sha','')
+    if not re.fullmatch(r'[a-f0-9]{40}',main) or main in (base,head):return None
+    inputs={};changed=False
+    for path in sorted(paths):
+        values=[]
+        for ref in (head,base,main):
+            response=run('gh','api',f'repos/{repo}/contents/{path}?ref={ref}',timeout=30,check=False)
+            try:value=json.loads(response.stdout)
+            except ValueError:return None
+            if response.returncode or value.get('type')!='file' or not re.fullmatch(r'[a-f0-9]{40}',value.get('sha','')):return None
+            values.append(value['sha'])
+        if values[0]!=values[1]:return None  # The candidate edited the failed gate.
+        inputs[path]=values;changed=changed or values[2]!=values[0]
+    if not changed:return None
+    return {'status':'environment_refresh','target_base':main,
+            'failure_signature':hashlib.sha256(json.dumps([sorted(cases),inputs],sort_keys=True).encode()).hexdigest(),
+            'detail':'Main changed the unchanged failing test; reverify and rerun CI before requesting code repair.',
+            'test_input_evidence':inputs}
+
+
 def observe(run, url, head, base, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -248,12 +305,11 @@ def observe(run, url, head, base, directory):
         except (OSError, subprocess.TimeoutExpired):
             candidate_log = ''
         if not candidate_log:
-            # A completed failed job can coexist with running sibling jobs.
-            # Logs may be unavailable until its workflow ends; that cannot
-            # turn a confirmed failure back into indefinite pending.
-            candidate_log = 'Completed failed check; logs not yet available.\n' + json.dumps([
-                {key:check.get(key) for key in ('name','conclusion','detailsUrl','targetUrl')}
-                for check in failed if run_id(check) == ident])
+            candidate_log=failed_job_logs(run,repo,head,ident,failed)
+        if not candidate_log:
+            # A failed check still blocks merge. Missing diagnostic evidence
+            # is not proof of a code defect and must not spawn a coding worker.
+            return {'status':'pending','detail':'Failed CI job logs unavailable; awaiting diagnostic evidence','runs':[ident]}
         (directory / f'github-run-{ident}.log').write_text(candidate_log)
         logs[ident]=candidate_log
         allowance = max(1024, 60000 // (2 * len(failed)))
@@ -292,6 +348,10 @@ def observe(run, url, head, base, directory):
             'artifact_directories': artifact_directories,
             'environment': 'github-' + hashlib.sha256(json.dumps(sorted((item.get('workflowName', ''), item.get('name', ''), item.get('context', '')) for item in failed)).encode()).hexdigest(),
             'log': str(log)}
+    refreshed=changed_test_inputs(run,repo,head,base,failed,logs)
+    if refreshed:
+        result.update(refreshed)
+        return result
     transient=transient_setup_failure(run,repo,head,base,failed,logs) if any(re.search(r'Temporary failure resolving|Could not resolve|EAI_AGAIN|Connection timed out|TLS handshake timeout|HTTP[^\n]*\b50[234]\b',v,re.I) for v in logs.values()) else None
     if transient:
         result.update(transient)
