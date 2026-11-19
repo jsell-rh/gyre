@@ -131,10 +131,19 @@ pub async fn admin_jobs(State(state): State<Arc<AppState>>) -> Json<Vec<JobInfo>
 }
 
 /// POST /api/v1/admin/jobs/{name}/run — manually trigger a job (Admin only).
+///
+/// By-effect task-scope surface: the triggered jobs mutate task rows
+/// (stale_agent_detector blocks the stale agent's task, reconciliation
+/// jobs reassign/cancel tasks), so a task-bound agent principal is denied
+/// (see `deny_task_bound_agent`). The extractor adds no new authentication
+/// requirement — the ABAC middleware already authenticates this mapped,
+/// non-exempt route — it exposes the verified claims to the handler check.
 pub async fn admin_run_job(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    deny_task_bound_agent(&auth)?;
     state
         .job_registry
         .trigger(&name, state.clone())
@@ -171,10 +180,18 @@ pub struct RestoreRequest {
 }
 
 /// POST /api/v1/admin/restore — restore from snapshot (Admin only).
+///
+/// By-effect task-scope surface: restore replaces task (and agent) state
+/// wholesale across the deployment — no task claim can cover it, so a
+/// task-bound agent principal is denied (see `deny_task_bound_agent`).
+/// The extractor adds no new authentication requirement — the ABAC
+/// middleware already authenticates this mapped, non-exempt route.
 pub async fn admin_restore_snapshot(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<RestoreRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    deny_task_bound_agent(&auth)?;
     let warning = crate::snapshot::restore_snapshot(&state, &req.snapshot_id)
         .await
         .map_err(|e| ApiError::NotFound(e.to_string()))?;
@@ -485,12 +502,41 @@ pub(crate) async fn kill_agent(
     Ok(())
 }
 
+/// By-effect task-scope gate for the admin control surfaces (identity-
+/// security.md §Task-Scoped JWT Claims, task-263 review repair).
+///
+/// The admin surfaces gated here mutate task rows and/or terminate other
+/// tasks' workloads deployment-wide: kill blocks the target agent's current
+/// task and tears down its workload, reassign moves every task assigned to
+/// an agent (with a generation bump), job triggers run stale-agent/
+/// reconciliation jobs that mutate task rows, and snapshot restore replaces
+/// task state wholesale. No task claim can cover a cross-task,
+/// deployment-wide effect, so a task-bound agent principal is denied
+/// outright — mirroring `archive_repo`'s outright denial — and the boundary
+/// holds regardless of ABAC policy configuration: the middleware
+/// `builtin-admin-only-deny` (priority 850) is the role gate for non-agent
+/// principals under the default configuration, but a policy that Allows
+/// Agent-role subjects on `admin` resources (priority > 850) must not let
+/// one task's agent terminate another task's workload. Non-agent
+/// principals (Admin users, the system token, orchestrators) keep their
+/// existing rights — `agent_task_claim()` is `None` for them.
+fn deny_task_bound_agent(auth: &crate::auth::AuthenticatedAgent) -> Result<(), ApiError> {
+    if auth.agent_task_claim().is_some() {
+        return Err(ApiError::Forbidden(
+            "agent tokens cannot trigger admin control surfaces that mutate tasks across the deployment"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/v1/admin/agents/{id}/kill — force-kill an agent (Admin only).
 pub async fn admin_kill_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     auth: crate::auth::AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
+    deny_task_bound_agent(&auth)?;
     let agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -561,6 +607,7 @@ pub async fn admin_reassign_agent(
     auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<ReassignRequest>,
 ) -> Result<StatusCode, ApiError> {
+    deny_task_bound_agent(&auth)?;
     let agent = state
         .agents
         .find_by_id(&Id::new(&id))
@@ -1536,6 +1583,315 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── task-263 by-effect boundary: admin task-mutating surfaces ──────────
+
+    async fn boundary_workspace(app: Router) -> (Router, String) {
+        let body = serde_json::json!({"name": "admin-boundary-ws"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    async fn boundary_repo(app: Router, ws_id: &str) -> (Router, String) {
+        let body = serde_json::json!({"workspace_id": ws_id, "name": "admin-boundary-repo"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    async fn boundary_task(app: Router, title: &str) -> (Router, String) {
+        let body = serde_json::json!({"title": title, "task_type": "implementation"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Spawn through the real POST /api/v1/agents/spawn path so the caller
+    /// holds a genuine task-scoped agent JWT (the same route production
+    /// workers authenticate with).
+    async fn boundary_spawn(
+        app: Router,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+    ) -> (Router, serde_json::Value) {
+        let body = serde_json::json!({
+            "name": format!("worker-{}", branch.replace('/', "-")),
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        (app, json)
+    }
+
+    /// task-263 review repair (by-effect sweep completion): the admin
+    /// control surfaces whose execution mutates task rows or terminates
+    /// other tasks' workloads — kill (blocks the target agent's task and
+    /// tears down its workload), reassign (moves every assigned task with
+    /// a generation bump), job trigger (stale-agent/reconciliation jobs
+    /// mutate tasks), and snapshot restore — deny task-bound agent
+    /// principals in the handler. The probe runs under a policy
+    /// configuration that ALLOWS Agent-role subjects on `admin` resources
+    /// (priority 860, above the 850 builtin-admin-only-deny), so without
+    /// the handler gate every call below would succeed; the denial
+    /// message is asserted to name the handler gate, proving the 403
+    /// comes from the code boundary and not middleware policy.
+    #[tokio::test]
+    async fn agent_jwt_denied_on_admin_task_mutating_surfaces() {
+        use gyre_common::Id;
+        use gyre_domain::policy::{Policy, PolicyEffect, PolicyScope};
+        use gyre_domain::{AgentStatus, TaskStatus};
+
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        // Permissive policy above the builtin admin-only-deny (850).
+        state
+            .policies
+            .create(&Policy {
+                id: Id::new("test-agent-admin-allow"),
+                name: "test-agent-admin-allow".to_string(),
+                description: "allows subjects on admin resources (boundary probe)".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 860,
+                effect: PolicyEffect::Allow,
+                conditions: vec![],
+                actions: vec!["*".to_string()],
+                resource_types: vec!["admin".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("test"),
+                created_at: crate::api::now_secs(),
+                updated_at: crate::api::now_secs(),
+            })
+            .await
+            .unwrap();
+
+        let (app, ws_id) = boundary_workspace(app).await;
+        let (app, repo_id) = boundary_repo(app, &ws_id).await;
+        let (app, task_a) = boundary_task(app, "Admin boundary A").await;
+        let (app, task_b) = boundary_task(app, "Admin boundary B").await;
+        let (app, json_a) = boundary_spawn(app, &repo_id, &task_a, "feat/admin-a").await;
+        let (app, json_b) = boundary_spawn(app, &repo_id, &task_b, "feat/admin-b").await;
+        let agent_a = json_a["agent"]["id"].as_str().unwrap().to_string();
+        let agent_b = json_b["agent"]["id"].as_str().unwrap().to_string();
+        let token_a = json_a["token"].as_str().unwrap().to_string();
+
+        // Spawn auto-advances Backlog→InProgress: a successful foreign kill
+        // would block task B, a successful foreign reassign would move it.
+        let task_b_row = state
+            .tasks
+            .find_by_id(&Id::new(&task_b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_b_row.status, TaskStatus::InProgress);
+
+        // ── kill: 403 from the handler gate, agent B and task B untouched ──
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/agents/{agent_b}/kill"))
+                    .header("Authorization", format!("Bearer {token_a}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("admin control surfaces"),
+            "denial must come from the handler task-scope gate, not middleware policy: {json}"
+        );
+        let agent_b_row = state
+            .agents
+            .find_by_id(&Id::new(&agent_b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent_b_row.status, AgentStatus::Active);
+        let task_b_row = state
+            .tasks
+            .find_by_id(&Id::new(&task_b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            task_b_row.status,
+            TaskStatus::InProgress,
+            "task B must not be blocked by a foreign agent's admin kill"
+        );
+
+        // ── reassign: 403, agent A's tasks not moved ──────────────────────
+        let body = serde_json::json!({ "target_agent_id": agent_b });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/agents/{agent_a}/reassign"))
+                    .header("Authorization", format!("Bearer {token_a}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("admin control surfaces"),
+            "reassign denial must come from the handler gate: {json}"
+        );
+        let task_a_row = state
+            .tasks
+            .find_by_id(&Id::new(&task_a))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            task_a_row.assigned_to.as_ref().map(|id| id.as_str()),
+            Some(agent_a.as_str()),
+            "task A must not be reassigned by an agent-principal admin call"
+        );
+
+        // ── job trigger: 403 (stale-agent/reconciliation jobs mutate tasks) ─
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/jobs/stale_agent_detector/run")
+                    .header("Authorization", format!("Bearer {token_a}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("admin control surfaces"),
+            "job-trigger denial must come from the handler gate: {json}"
+        );
+
+        // ── snapshot restore: 403 (replaces task state wholesale) ─────────
+        let body = serde_json::json!({ "snapshot_id": "no-such-snap" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/restore")
+                    .header("Authorization", format!("Bearer {token_a}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("admin control surfaces"),
+            "restore denial must come from the handler gate: {json}"
+        );
+
+        // ── the operator (global system token) keeps the same right under
+        // the same permissive policy — enforcement targets agent
+        // task-boundaries only. The kill succeeds and blocks task B.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/agents/{agent_b}/kill"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let task_b_row = state
+            .tasks
+            .find_by_id(&Id::new(&task_b))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task_b_row.status, TaskStatus::Blocked);
     }
 
     #[tokio::test]
