@@ -288,7 +288,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/admin/impersonate/{request_id}` | **Admin only** (must be the impersonating admin) — end the session; revokes the token immediately and emits `ImpersonationEnded` with `duration_secs`/`actions_taken` |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) — requires authentication |
-| `GET` | `/mcp/sse` | MCP SSE stream — typed AG-UI activity events — requires authentication |
+| `GET` | `/mcp/sse` | MCP SSE stream — workspace-scoped bus messages as typed AG-UI activity events — requires authentication |
 | `GET` | `/api/v1/agents/discover` | Discover active agents by capability (`?capability=<str>`) |
 | `PUT` | `/api/v1/agents/{id}/card` | Publish / update an agent's A2A AgentCard |
 | `POST` | `/api/v1/compose/apply` | Apply agent-compose spec (JSON or YAML), creates agent tree in dependency order |
@@ -500,7 +500,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 
 **Endpoints:**
 - `POST /mcp` — JSON-RPC 2.0. Methods: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`. Requires authentication.
-- `GET /mcp/sse` — SSE stream of typed AG-UI activity events. Requires authentication.
+- `GET /mcp/sse` — SSE stream of server→client notifications and typed AG-UI activity events, scoped to the authenticated agent's workspace (Workspace-destination and Broadcast messages, plus Directed messages addressed to the agent itself; other workspaces'/tenants' messages and other agents' directed messages are never delivered). Event names follow the AG-UI mapping (message-bus.md §MCP Integration): `TOOL_CALL_START`, `TOOL_CALL_END`, `RUN_STARTED`, `RUN_FINISHED`, `TEXT_MESSAGE_CONTENT`, `STATE_CHANGED`, `ERROR` (AgentError); kinds outside the spec table are emitted as generic `message` events. The SSE `data` payload is the raw `Message` envelope JSON. Requires authentication.
 
 **Available tools** (from `tools/list`):
 
