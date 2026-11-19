@@ -2354,18 +2354,20 @@ mod tests {
         let app = crate::api::api_router().with_state(state.clone());
         let cases = [
             (
+                "m-gitlab",
                 "https://gitlab.com/acme/widgets.git",
                 "mirrors/gitlab/acme/widgets.git",
             ),
             (
+                "m-example",
                 "https://git.example.com/team/tooling",
                 "mirrors/git.example.com/team/tooling.git",
             ),
         ];
-        for (url, expected_tail) in cases {
+        for (name, url, expected_tail) in cases {
             let body = serde_json::json!({
                 "workspace_id": "ws-mirror-hosts",
-                "name": "m",
+                "name": name,
                 "url": url,
             });
             let resp = app
