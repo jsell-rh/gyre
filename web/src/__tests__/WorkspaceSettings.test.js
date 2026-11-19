@@ -21,7 +21,7 @@
  *   - Tab keyboard navigation (ArrowRight/ArrowLeft/Home/End)
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, waitFor } from '@testing-library/svelte';
 vi.mock('../lib/api.js', () => ({
   api: {
@@ -77,9 +77,20 @@ const mockWorkspace = {
   compute_target_id: null,
 };
 
+// Frozen-clock spy for expiry-countdown tests (same pattern as
+// InvitationAccept.test.js): seeded fixtures and the render-time
+// Math.floor(Date.now()/1000) must agree exactly, or a second of
+// wall-clock between them flips floor(1799/60) to 29m.
+let dateNowSpy = null;
+
 describe('WorkspaceSettings', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    dateNowSpy?.mockRestore();
+    dateNowSpy = null;
   });
 
   it('renders without throwing', () => {
@@ -625,13 +636,19 @@ describe('WorkspaceSettings', () => {
     // expiry countdown on pending rows, revoke only for Pending (the
     // endpoint 409s on terminal statuses).
     it('renders invitation status and expiry, with revoke only for pending rows', async () => {
+      // Date.now() is frozen so the seeded expiry and the render-time
+      // countdown agree exactly (a second of wall-clock drift would render
+      // "29m", not "30m").
+      const nowMs = 1735689600000;
+      dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+      const nowSecs = Math.floor(nowMs / 1000);
       api.workspaceMembers.mockResolvedValue({ members: [] });
       api.workspaceInvitations.mockResolvedValue({
         invitations: [
           {
             id: 'inv-1', workspace_id: 'ws-1', user_id: 'u-5', invited_by: 'u-1',
             role: 'Developer', status: 'Pending',
-            expires_at: Math.floor(Date.now() / 1000) + 6 * 86400,
+            expires_at: nowSecs + 6 * 86400,
             created_at: 1700000000, accepted_at: null,
           },
           {
@@ -643,7 +660,7 @@ describe('WorkspaceSettings', () => {
           {
             id: 'inv-3', workspace_id: 'ws-1', user_id: 'u-7', invited_by: 'u-1',
             role: 'Developer', status: 'Pending',
-            expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
+            expires_at: nowSecs + 30 * 60,
             created_at: 1700000000, accepted_at: null,
           },
         ],
