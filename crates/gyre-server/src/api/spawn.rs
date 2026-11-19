@@ -1044,14 +1044,14 @@ pub(crate) async fn spawn_agent_core(
                         // The workspace's working copy IS the agent's new
                         // change — describe it so the change is named.
                         match state.jj_ops.jj_new(&jj_workspace_path, &description).await {
-                            Ok(cid) => {
+                            Ok(new_change) => {
                                 tracing::info!(
                                     agent_id = %agent.id,
                                     workspace = %jj_workspace_path,
-                                    change_id = %cid,
+                                    change_id = %new_change.change_id,
                                     "jj workspace provisioned for agent"
                                 );
-                                change_id = Some(cid);
+                                change_id = Some(new_change.change_id);
                             }
                             Err(e) => {
                                 tracing::warn!(

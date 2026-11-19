@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use gyre_ports::{JjChange, JjOpsPort, JjRebaseOutcome};
+use gyre_ports::{JjChange, JjNewChange, JjOpsPort, JjRebaseOutcome};
 use std::env;
 use tokio::process::Command;
 
@@ -91,9 +91,9 @@ impl JjOpsPort for JjOpsAdapter {
         Ok(())
     }
 
-    async fn jj_new(&self, repo_path: &str, description: &str) -> Result<String> {
+    async fn jj_new(&self, repo_path: &str, description: &str) -> Result<JjNewChange> {
         self.run_jj(repo_path, &["new", "-m", description]).await?;
-        // Read the current working-copy change ID
+        // Read the current working-copy change ID and commit ID
         let out = self
             .run_jj(
                 repo_path,
@@ -105,11 +105,17 @@ impl JjOpsPort for JjOpsAdapter {
                     "--limit",
                     "1",
                     "-T",
-                    "change_id",
+                    "change_id ++ \"\\x1f\" ++ commit_id",
                 ],
             )
             .await?;
-        Ok(out.trim().to_string())
+        let (change_id, commit_id) = out.trim().split_once('\x1f').ok_or_else(|| {
+            anyhow::anyhow!("jj log output has no change/commit id pair: {out:?}")
+        })?;
+        Ok(JjNewChange {
+            change_id: change_id.trim().to_string(),
+            commit_id: commit_id.trim().to_string(),
+        })
     }
 
     async fn jj_describe(&self, repo_path: &str, change_id: &str, description: &str) -> Result<()> {
@@ -579,17 +585,23 @@ mod tests {
             std::env::set_var("JJ_EMAIL", "test@gyre.local");
         }
 
-        let change_id = adapter
+        let new_change = adapter
             .jj_new(repo.to_str().unwrap(), "agent work")
             .await
             .expect("jj new must succeed");
-        assert!(!change_id.is_empty());
+        assert!(!new_change.change_id.is_empty());
         // The returned id is @'s change id (32 hex chars in jj 0.39.0).
-        assert_eq!(change_id, change_id_of(&repo, "@").await);
+        assert_eq!(new_change.change_id, change_id_of(&repo, "@").await);
+        // task-264: the returned commit id is @'s CURRENT commit id — the
+        // artifact commit signing covers.
+        assert_eq!(
+            new_change.commit_id,
+            templated_log(&repo, "@", "commit_id").await
+        );
         // jj_new moved @ onto a NEW change; the previous @ is now the
         // parent (jj does not create a new parent — it commits the
         // working-copy change in place).
-        assert_ne!(change_id, before_new);
+        assert_ne!(new_change.change_id, before_new);
         assert_eq!(change_id_of(&repo, "@-").await, before_new);
 
         // jj_log parses the fixture into JjChange records, newest first.
@@ -601,7 +613,7 @@ mod tests {
             log.len() >= 3,
             "expected >=3 changes (@, snapshot of the pre-new working copy, base), got {log:?}"
         );
-        assert_eq!(log[0].change_id, change_id);
+        assert_eq!(log[0].change_id, new_change.change_id);
         assert_eq!(log[0].description, "agent work");
         assert_eq!(log[0].author, "Gyre Test");
         // The git HEAD commit is somewhere below in the log with its
@@ -636,20 +648,24 @@ mod tests {
 
         let adapter = JjOpsAdapter::new();
         adapter.jj_init(repo.to_str().unwrap()).await.unwrap();
-        let change_id = adapter
+        let new_change = adapter
             .jj_new(repo.to_str().unwrap(), "initial")
             .await
             .unwrap();
         adapter
-            .jj_describe(repo.to_str().unwrap(), &change_id, "updated desc")
+            .jj_describe(
+                repo.to_str().unwrap(),
+                &new_change.change_id,
+                "updated desc",
+            )
             .await
             .expect("jj describe must succeed");
 
         // The change's description (read by change id, not position) is
         // updated, and the change id still resolves to the same change.
-        let desc = templated_log(&repo, &change_id, "description").await;
+        let desc = templated_log(&repo, &new_change.change_id, "description").await;
         assert_eq!(desc, "updated desc");
-        assert_eq!(change_id_of(&repo, "@").await, change_id);
+        assert_eq!(change_id_of(&repo, "@").await, new_change.change_id);
     }
 
     /// Recorded fixture (jj 0.39.0): `jj_undo` undoes the last jj
@@ -714,19 +730,19 @@ mod tests {
 
         let adapter = JjOpsAdapter::new();
         adapter.jj_init(repo.to_str().unwrap()).await.unwrap();
-        let change_id = adapter
+        let new_change = adapter
             .jj_new(repo.to_str().unwrap(), "bookmark target")
             .await
             .unwrap();
         adapter
-            .jj_bookmark_create(repo.to_str().unwrap(), "my-feature", &change_id)
+            .jj_bookmark_create(repo.to_str().unwrap(), "my-feature", &new_change.change_id)
             .await
             .expect("jj bookmark create must succeed");
 
         // The bookmark resolves to the created change.
         let target = templated_log(&repo, "my-feature", "change_id").await;
         assert_eq!(
-            target, change_id,
+            target, new_change.change_id,
             "bookmark my-feature must point at the created change"
         );
     }
