@@ -140,12 +140,16 @@ user / global token, real broadcast bus; no TCP listener involved):
 
 ### Local verification status
 
-`cargo check -p gyre-server --tests` passes at commit 1388c32e (full type
-check of the lib + test targets; output retained under
-/tmp/stage/review-evidence). Sandbox build budget blocks local
+`cargo check -p gyre-server --tests` passes at the merged head 28c922fc
+(rebase of this branch onto the task-250 base 321615ec; lib + test targets
+including the merged task-250 ws/message_persistence suites; output retained
+under /tmp/stage/review-evidence). Sandbox build budget blocks local
 `cargo test` compilation of gyre-server — the independent verifier must
 run:
 
 - `cargo test -p gyre-server mcp_sse`
 
-(all six tests above; the filter matches no other tests).
+(all six tests above; the filter matches no other tests). The task-250
+replay suites now sharing this branch (`ws::tests::ws_replay`, and
+`ws_replay_newest_window_and_strict_boundary_on_sqlite` in
+message_persistence) are likewise deferred to the verifier.
