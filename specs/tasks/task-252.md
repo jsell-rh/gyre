@@ -85,10 +85,10 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 ## Shipped
 
 Both capabilities are implemented in production code and previously reviewed
-and approved; this round (merge_conflict 3008f070a71f46fbbfb3bf6e75fb4c2a)
-resolved the rebase against current main head `05024b3e` (task-254) and
-re-verified the merged tree. The implementation itself is unchanged this
-round beyond the union merge.
+and approved; this round (rebase repair, merge commit `5e4a506e`) resolved
+the rebase against current main head `ee03c299` (task-274) and re-verified
+the merged tree. The task implementation is unchanged this round — the merge
+touched no task-252 file.
 
 ### Subscribe membership authorization (gap 2b439cf656cf14c344afdb07)
 
@@ -104,40 +104,42 @@ nor replay.
 ### REST telemetry endpoint (gap 64d1be477f27ebf27ec73076)
 
 `GET /api/v1/workspaces/:workspace_id/activity` (`workspace_activity_handler`,
-crates/gyre-server/src/api/activity.rs:107) is backed by
+crates/gyre-server/src/api/activity.rs) is backed by
 `state.telemetry_buffer`: `since` in epoch milliseconds (entries with
 `created_at <= since` excluded, 1-ms-newer included), `limit` honored
 (default 100), per-handler membership enforcement (403 for non-members), and
 the spec's exact ActivityEventData field mapping via
 `MessageKind::ag_event_type`. The route is registered in the ABAC
-RouteResourceMapping (abac_middleware.rs:317, "activity" resource, workspace
-path param) — check-abac-route-registry.sh passes with no new exemptions. The
-unscoped `/api/v1/activity` and WS ActivityQuery paths are unchanged.
+RouteResourceMapping (abac_middleware.rs, "activity" resource, workspace
+path param) — check-abac-route-registry.sh passes with no new exemptions
+(re-run on the merged tree this round, exit 0). The unscoped
+`/api/v1/activity` and WS ActivityQuery paths are unchanged.
 
-### Rebase repair (this round, merge commit 26eefb2d)
+### Rebase repair (this round, merge commit 5e4a506e)
 
-Single conflict against main `05024b3e`, in
-`specs/coverage/system/message-bus.md` (the "Last audited" header):
-HEAD's task-252 audit-trail sentence and main's task-254 sentence were
-combined in chronological order; the rest auto-merged. Verified the merged
-tree preserves both sides: task-252's route registration (api/mod.rs:871),
-ABAC mapping, and Subscribe membership check, plus task-254's
-`DefaultBodyLimit::max(max_message_bytes)` on the POST messages route
-(api/mod.rs:867) and signing-key history test file.
+Single conflict, in `scripts/test_dev_cargo_clean.py`: both sides carried
+independent fixes for the same cargo 1.100 build-unit-layout CI failure —
+ours `20fb8239` (task-252) and main's `b58fa463` (task-259, verified on
+cargo 1.99.0 in both layouts and landed on main). Resolved to main's
+version; our parallel fix is superseded. All other files auto-merged; the
+only server-code change of the merge is `api/repos.rs`, which came
+verbatim from the approved base (our branch never modified it relative to
+the merge base), so ws.rs, api/activity.rs, api/mod.rs, and
+abac_middleware.rs are byte-identical to the previously approved state.
 
 ### Test evidence
 
-- This sandbox, merged tree (26eefb2d): `cargo check -p gyre-server
-  --all-targets` exit 0; `cargo test -p gyre-common --lib` green (130 passed,
-  incl. `kind_ag_event_type_mapping_matches_spec`); `cargo fmt -p gyre-server -p gyre-common -- --check` clean;
-  `scripts/check-abac-route-registry.sh`, `check-arch.sh`, and
-  `check-migration-versions.sh` pass. Evidence:
-  /tmp/stage/review-evidence/task-252-rebase-repair-3.md.
-- Server behavior is unchanged this round beyond the union merge; server
-  test execution belongs to the independent verifier — focused list:
-  ws_subscribe_rejects_same_tenant_non_member (ws.rs:985),
-  ws_subscribe_agent_scoped_to_own_workspace_record (ws.rs:1096), the four
-  workspace_activity_* tests in api/activity.rs (activity.rs:288-453), and
-  gyre-common's kind_ag_event_type_mapping_matches_spec.
+- This sandbox, merged tree (5e4a506e): `scripts/check-abac-route-registry.sh`
+  exit 0 (no new exemptions); workspace `cargo fmt --check` clean;
+  `python3 -m unittest test_dev_cargo_clean` green (2 tests, cargo 1.99.0
+  legacy layout). Evidence: /tmp/stage/review-evidence/task-252-rebase-repair-4.md.
+- This sandbox has no outbound network (index.crates.io unreachable, curl
+  exit 7) and no cargo registry cache, so server build/test compilation
+  cannot run here — deferred to the independent verifier per the assignment
+  budget rule. Focused verifier list: ws_subscribe_rejects_same_tenant_non_member
+  (ws.rs), ws_subscribe_agent_scoped_to_own_workspace_record (ws.rs), the
+  four workspace_activity_* tests (api/activity.rs), and gyre-common's
+  kind_ag_event_type_mapping_matches_spec, plus `cargo check -p gyre-server
+  --all-targets` on the merged tree.
 - Deferred for remote verification: full `npm test`, all-target clippy,
   full workspace suite, and exact-head GitHub checks.
