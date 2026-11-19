@@ -50,7 +50,7 @@ def reattach_candidate(branch, checkout):
             run('git', 'symbolic-ref', 'HEAD', 'refs/heads/' + branch)
 
 
-def normalize_new_rust(base, formatter='/usr/local/cargo/bin/rustfmt'):
+def normalize_new_rust(base, formatter='/usr/local/cargo/bin/rustfmt', rustup_home='/usr/local/rustup'):
     """Format newly added Rust files before source is committed for review.
 
     Use the assignment base, not the last (often bookkeeping-only) commit.
@@ -75,11 +75,14 @@ def normalize_new_rust(base, formatter='/usr/local/cargo/bin/rustfmt'):
             # Match the differential format gate's config-independent copy.
             # A temp cwd also avoids repository rustup overrides. The default
             # formatter path is in the immutable worker image, not agent PATH.
+            # Native exec drops the image's ENV; pin the installed toolchain
+            # explicitly instead of relying on a shell or downloading another.
             with tempfile.TemporaryDirectory() as directory:
                 copy = Path(directory) / source.name
                 copy.write_bytes(original)
                 run(formatter, '--edition', '2021', '--config', 'skip_children=true', str(copy),
-                    cwd=directory, capture_output=True, text=True, timeout=30)
+                    cwd=directory, capture_output=True, text=True, timeout=30,
+                    env={'PATH': '/usr/local/cargo/bin:/usr/bin:/bin', 'RUSTUP_HOME': rustup_home})
                 formatted = copy.read_bytes()
             if formatted != original:
                 source.write_bytes(formatted)
