@@ -2,8 +2,8 @@
 title: "Agent-to-commit tracking at session granularity: session persistence, branch lifecycle, dirty state, file/commit queries, and time-travel"
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f"
 depends_on: []
-progress: ready-for-review
-commits: ["eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -59,88 +59,3 @@ Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb086
     ]
   }
 ]
-
-## Shipped
-
-Production source implemented in 50452ac5; this round (eff02cff) is a
-verification repair only — five clippy findings on changed lines fixed
-with no behavior change. The five source-control.md §Agent-to-Commit
-Tracking bullets are real, persisted, queryable behavior:
-
-- Session persistence: `AgentSessionRepository` port (gyre-ports)
-  implemented by the SQLite adapter (shared portable migration
-  `000067_agent_sessions`), the PostgreSQL adapter, and the mem adapter
-  (identical duplicate-id/not-exists guards); wired into AppState via
-  the `store!` pattern. A session row starts at agent spawn
-  (spawn_agent_core) and at each Ralph-loop fresh-context respawn
-  (relaunch_agent_session), and ends on every termination path:
-  complete_agent, fail_agent, and the stale-agent Dead transition.
-- Session-to-commit mapping: `AgentCommit` carries `session_id`;
-  `record_pushed_commits` and POST `/repos/:id/commits/record` resolve
-  the pushing agent's currently-open session and stamp it (NULL when
-  none — never a fabricated id). Chronological GET
-  `/repos/:id/agent-sessions` and GET
-  `/repos/:id/agent-sessions/:sid/commits` queries.
-- Branch lifecycle: GET `/repos/:id/agents/:aid/branch-lifecycle`
-  returns the spawn-time branch, the current branch resolved at
-  termination via a real `git rev-parse` lookup in the agent's
-  worktree (never the spawn value copied forward), and all observed
-  commits.
-- Dirty state: every termination path runs a real `git status
-  --porcelain` in the agent's worktree (dirty flag + uncommitted
-  paths); a missing/inaccessible worktree records dirty=NULL plus
-  `dirty_detail` — never a silent clean.
-- Commit-based queries: `files_changed` recorded per pushed commit at
-  push time (`git diff-tree --no-commit-id --name-only -r --root`);
-  by-file and by-commit-SHA session queries returning sessions and
-  agents.
-- Time-travel: GET `/repos/:id/agent-sessions/:sid/state` reconstructs
-  the commits present during [started_at, ended_at] (`git log --all
-  --after/--before` against the real object store) plus the completion
-  snapshot resolved from `refs/agents/{agent-id}/snapshots/{n}` (tree
-  sha + files).
-
-All new routes resolve in the ABAC registry (repo resource); all state
-is DB-backed so sessions and session-stamped commits survive a server
-restart.
-
-### This round — verification repair (eff02cff)
-
-Verification round 9d1dcae3 failed check-clippy-diff with five clippy
-findings on task-258 changed lines. Fixed with no behavior change:
-`#[allow(clippy::double_must_use)]` on the two diff-touched
-async_trait port traits (the established port-crate pattern for the
-must_use future async_trait injects per method), `map_or(true, ..)` →
-`is_none_or(..)` in `completion_snapshot`, needless borrows dropped on
-`Id::new(format!(..))` in the agent_sessions tests, and an
-argument-less `format!` replaced with a `.to_string()` literal in the
-time-travel test.
-
-### Test evidence
-
-- `cargo check -p gyre-server --tests`: PASS, exit 0 (8m18s, cold,
-  single job) — lib plus all unit/integration test targets type-check
-  at eff02cff (evidence:
-  /tmp/stage/review-evidence/cargo-check-gyre-server-tests.txt).
-- `cargo clippy -p gyre-ports --all-targets --all-features` at
-  eff02cff: no warnings in the changed traits of
-  crates/gyre-ports/src/agent_tracking.rs (only the unchanged
-  WorktreeRepository trait still carries the pre-existing async_trait
-  double_must_use, outside changed lines and ignored by the diff
-  gate).
-- Mechanical gates clean at eff02cff: check-mem-port-contracts,
-  check-abac-route-registry, check-abac-exempt-handlers,
-  check-in-memory-state-stores, check-migration-versions.
-- Full-workspace clippy (`scripts/check-clippy-diff.py bafc0353`) and
-  `cargo test --all` are deferred to the independent verifier per the
-  build-budget rule; the verifier should re-run checks.sh at this
-  head (server suite: cargo test --all, plus the task-258 focused
-  tests — agent_sessions and api::agent_tracking unit tests,
-  gyre-adapters session/agent_commit contract tests).
-- Prior-round focused evidence on the same source (50452ac5):
-  cargo test -p gyre-domain agent_tracking 7 passed; gyre-adapters
-  session and agent_commit contract tests passed
-  (create_and_find_by_agent_chronological, create_duplicate_id_fails,
-  find_by_id_and_repo, find_open_by_agent, update_missing_session_fails,
-  update_termination_state_round_trip, find_by_session_chronological,
-  session_and_files_round_trip).
