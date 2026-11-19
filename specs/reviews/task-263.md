@@ -53,3 +53,48 @@ Verifier must run (test-target compilation exceeds this sandbox's budget; wrappe
 - `cargo test -p gyre-server respawn_mint_carries_stored_stack_fingerprint` (ralph_loop::tests).
 - Pre-existing suites in every touched file (abac_middleware, agents, compose, discover, merge_requests, orchestrator, repos, spawn, tasks, constraint_check, gate_executor, rbac, mcp, git_http, auth, agent_audit) plus the spec-approval e2e (`agent_only_requires_exact_stack_hash_match_e2e`) — the ~54 test builders that gained `Authorization` headers must all still pass, proving non-agent principals are not locked out.
 - Full workspace suite + Clippy per standard verification.
+
+## Round 2 (candidate 4c45d9ef, base b381514b)
+
+Candidate: `4c45d9ef` (branch `pipeline/task-263/c542351595714feab18c8c7c2a27a77a-1`). Includes the round-1 repairs (42dad97a evidence correction, 544b2755/585d459e regression repairs, 356184ee wl_hostname compute-target fix, 2dd934d6 clippy, 0ef2e11d git-http signed repo_id identity, 00f1cfcb SPIFFE session binding, a5e2bf75 invariant test) and the task-261 SPIFFE merge, which resolved round-1 F1 by making every first-spawn mint carry the session stack fingerprint (`resolve_session_stack_evidence` resolved once at spawn feeds the mint, the SVID, and the launch-written workload-attestation record — `spawn_minted_jwt_carries_task_scoped_claims` now asserts mint == stored record on first spawn).
+
+Verdict: **needs-revision** — one finding (F1 below: one by-effect task-mutating surface missed by the sweep). Everything else verified clean.
+
+Probes run (checkout at candidate `4c45d9ef`; the working tree carries only the executor's protected-task-text staging of `specs/tasks/task-263.md`, which is not part of the product diff):
+
+- `/tmp/stage/bin/cargo check -p gyre-server` → **exit 0** (11m09s cold; evidence: `review-evidence/cargo-check-gyre-server.log`; test-target compilation deferred to the verifier per the memory budget).
+- 19 mechanical checks (`check-arch`, `check-abac-route-registry`, `check-abac-exempt-handlers`, `check-inert-enforcement`, `check-mem-port-contracts`, `check-scope-literal-defaults`, `check-fabricated-scope-defaults`, `check-forged-scope-fields`, `check-unbounded-external-http`, `check-forwarded-header-trust`, `check-lossy-secret-conversion`, `check-fail-open-ref-resolution`, `check-relative-path-defaults`, `check-byte-slice-truncation`, `check-migration-versions`, `check-migration-sql-portability`, `check-mcp-write-tools`, `check-dead-message-kinds`, `check-in-memory-state-stores`) → all exit 0 (`review-evidence/mechanical-checks.txt`).
+- `check-task-commit-attribution.sh` → exit 0 against the committed candidate (all 12 task-labeled commits are in the `commits:` frontmatter at HEAD; the script only fails on the executor's staged working-tree reset of the frontmatter, which is not part of the candidate).
+- Full re-read of the base→candidate diff for all 21 source files plus the merged repair rounds; independent by-effect sweep (grep of every `tasks.create/update`, `Task::new`, `transition_status`, `assign_task`, secret-revocation, and MR-creation site under `api/`, cross-checked against handler signatures and the ABAC resolver/exemption file).
+
+Verified working (no findings):
+
+- Round-1 F1 resolved: first-spawn mints carry `wl_stack_hash`/`stack_hash` equal to the launch-written workload-attestation fingerprint (spawn.rs `resolve_session_stack_evidence` → mint + SVID + attestation record; test asserts equality).
+- Mint/validation/revocation as round 1, plus the three repair rounds: `wl_hostname` is the compute target's host (Ssh → configured remote host, Kubernetes → honestly absent, local/Container → forge host IS the target host; pinned by `ssh_spawn_mints_configured_remote_host_as_wl_hostname`); git-http agent repo identity derives from the signed `repo_id` claim (name-only scope match across same-named workspaces closed; pinned by `agent_push_cross_workspace_same_name_repo_rejected` with positive control); SPIFFE session SVID session segment == JWT `sub` (`agent:<uuid>`) on every issuance path, restoring the federated exact-match invariant (pinned at the issuer by `session_svid_session_segment_equals_jwt_sub` and at the HTTP probe by deriving the expected session from the real mint's decoded `sub`).
+- Non-agent principals keep their rights: every new gate keys on `agent_task_claim()` (worker-tier, orchestrator-exempt) / `is_gyre_agent_jwt()`; admin boundary test proves the operator kill still works under the same permissive policy that the agent path is denied under.
+
+Findings:
+
+- [-] **F1 (by-effect sweep miss): `POST /api/v1/repos/:id/revert/:mr_id` (`revert_mr`, api/recovery.rs:285) mutates task rows but has neither an enforced agent task-scope check nor an out-of-scope statement.** The handler takes no auth extractor; its execution reverts the merge commit on the repo's default branch (`git_ops.revert_commit`), marks the MR Reverted, and creates a High-priority remediation task row (`merge_processor::apply_revert_side_effects` step 6, `state.tasks.create`) — the same effect class for which this candidate gated `create_task`, compose apply, admin seed, and the admin job triggers. The route is ABAC-mapped `("repo", Some("write"))` and the seeded `agent-scoped-access` builtin (priority 700) allows Agent-role subjects `write` on `*` — the exact default-configuration reachability the task text cites for `complete_agent` (agent JWT principals carry `UserRole::Agent`, auth.rs:1675/1999; the pre-existing jj_squash test proves an agent JWT passes seeded repo-write ABAC in practice). Reproduction: with a merged MR M in repo R, a valid non-expired worker JWT for any task in R (or the tenant, absent a tighter policy) POSTs `/api/v1/repos/R/revert/M` → 200, history reverted, remediation task created, task_id claim never consulted. Neither the enforced-sweep list nor the out-of-scope statements in `specs/tasks/task-263.md` mention revert. Repair: add an auth extractor and gate agent principals (outright denial consistent with `archive_repo`, or a task-claim/self boundary consistent with the MR-creation check), or record an explicit, justified out-of-scope statement in the task text. Evidence: `review-evidence/revert-gap-probe.txt`.
+
+Minor (non-blocking, recorded for completeness):
+
+- Sibling surfaces outside the sweep's literal definition (no in-handler task-row mutation, no MR creation): `POST /api/v1/merge-queue/enqueue`, `DELETE /api/v1/merge-queue/:id`, and `PUT /api/v1/merge-requests/:id/status` take no agent task-claim check (the MR-status handler does block Agent-role `approved`). Their downstream effects (merge, remediation/escalation tasks) are system-mediated via the merge processor. If left unenforced they should ideally carry one-line out-of-scope statements too, but they do not violate the task's stated sweep scope.
+- jj_* repo-write endpoints rely on permissive-default `check_repo_abac` — pre-existing, outside this task's named git-push boundary.
+
+Test-inflation check: none found in the new rounds (same standard as round 1 — real router/MCP dispatch, minted+registered JWTs, 403 + non-mutation + positive-control assertions; the SPIFFE invariant test validates a real mint through the real decoder and a real issuance).
+
+Verifier must run (test-target compilation exceeds this sandbox's budget):
+
+- `cargo test -p gyre-server agent_jwt` — auth.rs: `agent_jwt_mints_specced_task_scoped_claims`, `agent_jwt_audience_validation_is_live`, `revoked_jti_rejects_token_before_expiry`.
+- `cargo test -p gyre-server agent_jwt_task_scope_boundary_on_lifecycle_endpoints agent_jwt_cannot_spawn_onto_foreign_task spawn_minted_jwt_carries_task_scoped_claims ssh_spawn_mints_configured_remote_host_as_wl_hostname` (api::spawn::tests).
+- `cargo test -p gyre-server agent_jwt_cannot_mutate_foreign_task agent_jwt_create_task_clamped_to_claims` (api::tasks::tests).
+- `cargo test -p gyre-server mcp_agent_jwt_task_scope_on_task_and_mr_tools` (mcp::tests).
+- `cargo test -p gyre-server agent_push_outside_token_repo_scope_rejected agent_push_cross_workspace_same_name_repo_rejected` (git_http::tests).
+- `cargo test -p gyre-server agent_jwt_cannot_create_mr_outside_task_scope` (api::merge_requests::tests).
+- `cargo test -p gyre-server respawn_mint_carries_stored_stack_fingerprint` (ralph_loop::tests).
+- `cargo test -p gyre-server session_svid_session_segment_equals_jwt_sub` (spiffe::tests).
+- `cargo test -p gyre-server agent_jwt_denied_on_admin_task_mutating_surfaces` (api::admin::tests).
+- `cargo test -p gyre-server federated_agent_two_configuration_probe` (api::federation::tests — SPIFFE session-binding repair).
+- Pre-existing suites in every touched file (auth, agent_audit, abac_middleware, agents, compose, discover, federation, merge_requests, orchestrator, repos, spawn, tasks, workload, constraint_check, gate_executor, rbac, mcp, git_http, ralph_loop, spiffe) plus `agent_only_requires_exact_stack_hash_match_e2e` (api::specs::tests) — the ~54 test builders that gained `Authorization` headers must all still pass, proving non-agent principals are not locked out.
+- Full workspace suite + Clippy per standard verification.
