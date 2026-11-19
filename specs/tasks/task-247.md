@@ -2,8 +2,8 @@
 title: "Wire the SQLite/PostgreSQL MessageRepository into production AppState"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / db-message-repository-wiring / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["b2fd012c4257acac1648bfe9a509fede4fd25d8c", "68b63791eeffb2e7eed84d09b3d18dbd4a16e9a9", "68c3bf22bf274bdf7d35ca1c4cbbfbe5e245629f"]
 ---
 
 ## Required behavior
@@ -62,3 +62,74 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+`build_state` (crates/gyre-server/src/lib.rs) now wires `AppState.messages`
+through the same `store!` conditional every sibling durable port uses
+(commit 68c3bf22): with `GYRE_DATABASE_URL` set, the Diesel adapter
+(`SqliteStorage` / `PgStorage`, migration `2026-03-24-000017_messages`)
+serves every `state.messages` operation (send, poll, ack, WS replay,
+expiry jobs); `MemMessageRepository` remains only the no-database fallback,
+exactly where sibling durable ports fall back to mem. The port trait, both
+Diesel adapters, and the mem implementation are unchanged.
+
+### Behavioral evidence
+
+`crates/gyre-server/tests/message_persistence.rs` (own test binary,
+ENV_LOCK-serialized, commit 68b63791):
+
+- `messages_survive_restart_on_sqlite` — port-level restart proof:
+  Directed + Event messages stored via instance 1 survive an AppState
+  rebuild over the same SQLite URL (poll paths, unacked count, find_by_id);
+  ack is idempotent and its state survives a further restart.
+- `event_ttl_expiry_persists_across_restart_on_sqlite` — `expire_events`
+  deletes exactly the stale Event on a rebuilt instance and the deletion
+  survives another restart.
+- `message_endpoints_and_ws_replay_survive_restart_on_sqlite` — HTTP/WS
+  level regression for acceptance criteria 1 and 2: drives the real router
+  over a real TCP listener with `GYRE_DATABASE_URL` set, POSTs a Directed
+  message via `/api/v1/workspaces/:id/messages`, verifies the
+  messages-table row (`to_type='agent'`, `acknowledged=0`) through an
+  independent `SqliteStorage` pool, polls it back via
+  `GET /api/v1/agents/:id/messages`, then tears down the listener and
+  AppState, rebuilds a second server over the same DB URL, and verifies
+  the Directed message via poll and `?acknowledged=false`, the Event-tier
+  message via `GET /api/v1/workspaces/:id/messages`, and the WebSocket
+  Subscribe replay. This test fails against the HashMap-backed mem adapter
+  (instance 2 sees an empty store) and against the old unconditional mem
+  wiring.
+
+Adapters were verified directly in this sandbox: `cargo test -p
+ gyre-adapters --lib sqlite::message` — 33 passed, 0 failed
+(send/poll/ack/count/expiry against the SQLite adapter, AC 4), and
+`cargo check -p gyre-server --tests` was clean.
+
+### Formatting repair and re-confirmation
+
+Formatting-only repair of the verification finding: rustfmt flagged
+changed lines 97, 117, 133, 135, 206, 215 of
+`crates/gyre-server/tests/message_persistence.rs`. Applied `rustfmt
+--edition 2021` to the file (commit b2fd012c); no behavior change.
+`scripts/check-rustfmt-diff.py` against base 5eff43dd was re-run on the
+retained candidate ff1957d in this round: changed lines clean
+(2 Rust files checked), exit 0 (evidence:
+`/tmp/stage/review-evidence/rustfmt-diff-probe.log`). No Rust source
+was changed this round — implementation and tests are preserved verbatim
+from the retained candidate.
+
+### Verifier must execute
+
+- `cargo test -p gyre-server --test message_persistence` — all three
+  tests, including under `-- --test-threads=2` (ENV_LOCK makes
+  intra-binary parallelism safe).
+- Existing message-bus suites on the wired path: `cargo test -p
+  gyre-server --lib api::messages` and `--lib message_dispatcher` (AC 4).
+
+### Coverage rows
+
+`specs/coverage/system/message-bus.md` rows 3 (Core Principle), 11
+(Storage), and 16 (Edge Cases) carry the wiring evidence (commit 625690a1);
+no unrelated rows touched. The Directed at-least-once guarantee (ce88ec9)
+and the server-restart edge-case row (e5d4cc99) remain owned by their
+dependent tasks.
