@@ -2,8 +2,8 @@
 title: "Agent-to-commit tracking at session granularity: session persistence, branch lifecycle, dirty state, file/commit queries, and time-travel"
 spec_ref: "Spec gap spec-36fad8fcafe7b73a2b6f2d0e / agent-session-commit-tracking / b580b93c564f"
 depends_on: []
-progress: complete
-commits: ["f7d9c3883dda4d544507d78d6f7590e339f9ab96", "dfcb500fa9dfcc496f67b5a52b3ff830c0a9c77c", "fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "50452ac5318beaf98f0ff6a5b63557f02c0543b3"]
+progress: ready-for-review
+commits: ["50452ac5318beaf98f0ff6a5b63557f02c0543b3", "eff02cffb16bbc5ad1026478ff46d2062b5c6ceb", "fff11b71fb5e9a7f3a113c61bbcccfbd79e1b295", "dfcb500fa9dfcc496f67b5a52b3ff830c0a9c77c", "f7d9c3883dda4d544507d78d6f7590e339f9ab96", "ec0fbff49ca8ee5a7a21216e82ad56e110e8599b"]
 ---
 
 ## Required behavior
@@ -64,8 +64,9 @@ Canonical spec: `specs/system/source-control.md`. Source: `fb1424fbac55cd23cb086
 
 All five source-control.md §Agent-to-Commit Tracking bullets are real,
 persisted, queryable behavior on this branch (original implementation in
-50452ac5, fff11b71, eff02cff, dfcb500f; this round's CI repair in
-f7d9c388):
+50452ac5, fff11b71, eff02cff, dfcb500f; same-second lifecycle-commit
+ordering repair in f7d9c388; this round's session-list ordering repair in
+ec0fbff4):
 
 - **Session-to-commit mapping**: `AgentSessionRepository` port with
   SQLite/PostgreSQL adapters over migration `000067_agent_sessions`, a
@@ -73,10 +74,10 @@ f7d9c388):
   created at spawn and at each Ralph-loop fresh-context respawn, ended
   on every termination path (complete_agent, fail_agent, stale Dead,
   MCP gyre_agent_complete, admin kill); `AgentCommit.session_id` is
-  stamped from the pushing agent's open session in record_pushed_
-  commits and POST /repos/:id/commits/record (NULL when none — never a
-  fabricated id); chronological GET /repos/:id/agent-sessions/:sid/
-  commits.
+  stamped from the pushing agent's open session in
+  record_pushed_commits and POST /repos/:id/commits/record (NULL when
+  none — never a fabricated id); chronological GET
+  /repos/:id/agent-sessions/:sid/commits.
 - **Branch lifecycle**: GET /repos/:id/agents/:aid/branch-lifecycle —
   spawn-time branch, current branch resolved at termination via real
   `git rev-parse --abbrev-ref HEAD`, all observed commits.
@@ -90,34 +91,44 @@ f7d9c388):
   in [started_at, ended_at] via real `git log --after/--before` plus
   the completion snapshot resolved from refs/agents/{id}/snapshots/{n}.
 
-### This round: CI repair (run 44585095776)
+### This round: CI repair (run 44611030853, PR head bdf87292)
 
-`branch_lifecycle_view` failed with observed commits reversed
-(["BBBB", "AAAA"] vs ["AAAA", "BBBB"]). Root cause: the handler sorted
-observed commits by (timestamp, id); recorded timestamps have second
-granularity and ids are random UUIDs, so two commits recorded within
-the same second ordered arbitrarily — a genuine determinism defect in
-the "chronological" lifecycle view, not a test issue (the merge with
-4e88f183 did not touch this code). Fix (f7d9c388): break timestamp
-ties with the producing session's started_at — durable chronology,
-since one agent's sessions are sequential context windows, so session
-order never contradicts recorded-time order; the id remains only as
-the final deterministic fallback, and NULL-session commits key on
-their own timestamp. Added
-`branch_lifecycle_same_second_tie_ordered_by_session`, which pins the
-equal-timestamp tie deterministically (commits written directly with
-identical timestamps) instead of relying on wall-clock coincidence.
+`ralph_loop::tests::respawn_opens_a_new_session` failed with
+"session 1 stays terminated" (left None, right Some(500)): the test's
+spawn session (manually terminated, ended_at=Some(500)) and its
+fresh-context respawn successor are created within one wall-clock
+second, and `AgentSessionRepository::find_by_agent` ordered sessions
+by (started_at, id) — second-granularity timestamps tie, and the
+random-UUID id tiebreak ordered the open respawn session first. The
+same determinism-defect class f7d9c388 fixed for lifecycle commits,
+but in the session-list query itself.
+
+Fix (ec0fbff4): break started_at ties by session window in ALL THREE
+adapters identically — an ended session predates a still-open session
+started in the same second (one agent's sessions are sequential
+context windows): ended_at ASC NULLS LAST via `is_null` (false sorts
+first on both SQLite and PostgreSQL), then ended_at, then the id as
+the final deterministic fallback. The port contract
+(gyre-ports/src/agent_tracking.rs) documents the tie-break.
 
 ### Test evidence
 
-- `cargo check -p gyre-server`: clean on this exact head (f7d9c388).
-- Standalone mirror of the sort key (same-second tie, distinct
-  timestamps, NULL-session fallback) executed and passing; source and
-  output under /tmp/stage/review-evidence.
+- `cargo test -p gyre-adapters sqlite::session`: 8/8 pass on this
+  exact head (ec0fbff4), including the new deterministic regression
+  tests `same_second_tie_orders_ended_session_before_open` and
+  `same_second_tie_between_ended_sessions_orders_by_ended_at`, whose
+  session ids deliberately contradict the window order so a bare id
+  tiebreak fails them. Source SHAs, commands, and output saved under
+  /tmp/stage/review-evidence.
+- `cargo check -p gyre-server` and `cargo clippy -p gyre-adapters -p
+  gyre-ports`: clean on this exact head (no new findings in touched
+  files).
+- `scripts/check-mem-port-contracts.sh`: clean.
 - gyre-server test builds are deferred to the independent verifier
   (build-wrapper budget). Required probes:
-  `cargo nextest run -p gyre-server api::agent_tracking` (covers
-  branch_lifecycle_view, branch_lifecycle_same_second_tie_ordered_
-  by_session, two_session_attribution, by_file_and_by_commit_queries,
-  session_state_time_travel) and the full
-  `cargo nextest run --all` plus the standing gate scripts.
+  `cargo nextest run -p gyre-server ralph_loop::tests::respawn_opens_a_new_session`
+  and
+  `cargo nextest run -p gyre-server agent_sessions` (includes the new
+  mem-backed `find_by_agent_same_second_tie_orders_by_session_window`),
+  plus the full `cargo nextest run --all` and the standing gate
+  scripts.
