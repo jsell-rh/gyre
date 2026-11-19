@@ -124,8 +124,17 @@ impl AgentSessionRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = agent_sessions::table
                 .filter(agent_sessions::agent_id.eq(agent_id.as_str()))
-                // Chronological (oldest first).
+                // Chronological (oldest first). Same-second ties break by
+                // session window: an ended session predates a still-open
+                // session started in the same second (one agent's sessions
+                // are sequential context windows) — ended_at ASC NULLS LAST
+                // via is_null (false sorts first on both SQLite and
+                // PostgreSQL), then ended_at, then the id as the final
+                // deterministic fallback. Sorting on the random-UUID id
+                // alone orders same-second sessions arbitrarily.
                 .order(agent_sessions::started_at.asc())
+                .then_order_by(agent_sessions::ended_at.is_null().asc())
+                .then_order_by(agent_sessions::ended_at.asc())
                 .then_order_by(agent_sessions::id.asc())
                 .load::<SessionRow>(&mut *conn)
                 .context("find agent_sessions by agent")?;
@@ -141,7 +150,10 @@ impl AgentSessionRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = agent_sessions::table
                 .filter(agent_sessions::repository_id.eq(repository_id.as_str()))
+                // Same tie-break as find_by_agent (see there).
                 .order(agent_sessions::started_at.asc())
+                .then_order_by(agent_sessions::ended_at.is_null().asc())
+                .then_order_by(agent_sessions::ended_at.asc())
                 .then_order_by(agent_sessions::id.asc())
                 .load::<SessionRow>(&mut *conn)
                 .context("find agent_sessions by repo")?;

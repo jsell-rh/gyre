@@ -753,7 +753,12 @@ impl AgentSessionRepository for MemAgentSessionRepository {
     }
 
     async fn find_by_agent(&self, agent_id: &Id) -> Result<Vec<Session>> {
-        // Chronological (oldest first), same contract as the DB adapters.
+        // Chronological (oldest first), same contract as the DB adapters,
+        // including the same-second tie-break: an ended session predates a
+        // still-open session started in the same second (one agent's
+        // sessions are sequential context windows), then ended_at, then the
+        // id as the final deterministic fallback — never the random-UUID id
+        // alone, which orders same-second sessions arbitrarily.
         let mut sessions: Vec<Session> = self
             .store
             .lock()
@@ -765,12 +770,15 @@ impl AgentSessionRepository for MemAgentSessionRepository {
         sessions.sort_by(|a, b| {
             a.started_at
                 .cmp(&b.started_at)
+                .then_with(|| a.ended_at.is_none().cmp(&b.ended_at.is_none()))
+                .then_with(|| a.ended_at.cmp(&b.ended_at))
                 .then_with(|| a.id.as_str().cmp(b.id.as_str()))
         });
         Ok(sessions)
     }
 
     async fn find_by_repo(&self, repository_id: &Id) -> Result<Vec<Session>> {
+        // Same ordering contract as find_by_agent (see there).
         let mut sessions: Vec<Session> = self
             .store
             .lock()
@@ -782,6 +790,8 @@ impl AgentSessionRepository for MemAgentSessionRepository {
         sessions.sort_by(|a, b| {
             a.started_at
                 .cmp(&b.started_at)
+                .then_with(|| a.ended_at.is_none().cmp(&b.ended_at.is_none()))
+                .then_with(|| a.ended_at.cmp(&b.ended_at))
                 .then_with(|| a.id.as_str().cmp(b.id.as_str()))
         });
         Ok(sessions)

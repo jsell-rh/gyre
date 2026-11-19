@@ -42,10 +42,15 @@ pub trait AgentSessionRepository: Send + Sync {
     async fn create(&self, session: &Session) -> Result<()>;
 
     /// Find all sessions for the given agent, chronological (oldest first).
+    /// Same-`started_at` ties (timestamps have second granularity) break by
+    /// session window — an ended session sorts before a still-open session
+    /// started in the same second (one agent's sessions are sequential
+    /// context windows), then by `ended_at`, then `id` — never by the
+    /// random-UUID `id` alone.
     async fn find_by_agent(&self, agent_id: &Id) -> Result<Vec<Session>>;
 
     /// Find all sessions for the given repository, chronological (oldest
-    /// first).
+    /// first), with the same same-second tie-break as [`Self::find_by_agent`].
     async fn find_by_repo(&self, repository_id: &Id) -> Result<Vec<Session>>;
 
     /// Find a session by id.

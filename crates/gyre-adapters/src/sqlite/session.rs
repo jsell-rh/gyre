@@ -125,8 +125,17 @@ impl AgentSessionRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = agent_sessions::table
                 .filter(agent_sessions::agent_id.eq(agent_id.as_str()))
-                // Chronological (oldest first).
+                // Chronological (oldest first). Same-second ties break by
+                // session window: an ended session predates a still-open
+                // session started in the same second (one agent's sessions
+                // are sequential context windows) — ended_at ASC NULLS LAST
+                // via is_null (false sorts first on both SQLite and
+                // PostgreSQL), then ended_at, then the id as the final
+                // deterministic fallback. Sorting on the random-UUID id
+                // alone orders same-second sessions arbitrarily.
                 .order(agent_sessions::started_at.asc())
+                .then_order_by(agent_sessions::ended_at.is_null().asc())
+                .then_order_by(agent_sessions::ended_at.asc())
                 .then_order_by(agent_sessions::id.asc())
                 .load::<SessionRow>(&mut *conn)
                 .context("find agent_sessions by agent")?;
@@ -142,7 +151,10 @@ impl AgentSessionRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let rows = agent_sessions::table
                 .filter(agent_sessions::repository_id.eq(repository_id.as_str()))
+                // Same tie-break as find_by_agent (see there).
                 .order(agent_sessions::started_at.asc())
+                .then_order_by(agent_sessions::ended_at.is_null().asc())
+                .then_order_by(agent_sessions::ended_at.asc())
                 .then_order_by(agent_sessions::id.asc())
                 .load::<SessionRow>(&mut *conn)
                 .context("find agent_sessions by repo")?;
@@ -244,6 +256,73 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, Id::new("s1"));
         assert_eq!(results[1].id, Id::new("s2"));
+    }
+
+    /// Same-second ordering: started_at has second granularity, so a
+    /// terminated session and its respawn successor can share a
+    /// started_at. The tie must break by session window — the ended
+    /// session predates the still-open one — never by the random-UUID row
+    /// id, which orders the tie arbitrarily (CI run 44611030853,
+    /// respawn_opens_a_new_session: "session 1 stays terminated"). The
+    /// ids here contradict the window order ("aa-…" is the OPEN session),
+    /// so a bare id tiebreak fails this test deterministically.
+    #[tokio::test]
+    async fn same_second_tie_orders_ended_session_before_open() {
+        let (_tmp, s) = setup();
+        // Both sessions started in the same wall-clock second.
+        let same_second = 1_800_000_000u64;
+        let mut ended = make_session("zz-ended", "agent1", "repo1", same_second);
+        ended.ended_at = Some(same_second + 1);
+        let open = make_session("aa-open", "agent1", "repo1", same_second);
+        // Insertion order opposite to the expected result.
+        AgentSessionRepository::create(&s, &open).await.unwrap();
+        AgentSessionRepository::create(&s, &ended).await.unwrap();
+
+        let results = AgentSessionRepository::find_by_agent(&s, &Id::new("agent1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            results.iter().map(|x| x.id.to_string()).collect::<Vec<_>>(),
+            vec!["zz-ended".to_string(), "aa-open".to_string()],
+            "same-second sessions order by session window, not random id"
+        );
+        assert_eq!(results[0].ended_at, Some(same_second + 1));
+        assert_eq!(results[1].ended_at, None);
+
+        // Same tie-break on the by-repo query.
+        let repo_sessions = AgentSessionRepository::find_by_repo(&s, &Id::new("repo1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            repo_sessions
+                .iter()
+                .map(|x| x.id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["zz-ended".to_string(), "aa-open".to_string()]
+        );
+    }
+
+    /// Same-second tie between two ENDED sessions: the one that ended
+    /// earlier is the earlier context window.
+    #[tokio::test]
+    async fn same_second_tie_between_ended_sessions_orders_by_ended_at() {
+        let (_tmp, s) = setup();
+        let same_second = 1_800_000_000u64;
+        let mut early = make_session("zz-early", "agent1", "repo1", same_second);
+        early.ended_at = Some(same_second);
+        let mut late = make_session("aa-late", "agent1", "repo1", same_second);
+        late.ended_at = Some(same_second + 1);
+        AgentSessionRepository::create(&s, &late).await.unwrap();
+        AgentSessionRepository::create(&s, &early).await.unwrap();
+
+        let results = AgentSessionRepository::find_by_agent(&s, &Id::new("agent1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            results.iter().map(|x| x.id.to_string()).collect::<Vec<_>>(),
+            vec!["zz-early".to_string(), "aa-late".to_string()],
+            "same-second ended sessions order by ended_at, not random id"
+        );
     }
 
     #[tokio::test]

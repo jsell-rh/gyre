@@ -650,6 +650,64 @@ mod tests {
         );
     }
 
+    /// Same-second session ordering (the mem adapter backing test_state,
+    /// same contract as the SQLite/PostgreSQL adapters): started_at has
+    /// second granularity, so a terminated session and its respawn
+    /// successor can share a started_at. The tie must break by session
+    /// window — the ended session predates the still-open one — never by
+    /// the random-UUID id, which orders the tie arbitrarily (CI run
+    /// 44611030853, ralph_loop::tests::respawn_opens_a_new_session:
+    /// "session 1 stays terminated"). The ids here contradict the
+    /// window order ("aa-…" is the OPEN session), so a bare id tiebreak
+    /// fails this test deterministically.
+    #[tokio::test]
+    async fn find_by_agent_same_second_tie_orders_by_session_window() {
+        let state = test_state();
+        let agent = Agent::new(Id::new("agent-tie"), "tie", 1000);
+        state.agents.create(&agent).await.unwrap();
+        let repo = gyre_domain::Repository::new(
+            Id::new("repo-tie"),
+            Id::new("ws-1"),
+            "tie",
+            "/tmp/gyre-agent-sessions-tie",
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Both sessions started in the same wall-clock second.
+        let same_second = 1_800_000_000u64;
+        let mut ended = Session::new(
+            Id::new("zz-ended"),
+            agent.id.clone(),
+            repo.id.clone(),
+            same_second,
+            "feat/a",
+        );
+        ended.ended_at = Some(same_second + 1);
+        let open = Session::new(
+            Id::new("aa-open"),
+            agent.id.clone(),
+            repo.id.clone(),
+            same_second,
+            "feat/a",
+        );
+        // Insertion order opposite to the expected result.
+        state.agent_sessions.create(&open).await.unwrap();
+        state.agent_sessions.create(&ended).await.unwrap();
+
+        let sessions = state.agent_sessions.find_by_agent(&agent.id).await.unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|s| s.id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["zz-ended".to_string(), "aa-open".to_string()],
+            "same-second sessions order by session window, not random id"
+        );
+        assert_eq!(sessions[0].ended_at, Some(same_second + 1));
+        assert_eq!(sessions[1].ended_at, None);
+    }
+
     #[tokio::test]
     async fn time_travel_window_and_snapshot_from_real_repo() {
         let (state, _wt, dir) = real_worktree_state("tt").await;
