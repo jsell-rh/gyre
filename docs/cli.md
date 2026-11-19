@@ -38,11 +38,12 @@ Config file is stored at `~/.gyre/config` (JSON):
 ### Bootstrap ([Platform Model §8](../specs/system/platform-model.md#8-bootstrap--first-run))
 
 Before running bootstrap with `--repo-path`, commit the changes you want to
-import. Use a clean checkout or review both the staged changes and pending
-changes to the starter-kit paths listed below. When `specs/manifest.yaml`
-exists, bootstrap can stage changes to existing starter-kit paths even without
-`--starter-kit`. Its plain `git commit` can include unrelated staged changes,
-and the resulting local commit can remain even if the push is refused.
+import. Use a clean checkout or review the Git index and pending changes to
+`specs/manifest.yaml`, `specs/index.md`, `specs/system/design-principles.md`,
+`AGENTS.md`, and `.prek.yaml`. When the manifest exists, bootstrap can stage
+changes to these paths if they exist, even without `--starter-kit`. Its plain
+`git commit` can include unrelated staged changes, and the resulting local
+commit can remain even if the push is refused.
 
 ```bash
 # Full non-dev bootstrap for importing a local Gyre checkout.
@@ -60,10 +61,7 @@ gyre bootstrap \
 # workspace "default"
 gyre bootstrap --dev
 
-# Also write a starter spec structure (specs/manifest.yaml, specs/index.md,
-# specs/system/design-principles.md, AGENTS.md, .prek.yaml) into --repo-path
-# (required: --starter-kit without --repo-path is an error — the kit must land
-# at an explicit path, never a cwd-relative default)
+# Also write missing starter-kit files into the required --repo-path.
 gyre bootstrap --dev --starter-kit --repo-path /home/user/code/myrepo
 ```
 
@@ -80,11 +78,13 @@ failure. Bootstrap saves a newly issued admin API key to `~/.gyre/config` and
 prints it once in the summary when available.
 
 To import Gyre itself, point `--repo-path` at a local Gyre Git checkout with
-at least one commit. Bootstrap skips import if you omit `--repo-path` or the
-checkout lacks `specs/manifest.yaml`. Platform Model §8 promises a fallback
-manifest. Without `--starter-kit`, the CLI leaves a missing manifest unwritten.
-`--starter-kit` requires an explicit `--repo-path`, and starter-kit write errors
-abort bootstrap.
+at least one commit. Bootstrap checks for `specs/manifest.yaml` after optional
+starter-kit generation, so you can import a checkout that starts without a
+manifest by passing `--starter-kit`. Bootstrap skips import if you omit
+`--repo-path` or the manifest is still missing. Platform Model §8 promises a
+fallback manifest. The current CLI generates one only with `--starter-kit`,
+which requires an explicit `--repo-path`. Starter-kit write errors abort
+bootstrap.
 
 With `--repo-path`, bootstrap configures `cargo test --all` and
 `cargo clippy --all-targets -- -D warnings` if `Cargo.toml` exists, and
