@@ -745,8 +745,11 @@ impl AppState {
         msg.signature = Some(sig);
         msg.key_id = Some(kid);
 
-        // Persist (not Broadcast — those are never stored).
-        if !matches!(msg.to, Destination::Broadcast) {
+        // Persist (not Broadcast — those are never stored). Broadcast-only
+        // kinds (DataSeeded/QueueUpdated) are storage-exempt regardless of
+        // destination (message-bus.md §Broadcast-only kinds): they flow
+        // through the in-memory broadcast channel only.
+        if !matches!(msg.to, Destination::Broadcast) && !msg.kind.broadcast_only() {
             if let Err(e) = self.messages.store(&msg).await {
                 tracing::warn!("emit_event: failed to persist message: {e}");
             }
@@ -2622,6 +2625,64 @@ mod tests {
             tenants.iter().filter(|t| t.slug == "default").count(),
             1,
             "second bootstrap call must not create a duplicate default tenant"
+        );
+    }
+
+    /// message-bus.md §Broadcast-only kinds: `DataSeeded` and `QueueUpdated`
+    /// are storage-exempt — "never hitting `MessageRepository::store()`" —
+    /// REGARDLESS of destination. The internal emitter (`emit_scoped_event`)
+    /// must short-circuit storage for these kinds by kind, not only by
+    /// destination: emitted to a Workspace destination, the message must
+    /// still reach the broadcast channel while no row is persisted. Against
+    /// the prior destination-only guard this test fails (the row is stored).
+    #[tokio::test]
+    async fn emit_event_broadcast_only_kind_never_stored_for_workspace_destination() {
+        let state = mem::test_state();
+        mem::ensure_test_workspace(&state, "ws-bo-emit").await;
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        state
+            .emit_event(
+                Id::new("ws-bo-emit"),
+                Destination::Workspace(Id::new("ws-bo-emit")),
+                MessageKind::DataSeeded,
+                None,
+            )
+            .await;
+        state
+            .emit_event(
+                Id::new("ws-bo-emit"),
+                Destination::Workspace(Id::new("ws-bo-emit")),
+                MessageKind::QueueUpdated,
+                None,
+            )
+            .await;
+
+        // Both reached the broadcast channel (subscribers see them).
+        for expected in [MessageKind::DataSeeded, MessageKind::QueueUpdated] {
+            let msg = rx
+                .try_recv()
+                .unwrap_or_else(|e| panic!("{expected:?} must reach broadcast channel: {e}"));
+            assert_eq!(msg.kind, expected);
+            assert!(matches!(msg.from, MessageOrigin::Server));
+            // Storage exemption is kind-based: no row for either kind.
+            assert!(
+                state.messages.find_by_id(&msg.id).await.unwrap().is_none(),
+                "{expected:?} must never hit MessageRepository::store()"
+            );
+        }
+
+        // The workspace listing is empty — neither kind was persisted even
+        // though the destination was a Workspace.
+        let listed = state
+            .messages
+            .list_by_workspace(&Id::new("ws-bo-emit"), None, None, None, None, Some(100))
+            .await
+            .unwrap();
+        assert!(
+            listed.is_empty(),
+            "broadcast-only kinds must never hit MessageRepository::store(), \
+             even addressed to a Workspace destination"
         );
     }
 }

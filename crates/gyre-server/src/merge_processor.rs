@@ -671,6 +671,11 @@ pub(crate) async fn trip_circuit_breaker(
         .filter(|m| revert_breaker_key(m) == key)
         .map(|m| m.id.to_string())
         .collect();
+    // mr id → workspace, for scoping the QueueUpdated broadcasts below.
+    let mr_workspaces: HashMap<String, Id> = all_mrs
+        .iter()
+        .map(|m| (m.id.to_string(), m.workspace_id.clone()))
+        .collect();
     let queue = state.merge_queue.list_queue().await?;
     for entry in queue
         .iter()
@@ -684,6 +689,11 @@ pub(crate) async fn trip_circuit_breaker(
                 Some("circuit breaker: failed post-merge validation 3 times".to_string()),
             )
             .await;
+        // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
+        // the entry left the queue terminally (Cancelled).
+        if let Some(ws_id) = mr_workspaces.get(entry.merge_request_id.as_str()) {
+            emit_queue_updated(state, ws_id).await;
+        }
         // merge_queue.processed analytics event (analytics.md §Auto-Emitted
         // Events: "Queue entry processed") — a circuit-breaker cancellation
         // is a terminal outcome; the spec outcome value is "skipped".
@@ -1323,6 +1333,10 @@ async fn merge_atomic_group(
             .update_status(&ge.id, MergeQueueEntryStatus::Processing, None)
             .await?;
     }
+    // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
+    // the group's entries were claimed for a merge attempt
+    // (Queued → Processing).
+    emit_queue_updated(state, &first_mr.workspace_id).await;
 
     // Track successfully merged entries for potential rollback.
     let mut merged_entries: Vec<(MergeQueueEntry, MergeRequest)> = Vec::new();
@@ -1525,6 +1539,10 @@ async fn merge_atomic_group(
                     .merge_queue
                     .update_status(&ge.id, MergeQueueEntryStatus::Merged, None)
                     .await?;
+                // Broadcast-only QueueUpdated (message-bus.md
+                // §Broadcast-only kinds): merge completion — the entry left
+                // the queue terminally (Merged).
+                emit_queue_updated(state, &updated_mr.workspace_id).await;
 
                 // agent-gates.md §Part 3 — merge attestation bundle for
                 // every group member merge (same multi-party signing as the
@@ -1786,6 +1804,11 @@ async fn rollback_atomic_group(
         );
         return Ok(());
     };
+
+    // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
+    // the rollback requeued every group member (Processing/Merged → Queued)
+    // — a merge-queue state change watchers must see.
+    emit_queue_updated(state, &ws_id).await;
 
     // Step 4: Notify all distinct authors (spec says "notify all authors" — no broader audience).
     let body_json = serde_json::json!({
@@ -2092,6 +2115,9 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         .merge_queue
         .update_status(&entry.id, MergeQueueEntryStatus::Processing, None)
         .await?;
+    // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
+    // the entry was claimed for a merge attempt (Queued → Processing).
+    emit_queue_updated(state, &mr.workspace_id).await;
 
     // P5: Check dependency health (closed deps, gate failure escalation).
     if handle_dep_health_issues(state, &entry, &mr).await? {
@@ -2130,6 +2156,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             .merge_queue
             .update_status(&entry.id, MergeQueueEntryStatus::Queued, None)
             .await?;
+        // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only
+        // kinds): the claim was undone (Processing → Queued) because the
+        // repo's queue is paused.
+        emit_queue_updated(state, &mr.workspace_id).await;
         return Ok(());
     }
 
@@ -2462,6 +2492,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             .merge_queue
             .update_status(&entry.id, MergeQueueEntryStatus::Queued, Some(reason))
             .await?;
+        // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only
+        // kinds): the claim was undone (Processing → Queued) — the merge is
+        // held for human MR approval.
+        emit_queue_updated(state, &mr.workspace_id).await;
         return Ok(());
     }
 
@@ -2521,6 +2555,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                 )),
                             )
                             .await?;
+                        // Broadcast-only QueueUpdated (message-bus.md
+                        // §Broadcast-only kinds): claim undone
+                        // (Processing → Queued), ABAC fail-closed.
+                        emit_queue_updated(state, &mr.workspace_id).await;
                         return Ok(());
                     }
                 };
@@ -2582,6 +2620,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                                 )),
                                             )
                                             .await?;
+                                        // Broadcast-only QueueUpdated (message-bus.md
+                                        // §Broadcast-only kinds): claim undone
+                                        // (Processing → Queued), ABAC fail-closed.
+                                        emit_queue_updated(state, &mr.workspace_id).await;
                                         return Ok(());
                                     }
                                 };
@@ -2681,6 +2723,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .merge_queue
                 .update_status(&entry.id, MergeQueueEntryStatus::Merged, None)
                 .await?;
+            // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only
+            // kinds): merge completion — the entry left the queue
+            // terminally (Merged).
+            emit_queue_updated(state, &updated_mr.workspace_id).await;
 
             // Auto-track merge_queue.processed analytics event
             let ev = AnalyticsEvent::new(
@@ -3022,6 +3068,9 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     Some(format!("conflict: {}", message)),
                 )
                 .await?;
+            // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only
+            // kinds): the entry left the queue terminally (Failed).
+            emit_queue_updated(state, &mr.workspace_id).await;
             emit_queue_processed_failed(state, &entry, &mr, "conflict", &message).await;
         }
         Err(e) => {
@@ -3034,11 +3083,42 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     Some(format!("git error: {e}")),
                 )
                 .await?;
+            // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only
+            // kinds): the entry left the queue terminally (Failed).
+            emit_queue_updated(state, &mr.workspace_id).await;
             emit_queue_processed_failed(state, &entry, &mr, "git_error", &e.to_string()).await;
         }
     }
 
     Ok(())
+}
+
+/// Emit the `QueueUpdated` broadcast (message-bus.md §Broadcast-only kinds)
+/// when a merge-queue entry changes state — entering the queue (enqueue),
+/// being claimed for a merge attempt (Queued → Processing), being put back
+/// (Processing → Queued), or reaching a terminal outcome (Merged / Failed /
+/// Cancelled: leaving the queue).
+///
+/// `QueueUpdated` is a broadcast-only kind: payload none,
+/// `Destination::Broadcast`, `workspace_id: None`, storage-exempt — the
+/// kind-based short-circuit in `emit_scoped_event` keeps it out of
+/// `MessageRepository::store()` regardless of destination, so it flows
+/// through the in-memory broadcast channel only (subscribers: WS
+/// dashboards, MCP SSE streams). The tenant scope is resolved from the
+/// affected workspace; when it cannot be resolved the emission is skipped
+/// and logged (never a fabricated identity).
+pub(crate) async fn emit_queue_updated(state: &AppState, workspace_id: &Id) {
+    let Some(tenant_id) = state.message_tenant_id(workspace_id).await else {
+        return;
+    };
+    state
+        .emit_tenant_event(
+            tenant_id,
+            gyre_common::message::Destination::Broadcast,
+            gyre_common::message::MessageKind::QueueUpdated,
+            None,
+        )
+        .await;
 }
 
 /// Emit a `merge_queue.processed` analytics event for a queue entry that
@@ -3127,6 +3207,22 @@ pub(crate) async fn fail_queue_entry(
             Some(reason.to_string()),
         )
         .await?;
+    // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
+    // the entry left the queue terminally (Failed). Workspace resolved from
+    // the MR the caller holds, or from the entry's MR when not preloaded.
+    let ws_id = match mr {
+        Some(m) => Some(m.workspace_id.clone()),
+        None => state
+            .merge_requests
+            .find_by_id(&entry.merge_request_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|m| m.workspace_id),
+    };
+    if let Some(ws_id) = ws_id {
+        emit_queue_updated(state, &ws_id).await;
+    }
     emit_queue_processed_terminal(state, entry, mr, "failed", failure_kind, reason).await;
     Ok(())
 }
@@ -7061,10 +7157,17 @@ mod tests {
             "mr-second should be requeued after rollback"
         );
 
-        // AtomicGroupFailed event should be emitted.
-        let msg = rx
-            .try_recv()
-            .expect("AtomicGroupFailed event should be emitted");
+        // AtomicGroupFailed event should be emitted. Task-249
+        // (message-bus.md §Broadcast-only kinds): the rollback requeue also
+        // broadcasts QueueUpdated first, so scan for the AtomicGroupFailed
+        // event instead of assuming it is the first message.
+        let mut failed_event = None;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.kind == gyre_common::MessageKind::AtomicGroupFailed {
+                failed_event = Some(msg);
+            }
+        }
+        let msg = failed_event.expect("AtomicGroupFailed event should be emitted");
         assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
         let payload = msg.payload.as_ref().expect("event should have payload");
         assert_eq!(payload["group"], "bundle");
@@ -7241,10 +7344,17 @@ mod tests {
             "workspace member (non-author) should NOT receive a notification"
         );
 
-        // Verify event.
-        let msg = rx
-            .try_recv()
-            .expect("AtomicGroupFailed event should be emitted");
+        // Verify event. Task-249 (message-bus.md §Broadcast-only
+        // kinds): the rollback requeue also broadcasts QueueUpdated first,
+        // so scan for the AtomicGroupFailed event instead of assuming it
+        // is the first message.
+        let mut failed_event = None;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.kind == gyre_common::MessageKind::AtomicGroupFailed {
+                failed_event = Some(msg);
+            }
+        }
+        let msg = failed_event.expect("AtomicGroupFailed event should be emitted");
         assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
     }
 
@@ -7376,10 +7486,17 @@ mod tests {
             "entry should be requeued even without pre-group SHA"
         );
 
-        // Event should still be emitted.
-        let msg = rx
-            .try_recv()
-            .expect("AtomicGroupFailed event should be emitted");
+        // Event should still be emitted. Task-249 (message-bus.md
+        // §Broadcast-only kinds): the rollback requeue also broadcasts
+        // QueueUpdated first, so scan for the AtomicGroupFailed event
+        // instead of assuming it is the first message.
+        let mut failed_event = None;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.kind == gyre_common::MessageKind::AtomicGroupFailed {
+                failed_event = Some(msg);
+            }
+        }
+        let msg = failed_event.expect("AtomicGroupFailed event should be emitted");
         assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
     }
 
@@ -8485,7 +8602,17 @@ mod tests {
             .unwrap();
         assert_eq!(updated.status, MrStatus::Merged);
         assert!(!merge_queue_paused(&state, &repo.id).await);
-        assert!(rx.try_recv().is_err(), "no events expected on pass");
+        // Task-249 (message-bus.md §Broadcast-only kinds): every merge-queue
+        // state transition now broadcasts QueueUpdated (claim + merge
+        // completion here). Those are the ONLY messages allowed — any
+        // recovery event still fails the test.
+        while let Ok(msg) = rx.try_recv() {
+            assert_eq!(
+                msg.kind,
+                MessageKind::QueueUpdated,
+                "no events expected on pass beyond the QueueUpdated broadcasts"
+            );
+        }
 
         // Merge-success notification was delivered to the author's spawner.
         let notifs = state
@@ -8999,10 +9126,17 @@ mod tests {
             !merge_queue_paused(&state, &repo.id).await,
             "advisory failure must not pause"
         );
-        assert!(
-            rx.try_recv().is_err(),
-            "no recovery events for advisory failure"
-        );
+        // Task-249 (message-bus.md §Broadcast-only kinds): every merge-queue
+        // state transition now broadcasts QueueUpdated (claim + merge
+        // completion here). Those are the ONLY messages allowed — any
+        // recovery event still fails the test.
+        while let Ok(msg) = rx.try_recv() {
+            assert_eq!(
+                msg.kind,
+                MessageKind::QueueUpdated,
+                "no recovery events for advisory failure beyond the QueueUpdated broadcasts"
+            );
+        }
 
         // Merge succeeded → merge notification, but no recovery notifications.
         let notifs = state
