@@ -1124,6 +1124,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/scim/v2/Users/:id",
             get(scim::scim_get_user)
                 .put(scim::scim_update_user)
+                .patch(scim::scim_patch_user)
                 .delete(scim::scim_delete_user),
         )
         .route(

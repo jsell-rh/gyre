@@ -41,6 +41,7 @@ struct UserRow {
     tenant_id: Option<String>,
     global_role: String,
     deactivated_at: Option<i64>,
+    manager_id: Option<String>,
 }
 
 impl From<UserRow> for User {
@@ -74,6 +75,7 @@ impl From<UserRow> for User {
         u.tenant_id = r.tenant_id.map(Id::new);
         u.global_role = global_role;
         u.deactivated_at = r.deactivated_at.map(|v| v as u64);
+        u.manager_id = r.manager_id.map(Id::new);
         u
     }
 }
@@ -109,6 +111,7 @@ struct UserRecord<'a> {
     tenant_id: Option<&'a str>,
     global_role: String,
     deactivated_at: Option<i64>,
+    manager_id: Option<&'a str>,
 }
 
 #[derive(Insertable)]
@@ -168,6 +171,7 @@ impl UserRepository for SqliteStorage {
                 tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
                 global_role: global_role_to_str(&u.global_role).to_string(),
                 deactivated_at: u.deactivated_at.map(|v| v as i64),
+                manager_id: u.manager_id.as_ref().map(|m| m.as_str()),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -304,6 +308,7 @@ impl UserRepository for SqliteStorage {
                     users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
                     users::global_role.eq(global_role_to_str(&u.global_role)),
                     users::deactivated_at.eq(u.deactivated_at.map(|v| v as i64)),
+                    users::manager_id.eq(u.manager_id.as_ref().map(|m| m.as_str())),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
@@ -515,6 +520,46 @@ mod tests {
         let listed = UserRepository::list(&s).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert!(listed[0].is_deactivated());
+    }
+
+    #[tokio::test]
+    async fn enterprise_manager_id_round_trips() {
+        // TASK-265: the SCIM enterprise extension's manager.value
+        // (RFC 7643 §4.3) must survive create and update — the SCIM PUT/
+        // PATCH path persists it on the users.manager_id column.
+        let (_tmp, s) = setup();
+        let mut u = make_user("u-mgr", "ext-mgr", "dana");
+        u.manager_id = Some(Id::new("manager-user-9"));
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let found = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.manager_id, Some(Id::new("manager-user-9")));
+
+        // Update path: change and clear.
+        let mut u2 = found.clone();
+        u2.manager_id = Some(Id::new("manager-user-10"));
+        UserRepository::update(&s, &u2).await.unwrap();
+        assert_eq!(
+            UserRepository::find_by_id(&s, &u.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .manager_id,
+            Some(Id::new("manager-user-10"))
+        );
+        u2.manager_id = None;
+        UserRepository::update(&s, &u2).await.unwrap();
+        assert_eq!(
+            UserRepository::find_by_id(&s, &u.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .manager_id,
+            None
+        );
     }
 
     #[tokio::test]
