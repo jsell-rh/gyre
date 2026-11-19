@@ -2,7 +2,7 @@
 title: "Publish reviewed spec backlog for specs/development/agent-workflow.md"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: complete
+progress: ready-for-review
 commits: []
 ---
 
