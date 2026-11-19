@@ -124,9 +124,8 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 ## Shipped
 
 All five send-path guards are implemented and retained on this branch
-(955c134a, 9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0), merged with current
-main (cd088f9c → task-254, 02e018de → task-259, d5a69026 → task-274,
-specs-only).
+(955c134a, 9dd4a1f0, 873d0821, 3bb9c9bd, a2781ff0, 951fa88b), merged
+with current main through this round's rebase.
 
 ### Behavior
 
@@ -137,7 +136,7 @@ specs-only).
    never constructed, stored, or broadcast.
 2. **Mem store contract** — `MemMessageRepository::store`
    (crates/gyre-server/src/mem.rs) returns `Err` on `workspace_id: None`,
-   matching the SQLite/PostgreSQL `message_to_new_row` contract; all send
+   matching the SQLite/PostgreSQL `message_to_new_row` contract; send
    paths skip `store()` for Broadcast destinations.
 3. **WS `acknowledged` exclusion** — both WebSocket Message
    serialization sites (live bus-delivery arm and Subscribe replay arm
@@ -160,49 +159,33 @@ specs-only).
    (nothing stored or broadcast), including Server-origin global-token
    callers. An unresolvable workspace record rejects fail-closed.
 
-### Verification repairs
+### This round — rebase onto 0ea6a629
 
-**Round 7 — task-254 fixture repair (951fa88b).** Retained
-verification (`cargo test --all`, exit 101) failed the three task-254
-tests in `crates/gyre-server/tests/message_size_and_key_rotation.rs`
-with 403 "target agent ... cannot be resolved; tenant isolation cannot
-be verified": those fixtures predate rule 1 and created only the target
-agent row, never the workspace record the guard resolves the tenant
-from. Fixed the fixtures — `create_agent` now creates the workspace row
-(tenant `default`, the global test token's system principal tenant)
-first, mirroring the `create_agent_in_workspace` helper this task's own
-tests use; the rotation test's boot 2 reuses the same SQLite DB so the
-row persists. No assertion weakened (same sends must still return
-201/413); production code unchanged.
-
-**Round 8 — attribution recording.** Retained verification
-(`bash /tmp/stage/checks.sh`, exit 1) failed the task-commit-attribution
-gate: 951fa88b mentions task-254 in its subject and touches product
-surface, so the gate requires its SHA in task-254's `commits:`
-frontmatter as well (review scoping). Recorded it there
-(specs/tasks/task-254.md, with a note in that task's Shipped record) —
-the frozen exemption file was NOT extended. No code change this round:
-`git diff 30e9049b..HEAD -- crates/ web/` is empty, so the verified
-candidate's code surface is bit-identical to this head; the merge with
-main (ee03c299, task-274 spec backlog) is specs-only.
+Resolved the DIRTY rebase onto base 0ea6a629 (task-253's MCP SSE
+workspace-filtering work). mcp.rs, docs/api-reference.md, and
+specs/tasks/task-253.md auto-merged cleanly — task-248's
+`handle_message_send` tenant-isolation guard and task-253's new
+`mcp_sse_handler` coexist without overlap. The single content conflict
+was specs/coverage/system/message-bus.md's "Last audited" paragraph,
+resolved as the union: this task's row 5/9/10 closure sentence is
+retained alongside task-253's row-14 SSE closure sentence. No
+production code changed this round; the five guards and their tests are
+bit-identical to the previously verified candidate.
 
 ### Test evidence
 
-- In-sandbox, current head plus the repair: `cargo check -p gyre-server
-  --tests` exit 0 (full unit+integration surface type-checked, including
-  the repaired file); `cargo fmt --check` clean. Evidence:
-  /tmp/stage/review-evidence/task-248-round7-fixture-repair.md.
-- The cargo wrapper defers gyre-server test execution to the independent
-  verifier (build-budget gate, no transport restriction). Required
-  deferred probes: (1) `cargo test -p gyre-server --test
-  message_size_and_key_rotation` — all three tests must pass; (2) full
-  `cargo test --all`, otherwise green in the retained run (2483+ passed,
-  only these three failed).
-- Prior rounds' in-sandbox probes for the five guards themselves
-  (origin-table probes, rule-1 cross-tenant 403 with empty store, WS
-  replay/live `acknowledged` exclusion, mem-store Err-on-None contract
-  test, scopeless-guard Err + error-level log) are unchanged by the
-  fixture-only and specs-only repairs and remain in the commits above.
-- Round 8 probe: `bash scripts/check-task-commit-attribution.sh` exits 0
-  after the task-254 frontmatter recording (it exited 1 on the retained
-  run with 951fa88b/task-254 as the only violation).
+- In-sandbox probes (prior rounds, unchanged by this specs-only round):
+  origin-table probes (Admin API-key/OIDC server_only 403, directed-send
+  membership 403, global-token Server origin + Broadcast authority,
+  rule-6 Admin-Broadcast allowance), rule-1 cross-tenant 403 with empty
+  store (REST + MCP), WS live/replay `acknowledged` exclusion, GET
+  inbox keeps `acknowledged`, mem-store Err-on-None contract test,
+  scopeless-guard Err + error-level log with empty store/broadcast.
+- Round-7 fixture repair (951fa88b): task-254's
+  message_size_and_key_rotation fixtures now create the target agent's
+  workspace row so rule-1 resolution succeeds; no assertion weakened.
+- Deferred to the independent verifier (build-budget gate): `cargo test
+  -p gyre-server --test message_size_and_key_rotation` and full
+  `cargo test --all`; `cargo check -p gyre-server --tests` and
+  `cargo fmt --check` are the in-sandbox type/format gates for this
+  round.
