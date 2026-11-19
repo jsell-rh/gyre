@@ -634,7 +634,6 @@ impl AgentSigningKey {
     /// are minted from spawn context via [`AgentSigningKey::mint_with_workload`]
     /// — a worker agent's token is scoped to its repo.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn mint_worker_scoped(
         &self,
         agent_id: &str,

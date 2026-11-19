@@ -217,7 +217,9 @@ fn verify_chain_and_extract_id(
 
     Ok(ChainVerified {
         spiffe_id,
-        serial: format!("{:x}", leaf.serial),
+        // Canonical big-integer hex — the SAME form issuance stamps on
+        // IssuedSvid::serial (see canonical_serial_hex).
+        serial: crate::canonical_serial_hex(&leaf.serial.to_bytes_be()),
         not_before: leaf.validity.not_before.timestamp(),
         not_after: leaf.validity.not_after.timestamp(),
     })

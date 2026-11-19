@@ -174,6 +174,21 @@ impl TrustDomainCa {
         not_before: OffsetDateTime,
         not_after: OffsetDateTime,
     ) -> anyhow::Result<IssuedSvid> {
+        let serial_bytes = random_serial();
+        self.issue_svid_with_serial(spiffe_id, not_before, not_after, serial_bytes)
+    }
+
+    /// Issue an X.509-SVID with an explicit serial (the random-serial core
+    /// shared by [`TrustDomainCa::issue_svid_with_validity`]; tests force
+    /// specific serial forms to pin the issuance/verification format
+    /// contract).
+    fn issue_svid_with_serial(
+        &self,
+        spiffe_id: &SpiffeId,
+        not_before: OffsetDateTime,
+        not_after: OffsetDateTime,
+        serial_bytes: [u8; 16],
+    ) -> anyhow::Result<IssuedSvid> {
         let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
         let mut params = CertificateParams::default();
         // SPIFFE X.509-SVID: exactly one SAN — the URI SAN holding the
@@ -193,7 +208,6 @@ impl TrustDomainCa {
         params.distinguished_name = dn;
         params.not_before = not_before;
         params.not_after = not_after;
-        let serial_bytes = random_serial();
         params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial_bytes));
 
         let leaf = params.signed_by(&leaf_key, &self.cert, &self.key)?;
@@ -205,7 +219,10 @@ impl TrustDomainCa {
             chain_pem,
             leaf_pem,
             private_key_pem: leaf_key.serialize_pem(),
-            serial: hex::encode(serial_bytes),
+            // Canonical (big-integer) hex — the SAME form verification
+            // extracts from the parsed leaf, so a genuine SVID can never
+            // be rejected for a serial-encoding mismatch.
+            serial: crate::canonical_serial_hex(&serial_bytes),
             not_before: not_before.unix_timestamp(),
             not_after: not_after.unix_timestamp(),
         })
@@ -267,6 +284,52 @@ mod tests {
         assert_eq!(verified.spiffe_id, id);
         assert_eq!(verified.serial, svid.serial);
         assert!(verified.not_after > verified.not_before);
+    }
+
+    /// Regression (task-261 review): issuance formatted the serial as
+    /// fixed-width `hex::encode(serial_bytes)` while verification
+    /// formatted it as a big-integer `{:x}` — a serial whose top byte is
+    /// `0x01..=0x0F` carried a leading zero nibble on one side only, so
+    /// ~12% of genuinely issued SVIDs were rejected as serial mismatches
+    /// (agent heartbeats permanently failing). Both sides now format
+    /// through `canonical_serial_hex`; this test forces the worst case
+    /// deterministically instead of relying on the random ~12%.
+    #[test]
+    fn issued_and_verified_serials_agree_on_leading_zero_nibbles() {
+        let ca = TrustDomainCa::generate("gyre.example.com").unwrap();
+        let id = SpiffeId::agent("gyre.example.com", "worker", "sess-lz").unwrap();
+        // Top byte 0x01: fixed-width hex would be "01..." — one leading
+        // zero nibble the big-integer form strips.
+        let mut serial = [0u8; 16];
+        serial[0] = 0x01;
+        for (i, b) in serial.iter_mut().enumerate().skip(1) {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(5);
+        }
+        let not_before = OffsetDateTime::now_utc() - time::Duration::minutes(5);
+        let not_after = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        let svid = ca
+            .issue_svid_with_serial(&id, not_before, not_after, serial)
+            .unwrap();
+        assert_eq!(
+            svid.serial.len(),
+            31,
+            "issued serial must be the stripped form (31 nibbles for a top byte of 0x01), got {}",
+            svid.serial
+        );
+        assert!(!svid.serial.starts_with('0'));
+
+        let anchors = vec![ca.cert_der().to_vec()];
+        let verified = verify_svid(
+            &svid.chain_pem,
+            &anchors,
+            &expected_for(&id),
+            std::time::SystemTime::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            verified.serial, svid.serial,
+            "issuance and verification must agree on the serial format"
+        );
     }
 
     #[test]

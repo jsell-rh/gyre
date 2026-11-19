@@ -260,7 +260,9 @@ impl SpiffeService {
             let (_, leaf) = x509_parser::parse_x509_certificate(&leaf_der)
                 .map_err(|e| format!("obtained leaf certificate is unparseable: {e}"))?;
             (
-                format!("{:x}", leaf.serial),
+                // Canonical big-integer hex — the form verification
+                // extracts from the parsed leaf (canonical_serial_hex).
+                gyre_spiffe::canonical_serial_hex(&leaf.serial.to_bytes_be()),
                 leaf.validity.not_before.timestamp(),
                 leaf.validity.not_after.timestamp(),
             )

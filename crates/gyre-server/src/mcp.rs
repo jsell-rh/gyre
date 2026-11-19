@@ -10807,10 +10807,31 @@ concepts:
         let (foreign_id, _foreign_token) = register_worker(&state, "w-hb-x", "r-x").await;
         let app = crate::build_router(state.clone());
 
+        // The heartbeat surface verifies the session's X.509-SVID
+        // (identity-security.md Layer 1, task-261): seed the worker's
+        // SVID-backed record through the issuance path and present the
+        // issued chain + bound stack fingerprint on the self heartbeat.
+        let svid = crate::spiffe::issue_session_svid(
+            &state,
+            &worker_id,
+            "worker",
+            "local",
+            "sha256:hb-test-stack",
+        )
+        .await
+        .expect("test SVID issuance must succeed");
+
         // Self heartbeat passes and records.
         let (_status, json) = mcp_post_with_token(
             app.clone(),
-            tool_call("gyre_agent_heartbeat", json!({ "agent_id": worker_id })),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({
+                    "agent_id": worker_id,
+                    "svid": svid.record.chain_pem,
+                    "stack_fingerprint": "sha256:hb-test-stack",
+                }),
+            ),
             &token,
         )
         .await;
@@ -10818,10 +10839,19 @@ concepts:
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("Heartbeat recorded"), "got: {text}");
 
-        // Foreign agent: denied pre-dispatch, naming the target.
+        // Foreign agent: denied pre-dispatch, naming the target. The denial
+        // is a scope decision made before the handler runs — it must not
+        // depend on (or be bypassable by) the payload's SVID presentation.
         let (_status, json) = mcp_post_with_token(
             app.clone(),
-            tool_call("gyre_agent_heartbeat", json!({ "agent_id": foreign_id })),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({
+                    "agent_id": foreign_id,
+                    "svid": svid.record.chain_pem,
+                    "stack_fingerprint": "sha256:hb-test-stack",
+                }),
+            ),
             &token,
         )
         .await;
