@@ -912,7 +912,14 @@ pub async fn post_meta_spec_preview(
     // ── Pass 2: budget.
     let requested = resolved.len() as u64;
     if let Some(max) = state.preview_budget_max_concurrent {
-        let running = count_running_preview_agents(&state).await;
+        // Fail closed on the enumeration: a kv-store failure means the number
+        // of running preview agents is unknown, and admitting the POST would
+        // fail the concurrency cap open.
+        let running = count_running_preview_agents(&state).await.map_err(|e| {
+            ApiError::Internal(anyhow::anyhow!(
+                "cannot enumerate preview agents for the budget check: {e:#}"
+            ))
+        })?;
         if running.saturating_add(requested) > max {
             return Err(ApiError::TooManyRequests(format!(
                 "preview budget exhausted: {running} preview agent(s) running, max_concurrent={max}, requested={requested}"
@@ -1392,15 +1399,11 @@ async fn require_preview_scope(
 
 /// Preview agents are `Active` ledger rows with a running process. Counted from
 /// the per-agent index so the query is bounded by preview runs, not by all
-/// agents.
-async fn count_running_preview_agents(state: &AppState) -> u64 {
-    let entries = match state.kv_store.kv_list(PREVIEW_AGENTS_NS).await {
-        Ok(entries) => entries,
-        Err(e) => {
-            tracing::warn!("cannot enumerate preview agents for the budget check: {e:#}");
-            return 0;
-        }
-    };
+/// agents. Fails closed: an enumeration error is surfaced to the caller so the
+/// budget admission check rejects the POST instead of admitting unboundedly
+/// against an unknown running count.
+async fn count_running_preview_agents(state: &AppState) -> anyhow::Result<u64> {
+    let entries = state.kv_store.kv_list(PREVIEW_AGENTS_NS).await?;
     let mut count = 0u64;
     for (agent_id, raw) in entries {
         // Only unreleased slots are live: a finished agent still has an index
@@ -1417,7 +1420,7 @@ async fn count_running_preview_agents(state: &AppState) -> u64 {
             }
         }
     }
-    count
+    Ok(count)
 }
 
 /// Map a ledger status + the terminal `released` flag to the wire status.
@@ -3176,8 +3179,10 @@ mod tests {
                 "draft kind must be injected; env was:\n{env}"
             );
             assert!(
-                env.contains("DRAFT-PERSONA-BODY: write exhaustive tests"),
-                "draft content must be injected; env was:\n{env}"
+                env.contains(
+                    "GYRE_META_SPEC_DRAFT_CONTENT=DRAFT-PERSONA-BODY: write exhaustive tests"
+                ),
+                "draft content must be injected via the GYRE_META_SPEC_DRAFT_CONTENT env var; env was:\n{env}"
             );
             assert!(
                 env.contains(&format!("GYRE_PREVIEW_ID={preview_id}")),
@@ -3756,8 +3761,9 @@ mod tests {
             "draft kind must reach the Pod manifest; manifest was:\n{manifest}"
         );
         assert!(
-            manifest.contains("DRAFT-PERSONA-BODY: write exhaustive tests"),
-            "draft content must reach the Pod manifest; manifest was:\n{manifest}"
+            manifest.contains("\"GYRE_META_SPEC_DRAFT_CONTENT\"")
+                && manifest.contains("DRAFT-PERSONA-BODY: write exhaustive tests"),
+            "draft content must reach the Pod manifest via the GYRE_META_SPEC_DRAFT_CONTENT env var; manifest was:\n{manifest}"
         );
         assert!(
             manifest.contains("\"GYRE_PREVIEW_ID\"") && manifest.contains(&preview_id),
@@ -3978,6 +3984,48 @@ mod tests {
             self.inner.kv_remove(namespace, key).await
         }
         async fn kv_list(&self, namespace: &str) -> anyhow::Result<Vec<(String, String)>> {
+            self.inner.kv_list(namespace).await
+        }
+        async fn kv_clear(&self, namespace: &str) -> anyhow::Result<()> {
+            self.inner.kv_clear(namespace).await
+        }
+    }
+
+    /// kv wrapper whose `kv_list` on one namespace fails — forces the
+    /// preview-budget enumeration failure path, proving it fails closed
+    /// (the POST is rejected, not admitted against an unknown count).
+    struct ListFailingKv {
+        inner: std::sync::Arc<dyn gyre_ports::KvJsonStore>,
+        fail_namespace: &'static str,
+    }
+
+    impl ListFailingKv {
+        fn new(
+            inner: std::sync::Arc<dyn gyre_ports::KvJsonStore>,
+            fail_namespace: &'static str,
+        ) -> Self {
+            Self {
+                inner,
+                fail_namespace,
+            }
+        }
+    }
+
+    #[axum::async_trait]
+    impl gyre_ports::KvJsonStore for ListFailingKv {
+        async fn kv_set(&self, namespace: &str, key: &str, value: String) -> anyhow::Result<()> {
+            self.inner.kv_set(namespace, key, value).await
+        }
+        async fn kv_get(&self, namespace: &str, key: &str) -> anyhow::Result<Option<String>> {
+            self.inner.kv_get(namespace, key).await
+        }
+        async fn kv_remove(&self, namespace: &str, key: &str) -> anyhow::Result<()> {
+            self.inner.kv_remove(namespace, key).await
+        }
+        async fn kv_list(&self, namespace: &str) -> anyhow::Result<Vec<(String, String)>> {
+            if namespace == self.fail_namespace {
+                anyhow::bail!("injected kv list failure for namespace {namespace}");
+            }
             self.inner.kv_list(namespace).await
         }
         async fn kv_clear(&self, namespace: &str) -> anyhow::Result<()> {
@@ -4807,6 +4855,157 @@ mod tests {
         .await;
     }
 
+    /// The stale-agent-abort leg of the exactly-once slot release: when the
+    /// heartbeat detector aborts an Active preview agent (Dead transition),
+    /// it decrements the workspace slot itself and must flag the preview
+    /// slot released (`mark_preview_slot_released`) so every preview-owned
+    /// release that can still observe the run — the process-exit monitor,
+    /// DELETE teardown and the GC sweep — releases nothing. Without the
+    /// flag, each of them double-decrements the same slot (decrement is
+    /// MAX(0, n-1): permanent downward bias, over-admission past
+    /// max_concurrent_agents).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_abort_releases_preview_slot_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, ws_id) = preview_state(dir.path(), 86_400, None).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Long-lived processes: the stale transition must not kill them, so
+        // the exit-monitor leg runs against a genuinely registered process.
+        let script = dir.path().join("agent-sleep.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 300\n").unwrap();
+        make_executable(&script);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            async fn active_agents(state: &crate::AppState, key: &str) -> u32 {
+                state
+                    .budget_usages
+                    .get_usage(key)
+                    .await
+                    .unwrap()
+                    .map(|u| u.active_agents)
+                    .unwrap_or(0)
+            }
+            async fn released_flag(state: &crate::AppState, agent_id: &str) -> bool {
+                let raw = state
+                    .kv_store
+                    .kv_get("preview_agents", agent_id)
+                    .await
+                    .unwrap()
+                    .expect("preview agent index entry must exist");
+                serde_json::from_str::<serde_json::Value>(&raw).unwrap()["released"]
+                    .as_bool()
+                    .unwrap()
+            }
+            let ws_key = crate::api::budget::workspace_key(ws_id.as_str());
+
+            // Stale-abort an Active preview agent: Abort behavior + a
+            // heartbeat aged past the detector's 60 s window.
+            async fn stale_abort(state: &std::sync::Arc<crate::AppState>, agent_id: &str) {
+                let mut aged = state
+                    .agents
+                    .find_by_id(&gyre_common::Id::new(agent_id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                aged.disconnected_behavior = gyre_domain::DisconnectedBehavior::Abort;
+                aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+                aged.last_heartbeat = None;
+                state.agents.update(&aged).await.unwrap();
+                crate::stale_agents::run_once(state).await.unwrap();
+            }
+
+            // Run A: exit monitor + DELETE after the stale abort.
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let a_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            assert_eq!(active_agents(&state, &ws_key).await, 1);
+
+            stale_abort(&state, &a_id).await;
+            let row = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&a_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.status, gyre_domain::AgentStatus::Dead);
+            assert_eq!(
+                active_agents(&state, &ws_key).await,
+                0,
+                "the stale abort must decrement the slot exactly once"
+            );
+            assert!(
+                released_flag(&state, &a_id).await,
+                "the stale abort must write the preview released flag (mark_preview_slot_released)"
+            );
+
+            // The process later exits: the monitor's real transition. The
+            // preview finish path must see the flag and release nothing.
+            crate::api::spawn::on_agent_process_exit(&state, &a_id).await;
+            assert_eq!(
+                active_agents(&state, &ws_key).await,
+                0,
+                "process exit must not re-release a slot the stale abort released"
+            );
+
+            // Human clears the run: DELETE teardown must release nothing.
+            let resp = delete_preview(&app, json["preview_id"].as_str().unwrap()).await;
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                active_agents(&state, &ws_key).await,
+                0,
+                "DELETE must not re-release a slot the stale abort released"
+            );
+
+            // Run B: the GC sweep after the stale abort.
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/identity.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let b_preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let b_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            assert_eq!(active_agents(&state, &ws_key).await, 1);
+
+            stale_abort(&state, &b_id).await;
+            assert_eq!(active_agents(&state, &ws_key).await, 0);
+            assert!(released_flag(&state, &b_id).await);
+
+            // Age the run past its TTL and sweep: the GC teardown must
+            // release nothing and reclaim the run.
+            let raw = state
+                .kv_store
+                .kv_get("meta_spec_previews", &b_preview_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut record: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            record["created_at"] = serde_json::json!(0);
+            state
+                .kv_store
+                .kv_set("meta_spec_previews", &b_preview_id, record.to_string())
+                .await
+                .unwrap();
+            super::run_once(&state).await.unwrap();
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &b_preview_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "aged run must be swept"
+            );
+            assert_eq!(
+                active_agents(&state, &ws_key).await,
+                0,
+                "GC must not re-release a slot the stale abort released"
+            );
+        })
+        .await;
+    }
+
     /// Role and target validation: read-only caller 403, unknown repo 404,
     /// unknown spec path 400, empty targets 400, empty draft 400.
     #[tokio::test(flavor = "multi_thread")]
@@ -5186,6 +5385,38 @@ mod tests {
             delete_preview(&app, &preview_id).await;
         })
         .await;
+    }
+
+    /// Fail-closed budget enumeration: with the preview cap set, a kv-store
+    /// failure while counting running preview agents must REJECT the POST —
+    /// not admit unboundedly against an unknown running count (the pre-fix
+    /// behavior returned 0 from the count and let the request through).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_budget_enumeration_failure_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, repo_id, _ws_id) = preview_state(dir.path(), 86_400, Some(4)).await;
+
+        let mut failing = (*state).clone();
+        failing.kv_store =
+            std::sync::Arc::new(ListFailingKv::new(state.kv_store.clone(), "preview_agents"));
+        let app = crate::api::api_router().with_state(std::sync::Arc::new(failing));
+
+        let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Rejected before provisioning: no preview agent rows, no run record,
+        // no held slots.
+        let agents = state.agents.list().await.unwrap();
+        assert!(
+            agents.iter().all(|a| !a.name.starts_with("preview-")),
+            "a rejected budget check must not leave preview agent rows behind"
+        );
+        assert!(state
+            .kv_store
+            .kv_list("meta_spec_previews")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// GC TTL boundary: a run at/past the TTL is deleted, one just under it
