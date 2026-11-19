@@ -3,7 +3,7 @@ title: "Message send-path guards: scope validation, mem store contract, WS ackno
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["955c134a8c669070c3b936eac55f0e5e3f448418", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "873d0821ca7a33501c178303bdc618a1802ccbb6", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "a2781ff06b71bc443eda82aa1c0022edf011c972"]
+commits: ["a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
 ---
 
 ## Required behavior
