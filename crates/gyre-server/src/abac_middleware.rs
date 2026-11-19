@@ -318,6 +318,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/agents/:id/logs/stream", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id/stack", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/:id/workload", "agent", None),
+                RouteResourceMapping::api("/api/v1/agents/:id/attest", "agent", Some("write")),
                 RouteResourceMapping::api("/api/v1/agents/:id/container", "agent", None),
                 // ── Compose ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/compose/apply", "compose", Some("write")),
@@ -5707,6 +5708,9 @@ pub mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         // Register it so the auth extractor resolves the agent identity.
@@ -5941,6 +5945,9 @@ pub mod tests {
                 Some("repo-orchestrator"),
                 Some(3),
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         let weak = state
@@ -5957,6 +5964,9 @@ pub mod tests {
                 "repo-1",
                 None,
                 Some(1),
+                None,
+                None,
+                None,
                 None,
             )
             .unwrap();
@@ -7322,6 +7332,9 @@ pub mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
         state
@@ -7414,6 +7427,9 @@ pub mod tests {
                 "ws-agent-scope",
                 "repo-scope-a",
                 "repo-repo-scope-a",
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,

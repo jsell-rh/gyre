@@ -5443,6 +5443,15 @@ fn test_state_inner(
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
+        spiffe: Arc::new(
+            crate::spiffe::SpiffeService::local(
+                "gyre.example.com".to_string(),
+                gyre_spiffe::TrustDomainCa::generate("gyre.example.com")
+                    .expect("test CA generation must succeed"),
+                gyre_spiffe::BASE_SVID_TTL_SECS,
+            )
+            .expect("test SPIFFE service construction must succeed"),
+        ),
         repos: Arc::new(MemRepoRepository::default()),
         agents,
         tasks,

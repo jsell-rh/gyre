@@ -137,7 +137,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/agents/{id}` | Get agent — includes `attestation_level` (1..=3) resolved at the agent's last push: 3 = Gyre-managed container (server-verified), 2 = registered stack (self-reported), 1 = raw push, no attestation; `null` before the first push (task-165, supply-chain.md §Attestation Levels) |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status — `AgentStatus` variants: `Spawning`, `Running`, `Paused`, `Completed`, `Failed`, `Dead`, `Cancelled`; `Paused` used during BCP disconnected mode (M23.3, agent-runtime spec) |
 | `POST` | `/api/v1/agents/{id}/usage` | Record LLM usage for an agent — `{tokens_input, tokens_output, cost_usd}`; reported by the cred-proxy sidecar after each proxied LLM call; accumulated in budget tracking (agent-runtime.md §4: charged to the repo, rolled up to workspace + tenant) and followed by budget enforcement on every report — 80% → `BudgetWarning` message + notification; ≥100% → the configured `enforcement_action`, default `GracefulStop` (`BudgetExhausted` to active agents, 60s grace, then kill with work preserved + reassignment task; platform-model.md §5); `attestation.meta_specs_used` updated with active workspace meta-spec SHA (agent-runtime spec) |
-| `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat; on Linux, verifies PID liveness via `/proc/{pid}` and logs a warning if the process is no longer running (G10) |
+| `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat — body `{svid, stack_fingerprint?}`: the session's X.509-SVID (PEM chain, leaf first — the `GYRE_SVID_PEM` env var) is verified fail-closed against the trust domain's published trust bundle (chain validation, validity window, SPIFFE ID bound to this agent session, stack-fingerprint binding); 403 + `agent_heartbeat` audit event (Failure outcome) on any failed check — there is no bypass for unattested workloads (identity-security.md Layer 1, replaces the G10 `/proc/{pid}` probe). 204 on success |
 | `POST/GET` | `/api/v1/agents/{id}/messages` | Send/poll agent messages |
 | `POST` | `/api/v1/agents/{id}/logs` | Append a log line to the agent's log buffer (M11.2) |
 | `GET` | `/api/v1/agents/{id}/logs` | Paginated agent log lines (`?limit=100&offset=0`) (M11.2) |
@@ -145,7 +145,9 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/agents/{id}/touched-paths` | All repo branches and file paths written to by this agent (M13.4) |
 | `POST` | `/api/v1/agents/{id}/stack` | Agent self-reports its runtime stack fingerprint at spawn (M14.1) |
 | `GET` | `/api/v1/agents/{id}/stack` | Query agent's registered stack fingerprint (M14.1) |
-| `GET` | `/api/v1/agents/{id}/workload` | Current workload attestation — `{pid, hostname, compute_target, stack_hash, alive}`: captured at spawn; `alive` re-checked via `/proc/{pid}` on Linux (G10) |
+| `GET` | `/api/v1/agents/{id}/workload` | Current workload attestation record — `{pid, hostname, compute_target, stack_fingerprint, spiffe_id, svid_serial, svid_verified_at, alive}`: `pid`/`hostname`/`compute_target` are spawn-time metadata; `alive` is the workload-identity verification result (the SVID path flips it — `true` on a verified presentation, `false` on a rejected one), not a `/proc` probe (identity-security.md Layer 1) |
+| `POST` | `/api/v1/agents/{id}/attest` | Present the session's X.509-SVID for workload-identity verification — body `{svid, stack_fingerprint?}`; verifies the chain against the published trust bundle, enforces the validity window, binds the SPIFFE ID to this agent session and the stack fingerprint to the SVID-backed record. Fail-closed: 403 with the rejection reason on any failed check (identity-security.md Layer 1) |
+| `GET` | `/.well-known/spiffe/keys.json` | The trust domain's X.509-SVID trust anchors in SPIFFE bundle format (JWK Set, `use: "svid"`, `x5c` chains) — the sole verification anchor for SVIDs, published unauthenticated at the standard well-known location (any verifier must be able to check SVIDs, same model as the OIDC JWKS endpoint) |
 | `GET` | `/api/v1/agents/{id}/container` | Container audit record for this agent -- `ContainerAuditRecord`: `container_id`, `image`, `image_hash`, `runtime` (e.g. `"docker"`), `started_at`, `stopped_at?`, `exit_code?`; 404 if agent was not container-spawned (M19.3) |
 | `GET` | `/ws/agents/{id}/tty` | WebSocket TTY attach — auth via first-message Bearer token; replays buffered logs then streams live PTY output (M11.2) |
 | `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=&workspace_id=`); canonical `status` values (snake_case): `backlog`, `in_progress`, `review`, `done`, `blocked` |
@@ -291,7 +293,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/admin/impersonate/{request_id}` | **Admin only** (must be the impersonating admin) — end the session; revokes the token immediately and emits `ImpersonationEnded` with `duration_secs`/`actions_taken` |
 | `GET` | `/*` | Svelte SPA dashboard (served from `web/dist/`) |
 | `POST` | `/mcp` | MCP JSON-RPC 2.0 handler (`initialize`, `tools/list`, tool calls) — requires authentication |
-| `GET` | `/mcp/sse` | MCP SSE stream — typed AG-UI activity events — requires authentication |
+| `GET` | `/mcp/sse` | MCP SSE stream — workspace-scoped bus messages as typed AG-UI activity events — requires authentication |
 | `GET` | `/api/v1/agents/discover` | Discover active agents by capability (`?capability=<str>`) |
 | `PUT` | `/api/v1/agents/{id}/card` | Publish / update an agent's A2A AgentCard |
 | `POST` | `/api/v1/compose/apply` | Apply agent-compose spec (JSON or YAML), creates agent tree in dependency order |
@@ -503,7 +505,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 
 **Endpoints:**
 - `POST /mcp` — JSON-RPC 2.0. Methods: `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`. Requires authentication.
-- `GET /mcp/sse` — SSE stream of typed AG-UI activity events. Requires authentication.
+- `GET /mcp/sse` — SSE stream of server→client notifications and typed AG-UI activity events, scoped to the authenticated agent's workspace (Workspace-destination and Broadcast messages, plus Directed messages addressed to the agent itself; other workspaces'/tenants' messages and other agents' directed messages are never delivered). Event names follow the AG-UI mapping (message-bus.md §MCP Integration): `TOOL_CALL_START`, `TOOL_CALL_END`, `RUN_STARTED`, `RUN_FINISHED`, `TEXT_MESSAGE_CONTENT`, `STATE_CHANGED`, `ERROR` (AgentError); kinds outside the spec table are emitted as generic `message` events. The SSE `data` payload is the raw `Message` envelope JSON. Requires authentication.
 
 **Available tools** (from `tools/list`):
 
@@ -515,7 +517,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_create_mr` | Create a merge request |
 | `gyre_list_mrs` | List merge requests (`status`, `repository_id` filters) |
 | `gyre_record_activity` | Log a typed AG-UI activity event |
-| `gyre_agent_heartbeat` | Send agent heartbeat |
+| `gyre_agent_heartbeat` | Send agent heartbeat — args `{agent_id, svid, stack_fingerprint?}`: carries the session's X.509-SVID (`GYRE_SVID_PEM`) for the same fail-closed workload-identity verification as the HTTP heartbeat; a heartbeat without a valid SVID is rejected (identity-security.md Layer 1) |
 | `gyre_agent_complete` | Signal task completion (opens MR, cleans worktree) |
 | `gyre_search` | Full-text search across all entities (`q`, `entity_type`, `workspace_id`, `limit` params; `q` supports the full query language — quoted phrases and `type:`/`workspace:`/`repo:`/`status:`/`priority:`/`label:`/`since:`/`until:` facets; facets in `q` take precedence over the `entity_type`/`workspace_id` args) — access-scoped to the agent's token context; `workspace_id` only narrows within that scope and must resolve within the caller's tenant (rejected on cross-tenant or unknown id, same rule as `GET /api/v1/search`); execution records the `search.query` analytics event with caller-bound identity (M22.7, task-154, search.md §Access Scoping, analytics.md §Auto-Emitted Events) |
 | `gyre_analytics_query` | Decision-support analytics (`query_type`: `usage`\|`compare`\|`top`); wraps the three M23 analytics endpoints (M23) |

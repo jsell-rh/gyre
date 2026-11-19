@@ -765,6 +765,25 @@ pub(crate) async fn relaunch_agent_session(
             repo.id
         ),
     };
+    // Layer 1 wl_* claims (identity-security.md): the same spawn-time
+    // evidence the first spawn mint carries — the session's stack
+    // fingerprint (resolved once; the SVID issuance below binds the same
+    // value), the resolved authorized compute target, and the host.
+    let respawn_compute_target_label = resolved_ct_entity
+        .as_ref()
+        .map(|e| e.id.to_string())
+        .unwrap_or_else(|| "local".to_string());
+    let respawn_stack_evidence = crate::spiffe::resolve_session_stack_evidence(
+        state,
+        agent.id.as_str(),
+        &respawn_compute_target_label,
+        resolved_ct_entity.as_ref(),
+        wl_image_hash.as_deref(),
+        persona.as_ref().map(|p| p.slug.as_str()),
+    )
+    .await;
+    let wl_stack_hash = Some(respawn_stack_evidence.clone());
+    let wl_compute_target = respawn_compute_target_label.clone();
     let token = state
         .agent_signing_key
         .mint_worker_scoped(
@@ -790,6 +809,9 @@ pub(crate) async fn relaunch_agent_session(
                         gyre_domain::ComputeTargetType::Kubernetes => 1,
                     }),
             ),
+            Some(crate::workload_attestation::read_hostname()),
+            Some(wl_compute_target),
+            wl_stack_hash,
             wl_image_hash,
         )
         .map_err(|e| anyhow::anyhow!("re-spawn JWT mint: {e}"))?;
@@ -813,6 +835,7 @@ pub(crate) async fn relaunch_agent_session(
         state,
         &crate::api::spawn::AgentLaunchCtx {
             agent: agent.clone(),
+            stack_fingerprint: respawn_stack_evidence.clone(),
             workspace,
             repo: repo.clone(),
             task: task.clone(),
@@ -835,21 +858,31 @@ pub(crate) async fn relaunch_agent_session(
             is_interrogation: false,
         },
     )
-    .await;
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "re-spawn launch (incl. SVID issuance) failed for agent {}: {e:#}",
+            agent.id
+        )
+    })?;
 
     if !launch.launched {
         anyhow::bail!("compute-target spawn failed for re-spawn");
     }
 
     // Workload attestation for the new session (same record shape as the
-    // first spawn — queryable via GET /agents/:id/workload).
+    // first spawn — queryable via GET /agents/:id/workload), carrying the
+    // SVID identity issued inside launch_agent_process and the stack
+    // evidence the JWT wl_stack_hash claim carries.
     let att = crate::workload_attestation::attest_agent_with_container(
         agent.id.as_str(),
         launch.pid,
         &launch.compute_target_label,
-        "",
+        &respawn_stack_evidence,
         launch.container_id.clone(),
         launch.container_image.clone(),
+        launch.spiffe_id.clone(),
+        launch.svid_serial.clone(),
     );
     if let Ok(json) = serde_json::to_string(&att) {
         let _ = state

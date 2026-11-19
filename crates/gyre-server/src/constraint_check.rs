@@ -2461,6 +2461,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: Some("container-xyz".to_string()),
             image_hash: Some("sha256:img-def".to_string()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         let json = serde_json::to_string(&att).unwrap();
         state
@@ -2498,6 +2501,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: None,
             image_hash: None,
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         assert_eq!(derive_attestation_level(Some(&att)), 1);
     }
@@ -2516,6 +2522,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: None,
             image_hash: None,
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         assert_eq!(derive_attestation_level(Some(&att)), 2);
     }
@@ -2534,6 +2543,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: Some("ctr-123".to_string()),
             image_hash: Some("sha256:img-456".to_string()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         assert_eq!(derive_attestation_level(Some(&att)), 3);
     }
@@ -2553,6 +2565,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: Some(String::new()),
             image_hash: Some(String::new()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         assert_eq!(derive_attestation_level(Some(&att)), 2);
     }
@@ -2646,6 +2661,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: None,
             image_hash: None,
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         state
             .kv_store
@@ -2671,6 +2689,9 @@ mod tests {
             last_verified_at: 1_700_000_000,
             container_id: Some("ctr-abc".to_string()),
             image_hash: Some("sha256:img-xyz".to_string()),
+            spiffe_id: None,
+            svid_serial: None,
+            svid_verified_at: None,
         };
         state
             .kv_store
