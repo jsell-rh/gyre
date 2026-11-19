@@ -229,6 +229,14 @@ uncertain or queued merge retains that permit, while other candidates continue
 verification and publication. Per-task claims, safety holds, dependencies,
 independent review, exact-head CI, and upstream-tree confirmation still apply.
 
+When workflow-wide logs are unavailable because sibling jobs still run, the
+observer reads the completed failed job's logs after checking its head and
+attempt identity. If neither log source is available, merge remains blocked
+while diagnosis waits; absent logs do not create a speculative coding repair.
+For Python gate failures, an unchanged failing test that main has since edited
+requests fresh exact-tree verification and CI against main first. This is not
+approval: a failure on the refreshed base follows normal repair handling.
+
 A completed verification receipt stays pinned to its original tested head and
 base while main advances. The publisher checks freshness when CI becomes ready.
 It can reuse that original head only if Git proves the resulting merge tree is
@@ -311,6 +319,16 @@ the exact assigned candidate and base. Full commit ancestry is retained for
 attribution; unrelated historical attempt branches are excluded. Checkout blobs
 are materialized as needed and no host-local object alternates are copied into
 the sandbox. Remote Git access remains available for historical blob reads.
+
+After implementation tools stop, the trusted checkpoint finalizer runs the
+worker image's rustfmt on Rust files newly added since the assignment base.
+It includes committed and untracked additions, even after metadata-only commits,
+and leaves existing files' formatting debt alone. Formatting happens before the
+checkpoint and commit attribution, so independent review sees the actual
+normalized source. Formatter failures retain an unapproved source checkpoint;
+symlinks and shared files are rejected. Existing differential formatting checks
+remain mandatory in verification and CI. No prior approval transfers to a
+changed checkpoint.
 
 The model is `gateway/rits/zai-org/glm-5-3`. Fullsend strips `gateway/` and calls
 `https://api.enmaas.devshift.net/v1/chat/completions`, using the inline pinned
@@ -932,6 +950,11 @@ verified coverage. No-gap audits still require independent plan review; they do
 not manufacture implementation tasks or tests for working behavior. Audit and
 plan preparation are source inspection only; their build wrappers reject tests
 and builds. Product changes still pass all existing deterministic gates.
+Workflow YAML, Docker source and public root build manifests also qualify as
+literal behavior evidence, so CI, release and packaging specs can cite their
+actual implementation. These configuration files participate in evidence
+freshness and duplicate-plan detection. The new configuration allowances exclude
+`.env`, private-key files, credential JSON and other hidden directories.
 
 An assigned document is re-audited after its linked tasks are satisfied. Observed
 documents are re-audited when inspected source changes or the audit interval

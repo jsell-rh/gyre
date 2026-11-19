@@ -194,6 +194,7 @@ class EfficiencyTests(unittest.TestCase):
         self.assertEqual(reconcile_generated(self.store),['task-001'])
         self.assertIsNone(self.store.task('task-001')['data']['review'])
         self.assertIsNone(self.store.task('task-001')['data']['repair'])
+
         data=self.store.task('task-001')['data']
         self.assertEqual(data['candidate'],self.head)
         self.assertEqual(data['review_retry']['policy'],'generated-assets-owned-by-verifier-v1')
@@ -250,6 +251,23 @@ class EfficiencyTests(unittest.TestCase):
         self.assertEqual(self.store.task('task-001')['data']['candidate'],raw)
         self.assertEqual(self.store.task('task-001')['data']['verified'],receipt)
         self.assertIsNone(self.store.task('task-001')['data']['repair'])
+
+        # A recovered approval must immediately make the new base verifiable;
+        # restoring the old passing receipt alone strands a failed open PR.
+        old={'candidate':published,'repair':{'category':'ci','source':published},
+             'pr':'url','published_head':published,'published_verified':receipt,
+             'dependencies':[],'triaged':'g'}
+        self.store.put_task('task-001','g','body',old)
+        observation={'status':'environment_refresh','target_base':'f'*40,'failure_signature':'e'*64}
+        self.assertTrue(recover_setup_handoff(self.execution,self.store.task('task-001'),receipt,observation))
+        restored=self.store.task('task-001')
+        self.assertIsNone(restored['data']['verified'])
+        self.assertTrue(restored['data']['review']['approved'])
+        from pipeline.ci import verification_ready
+        from pipeline.catalog import discover
+        self.assertFalse(verification_ready(self.store,restored,self.base))
+        self.assertTrue(verification_ready(self.store,restored,'f'*40))
+        self.assertEqual(len(discover(self.store,'verify','f'*40)),1)
 
     def test_efficiency_report_does_not_count_abandoned_old_claims_as_active_all_night(self):
         metrics=helper('dev-efficiency');now=1000000

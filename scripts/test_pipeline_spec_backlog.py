@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -524,6 +525,51 @@ class SpecBacklogTests(unittest.TestCase):
         forged=self.audit();forged['sections'][1]['evidence'][0]['quote']='invented source'
         self.assertEqual(check(forged).returncode,1)
         self.assertEqual(check({'planning':self.audit()}).returncode,2)
+
+    def test_workflow_behavior_evidence_passes_both_validators_and_tracks_configuration_changes(self):
+        from pipeline.spec_backlog import current_evidence
+        (self.repo/'specs/system/example.md').write_text(
+            '# Example\nContext for this specification.\n\n## CI\nGitHub Actions must execute the mechanical guard.\n')
+        workflow=self.repo/'.github/workflows/ci.yml';workflow.parent.mkdir(parents=True)
+        workflow.write_text('name: CI\non: [push]\njobs:\n  checks:\n    runs-on: ubuntu-24.04\n'
+                            '    steps:\n      - run: bash scripts/check-arch.sh\n')
+        self.git('add','.');self.git('commit','-qm','CI contract and implementation')
+        self.base=self.git('rev-parse','HEAD');inventory(self.store,self.repo,self.base)
+        task=self.store.task(self.name);rows=[]
+        for identity,heading in task['data']['sections'].items():
+            normative=heading[-1]=='CI'
+            rows.append({'id':identity,'decision':'satisfied' if normative else 'context',
+                'requirement_quote':'GitHub Actions must execute the mechanical guard.' if normative else 'Context for this specification.',
+                'detail':'The workflow executes the guard on push.' if normative else 'Introductory rationale',
+                'evidence':[{'file':'.github/workflows/ci.yml','quote':'- run: bash scripts/check-arch.sh',
+                             'detail':'The Actions job invokes the actual mechanical guard.'}] if normative else []})
+        report={'base':self.base,'requirements':task['generation'],'sections':rows}
+        validated=validate_audit(report,task,self.base,self.repo)
+        self.assertEqual([r['file'] for r in validated['source_evidence']],['.github/workflows/ci.yml'])
+        path=self.root/'ci-audit.json';path.write_text(json.dumps(report))
+        command=[sys.executable,str(Path(__file__).with_name('pipeline-evidence.py')),str(path),'--root',str(self.repo)]
+        self.assertEqual(subprocess.run(command,capture_output=True).returncode,0)
+        self.assertTrue(current_evidence(self.repo,validated['source_evidence']))
+        workflow.write_text('name: CI\non: [push]\njobs: {}\n')
+        self.assertFalse(current_evidence(self.repo,validated['source_evidence']))
+        with self.assertRaises(ValueError):validate_audit(report,task,self.base,self.repo)
+        self.assertEqual(subprocess.run(command,capture_output=True).returncode,1)
+
+    def test_public_build_configuration_is_evidence_but_private_paths_remain_rejected(self):
+        module=helper('pipeline-evidence')
+        for name in ('Cargo.toml','Cargo.lock','Dockerfile','flake.nix','.cargo/config.toml',
+                     'docker/gyre-agent/entrypoint.sh','docker/dev-worker/policy.yaml'):
+            with self.subTest(path=name):
+                path=self.repo/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('public configuration\n')
+                self.assertTrue(module.production_source(name))
+                self.assertEqual(module.evidence(self.repo,{'file':name,'quote':'public configuration','detail':'Inspected configuration'})['file'],name)
+        for name in ('.env','credentials.json','.aws/credentials','.github/secrets.yml',
+                     '.github/workflows/api-token.env','docker/dev-worker/auth.json','docker/dev-worker/private.key',
+                     'docker/dev-worker/.ssh/config'):
+            with self.subTest(path=name):
+                path=self.repo/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('private fixture\n')
+                self.assertFalse(module.production_source(name))
+                with self.assertRaises(ValueError):module.evidence(self.repo,{'file':name,'quote':'private fixture','detail':'Must not admit this file'})
 
     def test_full_inventory_plan_index_stays_small_and_preserves_full_details_on_demand(self):
         from pipeline.spec_backlog import planning_context
