@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: complete
-commits: ["a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
+progress: ready-for-review
+commits: ["955c134a8c669070c3b936eac55f0e5e3f448418", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "873d0821ca7a33501c178303bdc618a1802ccbb6", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "a2781ff06b71bc443eda82aa1c0022edf011c972", "8a92d51b"]
 ---
 
 ## Required behavior
@@ -123,13 +123,12 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 
 ## Shipped
 
-All five send-path guard deviations from the Message Envelope and Scoping
-Rules sections are implemented in production code (955c134a, 9dd4a1f0,
-round-4 fail-closed repair 873d0821, round-5 test repair 3bb9c9bd, round-7
-clippy repair a2781ff0), and the branch is rebased onto 321615ec
-(task-250's WebSocket replay-window work) with behavior preserved.
+The task-248 implementation is retained in full on this branch, and this
+round resolved the DIRTY merge against current main (`61b6080d`, task-251
+Directed inbox lifecycle) as merge commit `8a92d51b`, preserving every
+send-path guard.
 
-### Behavior
+### Retained implementation (955c134a, 9dd4a1f0, round-4 fail-closed repair 873d0821, round-5 test repair 3bb9c9bd, round-7 clippy repair a2781ff0)
 
 1. **Scopeless-message guard** — `emit_scoped_event`
    (crates/gyre-server/src/lib.rs), the shared body of the internal
@@ -160,29 +159,41 @@ clippy repair a2781ff0), and the branch is rebased onto 321615ec
    its tenant with the caller's verified tenant; mismatch rejects 403
    (nothing stored or broadcast), including Server-origin global-token
    callers. An unresolvable workspace record rejects fail-closed rather
-   than skip-and-log (round-4 repair 873d0821).
+   than skip-and-log.
 
-### Round-7 repair (a2781ff0)
+### This round: merge repair (8a92d51b)
 
-Verification finding: the round-6 scopeless-guard test bound the
-captured-logs `MutexGuard` via `let logs = logs.lock().unwrap()` in an
-async test body with later awaits, tripping `clippy::await_holding_lock`
-(checks.sh exit 1; the only diff-scoped clippy finding). The captured
-`(level, message)` records are now cloned out in a single statement so
-the guard never survives across an await. Production code unchanged.
+Merged main `61b6080d` (task-251) into the branch. Main's changes since
+the merge base `67cc0398` touch only `api/spawn.rs`, `mcp.rs`, and
+`stale_agents.rs` (additive `acknowledge_agent_inbox` lifecycle code in
+functions disjoint from the send path), so every task-248 guard file
+(`api/messages.rs`, `ws.rs`, `lib.rs`, `mem.rs`, `auth.rs`) is preserved
+byte-identically. The sole textual conflict — the `Last-audited` header of
+`specs/coverage/system/message-bus.md`, where both sides appended audit
+notes — is resolved as the union: the task-248, task-250, and task-251
+notes are all retained, rows 5/9/10 carry the task-248 evidence and row 16
+the task-251 evidence.
 
 ### Test evidence
 
-Fourteen focused tests cover every acceptance criterion (list and probe
-transcripts in /tmp/stage/review-evidence/task-248-evidence.md and
-task-248-round7-repair.md). Executed in this sandbox this round:
-`rustfmt --check` on lib.rs (exit 0), `cargo check -p gyre-server --lib
---tests` (exit 0), and `cargo clippy -p gyre-server --lib --tests -- -A
-clippy::all -W clippy::await_holding_lock` (exit 0, zero findings).
-gyre-server test codegen exceeds the sandbox 4 GiB budget and is deferred
-to the independent verifier, which must run:
-`cargo test -p gyre-server --lib emit_scoped_event_rejects_scopeless_non_broadcast_message`
-(expect: Err + error-level log + no store/broadcast/dispatch for scopeless
-non-Broadcast; Broadcast and scoped controls pass) plus the other thirteen
-focused tests listed in the evidence file, and full checks.sh including
-check-clippy-diff.py against base 321615ec.
+- In-sandbox, on the merged tree: `cargo check -p gyre-server --tests`
+  clean (full unit-test surface type-checked, exit 0, web assets rebuilt
+  by build.rs); `cargo fmt --all -- --check` clean.
+- gyre-server test-binary compilation is deferred to the independent
+  verifier per the sandbox 4 GiB budget contract. Suites to run (all green
+  on the task-248 lineage pre-merge; the merge adds only disjoint-function
+  task-251 code):
+  `message_send*` (api/messages.rs guard suite incl.
+  `admin_api_key_cannot_forge_server_only_kind`,
+  `cross_tenant_directed_send_rejected_for_server_origin`,
+  `unresolvable_target_workspace_rejects_send`),
+  `emit_scoped_event_rejects_scopeless_non_broadcast_message`,
+  `mem_store_rejects_scopeless_message`, `ws_live_delivery_strips_acknowledged`,
+  `ws_subscribe_replay_strips_acknowledged`,
+  `get_inbox_still_includes_acknowledged`, `mcp_message_send_cross_tenant_rejected`,
+  `mcp_message_send_unresolvable_target_workspace_rejected`, plus the merged
+  task-251 lifecycle tests (`complete_agent_bulk_acks_directed_inbox`,
+  `agent_complete_bulk_acks_directed_inbox`,
+  `stale_abort_bulk_acks_directed_inbox_with_agent_orphaned`) and
+  `cargo test -p gyre-server --test message_persistence`. Probe record:
+  /tmp/stage/review-evidence/task-248-merge-repair.md.
