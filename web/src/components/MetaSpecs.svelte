@@ -423,9 +423,16 @@
     selectedMsId = id;
     const ms = wsMetaSpecs.find(m => m.id === id);
     selectedMsContent = ms?.prompt || '';
+    // The §9 State 2 baseline must track the selected meta-spec's published
+    // prompt: a stale baseline fabricates a pending-changes diff for an
+    // unmodified draft after a switch.
+    selectedMsBaseline = ms?.prompt || '';
     wsSuggestions = [];
     previewState = 'editing';
-    stopPreview();
+    // Bumping the run generation is what makes every in-flight poll of the
+    // previous meta-spec's preview run stale; resetPreviewState also clears
+    // that run's panel state (agents, preview_id, error, stalled notice).
+    resetPreviewState();
   }
 
   function toggleSpec(path) {
@@ -496,8 +503,14 @@
   function pollPreview(run) {
     let elapsed = 0;
     let errors = 0;
+    // One status fetch at a time: a slow status response must not stack
+    // overlapping ticks whose completions can then write out of order.
+    let inFlight = false;
     previewInterval = setInterval(async () => {
-      if (run !== previewRun) { stopPreview(); return; }
+      // Superseded run: return WITHOUT touching previewInterval. This tick
+      // belongs to the old run, and previewInterval may already hold a NEW
+      // run's poller (cancel → immediate re-Preview) that must keep running.
+      if (run !== previewRun) return;
       elapsed += PREVIEW_POLL_MS;
       if (elapsed >= PREVIEW_POLL_TIMEOUT_MS) {
         // Bounded wait: stop polling but keep the panel live — the agents are
@@ -506,6 +519,8 @@
         stopPreview();
         return;
       }
+      if (inFlight) return;
+      inFlight = true;
       let status;
       try {
         status = await api.previewMetaSpecStatus(previewId);
@@ -516,8 +531,11 @@
           stopPreview();
         }
         return;
+      } finally {
+        inFlight = false;
       }
-      if (run !== previewRun) { stopPreview(); return; }
+      // Same rule as above: stale post-await guard must not stop the new run.
+      if (run !== previewRun) return;
       errors = 0;
       previewAgents = Array.isArray(status?.agents)
         ? status.agents.map(a => ({
@@ -891,7 +909,7 @@
                   {#if agentPatchLines(a).length}
                     <div class="code-diff">
                       {#each agentPatchLines(a) as line}
-                        <div class="code-diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
+                        <div class="code-diff-line {line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'remove' : 'ctx'}">{line}</div>
                       {/each}
                     </div>
                   {:else if agentStatusIs(a, 'complete', 'stopped')}

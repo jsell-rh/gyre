@@ -148,9 +148,12 @@ describe('EditorSplit', () => {
     render(EditorSplit, {
       props: { content: '', repoId: null, context: 'meta-spec', workspaceId: 'ws-1', specPath: 'ms-1' },
     });
-    // Production §9 surface: MetaSpecs mounts EditorSplit with workspaceId
-    // and no repoId — the chat must be usable there (round-1 finding: it was
-    // permanently disabled when the repo-scoped assist was the only route).
+    // Component contract for the meta-spec context (workspace-scoped LLM
+    // chat with no repo). Note: MetaSpecs no longer mounts EditorSplit — it
+    // owns the §5 preview loop with its own inline editor, and DetailPanel
+    // mounts EditorSplit with context="spec" — so this branch is not
+    // currently production-mounted; the assertion covers the component's
+    // built-in capability, not a MetaSpecs production surface.
     expect(screen.getByTestId('llm-input').disabled).toBe(false);
     const input = screen.getByTestId('llm-input');
     fireEvent.input(input, { target: { value: 'make error handling more defensive' } });

@@ -1049,6 +1049,63 @@ describe('MetaSpecs -- workspace scope', () => {
     vi.useRealTimers();
   });
 
+  it('classifies unified-diff file headers as context, not add/remove', async () => {
+    vi.useFakeTimers();
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-hdr-1',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-hdr-1/retry' },
+      ],
+    });
+    // Real git-adapter patch text carries ---/+++/@@ headers; the viewer
+    // must not color them as removed/added lines (parity with the EditorSplit
+    // renderer's header filter).
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-hdr-1',
+      state: 'complete',
+      agents: [
+        {
+          agent_id: 'ag-1',
+          repo_id: 'repo-1',
+          spec_path: 'specs/payment/retry.md',
+          branch: 'preview/pv-hdr-1/retry',
+          status: 'complete',
+          diff: {
+            files_changed: 1,
+            insertions: 1,
+            deletions: 0,
+            patches: [{
+              path: 'src/lib.rs',
+              status: 'modified',
+              patch: '--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n fn old() {}\n+fn new() {}',
+            }],
+          },
+        },
+      ],
+    });
+
+    const { findByText, findByTestId, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByText('Preview'));
+    await vi.advanceTimersByTimeAsync(2100);
+    await findByTestId('preview-complete');
+
+    await waitFor(() => {
+      const lines = Array.from(container.querySelectorAll('.code-diff-line'));
+      const plusHeader = lines.find((l) => l.textContent === '+++ b/src/lib.rs');
+      expect(plusHeader).toBeTruthy();
+      expect(plusHeader.classList.contains('add')).toBe(false);
+      expect(plusHeader.classList.contains('ctx')).toBe(true);
+      const minusHeader = lines.find((l) => l.textContent === '--- a/src/lib.rs');
+      expect(minusHeader).toBeTruthy();
+      expect(minusHeader.classList.contains('remove')).toBe(false);
+      expect(minusHeader.classList.contains('ctx')).toBe(true);
+      const added = lines.find((l) => l.textContent === '+fn new() {}');
+      expect(added.classList.contains('add')).toBe(true);
+    });
+    vi.useRealTimers();
+  });
+
   it('shows per-agent tabs for multi-target runs', async () => {
     vi.useFakeTimers();
     api.previewMetaSpec.mockResolvedValue({
@@ -1159,6 +1216,91 @@ describe('MetaSpecs -- workspace scope', () => {
 
     await waitFor(async () => {
       expect(await findByTestId('persona-textarea')).toBeTruthy();
+    });
+    vi.useRealTimers();
+  });
+
+  it('a stale in-flight status tick cannot stop or hijack a re-started preview (cancel → re-Preview)', async () => {
+    vi.useFakeTimers();
+    // Run 1's first status tick hangs until the test resolves it — by then
+    // the user has cancelled and started run 2.
+    let resolveRun1Status;
+    const run1Status = new Promise((resolve) => { resolveRun1Status = resolve; });
+    let postCall = 0;
+    api.previewMetaSpec.mockImplementation(async () => {
+      postCall += 1;
+      const id = postCall === 1 ? 'pv-stale-1' : 'pv-stale-2';
+      const agent = postCall === 1 ? 'ag-stale-1' : 'ag-stale-2';
+      return {
+        preview_id: id,
+        agents: [
+          { agent_id: agent, repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: `preview/${id}/retry` },
+        ],
+      };
+    });
+    let statusCall = 0;
+    api.previewMetaSpecStatus.mockImplementation(() => {
+      statusCall += 1;
+      if (statusCall === 1) return run1Status;
+      if (statusCall === 2) {
+        return Promise.resolve({
+          preview_id: 'pv-stale-2',
+          state: 'running',
+          agents: [
+            { agent_id: 'ag-stale-2', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-stale-2/retry', status: 'running', diff: null },
+          ],
+        });
+      }
+      return Promise.resolve({
+        preview_id: 'pv-stale-2',
+        state: 'complete',
+        agents: [
+          {
+            agent_id: 'ag-stale-2',
+            repo_id: 'repo-1',
+            spec_path: 'specs/payment/retry.md',
+            branch: 'preview/pv-stale-2/retry',
+            status: 'complete',
+            diff: { files_changed: 1, insertions: 1, deletions: 0, patches: [{ path: 'src/lib.rs', status: 'modified', patch: '+fn new() {}' }] },
+          },
+        ],
+      });
+    });
+
+    const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByText('Preview'));
+    // Run 1's first tick fires and hangs on the unresolved status promise.
+    await vi.advanceTimersByTimeAsync(2100);
+
+    // Cancel, then immediately re-Preview: run 2 gets a fresh poll interval.
+    await fireEvent.click(await findByText('Cancel Preview'));
+    await fireEvent.click(await findByText('Preview'));
+    // Run 2's first tick reports running.
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(queryByTestId('preview-running')).toBeTruthy();
+
+    // The stale run-1 tick finally resolves as complete: it must neither
+    // flip the panel to complete nor stop run 2's poller (regression: the
+    // post-await guard used to stopPreview() whatever interval was live,
+    // clearing the NEW run's poller and leaving the UI stuck in running
+    // with no polling and no timeout).
+    resolveRun1Status({
+      preview_id: 'pv-stale-1',
+      state: 'complete',
+      agents: [
+        { agent_id: 'ag-stale-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-stale-1/retry', status: 'complete', diff: null },
+      ],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    // Still running run 2 — the stale complete response changed nothing.
+    expect(queryByTestId('preview-running')).toBeTruthy();
+    expect(queryByTestId('preview-complete')).toBeNull();
+
+    // Run 2's own poller is still alive: its next tick completes the run.
+    await vi.advanceTimersByTimeAsync(2100);
+    await waitFor(() => {
+      expect(queryByTestId('preview-complete')).toBeTruthy();
     });
     vi.useRealTimers();
   });
@@ -1447,6 +1589,94 @@ describe('MetaSpecs -- workspace scope', () => {
     expect(addLine.textContent).toBe('Prefer explicit types in public APIs.');
     expect(diff.querySelectorAll('.locked-diff-add')).toHaveLength(1);
     expect(diff.querySelectorAll('.locked-diff-remove')).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it('switching meta-specs refreshes the locked-diff baseline — an unmodified draft shows no pending diff (§9 switch → preview)', async () => {
+    vi.useFakeTimers();
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-switch-1',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-switch-1/retry' },
+      ],
+    });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-switch-1',
+      state: 'running',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-switch-1/retry', status: 'running', diff: null },
+      ],
+    });
+
+    const { findByText, findByLabelText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+
+    // Switch persona-1 → persona-2 in the dropdown WITHOUT editing the
+    // draft (the exact §9 iteration sequence the locked-diff tests above
+    // never exercised — they only edited the auto-selected first meta-spec).
+    const select = await findByLabelText('Persona');
+    await fireEvent.change(select, { target: { value: 'persona-2' } });
+    const textarea = await findByTestId('persona-textarea');
+    await waitFor(() => {
+      expect(textarea.value).toBe('You review code for security vulnerabilities.');
+    });
+
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    // Regression: the baseline used to stay persona-1's published prompt, so
+    // persona-2's unmodified prompt line rendered as a pending '+' line
+    // fabricated against persona-1. The locked pane must show the verbatim
+    // draft with NO pending-changes diff.
+    const locked = await findByTestId('editor-locked');
+    expect(locked).toBeTruthy();
+    expect(queryByTestId('locked-diff')).toBeNull();
+    expect(locked.textContent).toContain('You review code for security vulnerabilities.');
+    vi.useRealTimers();
+  });
+
+  it('switching meta-specs after a completed preview clears the old run\'s panel (generation reset)', async () => {
+    vi.useFakeTimers();
+    api.previewMetaSpec.mockResolvedValue({
+      preview_id: 'pv-switch-2',
+      agents: [
+        { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-switch-2/retry' },
+      ],
+    });
+    api.previewMetaSpecStatus.mockResolvedValue({
+      preview_id: 'pv-switch-2',
+      state: 'complete',
+      agents: [
+        {
+          agent_id: 'ag-1',
+          repo_id: 'repo-1',
+          spec_path: 'specs/payment/retry.md',
+          branch: 'preview/pv-switch-2/retry',
+          status: 'complete',
+          diff: { files_changed: 1, insertions: 1, deletions: 0, patches: [{ path: 'src/lib.rs', status: 'modified', patch: '+fn new() {}' }] },
+        },
+      ],
+    });
+
+    const { findByText, findByLabelText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByText('Preview'));
+    await vi.advanceTimersByTimeAsync(2100);
+    await findByTestId('preview-complete');
+
+    // Switching meta-specs must reset the preview state (bump the run
+    // generation and clear the old run's panel) — the old behavior only
+    // stopped the poller, leaving the completed run's panel mounted over
+    // the editor while the user edits a different meta-spec.
+    const select = await findByLabelText('Persona');
+    await fireEvent.change(select, { target: { value: 'persona-2' } });
+
+    await waitFor(() => {
+      expect(queryByTestId('preview-complete')).toBeNull();
+    });
+    const textarea = await findByTestId('persona-textarea');
+    await waitFor(() => {
+      expect(textarea.value).toBe('You review code for security vulnerabilities.');
+    });
     vi.useRealTimers();
   });
 });
