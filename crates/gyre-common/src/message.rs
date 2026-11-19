@@ -59,6 +59,90 @@ pub enum Destination {
     Broadcast,
 }
 
+/// Why a repo orchestrator escalated to the workspace orchestrator
+/// (platform-model.md §3 Cross-Repo Spec Escalation Protocol).
+///
+/// Wire format: kebab-case strings, matching `DependencySource`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationType {
+    /// The target repo's spec already describes the needed artifact, but
+    /// the artifact is not implemented yet — the workspace orchestrator
+    /// creates a cross-repo implementation task in the target repo.
+    ImplementationNeeded,
+    /// The target repo's spec does not describe the needed artifact — a
+    /// spec change is required, and a cross-repo spec change always
+    /// requires human approval (the human gate).
+    SpecChangeNeeded,
+}
+
+impl EscalationType {
+    /// Canonical wire string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EscalationType::ImplementationNeeded => "implementation-needed",
+            EscalationType::SpecChangeNeeded => "spec-change-needed",
+        }
+    }
+
+    /// Parse from the wire string. Unknown values are rejected — an
+    /// escalation with an unknown type has no defined handler, and
+    /// defaulting one branch would silently skip the human gate.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "implementation-needed" => Some(EscalationType::ImplementationNeeded),
+            "spec-change-needed" => Some(EscalationType::SpecChangeNeeded),
+            _ => None,
+        }
+    }
+}
+
+/// Structured payload of a cross-repo escalation `MessageKind::Escalation`
+/// message (platform-model.md §3 Cross-Repo Spec Escalation Protocol).
+///
+/// Field names double as the `MessageKind::Escalation` payload-schema
+/// extension fields (`reason` stays the shared required field with generic
+/// escalations; the cross-repo fields are optional so non-cross-repo
+/// escalations keep validating). Sent by `gyre_escalate_cross_repo` and
+/// consumed by the workspace orchestrator's escalation handler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EscalationPayload {
+    /// Repo the escalation originates from (the requesting repo).
+    pub source_repo_id: String,
+    /// Repo the artifact is needed from.
+    pub target_repo_id: String,
+    /// Spec path or interface name of the needed artifact
+    /// (e.g. "specs/system/user-port.md" or "UserPort").
+    pub needed_artifact: String,
+    /// Human-readable why the artifact is needed.
+    pub reason: String,
+    /// The requesting task in the source repo ("I need it for TASK-042").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The source repo's MR that is blocked on the artifact, when one
+    /// exists — the MR the workspace orchestrator links the dependency to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_mr_id: Option<String>,
+    /// The target repo's existing open MR that implements the artifact,
+    /// when one is already known (ImplementationNeeded only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_mr_id: Option<String>,
+    /// Which branch of the escalation protocol this is.
+    pub escalation_type: EscalationType,
+}
+
+impl EscalationPayload {
+    /// Serialize to the JSON value carried in `Message::payload`.
+    pub fn to_json(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    /// Deserialize from the JSON value in `Message::payload`.
+    pub fn from_json(v: &Value) -> Option<Self> {
+        serde_json::from_value(v.clone()).ok()
+    }
+}
+
 /// Message tier — determines signing and persistence behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageTier {
@@ -369,9 +453,25 @@ impl MessageKind {
             MessageKind::StatusUpdate => {
                 Some(&(const { [f("status", Str, true), f("summary", Str, true)] }))
             }
-            MessageKind::Escalation => {
-                Some(&(const { [f("reason", Str, true), f("context", Str, false)] }))
-            }
+            MessageKind::Escalation => Some(
+                &(const {
+                    [
+                        f("reason", Str, true),
+                        f("context", Str, false),
+                        // Cross-repo spec escalation extension (platform-model.md
+                        // §3, EscalationPayload): optional so generic
+                        // escalations keep validating; a cross-repo escalation
+                        // handler rejects a payload missing them.
+                        f("escalation_type", Str, false),
+                        f("source_repo_id", Str, false),
+                        f("target_repo_id", Str, false),
+                        f("needed_artifact", Str, false),
+                        f("task_id", Str, false),
+                        f("source_mr_id", Str, false),
+                        f("target_mr_id", Str, false),
+                    ]
+                }),
+            ),
             // Directed — agent-gates.md §Gate Failure Feedback: the exact
             // field set of the spec's GateResult message ("attempt" is the
             // 1-based number of this gate run for the MR).
@@ -1641,5 +1741,89 @@ mod tests {
         let msg = make_telemetry(Some(ws.clone()));
         buf.push(msg);
         assert_eq!(buf.list_since(&ws, 0, 100).len(), 1);
+    }
+
+    // ── Cross-repo escalation payload (platform-model.md §3) ────────────
+
+    fn cross_repo_escalation_payload() -> serde_json::Value {
+        json!({
+            "source_repo_id": "repo-a",
+            "target_repo_id": "repo-b",
+            "needed_artifact": "UserPort",
+            "reason": "TASK-042 needs UserPort from repo-b",
+            "task_id": "task-042",
+            "escalation_type": "implementation-needed",
+        })
+    }
+
+    #[test]
+    fn escalation_payload_roundtrips_both_types() {
+        for ty in [
+            EscalationType::ImplementationNeeded,
+            EscalationType::SpecChangeNeeded,
+        ] {
+            let p = EscalationPayload {
+                source_repo_id: "repo-a".to_string(),
+                target_repo_id: "repo-b".to_string(),
+                needed_artifact: "UserPort".to_string(),
+                reason: "needed for TASK-042".to_string(),
+                task_id: Some("task-042".to_string()),
+                source_mr_id: None,
+                target_mr_id: None,
+                escalation_type: ty,
+            };
+            let back = EscalationPayload::from_json(&p.to_json())
+                .expect("EscalationPayload must roundtrip through its wire JSON");
+            assert_eq!(back, p);
+        }
+    }
+
+    #[test]
+    fn escalation_payload_wire_names_are_kebab_case() {
+        assert_eq!(
+            EscalationType::ImplementationNeeded.as_str(),
+            "implementation-needed"
+        );
+        assert_eq!(
+            EscalationType::SpecChangeNeeded.as_str(),
+            "spec-change-needed"
+        );
+        assert_eq!(
+            EscalationType::parse("implementation-needed"),
+            Some(EscalationType::ImplementationNeeded)
+        );
+        assert_eq!(
+            EscalationType::parse("spec-change-needed"),
+            Some(EscalationType::SpecChangeNeeded)
+        );
+        // Unknown types are rejected, not defaulted: defaulting would
+        // silently skip the spec-change human gate.
+        assert_eq!(EscalationType::parse("urgent"), None);
+        assert_eq!(EscalationType::parse(""), None);
+    }
+
+    #[test]
+    fn escalation_schema_accepts_cross_repo_payload_and_generic_escalations() {
+        // A structured cross-repo escalation validates against the
+        // Escalation kind's extended schema.
+        assert!(MessageKind::Escalation
+            .validate_payload(Some(&cross_repo_escalation_payload()))
+            .is_ok());
+        // A generic escalation (reason only) still validates — the
+        // cross-repo extension fields are optional.
+        assert!(MessageKind::Escalation
+            .validate_payload(Some(&json!({"reason": "stale agent"})))
+            .is_ok());
+        // reason stays required for every escalation.
+        assert!(MessageKind::Escalation
+            .validate_payload(Some(&json!({"target_repo_id": "repo-b"})))
+            .is_err());
+        // Schema-known extension fields must match their wire type.
+        assert!(MessageKind::Escalation
+            .validate_payload(Some(&json!({
+                "reason": "x",
+                "escalation_type": 7,
+            })))
+            .is_err());
     }
 }

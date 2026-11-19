@@ -12,6 +12,7 @@ pub(crate) mod auth;
 pub mod commit_signatures;
 pub(crate) mod constraint_check;
 pub mod container_audit;
+pub mod cross_repo_escalation;
 pub mod dep_staleness;
 pub mod domain_events;
 pub mod email;

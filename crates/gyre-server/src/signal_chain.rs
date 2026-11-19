@@ -158,7 +158,7 @@ async fn find_live_workspace_orchestrator(
 }
 
 /// Find the live repo orchestrator for a repo, if any.
-async fn find_live_repo_orchestrator(
+pub(crate) async fn find_live_repo_orchestrator(
     state: &AppState,
     repo: &Repository,
 ) -> anyhow::Result<Option<Agent>> {
@@ -247,7 +247,7 @@ pub async fn on_spec_approved(state: &Arc<AppState>, payload: &serde_json::Value
 /// Spawn a workspace orchestrator if none is live, reusing the task-093
 /// spawn core (scoped JWT, keypair, budget, restart_on_failure). Returns
 /// the live orchestrator either way.
-async fn ensure_workspace_orchestrator(
+pub(crate) async fn ensure_workspace_orchestrator(
     state: &Arc<AppState>,
     workspace_id: &Id,
 ) -> anyhow::Result<Agent> {

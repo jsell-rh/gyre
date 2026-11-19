@@ -97,7 +97,7 @@ pub struct PromptSaveResponse {
 /// The 4-char hex suffix is a deterministic hash of the full original path,
 /// preventing collisions between paths that produce the same slug segment
 /// (e.g. "system/payment-retry.md" and "system/payment-retry-v2.md").
-fn spec_path_slug(spec_path: &str) -> String {
+pub(crate) fn spec_path_slug(spec_path: &str) -> String {
     let without_ext = spec_path.trim_end_matches(".md");
     let slug = without_ext.replace('/', "-").to_lowercase();
     let hash: u32 = spec_path
@@ -863,7 +863,7 @@ fn assist_sse_response(
 /// Never returns "": an empty spec_sha is a fail-open that pushes the Inbox
 /// approve action onto a legacy fallback which approves the pre-edit ledger
 /// version — a no-op masked by an "Approved" success message.
-async fn spec_blob_sha(
+pub(crate) async fn spec_blob_sha(
     git_bin: &str,
     repo_path: &str,
     branch: &str,

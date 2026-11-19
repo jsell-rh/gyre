@@ -28,7 +28,10 @@ pub use gate::{GateStatus, GateType};
 pub use graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility};
 pub use id::Id;
 pub use key_binding::KeyBinding;
-pub use message::{Destination, Message, MessageKind, MessageOrigin, MessageTier, TelemetryBuffer};
+pub use message::{
+    Destination, EscalationPayload, EscalationType, Message, MessageKind, MessageOrigin,
+    MessageTier, TelemetryBuffer,
+};
 pub use notification::{Notification, NotificationPriority, NotificationSource, NotificationType};
 pub use protocol::{ActivityEventData, AgEventType, SubscribeScope, WsMessage};
 pub use secret::{Secret, SecretScope, SecretType};

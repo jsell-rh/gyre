@@ -599,6 +599,23 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "gyre_escalate_cross_repo",
+                "description": "Escalate a cross-repo need to the workspace orchestrator (platform-model.md §3). Requires a repo-orchestrator JWT. implementation-needed: the target repo's spec already describes the artifact but it is not implemented — the workspace orchestrator creates a cross-repo task in the target repo and notifies its orchestrator. spec-change-needed: the target repo's spec does not describe the artifact — the workspace orchestrator drafts a spec change in the target repo and routes it to humans for approval (cross-repo spec changes always require human approval).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "target_repo": { "type": "string", "description": "Target repository ID (must be in the caller's workspace, distinct from the caller's repo)" },
+                        "needed_artifact": { "type": "string", "description": "Spec path or interface name of the needed artifact (e.g. 'specs/system/user-port.md' or 'UserPort')" },
+                        "reason": { "type": "string", "description": "Why the artifact is needed" },
+                        "escalation_type": { "type": "string", "description": "implementation-needed | spec-change-needed" },
+                        "task_id": { "type": "string", "description": "Optional: the requesting task in the caller's repo" },
+                        "source_mr_id": { "type": "string", "description": "Optional: the caller's MR blocked on the artifact — the workspace orchestrator links the MR dependency to it" },
+                        "target_mr_id": { "type": "string", "description": "Optional (implementation-needed only): the target repo's existing open MR that implements the artifact" }
+                    },
+                    "required": ["target_repo", "needed_artifact", "reason", "escalation_type"]
+                }
+            },
+            {
                 "name": "gyre_spawn_worker",
                 "description": "Spawn a worker agent for an implementation task in the caller's repo. Requires a repo-orchestrator JWT. Delegates to the standard agent spawn flow (worktree, scoped JWT, compute target resolution).",
                 "inputSchema": {
@@ -825,6 +842,21 @@ async fn validate_tool_scope(
                 } else {
                     check_repo_target_by_id(auth, repo, true, tool_name)
                 }
+            } else {
+                Ok(())
+            }
+        }
+        // Cross-repo escalation (repo orchestrator persona, platform-model.md
+        // §3): the tool sends a message and triggers work in another repo of
+        // the caller's WORKSPACE — the write is performed by the workspace
+        // orchestrator's server-side run, not the caller's token, so the
+        // token-level check is the caller's own repo spawn right (the same
+        // tier the worker spawn uses); the handler additionally requires a
+        // repo-orchestrator JWT and validates the target repo's membership
+        // in the caller's workspace against real state.
+        "gyre_escalate_cross_repo" => {
+            if has_repo_scopes(auth) {
+                check_repo_scope(auth, None, true, tool_name)
             } else {
                 Ok(())
             }
@@ -1628,6 +1660,162 @@ async fn handle_decompose_spec(state: &AppState, args: &Value, auth: &Authentica
 /// gyre_spawn_worker (task-093): repo-orchestrator only. Delegates to the
 /// REST spawn core so worktree creation, JWT minting, and compute target
 /// resolution are identical to POST /api/v1/agents/spawn.
+/// gyre_escalate_cross_repo (task-094, platform-model.md §3
+/// Cross-Repo Spec Escalation Protocol): repo-orchestrator only. Sends a
+/// Directed-tier Escalation message with the structured EscalationPayload
+/// to the workspace orchestrator (spawning one on demand when none is
+/// live) and drives its processing: implementation-needed creates a
+/// cross-repo task in the target repo and notifies its repo orchestrator;
+/// spec-change-needed drafts the spec change in the target repo and routes
+/// it to humans for approval (the human gate). Scope: the target repo must
+/// live in the caller's workspace and differ from the caller's own repo;
+/// optional task/MR ids are validated against those repos before any side
+/// effect.
+async fn handle_escalate_cross_repo(
+    state: &Arc<AppState>,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    let (caller_ws, source_repo_id) = match repo_orchestrator_scope(auth) {
+        Some(scope) => scope,
+        None => return tool_error("requires a repo-orchestrator token"),
+    };
+    let target_repo_id = match require_str(args, "target_repo") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: target_repo"),
+    };
+    let needed_artifact = match require_str(args, "needed_artifact") {
+        Ok(a) => a.to_string(),
+        Err(_) => return tool_error("missing required field: needed_artifact"),
+    };
+    let reason = match require_str(args, "reason") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: reason"),
+    };
+    let escalation_type =
+        match get_str(args, "escalation_type").and_then(gyre_common::EscalationType::parse) {
+            Some(t) => t,
+            None => {
+                return tool_error(
+                    "escalation_type must be 'implementation-needed' or 'spec-change-needed'",
+                )
+            }
+        };
+
+    // Target repo: must exist, live in the caller's workspace, and differ
+    // from the caller's own repo (a cross-repo escalation by definition).
+    let target = match state.repos.find_by_id(&Id::new(&target_repo_id)).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return tool_error(format!("target repo {target_repo_id} not found")),
+        Err(e) => return tool_error(format!("Error: {e}")),
+    };
+    if target.workspace_id.to_string() != caller_ws {
+        return tool_error(format!(
+            "PERMISSION_DENIED: target repo {target_repo_id} is not in the caller's workspace"
+        ));
+    }
+    if target.id.to_string() == source_repo_id {
+        return tool_error("target repo must differ from the caller's own repo");
+    }
+
+    // Optional requesting task: must belong to the caller's repo (or the
+    // caller's workspace when the task carries no repo binding).
+    let task_id = get_str(args, "task_id").map(|s| s.to_string());
+    if let Some(tid) = &task_id {
+        match state.tasks.find_by_id(&Id::new(tid)).await {
+            Ok(Some(t)) => {
+                let in_scope = if t.repo_id.to_string().is_empty() {
+                    t.workspace_id.to_string() == caller_ws
+                } else {
+                    t.repo_id.to_string() == source_repo_id
+                };
+                if !in_scope {
+                    return tool_error(format!(
+                        "PERMISSION_DENIED: task {tid} is not in the caller's repo"
+                    ));
+                }
+            }
+            Ok(None) => return tool_error(format!("Task not found: {tid}")),
+            Err(e) => return tool_error(format!("Error: {e}")),
+        }
+    }
+
+    // Optional source MR: must belong to the caller's own repo.
+    let source_mr_id = get_str(args, "source_mr_id").map(|s| s.to_string());
+    if let Some(mid) = &source_mr_id {
+        match state.merge_requests.find_by_id(&Id::new(mid)).await {
+            Ok(Some(mr)) => {
+                if mr.repository_id.to_string() != source_repo_id {
+                    return tool_error(format!(
+                        "PERMISSION_DENIED: merge request {mid} is not in the caller's repo"
+                    ));
+                }
+            }
+            Ok(None) => return tool_error(format!("Merge request not found: {mid}")),
+            Err(e) => return tool_error(format!("Error: {e}")),
+        }
+    }
+
+    // Optional target MR (implementation-needed only): must belong to the
+    // target repo — the dependency the caller claims links the repos.
+    let target_mr_id = get_str(args, "target_mr_id").map(|s| s.to_string());
+    if let Some(mid) = &target_mr_id {
+        match state.merge_requests.find_by_id(&Id::new(mid)).await {
+            Ok(Some(mr)) => {
+                if mr.repository_id != target.id {
+                    return tool_error(format!(
+                        "PERMISSION_DENIED: merge request {mid} is not in the target repo"
+                    ));
+                }
+            }
+            Ok(None) => return tool_error(format!("Merge request not found: {mid}")),
+            Err(e) => return tool_error(format!("Error: {e}")),
+        }
+    }
+
+    let payload = gyre_common::EscalationPayload {
+        source_repo_id: source_repo_id.clone(),
+        target_repo_id: target_repo_id.clone(),
+        needed_artifact,
+        reason,
+        task_id,
+        source_mr_id,
+        target_mr_id,
+        escalation_type,
+    };
+    let caller_agent_id = Id::new(&auth.agent_id);
+    match crate::cross_repo_escalation::escalate(state, &caller_agent_id, &auth.tenant_id, &payload)
+        .await
+    {
+        Ok(outcome) => {
+            let summary = match (
+                &outcome.created_task_id,
+                &outcome.created_mr_id,
+                &outcome.notified_repo_orchestrator_id,
+            ) {
+                (Some(task), _, Some(repo_orch)) => format!(
+                    "Escalation delivered (message {}); created cross-repo task {} in {} and notified repo orchestrator {}",
+                    outcome.message_id, task, target_repo_id, repo_orch
+                ),
+                (Some(task), _, None) => format!(
+                    "Escalation delivered (message {}); created cross-repo task {} in {}",
+                    outcome.message_id, task, target_repo_id
+                ),
+                (_, Some(mr), _) => format!(
+                    "Escalation delivered (message {}); drafted cross-repo spec change as MR {} in {} — human approval required before it lands",
+                    outcome.message_id, mr, target_repo_id
+                ),
+                (None, None, _) => format!(
+                    "Escalation delivered (message {})",
+                    outcome.message_id
+                ),
+            };
+            tool_result(summary)
+        }
+        Err(e) => tool_error(format!("Escalation failed: {e:#}")),
+    }
+}
+
 async fn handle_spawn_worker(
     state: &Arc<AppState>,
     args: &Value,
@@ -3093,7 +3281,11 @@ fn parse_mcp_destination(
     Err("invalid 'to': expected {\"agent\": \"<id>\"} or {\"workspace\": \"<id>\"}".to_string())
 }
 
-async fn handle_message_poll(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+async fn handle_message_poll(
+    state: &Arc<AppState>,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
     // Derive agent_id from auth context.
     let agent_id = Id::new(&auth.agent_id);
 
@@ -3102,6 +3294,22 @@ async fn handle_message_poll(state: &AppState, args: &Value, auth: &Authenticate
         Ok(Some(_)) => {}
         Ok(None) => return tool_error(format!("agent {} not found", auth.agent_id)),
         Err(e) => return tool_error(format!("failed to lookup agent: {e}")),
+    }
+
+    // task-094 (platform-model.md §3): when the WORKSPACE ORCHESTRATOR
+    // polls its inbox, drive the cross-repo escalation handler for any
+    // unacked structured escalation addressed to it — the receipt path
+    // for escalations whose synchronous processing at delivery time
+    // never ran or failed. Only cross-repo EscalationPayloads are
+    // processed; generic escalations from other server components stay
+    // for their real consumers. Best-effort: never fails the poll.
+    if let Some(caller_ws) = workspace_orchestrator_scope(auth) {
+        crate::cross_repo_escalation::drive_pending_escalations(
+            state,
+            &agent_id,
+            &Id::new(&caller_ws),
+        )
+        .await;
     }
 
     let limit = args
@@ -4962,6 +5170,7 @@ pub async fn mcp_handler(
                     | "gyre_spawn_repo_orchestrator"
                     | "gyre_cross_repo_task"
                     | "gyre_decompose_spec"
+                    | "gyre_escalate_cross_repo"
                     | "gyre_spawn_worker"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
@@ -5059,6 +5268,9 @@ pub async fn mcp_handler(
                 "gyre_cross_repo_task" => handle_cross_repo_task(&state, &args, &auth).await,
                 "gyre_decompose_spec" => handle_decompose_spec(&state, &args, &auth).await,
                 "gyre_spawn_worker" => handle_spawn_worker(&state, &args, &auth).await,
+                "gyre_escalate_cross_repo" => {
+                    handle_escalate_cross_repo(&state, &args, &auth).await
+                }
                 "graph_summary" => handle_graph_summary(&state, &args).await,
                 "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
@@ -10452,6 +10664,173 @@ concepts:
             .expect("coordination task created");
         assert_eq!(t.workspace_id, gyre_common::Id::new("ws-1"));
         assert_eq!(t.task_type, Some(gyre_domain::TaskType::Coordination));
+    }
+
+    // task-094 (platform-model.md §3): the escalation tool is gated to the
+    // repo-orchestrator tier — a worker token is denied and no escalation
+    // side effects occur.
+    #[tokio::test]
+    async fn mcp_escalate_cross_repo_denies_worker_token() {
+        let state = orch_state().await;
+        let (_id, token) = register_worker(&state, "w-esc", "r-1").await;
+        let app = crate::build_router(state.clone());
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_escalate_cross_repo",
+                json!({
+                    "target_repo": "r-2",
+                    "needed_artifact": "UserPort",
+                    "reason": "needed",
+                    "escalation_type": "implementation-needed"
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["result"]["isError"].as_bool().unwrap());
+
+        // No side effects: no cross-repo task in r-2, no Escalation message.
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(tasks
+            .iter()
+            .all(|t| t.repo_id != gyre_common::Id::new("r-2")));
+    }
+
+    // task-094: a repo orchestrator escalating into a repo outside its
+    // workspace is denied before any side effect.
+    #[tokio::test]
+    async fn mcp_escalate_cross_repo_denies_cross_workspace_target() {
+        let state = orch_state().await;
+        let (_id, token) = register_orchestrator(
+            &state,
+            "repo-esc-x",
+            "ws-1",
+            Some("r-1"),
+            "repo_orchestrator",
+        )
+        .await;
+        let app = crate::build_router(state.clone());
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_escalate_cross_repo",
+                json!({
+                    "target_repo": "r-x",
+                    "needed_artifact": "UserPort",
+                    "reason": "needed",
+                    "escalation_type": "implementation-needed"
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("PERMISSION_DENIED"), "got: {text}");
+    }
+
+    // task-094: the happy path through the MCP surface — a repo
+    // orchestrator's implementation-needed escalation creates the
+    // cross-repo task in the TARGET repo and notifies the target repo's
+    // orchestrator (spawned on demand).
+    #[tokio::test]
+    async fn mcp_escalate_cross_repo_implementation_needed() {
+        let state = orch_state().await;
+        // ensure_workspace_orchestrator requires an approved
+        // workspace-orchestrator persona in the scope chain.
+        let mut persona = gyre_domain::Persona::new(
+            gyre_common::Id::new("ws-orchestrator-persona"),
+            "workspace-orchestrator",
+            "workspace-orchestrator",
+            gyre_domain::PersonaScope::Tenant(gyre_common::Id::new("t1")),
+            "test orchestrator persona",
+            0,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        state.personas.create(&persona).await.unwrap();
+
+        let (caller_id, token) = register_orchestrator(
+            &state,
+            "repo-esc-a",
+            "ws-1",
+            Some("r-1"),
+            "repo_orchestrator",
+        )
+        .await;
+        // The requesting task in the caller's repo (task_id is validated
+        // against the caller's repo before any side effect).
+        let mut src_task = gyre_domain::Task::new(gyre_common::Id::new("task-042"), "TASK-042", 0);
+        src_task.repo_id = gyre_common::Id::new("r-1");
+        src_task.workspace_id = gyre_common::Id::new("ws-1");
+        state.tasks.create(&src_task).await.unwrap();
+        let app = crate::build_router(state.clone());
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_escalate_cross_repo",
+                json!({
+                    "target_repo": "r-2",
+                    "needed_artifact": "UserPort",
+                    "reason": "TASK-042 needs UserPort",
+                    "escalation_type": "implementation-needed",
+                    "task_id": "task-042"
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("cross-repo task"), "got: {text}");
+
+        // The cross-repo task landed in the TARGET repo (r-2).
+        let tasks = state.tasks.list().await.unwrap();
+        let t = tasks
+            .iter()
+            .find(|t| t.repo_id == gyre_common::Id::new("r-2"))
+            .expect("cross-repo task created in target repo");
+        assert_eq!(t.workspace_id, gyre_common::Id::new("ws-1"));
+        assert_eq!(t.task_type, Some(gyre_domain::TaskType::Implementation));
+        assert!(t.labels.contains(&"cross-repo".to_string()));
+
+        // The requesting task now depends on the created cross-repo task.
+        let src_task = state
+            .tasks
+            .find_by_id(&gyre_common::Id::new("task-042"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(src_task.depends_on.contains(&t.id));
+
+        // The escalation message sits in the workspace orchestrator's
+        // inbox, originating from the escalating repo orchestrator.
+        let agents = state
+            .agents
+            .list_by_workspace(&gyre_common::Id::new("ws-1"))
+            .await
+            .unwrap();
+        let ws_orch = agents
+            .iter()
+            .find(|a| a.orchestrator_type == gyre_domain::OrchestratorType::WorkspaceOrchestrator)
+            .expect("workspace orchestrator spawned");
+        let inbox = state
+            .messages
+            .list_after(&ws_orch.id, 0, None, 100)
+            .await
+            .unwrap();
+        let esc = inbox
+            .iter()
+            .find(|m| m.kind == gyre_common::MessageKind::Escalation)
+            .expect("Escalation in workspace orchestrator inbox");
+        assert_eq!(
+            esc.from,
+            gyre_common::MessageOrigin::Agent(gyre_common::Id::new(&caller_id))
+        );
+        assert!(esc.acknowledged, "processed escalation must be acked");
     }
 
     #[tokio::test]

@@ -859,7 +859,7 @@ async fn record_meta_spec_drift_warning(
 
 /// Check if all `depends_on` for the given MR have status `Merged`.
 /// Returns `Ok(true)` if all dependencies are satisfied, `Ok(false)` if any are pending.
-async fn dependencies_satisfied(state: &AppState, mr_id: &Id) -> anyhow::Result<bool> {
+pub(crate) async fn dependencies_satisfied(state: &AppState, mr_id: &Id) -> anyhow::Result<bool> {
     let mr = match state.merge_requests.find_by_id(mr_id).await? {
         Some(m) => m,
         None => return Ok(true), // MR not found — let the processor handle the error
