@@ -2,8 +2,8 @@
 title: "Message edge cases: 64KB send limit with 413 and JWKS historical-key serving for signature rotation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-size-and-key-rotation / 60b177f85a11"
 depends_on: [task-247, task-251]
-progress: ready-for-review
-commits: ["7cdd66d072c448cc23200daac8b16e2e46d1b78d"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -64,83 +64,3 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
-
-## Shipped
-
-Both remaining Edge Cases rows of message-bus.md are now implemented in
-production code (gap e5d4cc99, rows "Message too large" and "Signature key
-rotation"); the restart and dead-inbox rows were already delivered by the
-task-247/task-251 dependencies and are unchanged.
-
-### Message too large — 64KB send limit with 413
-
-- `api_router` (`crates/gyre-server/src/api/mod.rs`) reads
-  `GYRE_MAX_MESSAGE_SIZE` (default 64 * 1024) and layers
-  `DefaultBodyLimit::max(max_message_bytes)` on the
-  `POST /api/v1/workspaces/:workspace_id/messages` method router. The limit
-  covers the TOTAL request body (full JSON envelope incl. `to`, `kind`,
-  `payload`): the `Json` extractor rejects an oversized body with 413 before
-  the handler runs, so nothing is signed, stored, or broadcast.
-- The route-level limit takes precedence over the global `GYRE_MAX_BODY_SIZE`
-  (10MB) router layer in `build_router` — proven in-sandbox against the exact
-  axum version in the lockfile (0.7.9) by a standalone probe
-  (/tmp/stage/review-evidence/task-254-axum-limit-probe.md), which also pins
-  the inclusive boundary: a body of exactly 64KB is accepted, 64KB+1 is 413.
-- Documented in docs/server-config.md and docs/api-reference.md.
-
-### Signature key rotation — JWKS serves historical keys
-
-- `crates/gyre-server/src/lib.rs`: new durable KV entry
-  `AGENT_SIGNING_KEY_HISTORY_KV_KEY` (`server_identity` namespace) holds
-  `{kid, public_key_b64}` for every signing key ever active on the
-  deployment. Every DB-backed boot adds its active key (idempotent by kid);
-  the `GYRE_AGENT_SIGNING_KEY` rotation path additionally folds the previous
-  current-slot key into the history, so a deployment that predates this
-  feature still keeps its pre-rotation kid resolvable on the first rotated
-  boot. Rotation chains accumulate (K1 → K2 → K3 serves K1 and K2 alongside
-  the active K3). Env-provisioned PRIVATE material is still never written to
-  the DB — task-107 F12 semantics preserved (its env/persistence tests are
-  untouched and their guarantees unchanged).
-- `GET /.well-known/jwks.json` (`oidc.rs`) appends the retained entries
-  (minus the active kid, deduped) to the keys array; with no rotation the
-  document is unchanged (single key — the m18 OIDC shape).
-- New `auth::HistoricalSigningKey` type: kid derived from the public key
-  with the same `derive_kid` the active key uses, JWK fields identical to
-  the active key's entry.
-
-### Test evidence
-
-New integration binary `crates/gyre-server/tests/message_size_and_key_rotation.rs`
-(own process; env access serialized on an ENV_LOCK, the
-message_persistence.rs pattern):
-
-- 65KB-class body → 413 through the full `build_router` (global 10MB layer
-  included, proving precedence), `count_unacked == 0` (nothing stored), no
-  frame on `message_broadcast_tx` (nothing broadcast); a body of exactly
-  65536 bytes → 201 and stored.
-- `GYRE_MAX_MESSAGE_SIZE=2048` → a 3KB body is 413 (nothing stored), a small
-  body is accepted.
-- Rotation: boot 1 over a real SQLite file signs a Directed message under
-  the server-generated K1; rotate to a ring-generated K2 via
-  `GYRE_AGENT_SIGNING_KEY`; boot 2 over the same DB: JWKS contains BOTH
-  kids; the K1 signature verifies with real ring Ed25519 against K1's
-  served public key over the reconstructed sign input and FAILS against
-  K2's key (negative control); new messages carry `key_id == kid2` and
-  verify against K2's entry (and fail under K1).
-
-### Verification status (honest scope)
-
-- In-sandbox: `cargo check -p gyre-server --lib` and `--tests` (all test
-  targets) clean; clippy lib-only adds no new warnings; `cargo fmt --check`
-  clean; the full `scripts/check-*.sh` sweep shows zero new failures vs the
-  assignment base (identical PASS/FAIL sets; the baseline failures are
-  unchanged on the clean base — several are mawk-vs-gawk sandbox limits);
-  the axum 0.7.9 route-limit-precedence/inclusive-boundary probe passes.
-- Deferred to the independent verifier (the sandbox build wrapper blocks
-  gyre-server code generation within the 4 GiB budget): execute
-  `cargo test -p gyre-server --test message_size_and_key_rotation`, plus
-  the keep-passing set — `--test message_persistence`,
-  `--test task107_signing_key_env`, `--test task107_signing_key_persistence`,
-  `--test m18_oidc_integration`, and `--lib` (messages unit tests: 429 queue
-  depth, idempotent ack, fan-out, atomic sends). Command list recorded in
-  /tmp/stage/review-evidence/task-254.md.
