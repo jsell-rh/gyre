@@ -994,6 +994,10 @@ mod tests {
         let (mut member, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         auth_ws(&mut member, "key-member").await;
         subscribe_ws(&mut member, "ws-leak", None).await;
+        // The outsider's rejected Subscribe can never place "ws-leak" in
+        // the connection index, so observing it there proves the MEMBER's
+        // subscription was authorized before the emits below.
+        await_ws_subscription(&state, "ws-leak").await;
 
         // Emit telemetry AND a workspace-scoped bus message to W.
         state
@@ -1074,6 +1078,10 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         auth_ws(&mut ws, "agent-own-token").await;
         subscribe_ws(&mut ws, "ws-agent-own", None).await;
+        // Synchronize on the server having authorized the subscription
+        // before emitting — otherwise the telemetry broadcast is consumed
+        // while the connection's subscribed list is still empty.
+        await_ws_subscription(&state, "ws-agent-own").await;
 
         state
             .emit_telemetry(
@@ -1228,6 +1236,39 @@ mod tests {
         ))
         .await
         .unwrap();
+    }
+
+    /// Wait until the server has actually processed a Subscribe that
+    /// authorized `workspace_id` for a connection: poll the per-connection
+    /// workspace index until some connection's authorized list contains it.
+    ///
+    /// `subscribe_ws` only awaits the CLIENT-side send. On the current-thread
+    /// #[tokio::test] runtime the connection task is not polled until the
+    /// test task yields, so telemetry emitted immediately after `subscribe_ws`
+    /// would be broadcast (and consumed, and dropped) while the connection's
+    /// `subscribed_workspaces` is still empty — telemetry is never replayed
+    /// from the buffer, so it would be lost for good. Observing the index
+    /// entry (the Subscribe handler inserts it after authorization, before
+    /// returning to its select loop) synchronizes the emits with the
+    /// subscription deterministically, unlike a fixed sleep. A rejected
+    /// workspace never appears in the index, so this only returns for
+    /// accepted subscriptions.
+    async fn await_ws_subscription(state: &Arc<AppState>, workspace_id: &str) {
+        let ws_id = gyre_common::Id::new(workspace_id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let index = state.ws_connection_workspaces.read().await;
+                if index.values().any(|scopes| scopes.contains(&ws_id)) {
+                    return;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "subscription for {workspace_id} was not authorized on the server within 5s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     fn now_secs() -> u64 {
