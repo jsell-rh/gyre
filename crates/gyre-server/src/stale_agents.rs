@@ -90,6 +90,16 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 let _ = state.analytics.record(&ev).await;
                 let _ = state.agents.update(&agent).await;
 
+                // message-bus.md §Edge Cases (orphaned agents): the detector
+                // marks the heartbeated-out agent Dead and bulk-acks its
+                // unacked Directed inbox with reason "agent_orphaned" —
+                // retained for audit, never redelivered, and reclaimable by
+                // the dead-inbox retention job (expire_acked_inboxes) once
+                // GYRE_DEAD_INBOX_TTL_SECS elapses. Without this, unacked
+                // Directed messages to dead agents accumulate indefinitely.
+                crate::api::spawn::acknowledge_agent_inbox(state, &agent.id, "agent_orphaned")
+                    .await;
+
                 if was_active {
                     crate::api::budget::decrement_active_agents(
                         state,
@@ -937,5 +947,136 @@ mod tests {
                 .is_some(),
             "other tasks' secrets must survive the stale stop"
         );
+    }
+
+    /// message-bus.md §Edge Cases (orphaned agents): when the stale detector
+    /// marks a heartbeated-out agent Dead, its unacked Directed messages are
+    /// bulk-acked with reason "agent_orphaned" — count_unacked drops to zero,
+    /// the rows remain stored for audit, and the dead-inbox retention expiry
+    /// reclaims exactly those rows (expire_acked_inboxes matches only the
+    /// agent_completed/agent_orphaned reasons, so the deletion count also
+    /// proves the recorded reason). Fails on the old behavior where the Dead
+    /// transition never called acknowledge_all.
+    #[tokio::test]
+    async fn stale_abort_bulk_acks_directed_inbox_with_agent_orphaned() {
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+
+        let state = test_state();
+        let now = now_secs();
+
+        let mut agent = Agent::new(Id::new("agent-stale-inbox"), "stale-inbox-agent", now);
+        agent.transition_status(AgentStatus::Active).ok();
+        agent.last_heartbeat = Some(now - 120);
+        agent.disconnected_behavior = DisconnectedBehavior::Abort;
+        state.agents.create(&agent).await.unwrap();
+
+        // Aged past a 1s retention cutoff so the reclamation probe can use a
+        // short dead-inbox window without touching process-global env vars.
+        let created_at = (now * 1000).saturating_sub(10_000);
+        let directed = |id: &str, target: &str| Message {
+            id: Id::new(id.to_string()),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-1")),
+            to: Destination::Agent(Id::new(target.to_string())),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+
+        // Two unacked Directed messages in the orphaned agent's inbox.
+        state
+            .messages
+            .store(&directed("orphan-msg-1", "agent-stale-inbox"))
+            .await
+            .unwrap();
+        state
+            .messages
+            .store(&directed("orphan-msg-2", "agent-stale-inbox"))
+            .await
+            .unwrap();
+        // A live agent's unacked inbox — must survive untouched.
+        state
+            .messages
+            .store(&directed("orphan-live-msg", "agent-stale-live"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new("agent-stale-inbox"))
+                .await
+                .unwrap(),
+            2,
+            "precondition: two unacked Directed messages before the Dead transition"
+        );
+
+        run_once(&state).await.unwrap();
+
+        let dead = state
+            .agents
+            .find_by_id(&Id::new("agent-stale-inbox"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dead.status, AgentStatus::Dead);
+
+        // Orphan cleanup: zero unacked, rows retained for audit.
+        assert_eq!(
+            state
+                .messages
+                .count_unacked(&Id::new("agent-stale-inbox"))
+                .await
+                .unwrap(),
+            0,
+            "the Dead transition must bulk-ack the orphaned agent's Directed inbox"
+        );
+        for msg_id in ["orphan-msg-1", "orphan-msg-2"] {
+            let msg = state
+                .messages
+                .find_by_id(&Id::new(msg_id))
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{msg_id} must remain stored for audit"));
+            assert!(msg.acknowledged, "{msg_id} must be acknowledged");
+        }
+
+        // Reclamation: with the dead-inbox retention window (1s here)
+        // elapsed, expire_acked_inboxes deletes exactly the two
+        // agent_orphaned rows.
+        let deleted = state
+            .messages
+            .expire_acked_inboxes(now * 1000 - 1_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            deleted, 2,
+            "dead-inbox retention must reclaim exactly the orphaned agent's inbox"
+        );
+        assert!(state
+            .messages
+            .find_by_id(&Id::new("orphan-msg-1"))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(state
+            .messages
+            .find_by_id(&Id::new("orphan-msg-2"))
+            .await
+            .unwrap()
+            .is_none());
+
+        // Untouched: the live agent's unacked inbox.
+        let live = state
+            .messages
+            .find_by_id(&Id::new("orphan-live-msg"))
+            .await
+            .unwrap()
+            .expect("live agent's unacked Directed message must survive");
+        assert!(!live.acknowledged);
     }
 }
