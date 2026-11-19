@@ -2,8 +2,8 @@
 title: "SCIM user lifecycle completion: PATCH, deactivation semantics, enterprise extension, production wiring"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / scim-users-lifecycle / b60edce5bc49"
 depends_on: []
-progress: ready-for-review
-commits: ["ed7b5a88115656eab7480444622586f57c8dd99f", "d835ff672057a17202f7c2902f7c958e9ea4b233", "156d268fde267a990c59a047da860d9b9725e77c"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -94,28 +94,3 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
-
-## Shipped
-
-All five requirement areas are implemented in production code on this branch: implementation commit `156d268f`, review-repair commit `d835ff67`, and verification-repair commit `ed7b5a88` (the last closes the three failures from verification run `85ea51e0`).
-
-### Production wiring (requirement 1)
-
-`require_auth_middleware` (crates/gyre-server/src/lib.rs) passes `/scim/v2/*` through to the handlers instead of running the global agent/API-key/JWT token ladder (which rejected a SCIM-only bearer 401 "Invalid token" before `check_scim_auth` could run). The exemption is fail-closed: every `/scim/v2` handler still enforces `check_scim_auth` — 403 when `GYRE_SCIM_TOKEN` is unset, constant-time bearer compare (`auth::tokens_equal`). The routes are ABAC resolver-exempt with per-handler auth, so the ABAC-exempt-handler and route-registry gates stay green.
-
-### PATCH + deactivation lifecycle (requirements 2–3)
-
-`PATCH /scim/v2/Users/{id}` (`scim_patch_user`, api/scim.rs) implements RFC 7644 PatchOp (`Operations` with `op`/`path`/`value`, including enterprise-extension URN paths) plus a simplified bare-body form (`{"active": false}`) for IdPs that send a fragment. `active:false` (PATCH, PUT, or DELETE) runs `deactivate_via_scim`: soft `User::deactivate` (the row remains resolvable — SCIM DELETE no longer hard-deletes), `sessions.revoke_all_for_user`, `impersonation::end_active_sessions_for_user`, agents' `spawned_by` attribution cleared, `workspace_ownership::on_user_removed`, and a `user_deactivated` audit event with `source: "scim"`. The serialized `active` field mirrors `!user.is_deactivated()` instead of the hardcoded `true`. `ServiceProviderConfig` advertises `patch.supported: true`. In auth.rs, the `credential_revoked` check was hoisted above the deactivation check in the API-key branch so a session-revoking SCIM deactivation replays its pre-deactivation credential with 401 "Session has been revoked".
-
-### Enterprise extension (requirement 4) + core-schema preservation (requirement 5)
-
-User resources serialize `urn:ietf:params:scim:schemas:extension:enterprise:2.0:User` with `organization` (the tenant id) and `manager.value`, persisted via the `users.manager_id` column (migration `2026-11-13-000067_user_manager_id`, SQLite + Postgres). Create/PUT/PATCH accept and persist both attributes. `userName`/`externalId` remain immutable on PUT and PATCH (ignored, not 409, to keep IdP sync loops working); idempotent create, emails, meta, and no-password-fields behavior are unchanged. Schemas/ResourceTypes discovery advertises the extension.
-
-### Verification repair (ed7b5a88)
-
-Verification run `85ea51e0` (cargo test --all) failed 3 of 9 tests in `tests/scim_lifecycle.rs`, all at the same assertion: after SCIM deactivation the agent's `spawned_by` still held the user id. Root cause: `deactivate_via_scim` clears the field in memory and calls `AgentRepository::update`, but both SQL adapters' `update()` omitted `agents::spawned_by` from the diesel SET list, so the clearance was never persisted (the mem adapter stores the whole struct, so only the SQL-backed integration tests could catch it). Fixed in `sqlite/agent.rs` and `postgres/agent.rs` (update now sets `spawned_by`, matching the create upsert); the port contract now documents that `update` persists every mutable field including `spawned_by`; regression test `update_persists_spawned_by_attribution_changes` (Some→None and None→Some round trip) added to the sqlite adapter suite.
-
-### Test evidence
-
-- This sandbox (evidence in /tmp/stage/review-evidence, head `ed7b5a88`): `cargo test -p gyre-adapters sqlite::agent` — 19 passed, 0 failed, including the new `update_persists_spawned_by_attribution_changes` regression test. gyre-server test compilation is deferred to the independent verifier (sandbox build budget), which must run `cargo test -p gyre-server --test scim_lifecycle` and the full `cargo test --all` (the prior run's only failures were the three spawned_by tests this commit fixes).
-- `tests/scim_lifecycle.rs` (added in `156d268f`) drives every request through the full production `build_router()` stack over a real SQLite temp-file database: SCIM-only bearer reaches the handlers and succeeds; wrong/missing/global token rejected 403; unset `GYRE_SCIM_TOKEN` fails closed 403; PATCH `active:false` (PatchOp and bare-body) and SCIM DELETE each deactivate the stored record, serialize `active:false`, revoke every session (pre-deactivation credential replays 401), and clear agents' `spawned_by`; DELETE leaves the row resolvable; the enterprise extension round-trips through create/PUT/PATCH; userName/externalId immutability and patch-advertised ServiceProviderConfig asserted.
