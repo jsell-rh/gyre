@@ -3070,8 +3070,13 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
         msg.key_id = Some(kid);
     }
 
-    // Persist Directed and Event tier.
-    if effective_tier != MessageTier::Telemetry && !matches!(msg.to, Destination::Broadcast) {
+    // Persist Directed and Event tier. Broadcast-only kinds
+    // (DataSeeded/QueueUpdated) are storage-exempt regardless of destination
+    // (message-bus.md §Broadcast-only kinds) — broadcast channel only.
+    if effective_tier != MessageTier::Telemetry
+        && !matches!(msg.to, Destination::Broadcast)
+        && !msg.kind.broadcast_only()
+    {
         if let Err(e) = state.messages.store(&msg).await {
             return tool_error(format!("failed to store message: {e}"));
         }

@@ -1266,6 +1266,10 @@ pub async fn maybe_auto_enqueue_reconciliation_mr(
         );
         return;
     }
+    // Broadcast-only QueueUpdated (message-bus.md §Broadcast-only kinds):
+    // the enqueue transition — the reconciliation MR entering the merge
+    // queue (same broadcast the explicit enqueue handler emits).
+    crate::merge_processor::emit_queue_updated(state, &mr.workspace_id).await;
     // Trigger quality-gate execution for the enqueued MR (same as the
     // explicit enqueue handler) — the merge processor merges once they pass.
     crate::gate_executor::trigger_gates_for_mr(
