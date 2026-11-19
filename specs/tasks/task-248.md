@@ -3,7 +3,7 @@ title: "Message send-path guards: scope validation, mem store contract, WS ackno
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
+commits: ["955c134a8c669070c3b936eac55f0e5e3f448418", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "873d0821ca7a33501c178303bdc618a1802ccbb6", "3bb9c9bd4099810d8583ab647018a5a41297f8c2"]
 ---
 
 ## Required behavior
@@ -126,15 +126,16 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 All five send-path guard deviations from the Message Envelope and Scoping
 Rules sections are implemented in production code (commits 955c134a,
 9dd4a1f0, the round-4 fail-closed repair 873d0821, and the round-5 test
-repair 3bb9c9bd).
+repair 3bb9c9bd), and the branch has been rebased onto 321615ec
+(task-250's WebSocket replay-window work) with behavior preserved.
 
 ### Behavior
 
-1. **Scopeless-message guard** — `emit_scoped_event` (crates/gyre-server/src/lib.rs),
-   the shared body of the internal `emit_event`/`emit_tenant_event` family,
-   returns `Err` and logs at error level when `destination != Broadcast &&
-   workspace_id.is_none()`; the message is never constructed, stored, or
-   broadcast.
+1. **Scopeless-message guard** — `emit_scoped_event`
+   (crates/gyre-server/src/lib.rs), the shared body of the internal
+   `emit_event`/`emit_tenant_event` family, returns `Err` and logs at error
+   level when `destination != Broadcast && workspace_id.is_none()`; the
+   message is never constructed, stored, or broadcast.
 2. **Mem store contract** — `MemMessageRepository::store`
    (crates/gyre-server/src/mem.rs) returns `Err` on `workspace_id: None`,
    matching the SQLite/PostgreSQL `message_to_new_row` contract. All send
@@ -172,19 +173,34 @@ testing. Both probes now use `Custom("rule6_broadcast_probe")` (Event tier,
 constraint. Production code unchanged; specs/coverage/system/message-bus.md
 row 10 notes the probe-kind constraint.
 
+### Round-6 rebase onto 321615ec
+
+Resolved the merge against task-250's WebSocket replay-window rework
+(newest-1000 window across all subscribed workspaces combined,
+strictly-greater `last_seen` boundary, single `ReplayCatchUp` signal) while
+preserving this task's `acknowledged` exclusion: the conflict in
+crates/gyre-server/src/ws.rs takes task-250's pool-based replay selection
+wholesale and routes the final delivery loop through `ws_message_payload`
+instead of raw `serde_json::to_string`, so BOTH WS serialization sites still
+strip `acknowledged` under the new replay algorithm. The replay-arm test
+(`ws_subscribe_replay_strips_acknowledged`, persisted message with
+`created_at: 1000`, `last_seen: 0`) still qualifies under the shifted
+strictly-greater bound (`since_ms = 1`). The coverage-file conflict was
+merged to describe both tasks' work on row 9 and this task's work on row 10.
+
 ### Test evidence
 
-Fourteen focused tests cover every acceptance criterion (full list and
-verifier invocation in /tmp/stage/review-evidence/task-248-evidence.md).
-Executed in this sandbox: `cargo fmt -p gyre-server -- --check` (clean),
-`SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` (exit 0), and the
-gyre-common premise tests (`server_only_returns_false_for_directed_telemetry_custom`,
-`tier_event` — Custom is Event tier and not server_only). gyre-server test
-compilation exceeds the sandbox 4 GiB budget and is deferred to the
-independent verifier, which must run:
+Fourteen focused tests cover every acceptance criterion (list and verifier
+invocation in /tmp/stage/review-evidence/task-248-evidence.md). Executed in
+this sandbox this round: `cargo check -p gyre-server` (exit 0) and
+`cargo check -p gyre-server --tests` (exit 0) — both clean after the rebase
+resolution, confirming the merged ws.rs replay code and its tests type-check
+against task-250's changes. gyre-server test compilation exceeds the sandbox
+4 GiB budget and is deferred to the independent verifier, which must run:
 `cargo test -p gyre-server --lib admin_api_key_broadcast_allowed_non_admin_rejected`
 (expect: Admin API-key Broadcast probe → 201 via the rule-6 role check;
 non-Admin member probe → 403 "Broadcast destination requires Server origin
 or Admin role") plus the other thirteen focused tests listed in the evidence
-file. No gyre-server test has been executed in this sandbox — that execution
+file, including both ws.rs `acknowledged` tests against the rebased replay
+arm. No gyre-server test has been executed in this sandbox — that execution
 is pending independent verification, not claimed.
