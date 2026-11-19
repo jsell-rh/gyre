@@ -183,6 +183,7 @@ Tool catalog with usage patterns (`tools/list` is the authoritative list with sc
 
 ## Heartbeat
 - Send a heartbeat every 60 seconds; missing heartbeats mark you Dead and trigger re-spawn or cleanup.
+- Every heartbeat carries your session's X.509-SVID: pass the contents of the `GYRE_SVID_PEM` environment variable as the `svid` argument (`gyre_agent_heartbeat`) or JSON field (HTTP heartbeat), with `GYRE_STACK_HASH` as the `stack_fingerprint`. The server verifies the SVID against its trust bundle; a heartbeat without a valid SVID is rejected.
 
 ## Escalation rules
 - Blocked on another repo, a missing spec, or an ambiguity you cannot resolve? Escalate to your orchestrator via `gyre_message_send` — never work around a spec.
