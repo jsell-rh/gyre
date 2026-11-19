@@ -409,6 +409,21 @@ impl AgentSigningKey {
         &self.pkcs8_bytes
     }
 
+    /// The public half of this key as a PEM-encoded SubjectPublicKeyInfo
+    /// (SPKI) block — the form Rekor's hashedrekord `publicKey.content`
+    /// carries (task-264). Ed25519 SPKI is the fixed 12-byte RFC 8410
+    /// prefix followed by the raw 32-byte key.
+    pub fn public_key_pem(&self) -> String {
+        const ED25519_SPKI_PREFIX: [u8; 12] = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        let mut spki = Vec::with_capacity(ED25519_SPKI_PREFIX.len() + self.public_key_bytes.len());
+        spki.extend_from_slice(&ED25519_SPKI_PREFIX);
+        spki.extend_from_slice(&self.public_key_bytes);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&spki);
+        format!("-----BEGIN PUBLIC KEY-----\n{b64}\n-----END PUBLIC KEY-----\n")
+    }
+
     /// Sign arbitrary bytes with the Ed25519 private key.
     ///
     /// Used by the attestation module to sign merge attestation bundles.

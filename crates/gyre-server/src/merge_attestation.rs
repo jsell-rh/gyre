@@ -400,21 +400,31 @@ pub async fn generate_merge_attestation_bundle(
 
     Ok(bundle)
 }
-
 // ── Storage ──────────────────────────────────────────────────────────────────
+
+/// KV namespace holding each MR's Rekor transparency-log entry UUID for
+/// its merge attestation bundle (task-264): `mr_id → entry UUID`. Durable
+/// alongside every other KV-backed record (SQLite/PG in production).
+pub const REKOR_ENTRY_KV_NAMESPACE: &str = "rekor_attestation_entries";
 
 /// Persist the signed bundle through the `AttestationStorage` port
 /// (spec §Storage: git note on the merge commit + `merge_attestation_bundle`
 /// audit event, queryable by MR id and commit SHA) and submit it to the
-/// Rekor transparency log. Failures are logged — the merge has already
-/// landed and must not be rolled back by bundle storage — but they are
-/// surfaced, never silently swallowed.
+/// Rekor transparency log (task-264).
+///
+/// Returns `Ok(())` only when BOTH the bundle storage and (when Rekor is
+/// configured) the transparency-log submission with its persisted entry
+/// UUID succeeded. Any failure is an explicit `Err` naming what failed —
+/// the merge has already landed and must not be rolled back by bundle
+/// storage, so callers surface the error as a warning/audit state, but a
+/// Rekor outage is never reported as successful transparency-log
+/// recording (the old no-op client returned a silent `Ok(None)`).
 pub async fn store_merge_attestation_bundle(
     state: &AppState,
     mr: &MergeRequest,
     repo: &gyre_domain::Repository,
     bundle: &MergeAttestationBundle,
-) {
+) -> Result<(), String> {
     let scope = gyre_ports::attestation_storage::AttestationScope {
         workspace_id: mr.workspace_id.clone(),
         repo_id: repo.id.clone(),
@@ -424,18 +434,40 @@ pub async fn store_merge_attestation_bundle(
         .store(std::path::Path::new(&repo.path), &scope, bundle)
         .await
     {
-        tracing::warn!(
-            mr_id = %mr.id,
-            error = %e,
-            "failed to store merge attestation bundle (git note / audit event)"
-        );
+        return Err(format!(
+            "failed to store merge attestation bundle (git note / audit event) for MR {}: {e}",
+            mr.id
+        ));
     }
-    if let Err(e) = state.rekor.submit(bundle).await {
-        tracing::warn!(
-            mr_id = %mr.id,
-            error = %e,
-            "failed to submit merge attestation bundle to the Rekor transparency log"
-        );
+    match state.rekor.submit(bundle).await {
+        Ok(Some(entry_uuid)) => {
+            if let Err(e) = state
+                .kv_store
+                .kv_set(REKOR_ENTRY_KV_NAMESPACE, &mr.id.to_string(), entry_uuid.clone())
+                .await
+            {
+                return Err(format!(
+                    "failed to persist the Rekor entry UUID for MR {}: {e}",
+                    mr.id
+                ));
+            }
+            tracing::info!(
+                mr_id = %mr.id,
+                rekor_entry_id = %entry_uuid,
+                "merge attestation bundle recorded in the Rekor transparency log"
+            );
+            Ok(())
+        }
+        Ok(None) => Err(format!(
+            "Rekor client returned no entry UUID for MR {} without an error — \
+             transparency-log recording did not happen",
+            mr.id
+        )),
+        Err(e) => Err(format!(
+            "failed to submit merge attestation bundle for MR {} to the Rekor \
+             transparency log: {e}",
+            mr.id
+        )),
     }
 }
 
@@ -1370,5 +1402,164 @@ mod tests {
             .unwrap();
         assert!(result.valid, "got {:?}", result.errors);
         assert_eq!(result.spec_approval_valid, None);
+    }
+}
+
+// ── Rekor transparency-log storage tests (task-264) ─────────────────────────
+
+#[cfg(test)]
+mod rekor_storage_tests {
+    use super::*;
+    use gyre_ports::RekorClient;
+
+    /// A scripted Rekor client: returns a fixed entry UUID, a fixed
+    /// outage error, or "unconfigured" — exercising the REAL storage
+    /// path's handling of each outcome (the HttpRekorClient wire behavior
+    /// itself has its own suite in gyre-adapters).
+    enum ScriptedRekor {
+        Ok(String),
+        Outage,
+    }
+
+    #[async_trait::async_trait]
+    impl RekorClient for ScriptedRekor {
+        async fn submit(&self, _bundle: &MergeAttestationBundle) -> anyhow::Result<Option<String>> {
+            match self {
+                ScriptedRekor::Ok(uuid) => Ok(Some(uuid.clone())),
+                ScriptedRekor::Outage => Err(anyhow::anyhow!("rekor down")),
+            }
+        }
+
+        fn is_configured(&self) -> bool {
+            !matches!(self, ScriptedRekor::Outage)
+        }
+    }
+
+    /// A real git repo (the storage port writes a git note on the merge
+    /// commit) + MR + repo records wired into a mem state whose Rekor
+    /// client is `rekor`.
+    async fn fixture(rekor: ScriptedRekor) -> (Arc<AppState>, MergeRequest, gyre_domain::Repository) {
+        let state = crate::mem::test_state_with_rekor(Arc::new(rekor));
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_path = dir.path().join("repo.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["init", "--bare"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init --bare failed");
+        // Hold the tempdir for the test's duration.
+        std::mem::forget(dir);
+
+        let repo = gyre_domain::Repository::new(
+            Id::new("repo-rekor"),
+            Id::new("ws-rekor"),
+            "rekor-repo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-rekor"),
+            Id::new("repo-rekor"),
+            Id::new("ws-rekor"),
+            "Rekor storage",
+            "feat/x",
+            "main",
+            1_700_000_000,
+        );
+        mr.author_agent_id = Some(Id::new("agent-author"));
+        state.merge_requests.create(&mr).await.unwrap();
+        (state, mr, repo)
+    }
+
+    async fn bundle(state: &Arc<AppState>, mr: &MergeRequest) -> MergeAttestationBundle {
+        generate_merge_attestation_bundle(state, mr, "rekorsha", 1_774_000_000)
+            .await
+            .unwrap()
+    }
+
+    /// task-264: a successful transparency-log submission stores the entry
+    /// UUID, keyed by MR id, in the durable KV store.
+    #[tokio::test]
+    async fn successful_submission_stores_the_rekor_entry_uuid() {
+        let (state, mr, repo) = fixture(ScriptedRekor::Ok("uuid-xyz".to_string())).await;
+        let bundle = bundle(&state, &mr).await;
+
+        store_merge_attestation_bundle(&state, &mr, &repo, &bundle)
+            .await
+            .expect("storage + successful Rekor submission must succeed");
+
+        let stored = state
+            .kv_store
+            .kv_get(REKOR_ENTRY_KV_NAMESPACE, &mr.id.to_string())
+            .await
+            .unwrap()
+            .expect("the Rekor entry UUID must be persisted");
+        assert_eq!(stored, "uuid-xyz");
+    }
+
+    /// task-264: a Rekor outage is an explicit failure — never a silent
+    /// Ok — and no entry UUID is recorded for a bundle that was not
+    /// actually submitted.
+    #[tokio::test]
+    async fn rekor_outage_is_an_explicit_failure_not_silent_success() {
+        let (state, mr, repo) = fixture(ScriptedRekor::Outage).await;
+        let bundle = bundle(&state, &mr).await;
+
+        let err = store_merge_attestation_bundle(&state, &mr, &repo, &bundle)
+            .await
+            .expect_err("a Rekor outage must not be reported as success");
+        assert!(
+            err.contains("rekor down"),
+            "the outage error must surface the Rekor failure: {err}"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(REKOR_ENTRY_KV_NAMESPACE, &mr.id.to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "no entry UUID may be recorded for an unsubmitted bundle"
+        );
+
+        // The bundle itself IS still stored (git note + audit event) — the
+        // merge landed; only the transparency-log recording failed.
+        let retrieved = state
+            .attestation_storage
+            .retrieve_by_mr(&mr.id)
+            .await
+            .unwrap()
+            .expect("the bundle remains stored despite the Rekor outage");
+        assert_eq!(retrieved.mr_id, mr.id.to_string());
+    }
+
+    /// task-264: an unconfigured log (the default test wiring — and the
+    /// default production wiring without GYRE_REKOR_URL) fails every
+    /// submission explicitly; never a silent Ok(None).
+    #[tokio::test]
+    async fn unconfigured_rekor_fails_explicitly() {
+        let (state, mr, repo) = fixture(ScriptedRekor::Outage).await;
+        drop(state);
+        // Default mem wiring (no injection): the unconfigured HttpRekorClient.
+        let state_default = crate::mem::test_state();
+        state_default.repos.create(&repo).await.unwrap();
+        state_default.merge_requests.create(&mr).await.unwrap();
+        let bundle_default = generate_merge_attestation_bundle(&state_default, &mr, "rekorsha2", 0)
+            .await
+            .unwrap();
+
+        let err = store_merge_attestation_bundle(&state_default, &mr, &repo, &bundle_default)
+            .await
+            .expect_err("an unconfigured Rekor must fail explicitly");
+        assert!(
+            err.contains("not configured") || err.contains("rekor"),
+            "the error must name the unconfigured transparency log: {err}"
+        );
     }
 }
