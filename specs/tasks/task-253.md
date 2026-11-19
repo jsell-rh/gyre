@@ -2,8 +2,8 @@
 title: "MCP SSE stream: workspace filtering and MessageKind-to-AG-UI event mapping"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / mcp-sse-workspace-agui / 60b177f85a11"
 depends_on: []
-progress: ready-for-review
-commits: ["c9c8b4c3722d79b8ddc835ea6b1602bc70b9474a"]
+progress: not-started
+commits: []
 ---
 
 ## Required behavior
@@ -58,79 +58,3 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
-
-## Shipped
-
-`mcp_sse_handler` (crates/gyre-server/src/mcp.rs, commit c9c8b4c3) now
-implements both halves of message-bus.md §MCP Integration:
-
-### Workspace filtering
-
-The handler resolves the subscriber's workspace scope fail-closed (never
-fabricated): for agent/system principals the stored agent record governs
-(`state.agents.find_by_id` — "Workspace that governs this agent", M34
-hierarchy enforcement), with the signature-verified `workspace_id` JWT claim
-(mirrored onto the principal by the auth extractor) as the fallback when no
-record exists; user principals (API key, Keycloak) are claim-only. Bus
-delivery is then filtered per destination:
-
-- `Destination::Workspace(ws)` — delivered only when `ws` equals the
-  subscriber's resolved workspace (workspace ids are globally unique, so the
-  match implies tenant containment);
-- `Destination::Broadcast` — delivered to all subscribers per the bus's
-  broadcast semantics; admins with no resolvable scope (global token) keep
-  the legacy unscoped dashboard view, mirroring the admin bypass in
-  ws.rs Subscribe;
-- `Destination::Agent(id)` — delivered only on the authenticated agent's own
-  stream (`id == auth.agent_id`).
-
-### AG-UI event mapping
-
-`agui_event_name` (mcp.rs) maps `MessageKind` → SSE event name per the spec
-table: ToolCallStart→TOOL_CALL_START, ToolCallEnd→TOOL_CALL_END,
-RunStarted→RUN_STARTED, RunFinished→RUN_FINISHED,
-TextMessageContent→TEXT_MESSAGE_CONTENT, StateChanged→STATE_CHANGED,
-AgentError→ERROR; kinds outside the table (incl. `Custom`) keep the generic
-`message` event. The SSE data payload is unchanged (raw envelope JSON).
-
-### Test evidence
-
-Five focused tests in the mcp.rs test module (in-process
-`tower::ServiceExt::oneshot` against `build_router(test_state())` — real
-router, real auth extractor with minted+registered agent JWTs, real broadcast
-bus; no TCP listener involved):
-
-- `mcp_sse_workspace_isolation` (AC1) — agents in different workspaces of
-  different tenants; a Workspace-scoped ToolCallStart to workspace A reaches
-  A's stream only. Fails against the pre-task handler (which forwarded every
-  bus message to every subscriber).
-- `mcp_sse_agui_event_mapping` (AC2) — all seven spec-table kinds arrive
-  with their AG-UI event names (AgentError → ERROR); TaskCreated keeps the
-  default `message` name. Fails against the old always-`message` handler.
-- `mcp_sse_directed_delivery` (AC3) — a Directed message to the
-  authenticated agent is delivered; a Directed message to another agent is
-  not.
-- `mcp_sse_admin_connection_still_receives_notifications` (AC4) — a global-
-  token connection still receives Broadcast server→client notifications
-  (DataSeeded).
-- `mcp_sse_record_activity_telemetry_reaches_workspace` (AC5) — a worker
-  JWT calling `gyre_record_activity` (agent record in ws-ra) surfaces on a
-  same-workspace subscriber's stream as `event: RUN_STARTED`.
-
-### Deferred to the independent verifier
-
-The sandbox build wrapper refuses gyre-server test codegen ("gyre-server
-code generation plus the model exceeds 4 GiB"), so the five tests were
-type-checked (`cargo check -p gyre-server --lib --tests`, clean) but not
-executed locally. Required probe:
-
-```
-SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib mcp_sse
-```
-
-Expected: 5 passed. Evidence and exact commands recorded in
-/tmp/stage/review-evidence/task-253.md. No transport/listener restriction was
-encountered.
-
-Coverage: specs/coverage/system/message-bus.md row 14 (MCP Integration) and
-the audit header updated with the SSE evidence.
