@@ -3,7 +3,7 @@ title: "Storage-exempt broadcast kinds: kind-based short-circuit and real DataSe
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / broadcast-only-kind-emitters / 60b177f85a11"
 depends_on: []
 progress: ready-for-review
-commits: ["7f02c401fe9d8ba5d46b4303da37fb31645ccbb5", "356ddc34988696560ac01e683ee882fb92d97d42"]
+commits: ["356ddc34988696560ac01e683ee882fb92d97d42", "7f02c401fe9d8ba5d46b4303da37fb31645ccbb5", "669214b67a1a1675deeee31994412a8aabf39bbe"]
 ---
 
 ## Required behavior
@@ -66,85 +66,80 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
 
 ## Shipped
 
-Both requirements are implemented in production code, and the one
-verification finding against the candidate is repaired.
+Both required behaviors are implemented in production code, the one
+verification finding against the candidate is repaired, and the
+deterministic repo-invariant checks (rustfmt, clippy changed-lines,
+check-dead-message-kinds with QueueUpdated removed from the exemptions
+file, and the rest of checks.sh) ran green in the independent
+verification sandbox on this exact Rust source — `git diff 34ef6315..HEAD
+-- crates/ scripts/` is empty.
 
 ### Kind-based storage short-circuit
 
-`MessageKind::broadcast_only()` (crates/gyre-common/src/message.rs) returns
-true for exactly `DataSeeded` and `QueueUpdated`. All three send paths
-short-circuit storage by KIND in addition to the existing tier/destination
-guards, so no `DataSeeded`/`QueueUpdated` row is ever persisted even when
-addressed to a Workspace destination, while broadcast-channel delivery,
-signing, and all validation for other kinds are unchanged:
+`MessageKind::broadcast_only()` (crates/gyre-common/src/message.rs)
+returns true for exactly `DataSeeded` and `QueueUpdated`. All three send
+paths short-circuit storage by KIND in addition to the existing
+tier/destination guards, so no `DataSeeded`/`QueueUpdated` row is ever
+persisted even when addressed to a Workspace destination, while
+broadcast-channel delivery, signing, and all validation for other kinds
+are unchanged:
 
 - REST send: `send_message` (crates/gyre-server/src/api/messages.rs)
 - MCP send: `handle_message_send` (crates/gyre-server/src/mcp.rs)
 - internal emitter: `emit_scoped_event` (crates/gyre-server/src/lib.rs)
 
-The optional 400-rejection of non-Broadcast destinations was NOT taken: the
-acceptance criterion requires the broadcast channel to deliver a
-Workspace-forced broadcast-only message, so the send succeeds 201 and the
-kind-based exemption keeps it out of `store()`.
+The optional 400-rejection of non-Broadcast destinations was NOT taken:
+the acceptance criterion requires the broadcast channel to deliver a
+Workspace-forced broadcast-only message, so the send succeeds 201 and
+the kind-based exemption keeps it out of `store()`.
 
 ### Real emitters for the two formerly-dead kinds
 
-- `DataSeeded` — emitted when workspace data seeding completes, at the end
-  of `admin_seed` (crates/gyre-server/src/api/admin.rs): server origin,
-  `Destination::Broadcast`, `workspace_id: None`, payload none, tenant =
-  the seeding caller's tenant.
+- `DataSeeded` — emitted when workspace data seeding completes, at the
+  end of `admin_seed` (crates/gyre-server/src/api/admin.rs): server
+  origin, `Destination::Broadcast`, `workspace_id: None`, payload none,
+  tenant = the seeding caller's tenant.
 - `QueueUpdated` — `emit_queue_updated` helper
   (crates/gyre-server/src/merge_processor.rs) called at every merge-queue
-  entry state transition: enqueue (`enqueue_core` in api/merge_queue.rs and
-  the reconciliation auto-enqueue in reconciliation.rs), claim
+  entry state transition: enqueue (`enqueue_core` in api/merge_queue.rs
+  and the reconciliation auto-enqueue in reconciliation.rs), claim
   (Queued→Processing, single-entry and atomic-group paths), requeue
-  (Processing→Queued: paused queue, supervised-trust hold, ABAC fail-closed,
-  atomic-group rollback), and terminal outcomes (Merged, Failed, Cancelled).
-  Payload none, `Destination::Broadcast`, `workspace_id: None`; tenant
-  resolved from the affected workspace (skip-and-log when unresolvable).
+  (Processing→Queued: paused queue, supervised-trust hold, ABAC
+  fail-closed, atomic-group rollback), and terminal outcomes (Merged,
+  Failed, Cancelled — including operator cancel in api/merge_queue.rs
+  and the circuit-breaker cancellation). Payload none,
+  `Destination::Broadcast`, `workspace_id: None`; tenant resolved from
+  the affected workspace (skip-and-log when unresolvable, never
+  fabricated).
 
 `QueueUpdated` was removed from scripts/dead-message-kind-exemptions.txt
-(no new entries); `bash scripts/check-dead-message-kinds.sh` passes.
+(no new exemption entries; the file shrank by one kind), and the
+message-bus.md coverage row 6 cites this task's source evidence.
 
-### Tests
+### Verification-finding repair (attempt 4381dc12)
 
-- `broadcast_only_kinds_not_persisted_even_forced_to_workspace`
-  (api/messages.rs): sends `data_seeded` and `queue_updated` through the
-  REST send path to a Workspace destination — 201, `find_by_id` → None,
-  `list_by_workspace` empty, broadcast channel delivered both. Fails
-  against the pre-task destination-only guard (the row WAS stored).
-- `emit_event_broadcast_only_kind_never_stored_for_workspace_destination`
-  (lib.rs): same probe through the internal emitter for both kinds.
-- `admin_seed_broadcasts_data_seeded` (api/admin.rs): runs the real
-  workspace-seed flow with a broadcast subscriber; asserts a Server-origin
-  DataSeeded broadcast (Broadcast destination, `workspace_id: None`,
-  payload none) and no stored row. Pre-task the kind had zero production
-  constructors.
-- Merge-queue state-transition tests in merge_processor.rs observe
-  QueueUpdated broadcasts on claim/merge/requeue/pause/fail transitions.
+The independent verification run failed one frontend test:
+WorkspaceSettings "renders invitation status and expiry" expected
+'Expires in 30m' but got 'Expires in 29m'. Root cause: a pre-existing
+wall-clock boundary race in the test fixture — `expires_at` was set to
+exactly floor(now)+30*60 while the component floors whole minutes from
+Date.now() at render time, so any render crossing the next second
+computed 1799s → 29m. Fixed in commit 669214b6 by adding +30s slack to
+the countdown fixtures (assertion strength unchanged: still exact
+'Expires in 30m', still proves minutes-not-seconds). Focused evidence:
+85/85 passed on 4 consecutive vitest executions of the file
+(/tmp/stage/review-evidence).
 
-### Verification finding repaired (commit 7f02c401)
+### Test evidence
 
-`cargo test --all` on the candidate failed
-`merge_processor::tests::atomic_group_failure_notifies_all_distinct_authors`:
-the atomic-group rollback requeue now broadcasts `QueueUpdated` (specced
-task-249 behavior) before the `AtomicGroupFailed` event, and that one test
-still assumed `AtomicGroupFailed` was the first channel message. Fixed by
-applying the same scan-for-kind pattern its sibling rollback test already
-uses; the event must still be emitted, so assertion strength is preserved.
-
-### Evidence
-
-- `cargo check -p gyre-server` → exit 0 (this sandbox; gyre-server test
-  compilation deferred to the independent verifier per the 4 GiB budget)
-- `cargo test -p gyre-common --quiet` → 129 passed, including
-  `broadcast_only_returns_true_for_dataseeded_queueupdated_only`
-- `bash scripts/check-dead-message-kinds.sh` → OK
-- `cargo fmt -p gyre-server -- --check` → clean
-
-Verifier must run: `cargo test -p gyre-server --lib merge_processor::tests`
-(includes the repaired `atomic_group_failure_notifies_all_distinct_authors`),
-`broadcast_only_kinds_not_persisted_even_forced_to_workspace`,
-`emit_event_broadcast_only_kind_never_stored_for_workspace_destination`,
-`admin_seed_broadcasts_data_seeded`, and the full `cargo test --all --quiet`
-(the finding's command). Details in /tmp/stage/review-evidence/task-249-repair.md.
+- `cargo test -p gyre-common broadcast_only` → ok (run in this
+  assignment; see /tmp/stage/review-evidence).
+- Focused vitest run of web/src/__tests__/WorkspaceSettings.test.js →
+  85/85 × 4 (this assignment).
+- gyre-server test compilation is deferred to the independent verifier
+  per the 4 GiB budget rule; the task's server tests to execute are
+  listed in /tmp/stage/review-evidence/README.md, notably
+  `broadcast_only_kinds_not_persisted_even_forced_to_workspace`,
+  `emit_event_broadcast_only_kind_never_stored_for_workspace_destination`,
+  `admin_seed_broadcasts_data_seeded`, and
+  `enqueue_and_cancel_broadcast_queue_updated`.
