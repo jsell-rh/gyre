@@ -1813,7 +1813,13 @@ mod tests {
         let rogue_leaf = params.self_signed(&rogue_key).unwrap();
         let rogue_leaf_pem = rogue_leaf.pem();
 
-        // Valid ECDSA signature by the rogue key over the commit SHA.
+        // Valid ECDSA signature by the rogue key over the SAME canonical
+        // attribution-bound payload the genuine signing path signs
+        // (`record_signed_payload`: commit SHA + task_id + spawned_by —
+        // task-264). Signing the bare commit SHA here would fail phase (a)
+        // trivially and the test would no longer isolate the leaf binding;
+        // a real forger controls their key and signs whatever material
+        // makes the record internally consistent.
         let rogue_ecdsa = ring::signature::EcdsaKeyPair::from_pkcs8(
             &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
             &rogue_key.serialize_der(),
@@ -1824,7 +1830,7 @@ mod tests {
             rogue_ecdsa
                 .sign(
                     &ring::rand::SystemRandom::new(),
-                    record.commit_sha.as_bytes(),
+                    &crate::commit_signatures::record_signed_payload(&record),
                 )
                 .unwrap()
                 .as_ref(),

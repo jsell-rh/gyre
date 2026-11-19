@@ -1439,24 +1439,40 @@ mod rekor_storage_tests {
         }
     }
 
-    /// A real git repo (the storage port writes a git note on the merge
-    /// commit) + MR + repo records wired into a mem state whose Rekor
-    /// client is `rekor`.
+    /// A real git repo with a real commit (the storage port writes a git
+    /// note on the merge commit, so the object must exist — a fake SHA
+    /// like "rekorsha" fails `git notes add` before Rekor is ever
+    /// reached) + MR + repo records wired into a mem state whose Rekor
+    /// client is `rekor`. Returns the merge commit's real SHA.
     async fn fixture(
         rekor: ScriptedRekor,
-    ) -> (Arc<AppState>, MergeRequest, gyre_domain::Repository) {
+    ) -> (Arc<AppState>, MergeRequest, gyre_domain::Repository, String) {
         let state = crate::mem::test_state_with_rekor(Arc::new(rekor));
 
         let dir = tempfile::TempDir::new().unwrap();
-        let repo_path = dir.path().join("repo.git");
+        let repo_path = dir.path().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .args(["init", "--bare"])
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git init --bare failed");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@gyre.local"]);
+        git(&["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo_path.join("file.txt"), "base").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        let merge_sha = git(&["rev-parse", "HEAD"]);
         // Hold the tempdir for the test's duration.
         std::mem::forget(dir);
 
@@ -1480,11 +1496,15 @@ mod rekor_storage_tests {
         );
         mr.author_agent_id = Some(Id::new("agent-author"));
         state.merge_requests.create(&mr).await.unwrap();
-        (state, mr, repo)
+        (state, mr, repo, merge_sha)
     }
 
-    async fn bundle(state: &Arc<AppState>, mr: &MergeRequest) -> MergeAttestationBundle {
-        generate_merge_attestation_bundle(state, mr, "rekorsha", 1_774_000_000)
+    async fn bundle(
+        state: &Arc<AppState>,
+        mr: &MergeRequest,
+        merge_sha: &str,
+    ) -> MergeAttestationBundle {
+        generate_merge_attestation_bundle(state, mr, merge_sha, 1_774_000_000)
             .await
             .unwrap()
     }
@@ -1493,8 +1513,8 @@ mod rekor_storage_tests {
     /// UUID, keyed by MR id, in the durable KV store.
     #[tokio::test]
     async fn successful_submission_stores_the_rekor_entry_uuid() {
-        let (state, mr, repo) = fixture(ScriptedRekor::Ok("uuid-xyz".to_string())).await;
-        let bundle = bundle(&state, &mr).await;
+        let (state, mr, repo, merge_sha) = fixture(ScriptedRekor::Ok("uuid-xyz".to_string())).await;
+        let bundle = bundle(&state, &mr, &merge_sha).await;
 
         store_merge_attestation_bundle(&state, &mr, &repo, &bundle)
             .await
@@ -1514,8 +1534,8 @@ mod rekor_storage_tests {
     /// actually submitted.
     #[tokio::test]
     async fn rekor_outage_is_an_explicit_failure_not_silent_success() {
-        let (state, mr, repo) = fixture(ScriptedRekor::Outage).await;
-        let bundle = bundle(&state, &mr).await;
+        let (state, mr, repo, merge_sha) = fixture(ScriptedRekor::Outage).await;
+        let bundle = bundle(&state, &mr, &merge_sha).await;
 
         let err = store_merge_attestation_bundle(&state, &mr, &repo, &bundle)
             .await
@@ -1550,13 +1570,13 @@ mod rekor_storage_tests {
     /// submission explicitly; never a silent Ok(None).
     #[tokio::test]
     async fn unconfigured_rekor_fails_explicitly() {
-        let (state, mr, repo) = fixture(ScriptedRekor::Outage).await;
+        let (state, mr, repo, merge_sha) = fixture(ScriptedRekor::Outage).await;
         drop(state);
         // Default mem wiring (no injection): the unconfigured HttpRekorClient.
         let state_default = crate::mem::test_state();
         state_default.repos.create(&repo).await.unwrap();
         state_default.merge_requests.create(&mr).await.unwrap();
-        let bundle_default = generate_merge_attestation_bundle(&state_default, &mr, "rekorsha2", 0)
+        let bundle_default = generate_merge_attestation_bundle(&state_default, &mr, &merge_sha, 0)
             .await
             .unwrap();
 
@@ -1564,7 +1584,7 @@ mod rekor_storage_tests {
             .await
             .expect_err("an unconfigured Rekor must fail explicitly");
         assert!(
-            err.contains("not configured") || err.contains("rekor"),
+            err.contains("not configured"),
             "the error must name the unconfigured transparency log: {err}"
         );
     }
