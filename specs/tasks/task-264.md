@@ -2,7 +2,7 @@
 title: "Sigstore layer-3 completion: every commit signed, keyless by default, no silent fallback, real Rekor for attestation bundles"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / sigstore-layer3-completion / b60edce5bc49"
 depends_on: [task-107]
-progress: complete
+progress: ready-for-review
 commits: ["7e96fca019100d9bcc03aad6dff32640c3d18601", "fd91e5ba64f5b4a2ed4463afe9d9f1117df4c659", "cd0ff0eacdddd3e6d27acf5a86cb8427946a0595", "6f3dd98ddc96ba451c8773cede85fff2e8eda19b"]
 ---
 
@@ -56,7 +56,7 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
 
 ## Shipped
 
-Task-264 closes the five Layer-3 shortfalls on top of the task-107 stack. Implementation: `6f3dd98d` (pipeline checkpoint), `cd0ff0ea` (implementation + finalizer), review repair `fd91e5ba` (round `31d4fb6e7aa04318939755a5d28aa1bf`: branch pushes no longer overwrite existing attribution records; landed-commit enumeration fails closed), verification repair `7e96fca0` (see below). The assignment base `05024b3e` (task-254) was merged in `43c0b505`, resolving `docs/server-config.md` to keep the task-264 signing-mode rows plus task-254's signing-key rotation-history wording.
+Task-264 closes the five Layer-3 shortfalls on top of the task-107 stack. Implementation: `6f3dd98d` (pipeline checkpoint), `cd0ff0ea` (implementation + finalizer), review repair `fd91e5ba` (round `31d4fb6e7aa04318939755a5d28aa1bf`: branch pushes no longer overwrite existing attribution records; landed-commit enumeration fails closed), verification repair `7e96fca0` (see below). The assignment base `05024b3e` (task-254) was merged in `43c0b505`, resolving `docs/server-config.md` to keep the task-264 signing-mode rows plus task-254's signing-key rotation-history wording. Rebase reconciliation `a9081053` (repair `a2338e2fb6894c3a970fc719d03ec491`): main had advanced to task-261 (SPIFFE); the three conflicts were resolved as pure unions — `lib.rs` keeps both the task-264 `HttpRekorClient` wiring and task-261's `load_spiffe_service` (AppState carries both fields), `server-config.md` keeps the task-264 `GYRE_REKOR_URL` row alongside the `GYRE_SPIFFE_*` rows, and `identity-security.md` restores task-261's row 2 with row 1 updated to reflect all three identity-stack layers real. No implementation behavior changed in the reconciliation; `cargo check -p gyre-server --tests` clean, `cargo fmt` clean, `cargo test -p gyre-adapters rekor` 3/3 green, `check-arch`/`check-mem-port-contracts` green.
 
 ### Behavior
 
