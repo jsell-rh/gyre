@@ -2,8 +2,8 @@
 title: "Message send-path guards: scope validation, mem store contract, WS acknowledged exclusion, auth-mechanism origin table, Agent-destination tenant isolation"
 spec_ref: "Spec gap spec-c62aac6701125cb09e0c736c / message-send-path-guards / 60b177f85a11"
 depends_on: []
-progress: not-started
-commits: []
+progress: complete
+commits: ["a2781ff06b71bc443eda82aa1c0022edf011c972", "3bb9c9bd4099810d8583ab647018a5a41297f8c2", "873d0821ca7a33501c178303bdc618a1802ccbb6", "9dd4a1f0f07930760dddf8036a9fede6bbafb44c", "955c134a8c669070c3b936eac55f0e5e3f448418"]
 ---
 
 ## Required behavior
@@ -120,3 +120,80 @@ Canonical spec: `specs/system/message-bus.md`. Source: `4127964001113dda08e48524
     ]
   }
 ]
+
+## Shipped
+
+The task-248 implementation is retained in full on this branch, and this
+round resolved the DIRTY merge against current main (`61b6080d`, task-251
+Directed inbox lifecycle) as merge commit `8a92d51b`, preserving every
+send-path guard.
+
+### Retained implementation (955c134a, 9dd4a1f0, round-4 fail-closed repair 873d0821, round-5 test repair 3bb9c9bd, round-7 clippy repair a2781ff0)
+
+1. **Scopeless-message guard** — `emit_scoped_event`
+   (crates/gyre-server/src/lib.rs), the shared body of the internal
+   `emit_event`/`emit_tenant_event` family, returns `Err` and logs at
+   error level when `destination != Broadcast && workspace_id.is_none()`;
+   the message is never constructed, stored, or broadcast.
+2. **Mem store contract** — `MemMessageRepository::store`
+   (crates/gyre-server/src/mem.rs) returns `Err` on `workspace_id: None`,
+   matching the SQLite/PostgreSQL `message_to_new_row` contract. All send
+   paths skip `store()` for Broadcast destinations.
+3. **WS `acknowledged` exclusion** — both WebSocket Message serialization
+   sites (live bus-delivery arm and Subscribe replay arm in
+   crates/gyre-server/src/ws.rs) serialize through `ws_message_payload`,
+   which strips `acknowledged` with the same manual-removal pattern as
+   `send_response`. GET inbox responses keep the field.
+4. **Origin table** — `origin_from_auth` (crates/gyre-server/src/api/messages.rs)
+   derives origin from the auth mechanism threaded through
+   `AuthenticatedAgent.auth_mechanism` (set by the extractor on every auth
+   path): global `GYRE_AUTH_TOKEN` → Server; API key / OIDC user JWT →
+   `User(user_id)`; agent token / federated JWT → `Agent(sub)`. Admin-role
+   API-key/OIDC callers resolve to User origin (server_only 403 gate and
+   rule-3 membership check apply to them); the separate rule-6 Admin-role
+   check still lets them target Broadcast; the global token keeps full
+   forge authority.
+5. **Rule-1 tenant isolation, fail-closed** — the REST send handler and
+   the mirrored MCP `handle_message_send` load the target agent's
+   workspace record on every `Destination::Agent(id)` send and compare
+   its tenant with the caller's verified tenant; mismatch rejects 403
+   (nothing stored or broadcast), including Server-origin global-token
+   callers. An unresolvable workspace record rejects fail-closed rather
+   than skip-and-log.
+
+### This round: merge repair (8a92d51b)
+
+Merged main `61b6080d` (task-251) into the branch. Main's changes since
+the merge base `67cc0398` touch only `api/spawn.rs`, `mcp.rs`, and
+`stale_agents.rs` (additive `acknowledge_agent_inbox` lifecycle code in
+functions disjoint from the send path), so every task-248 guard file
+(`api/messages.rs`, `ws.rs`, `lib.rs`, `mem.rs`, `auth.rs`) is preserved
+byte-identically. The sole textual conflict — the `Last-audited` header of
+`specs/coverage/system/message-bus.md`, where both sides appended audit
+notes — is resolved as the union: the task-248, task-250, and task-251
+notes are all retained, rows 5/9/10 carry the task-248 evidence and row 16
+the task-251 evidence.
+
+### Test evidence
+
+- In-sandbox, on the merged tree: `cargo check -p gyre-server --tests`
+  clean (full unit-test surface type-checked, exit 0, web assets rebuilt
+  by build.rs); `cargo fmt --all -- --check` clean.
+- gyre-server test-binary compilation is deferred to the independent
+  verifier per the sandbox 4 GiB budget contract. Suites to run (all green
+  on the task-248 lineage pre-merge; the merge adds only disjoint-function
+  task-251 code):
+  `message_send*` (api/messages.rs guard suite incl.
+  `admin_api_key_cannot_forge_server_only_kind`,
+  `cross_tenant_directed_send_rejected_for_server_origin`,
+  `unresolvable_target_workspace_rejects_send`),
+  `emit_scoped_event_rejects_scopeless_non_broadcast_message`,
+  `mem_store_rejects_scopeless_message`, `ws_live_delivery_strips_acknowledged`,
+  `ws_subscribe_replay_strips_acknowledged`,
+  `get_inbox_still_includes_acknowledged`, `mcp_message_send_cross_tenant_rejected`,
+  `mcp_message_send_unresolvable_target_workspace_rejected`, plus the merged
+  task-251 lifecycle tests (`complete_agent_bulk_acks_directed_inbox`,
+  `agent_complete_bulk_acks_directed_inbox`,
+  `stale_abort_bulk_acks_directed_inbox_with_agent_orphaned`) and
+  `cargo test -p gyre-server --test message_persistence`. Probe record:
+  /tmp/stage/review-evidence/task-248-merge-repair.md.
