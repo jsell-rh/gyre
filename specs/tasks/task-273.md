@@ -116,27 +116,25 @@ coverage matrix rows were updated with source evidence
 
 ### Test evidence
 
-- `cargo test -p gyre-adapters` (602 passed, incl. the sops
+- Prior round: `cargo test -p gyre-adapters` (602 passed, incl. the sops
   cross-implementation vector, Vault KV v2 + JWT-auth stub-server tests,
   SOPS-at-rest + legacy-migration tests); `cargo test -p gyre-common -p
   gyre-ports -p gyre-domain` (706 passed); full `web` vitest suite (2571
   passed, incl. Jobs-run-history / Server-Logs / audit-search tests).
-- `cargo check -p gyre-server --tests` passes; the full server test binary
-  exceeds this sandbox's 4 GiB build cap — the independent verifier owns
-  `cargo test -p gyre-server` (incl. the restart, SOPS-at-rest,
-  server-logs, maintenance-job and admin-audit probes).
-- Mechanical invariant scripts pass with no new exemptions: check-arch,
-  abac-route-registry, migration-versions, migration-sql-portability,
-  mem-port-contracts, in-memory-state-stores, unbounded-external-http,
-  lossy-secret-conversion, fabricated-scope-defaults,
-  scope-literal-defaults, inert-enforcement, forwarded-header-trust,
-  forged-scope-fields, dead-message-kinds, relative-path-defaults,
-  fail-open-ref-resolution, byte-slice-truncation,
-  task-commit-attribution.
-- Contract-repair round (this commit): the executor-restored assigned task
-  document is preserved verbatim; progress/attribution restored under
-  `## Shipped`; the task surface was rustfmt'd (commit b101d27a,
-  formatting only, behavior-preserving).
+- Rebase-repair round (merge of assigned base 4cfbe20d, resolved in
+  `crates/gyre-server/src/lib.rs` by keeping both sides' independent
+  additions — `build_secret_repository` and `load_spiffe_service` — both
+  wired in `build_state`): re-verified with `cargo check -p gyre-server` and
+  `cargo check -p gyre-server --tests` (clean), focused `cargo test -p
+  gyre-adapters sops` (15 passed) and `vault` (7 passed), `cargo test -p
+  gyre-spiffe` (27 passed, base-side behavior preserved), and the mechanical
+  invariant scripts (check-arch, abac-route-registry, migration-versions,
+  migration-sql-portability, mem-port-contracts, in-memory-state-stores,
+  unbounded-external-http) — all pass with no new exemptions. Logs under
+  /tmp/stage/review-evidence.
+- The full server test binary exceeds this sandbox's 4 GiB build cap — the
+  independent verifier owns `cargo test -p gyre-server` (incl. the restart,
+  SOPS-at-rest, server-logs, maintenance-job and admin-audit probes).
 
 ## Required behavior
 
