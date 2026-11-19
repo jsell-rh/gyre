@@ -1074,11 +1074,7 @@ pub async fn git_receive_pack(
                                 ..
                             } => StatusCode::BAD_GATEWAY,
                         };
-                        return (
-                            status,
-                            format!("push rejected: {reason}"),
-                        )
-                            .into_response();
+                        return (status, format!("push rejected: {reason}")).into_response();
                     }
                 }
             }
@@ -9564,10 +9560,11 @@ specs:
             assert_eq!(record.signer_id, "system");
             // The shared verification path validates the record — the real
             // Ed25519 check over the attribution-bound payload.
-            let verification = crate::sigstore::verify_state_commit_signature(&state, "repo-1", sha)
-                .await
-                .unwrap()
-                .expect("record must exist");
+            let verification =
+                crate::sigstore::verify_state_commit_signature(&state, "repo-1", sha)
+                    .await
+                    .unwrap()
+                    .expect("record must exist");
             assert!(
                 verification.valid,
                 "pushed commit {sha} signature must verify: {:?}",
@@ -9678,7 +9675,9 @@ specs:
             "unreachable Fulcio with keyless mode must reject the push explicitly"
         );
         let body_text = String::from_utf8_lossy(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .to_string();
         assert!(

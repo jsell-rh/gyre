@@ -514,7 +514,9 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/repos/{repo_id}/commits/{commit_id}/signature"))
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/commits/{commit_id}/signature"
+                    ))
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -644,7 +646,7 @@ mod tests {
 
     // ── Signing mode handler coverage (task-107, task-264) ───────────────────
     //
- // These exercise the jj HANDLER wiring, not the sigstore module
+    // These exercise the jj HANDLER wiring, not the sigstore module
     // (whose signing/verification phases have their own suite in
     // sigstore.rs over an upstream-contract mock stack):
     // - attribution (F2) is threaded from the caller's validated JWT claims

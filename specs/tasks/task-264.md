@@ -2,7 +2,7 @@
 title: "Sigstore layer-3 completion: every commit signed, keyless by default, no silent fallback, real Rekor for attestation bundles"
 spec_ref: "Spec gap spec-31d3ae72e12e22c52442e309 / sigstore-layer3-completion / b60edce5bc49"
 depends_on: [task-107]
-progress: not-started
+progress: ready-for-review
 commits: ["6f3dd98ddc96ba451c8773cede85fff2e8eda19b"]
 ---
 
@@ -53,3 +53,23 @@ Canonical spec: `specs/system/identity-security.md`. Source: `fb1424fbac55cd23cb
     ]
   }
 ]
+
+## Shipped
+
+Task-264 closes the five Layer-3 shortfalls on top of the task-107 stack. Source: checkpoint commit `6f3dd98d` (implementation) plus this commit (finalizer: formatting, integration-harness signing opt-in, docs/coverage, review cleanup).
+
+### Behavior
+
+1. **Every commit surface signs.** A single shared entry point, `commit_signatures::sign_commit`, is now called by all four commit-producing surfaces, each persisting a `CommitSignature`: `jj new` (api/jj.rs — the `JjOpsPort::jj_new` port now returns `JjNewChange {change_id, commit_id}` so the signable, content-addressed commit id is available), `jj squash` (api/jj.rs), git HTTP push (git_http.rs `git_receive_pack` — signs every landed commit *before* responding; on signing failure it undoes the ref updates, emits a `git_push_rejected` audit event naming the `commit-signing` gate and the active mode, and rejects the push 403/502), and MR merge-commit creation (merge_processor.rs `sign_merge_commit`, wired into both the single-MR `process_next` path — signing failure triggers the existing post-merge recovery protocol: queue pause, revert, escalation — and the atomic-group path, which rolls the group back).
+2. **Keyless by default.** `SigningMode::parse` maps unset/empty → `Fulcio`; `local` and `none` are explicit operator opt-ins only. An unrecognized `GYRE_SIGNING_MODE` value is a hard startup error (panics in `from_env` at boot) instead of the old silent `_ => Local` downgrade.
+3. **No silent degradation.** On Fulcio failure the operation fails loudly with an error naming the active mode (403 for callers with no presentable OIDC JWT — `sigstore::jwt_is_presentable` gates *before* any HTTP call, so an empty/dev-token bearer is never presented to Fulcio; 502/push-rejection/merge-revert for stack failures). The only fallback is the new operator-configured `GYRE_SIGNING_FULCIO_FALLBACK=local`, which warns and stores an honest `sigstore_mode=local` record.
+4. **Attribution is cryptographically bound.** The local Ed25519 signature, the keyless ECDSA signature, and the Rekor hashedrekord digest all cover the canonical payload `{commit_sha, task_id, spawned_by}` (`signed_commit_payload`/`commit_digest`/`record_signed_payload`). Verification (both local and fulcio paths, including the Rekor entry content-match) recomputes the payload from the record's own fields, so a tampered `task_id` or `spawned_by` fails verification — the attribution is not just a plaintext column.
+5. **Real Rekor for attestation bundles.** `NoopRekorClient` is deleted; production wiring (server lib.rs `build_state`) and the test fixture both wire `HttpRekorClient` (gyre-adapters/src/rekor.rs), which submits each signed bundle as a hashedrekord to `GYRE_REKOR_URL` (latency-bounded, 10 s timeout) and persists the returned entry UUID keyed by MR id (KV namespace `rekor_attestation_entries`). An unconfigured log or a Rekor outage is an explicit `Err` surfaced as a warn/audit state by `store_merge_attestation_bundle` — never a silent `Ok(None)` — while the already-landed merge is not rolled back.
+
+Production-wired integration harnesses that push/merge with non-JWT dev tokens (git_integration, e2e_ralph_loop, graph_integration, spec_enforcement) now explicitly set `GYRE_SIGNING_MODE=local` — the documented operator opt-in — mirroring `mem::test_state`, so the new Fulcio-by-default does not break unrelated push/merge coverage. Docs updated: server-config.md (`GYRE_SIGNING_MODE`, new `GYRE_SIGNING_FULCIO_FALLBACK`, `GYRE_REKOR_URL`) and api-reference.md (jj/new, jj/squash, git-receive-pack, merge-queue/enqueue rows).
+
+### Test evidence
+
+- **Ran here (smaller packages / type checks):** `cargo test -p gyre-adapters rekor` — 3/3 pass (hashedrekord wire round-trip against a local mock Rekor, unconfigured-log explicit error, unsigned-bundle refusal). `cargo check -p gyre-server --tests` — clean (type-checks all new server test code). `cargo fmt --all` applied. Mechanical checks pass locally: check-unbounded-external-http, check-lossy-secret-conversion, check-byte-slice-truncation, check-inert-enforcement, check-fabricated-scope-defaults, check-relative-path-defaults, check-scope-literal-defaults, check-forwarded-header-trust, check-fail-open-ref-resolution.
+- **Deferred to the independent verifier (gyre-server test compilation exceeds this assignment's build budget):** `cargo test -p gyre-server --lib commit_signatures sigstore jj_squash jj_new push_signs push_rejected_loudly merge_commit_signing rekor_storage` — the task-264 suites are: `commit_signatures::tests::{signing_mode_default_and_explicit_values, fulcio_fallback_requires_explicit_local_value, local_verify_fails_on_tampered_task_attribution, signed_payload_is_canonical_and_attribution_sensitive}`, `sigstore::tests::{jwt_presentability_gate, verification_fails_on_tampered_task_attribution, commit_digest_is_stable_and_hex}`, `api::jj::tests::{jj_new_signs_commit_with_persisted_validated_signature, jj_squash_fulcio_unreachable_fails_loudly_no_local_fallback, jj_squash_fulcio_without_jwt_is_refused}`, `git_http::tests::{push_signs_every_landed_commit, push_rejected_loudly_when_fulcio_unreachable}`, `merge_processor::merge_signing_tests::{merge_commit_signing_persists_attribution_bound_record, merge_commit_signing_fails_loudly_when_fulcio_unreachable}`, `merge_attestation::rekor_storage_tests::{successful_submission_stores_the_rekor_entry_uuid, rekor_outage_is_an_explicit_failure_not_silent_success, unconfigured_rekor_fails_explicitly}`; plus the regression-sensitive existing binaries `cargo test -p gyre-server --test git_integration --test e2e_ralph_loop --test graph_integration --test spec_enforcement` (these now opt into local signing) and the existing jj/squash/sigstore suites.
+- **Environment restriction:** the `jj` binary is not installed in this sandbox, so `cargo test -p gyre-adapters jj_ops` (updated for `JjNewChange`) could not run here; it must run in an environment with jj on PATH.

@@ -76,8 +76,7 @@ impl SigningMode {
         let raw = std::env::var("GYRE_SIGNING_MODE")
             .or_else(|_| std::env::var("GYRE_SIGSTORE_MODE"))
             .unwrap_or_default();
-        Self::parse(&raw)
-            .unwrap_or_else(|e| panic!("commit signing is misconfigured: {e}"))
+        Self::parse(&raw).unwrap_or_else(|e| panic!("commit signing is misconfigured: {e}"))
     }
 }
 
@@ -94,7 +93,11 @@ pub fn parse_fulcio_fallback(raw: Option<&str>) -> bool {
 /// enabled, a Fulcio failure degrades to local signing — loudly (warn
 /// log, and the stored record honestly carries `sigstore_mode=local`).
 pub fn fulcio_fallback_local() -> bool {
-    parse_fulcio_fallback(std::env::var("GYRE_SIGNING_FULCIO_FALLBACK").ok().as_deref())
+    parse_fulcio_fallback(
+        std::env::var("GYRE_SIGNING_FULCIO_FALLBACK")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Server-side signing configuration. This is the trust anchor for
@@ -235,7 +238,8 @@ pub fn verify_commit_signature(record: &CommitSignature, public_key_bytes: &[u8]
         Err(_) => return false,
     };
     let pk = UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
-    pk.verify(&record_signed_payload(record), &sig_bytes).is_ok()
+    pk.verify(&record_signed_payload(record), &sig_bytes)
+        .is_ok()
 }
 
 /// The canonical attribution-bound payload every commit signature covers

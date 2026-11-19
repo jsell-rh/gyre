@@ -109,10 +109,9 @@ impl JjOpsPort for JjOpsAdapter {
                 ],
             )
             .await?;
-        let (change_id, commit_id) = out
-            .trim()
-            .split_once('\x1f')
-            .ok_or_else(|| anyhow::anyhow!("jj log output has no change/commit id pair: {out:?}"))?;
+        let (change_id, commit_id) = out.trim().split_once('\x1f').ok_or_else(|| {
+            anyhow::anyhow!("jj log output has no change/commit id pair: {out:?}")
+        })?;
         Ok(JjNewChange {
             change_id: change_id.trim().to_string(),
             commit_id: commit_id.trim().to_string(),
@@ -654,7 +653,11 @@ mod tests {
             .await
             .unwrap();
         adapter
-            .jj_describe(repo.to_str().unwrap(), &new_change.change_id, "updated desc")
+            .jj_describe(
+                repo.to_str().unwrap(),
+                &new_change.change_id,
+                "updated desc",
+            )
             .await
             .expect("jj describe must succeed");
 

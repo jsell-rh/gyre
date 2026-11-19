@@ -701,8 +701,11 @@ fn check_signature(record: &CommitSignature, leaf_pem: &str) -> bool {
         &ring::signature::ECDSA_P256_SHA256_ASN1,
         spki.subject_public_key.data.as_ref(),
     );
-    pk.verify(&crate::commit_signatures::record_signed_payload(record), &sig_bytes)
-        .is_ok()
+    pk.verify(
+        &crate::commit_signatures::record_signed_payload(record),
+        &sig_bytes,
+    )
+    .is_ok()
 }
 
 /// Fetch and decode the trust bundle from the CONFIGURED Fulcio (F3).
@@ -1679,7 +1682,8 @@ mod tests {
     /// signature, so the tampered record also fails to match its entry (d) —
     /// the tampering is detected, not merely unverifiable.
     #[tokio::test]
-    async fn verification_fails_on_tampered_signature() {        let stack = MockSigningStack::new();
+    async fn verification_fails_on_tampered_signature() {
+        let stack = MockSigningStack::new();
         let mut record = sign(&stack, "tamper1").await;
         // Corrupt the last byte of the DER ECDSA signature.
         let mut sig = BASE64.decode(&record.signature).unwrap();

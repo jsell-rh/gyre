@@ -159,20 +159,15 @@ mod tests {
         let client = HttpRekorClient::new(None, "-----BEGIN PUBLIC KEY-----".to_string());
         assert!(!client.is_configured());
         let err = client.submit(&bundle(Some("sig"))).await.unwrap_err();
-        assert!(
-            err.to_string().contains("not configured"),
-            "got: {err:#}"
-        );
+        assert!(err.to_string().contains("not configured"), "got: {err:#}");
     }
 
     /// A bundle without a signature cannot be recorded — explicit error,
     /// never an entry over unsigned material.
     #[tokio::test]
     async fn unsigned_bundle_is_refused() {
-        let client = HttpRekorClient::new(
-            Some("http://rekor.invalid".to_string()),
-            "pk".to_string(),
-        );
+        let client =
+            HttpRekorClient::new(Some("http://rekor.invalid".to_string()), "pk".to_string());
         let err = client.submit(&bundle(None)).await.unwrap_err();
         assert!(
             err.to_string().contains("no bundle signature"),
@@ -262,9 +257,7 @@ mod tests {
         // The request was the hashedrekord over the bundle's canonical
         // JSON: digest + signature + forge public key all present.
         let req = seen_body.lock().clone();
-        let expected_digest = hex::encode(Sha256::digest(
-            b.unsigned_canonical_json().as_bytes(),
-        ));
+        let expected_digest = hex::encode(Sha256::digest(b.unsigned_canonical_json().as_bytes()));
         assert!(req.contains("/api/v1/log/entries"), "path: {req}");
         assert!(req.contains(&expected_digest), "digest missing: {req}");
         assert!(req.contains("c2ln"), "bundle signature missing: {req}");
@@ -275,7 +268,8 @@ mod tests {
 
         // Outage: HTTP 500 is an explicit error naming the MR — never a
         // silent Ok(None) (task-264).
-        fail.store(true, Ordering::SeqCst);        let err = client.submit(&b).await.unwrap_err();
+        fail.store(true, Ordering::SeqCst);
+        let err = client.submit(&b).await.unwrap_err();
         assert!(
             err.to_string().contains("mr-1"),
             "the outage error must name the bundle: {err:#}"

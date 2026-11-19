@@ -92,7 +92,6 @@ impl IntoResponse for ApiError {
                 )
             }
             ApiError::RateLimited(_) | ApiError::LlmUnavailable => unreachable!(),
-            ApiError::CommitSigningRefused(_) | ApiError::CommitSigningFailed(_) => unreachable!(),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }

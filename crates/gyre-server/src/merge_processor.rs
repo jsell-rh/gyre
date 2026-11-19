@@ -1538,14 +1538,13 @@ async fn merge_atomic_group(
                 .await
                 {
                     Ok(signed) => {
-                        if let Err(e) =
-                            crate::merge_attestation::store_merge_attestation_bundle(
-                                state,
-                                &updated_mr,
-                                &repo,
-                                &signed,
-                            )
-                            .await
+                        if let Err(e) = crate::merge_attestation::store_merge_attestation_bundle(
+                            state,
+                            &updated_mr,
+                            &repo,
+                            &signed,
+                        )
+                        .await
                         {
                             warn!(
                                 mr_id = %updated_mr.id,
@@ -3341,14 +3340,6 @@ pub(crate) async fn resume_merge_queue(state: &AppState, repo: &gyre_domain::Rep
         .await;
 }
 
-/// Post-merge validation failure recovery (platform-model.md §6):
-///
-/// 1. Pause the merge queue for this repo.
-/// 2. Create a revert commit undoing the merge and push it to the default branch.
-/// 3. Re-run post-merge gates on the reverted HEAD.
-///    - PASS: resume the queue (main is green again).
-///    - FAIL: escalate to a human via a MergeQueueEscalation notification; stay paused.
-/// 4. Mark the MR `Reverted` (both branches — the merge is already undone).
 /// Sign a merge commit through the server's configured signing mode
 /// (task-264, identity-security.md §Layer 3: MR merge-commit creation is a
 /// commit-producing surface and must leave a persisted `CommitSignature`).
@@ -3388,7 +3379,11 @@ async fn sign_merge_commit(
                 spawned.unwrap_or_default(),
             )
         }
-        None => ("forge-merge-queue".to_string(), String::new(), String::new()),
+        None => (
+            "forge-merge-queue".to_string(),
+            String::new(),
+            String::new(),
+        ),
     };
     let attribution = SigningAttribution {
         agent_id: agent_id.clone(),
@@ -3432,9 +3427,7 @@ async fn sign_merge_commit(
                     &repo.id.to_string(),
                     &repo.name,
                 )
-                .map_err(|e| {
-                    format!("merge-actor identity: forge failed to mint the JWT: {e}")
-                })?
+                .map_err(|e| format!("merge-actor identity: forge failed to mint the JWT: {e}"))?
         }
         _ => String::new(),
     };
@@ -3454,13 +3447,12 @@ async fn sign_merge_commit(
     .await
     {
         Ok(Some(record)) => {
-            state
-                .commit_signatures
-                .save(&record)
-                .await
-                .map_err(|e| {
-                    format!("failed to persist the merge commit signature for MR {}: {e}", mr.id)
-                })?;
+            state.commit_signatures.save(&record).await.map_err(|e| {
+                format!(
+                    "failed to persist the merge commit signature for MR {}: {e}",
+                    mr.id
+                )
+            })?;
             info!(
                 mr_id = %mr.id,
                 sha = %merge_commit_sha,
@@ -3475,8 +3467,17 @@ async fn sign_merge_commit(
     }
 }
 
-/// 1. Pause the merge queue.
-/// 2. Forge a revert commit ... (full recovery protocol, platform-model.md §6).
+/// Post-merge validation failure recovery (platform-model.md §6):
+///
+/// 1. Pause the merge queue for this repo.
+/// 2. Create a revert commit undoing the merge and push it to the default branch.
+/// 3. Re-run post-merge gates on the reverted HEAD.
+///    - PASS: resume the queue (main is green again).
+///    - FAIL: escalate to a human via a MergeQueueEscalation notification; stay paused.
+/// 4. Mark the MR `Reverted` (both branches — the merge is already undone).
+/// 5. Send the author agent a RevertNotification (event + persisted notification).
+/// 6. Create a remediation task describing the failure.
+/// 7. Invalidate the MR's gate results (they must re-run).
 async fn recover_from_post_merge_failure(
     state: &AppState,
     repo: &gyre_domain::Repository,

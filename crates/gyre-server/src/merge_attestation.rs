@@ -443,7 +443,11 @@ pub async fn store_merge_attestation_bundle(
         Ok(Some(entry_uuid)) => {
             if let Err(e) = state
                 .kv_store
-                .kv_set(REKOR_ENTRY_KV_NAMESPACE, &mr.id.to_string(), entry_uuid.clone())
+                .kv_set(
+                    REKOR_ENTRY_KV_NAMESPACE,
+                    &mr.id.to_string(),
+                    entry_uuid.clone(),
+                )
                 .await
             {
                 return Err(format!(
@@ -1438,7 +1442,9 @@ mod rekor_storage_tests {
     /// A real git repo (the storage port writes a git note on the merge
     /// commit) + MR + repo records wired into a mem state whose Rekor
     /// client is `rekor`.
-    async fn fixture(rekor: ScriptedRekor) -> (Arc<AppState>, MergeRequest, gyre_domain::Repository) {
+    async fn fixture(
+        rekor: ScriptedRekor,
+    ) -> (Arc<AppState>, MergeRequest, gyre_domain::Repository) {
         let state = crate::mem::test_state_with_rekor(Arc::new(rekor));
 
         let dir = tempfile::TempDir::new().unwrap();
